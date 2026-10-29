@@ -1,0 +1,20 @@
+name: Feature request
+description: An idea for cordinal.
+labels: [feature]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Describe the problem or the moment you missed this, not only the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help?
+  - type: textarea
+    id: elsewhere
+    attributes:
+      label: Does another player do this well?
+      description: Another music player, a game music player, anything.

@@ -1,0 +1,114 @@
+# Builds cordinal for Windows (build.bat) and natively for Linux (CMake, in an Arch Linux
+# container, the distribution the Linux build targets), checks the Linux installer, and
+# publishes a GitHub release for a v* tag, or for a push to main whose version (src/cordinal.rc)
+# has no release yet.
+name: build
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build
+        shell: cmd
+        run: build.bat stock-nrv
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows
+          path: |
+            build/cordinal.exe
+            build/cordinal-test.exe
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    timeout-minutes: 30
+    steps:
+      - name: Install build tools
+        run: |
+          pacman -Syu --noconfirm --needed base-devel cmake git sdl3 sdl3_ttf pipewire wireplumber pipewire-pulse \
+            libpulse systemd-libs fontconfig openssl
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build
+        run: |
+          cmake -S . -B build-linux -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-linux -j"$(nproc)"
+      - name: Package
+        run: |
+          sh -n linux/install.sh
+          mkdir -p dist cordinal
+          install -m 755 build-linux/cordinal cordinal/cordinal
+          install -m 755 linux/install.sh cordinal/install.sh
+          install -m 644 linux/cordinal.desktop cordinal/cordinal.desktop
+          install -m 644 docs/icon.png cordinal/cordinal.png
+          install -m 644 src/encode/LICENSE.txt cordinal/glint-LICENSE.txt
+          strip cordinal/cordinal
+          tar -czf dist/cordinal-linux-x64.tar.gz cordinal
+          cp linux/install.sh dist/
+          ls -l dist cordinal
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux
+          path: dist/
+          if-no-files-found: error
+
+  # The installer the way a user runs it, against the package just built (no download).
+  linux-install:
+    needs: linux
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: linux
+          path: dist
+      - name: Install with the installer
+        run: |
+          pacman -Syu --noconfirm --needed sudo
+          useradd -m tester
+          echo 'tester ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/tester
+          tar -xzf dist/cordinal-linux-x64.tar.gz -C /home/tester
+          chown -R tester /home/tester
+          su tester -c 'sh /home/tester/cordinal/install.sh --no-ffmpeg'
+          su tester -c 'test -x ~/.local/bin/cordinal && test -f ~/.local/share/applications/cordinal.desktop'
+          su tester -c '! ldd ~/.local/bin/cordinal | grep "not found"'
+          su tester -c 'sh /home/tester/cordinal/install.sh --uninstall && test ! -e ~/.local/bin/cordinal'
+
+  release:
+    needs: [windows, linux, linux-install]
+    if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: artifacts
+      - name: Publish
+        run: |
+          version=$(sed -n 's/.*VALUE "ProductVersion", "\(.*\)".*/\1/p' src/cordinal.rc)
+          tag="v$version"
+          if [ "${GITHUB_REF_TYPE}" = tag ] && [ "${GITHUB_REF_NAME}" != "$tag" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match version $version in src/cordinal.rc"; exit 1
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag exists already"; exit 0
+          fi
+          gh release create "$tag" artifacts/linux/* artifacts/windows/cordinal.exe --target "$GITHUB_SHA" \
+            --title "cordinal $version" --generate-notes

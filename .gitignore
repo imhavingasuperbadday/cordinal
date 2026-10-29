@@ -1,0 +1,11 @@
+build/
+.claude/
+__pycache__/
+*.obj
+*.res
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.lib
+build-linux/

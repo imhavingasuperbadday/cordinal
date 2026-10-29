@@ -1,0 +1,6 @@
+# Sources are LF everywhere, whatever editor or tool wrote them.
+* text=auto eol=lf
+*.ico binary
+*.png binary
+*.webp binary
+*.flac binary

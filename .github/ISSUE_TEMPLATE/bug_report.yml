@@ -1,0 +1,36 @@
+name: Bug report
+description: Something doesn't work as it should.
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: cordinal version
+      placeholder: "2.1.0"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "Windows 11 24H2"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. Add a FLAC album\n2. Double-click the first track\n3. ..."
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened instead
+    validations:
+      required: true
+  - type: textarea
+    id: files
+    attributes:
+      label: Logs, crash reports or sample files
+      description: Crash reports are in %LOCALAPPDATA%\cordinal\crashes. Only attach files you're allowed to share.

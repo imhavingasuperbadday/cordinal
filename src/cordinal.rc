@@ -1,0 +1,61 @@
+#include <windows.h>
+#include "resource.h"
+
+IDI_APP ICON "cordinal.ico"
+1 24 "cordinal.manifest"
+IDR_LICENSE_ENCODERS RCDATA "encode/LICENSE.txt"
+
+// The extra themes' art and sounds, embedded only in a build with them (build.bat themes).
+#ifdef CORDINAL_EXTRA_THEMES
+IDI_APOLLO ICON "apollo/apollo.ico"
+IDI_APOLLO_TRACK ICON "apollo/track.ico"
+
+// DELTARUNE assets: the Dark Fountain's sprites and the game's dialogue font (see resource.h).
+IDR_FOUNTAIN_EDGE RCDATA "deltarune/fountain_edge.png"
+IDR_FOUNTAIN_BASIN RCDATA "deltarune/fountain_basin.png"
+IDR_FOUNTAIN_TEXTURE RCDATA "deltarune/fountain_texture.png"
+IDR_FONT_DELTARUNE RCDATA "deltarune/deltarune.ttf"
+IDR_SND_SELECT RCDATA "deltarune/snd_select.flac"
+IDR_SND_MENUMOVE RCDATA "deltarune/snd_menumove.flac"
+IDR_SND_NOISE RCDATA "deltarune/snd_noise.flac"
+IDR_SND_SAVE RCDATA "deltarune/snd_save.flac"
+IDR_SND_BELL RCDATA "deltarune/snd_bell.flac"
+IDR_SND_ERROR RCDATA "deltarune/snd_error.flac"
+IDR_SND_CANTSELECT RCDATA "deltarune/snd_cantselect.flac"
+IDR_SND_SWING RCDATA "deltarune/snd_swing.flac"
+IDR_SND_LEVELUP RCDATA "deltarune/snd_levelup.flac"
+IDR_SND_TXTQ RCDATA "deltarune/snd_txtq.flac"
+IDR_SND_QUEEN_BITCRUSHLAUGH RCDATA "deltarune/snd_queen_bitcrushlaugh.flac"
+
+// Apollo 37zz's toolbar strip and rebar backgrounds for the Apollo theme (see resource.h).
+IDR_APOLLO_TOOLBAR RCDATA "apollo/toolbar.png"
+231 RCDATA "apollo/rebar_capacala.png"
+232 RCDATA "apollo/rebar_apollo.png"
+233 RCDATA "apollo/rebar_letters.png"
+234 RCDATA "apollo/rebar_notes.png"
+#endif
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION 0,1,0,0
+PRODUCTVERSION 0,1,0,0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "imhavingasuperbadday"
+            VALUE "LegalCopyright", "Copyright (C) 2026 imhavingasuperbadday. GPL-3.0-or-later."
+            VALUE "FileDescription", "cordinal music player"
+            VALUE "FileVersion", "0.1.0"
+            VALUE "ProductName", "cordinal"
+            VALUE "ProductVersion", "0.1.0"
+            VALUE "OriginalFilename", "cordinal.exe"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

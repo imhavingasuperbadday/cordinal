@@ -1,0 +1,32 @@
+name: Format request
+description: A file format cordinal doesn't play, or plays wrongly.
+labels: [format]
+body:
+  - type: input
+    id: format
+    attributes:
+      label: Format and extension
+      placeholder: "BRSTM (.brstm), Nintendo Wii"
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What's wrong
+      options:
+        - Not supported at all
+        - Plays, but sounds wrong
+        - Wrong length, loop or fade
+        - Tags or track list are wrong
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: Where the files come from (game, platform, ripping tool) and which other player handles them correctly.
+  - type: textarea
+    id: sample
+    attributes:
+      label: Sample file
+      description: A short sample helps most. Only attach files you're allowed to share.
