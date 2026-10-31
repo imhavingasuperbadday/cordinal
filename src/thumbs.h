@@ -61,4 +61,5 @@ private:
     uint64_t generation_ = 0;                          // bumped to invalidate in-flight work
     bool quit_ = false;
     size_t pendingLimit_ = 128, readyLimit_ = 2;
+    unsigned savedSincePrune_ = 0;  // UI thread only
 };

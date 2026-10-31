@@ -284,6 +284,7 @@ public:
         return done;
     }
     bool Seek(double seconds) override { return live_ ? false : PacketDecoder::Seek(seconds); }
+    bool FastSeek() const override { return !live_ && PacketDecoder::FastSeek(); }
     double Duration() const override { return live_ ? 0 : PacketDecoder::Duration(); }
     bool Failed() const override { return live_ ? liveFailed_ : PacketDecoder::Failed(); }
     void Abort() override { if (live_) live_->Abort(); }
@@ -327,7 +328,7 @@ private:
         if (!mapped || mapped > 8) return false;
         channels_=mapped;
         if (index_==15) { index_=0; while (index_<13 && rates[index_]!=rate) ++index_; if (index_==13) return false; }
-        if (rate!=media_.rate) return false;
+        if (!media_.mp4TimeScale && rate!=media_.rate) return false;
         transform_[0].Init(2048); transform_[1].Init(256);
         for (int shortBlock=0;shortBlock<2;++shortBlock) for (int k=0;k<2;++k) window_[shortBlock][k]=Window(shortBlock?128:1024,k!=0);
         simd_=FastAudioKernels();

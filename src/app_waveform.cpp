@@ -1,6 +1,6 @@
 // The seek bar as a waveform: the playing track's peaks (peaks.h), computed in the background the
-// first time a track plays (or during a ReplayGain scan) and cached. Until they arrive, or if
-// the file can't be decoded, the seek bar stays the plain flat channel.
+// first time a track plays (or during a ReplayGain scan) and cached. A likely next track is
+// prepared in advance; an uncached, quickly seekable file shows a sampled preview while decoding.
 //
 // The played part carries the state: the accent (or the player position's own color, app_fountain.cpp)
 // while playing, amber while paused, the error color while Stop after current is armed or the track
@@ -21,7 +21,7 @@ namespace {
 
 struct Waveform {
     TrackId track = kNone;  // the track `peaks` belongs to (or is being computed for)
-    bool ready = false;     // `peaks` holds that track's data
+    bool ready = false;     // `peaks` holds that track's complete or in-progress data
     uint32_t request = 0;   // the background request `track` is waiting on (0 = none)
     Peaks peaks{};
 
@@ -60,13 +60,20 @@ const std::vector<Chapter>& Chapters() {
 
 // Queues (or immediately answers) the peaks for `id`. A CUE track asks for its range of the file
 // in file seconds, as peaks.h documents; a song of a game-music file has no range to ask for.
-bool Request(TrackId id) {
+bool PeakSource(TrackId id, std::wstring& path, double& start, double& end) {
     if (id == kNone || id >= g_lib.Count()) return false;
-    std::wstring path = g_lib.Path(id);
-    double start = 0, end = 0;
+    path = g_lib.Path(id);
+    start = end = 0;
     if (IsSubtrack(path) && !SubtrackRange(path, start, end)) return false;
+    return true;
+}
+
+bool Request(TrackId id, Peaks& peaks, uint32_t& request) {
+    std::wstring path;
+    double start, end;
+    if (!PeakSource(id, path, start, end)) { request = 0; return false; }
     const Track& t = g_lib[id];
-    return GetPeaks(path, t.fileSize, t.fileTime, start, end, g_wave.peaks, g_wave.request);
+    return GetPeaks(path, t.fileSize, t.fileTime, start, end, peaks, request) || GetPeakProgress(request, peaks);
 }
 
 // The buckets a pixel span [x0, x1) of a channel `width` px wide covers. At least one bucket, so a
@@ -90,6 +97,25 @@ int Loudest(const Peaks& peaks, BucketSpan span) {
 
 }  // namespace
 
+// Start as soon as playback is requested, before the engine announces the first audible sample.
+void PrepareWaveform(TrackId id) {
+    if (g.liveWaveform) return;
+    Peaks peaks{};
+    uint32_t request = 0;
+    Request(id, peaks, request);
+}
+
+// The engine already chose this track for its gapless hand-off, so its exact peaks can be ready
+// by the time it is heard without guessing from the playlist order.
+void PrefetchWaveform(TrackId id) {
+    if (id == kNone || g.liveWaveform) { CancelPeakPrefetch(); return; }
+    std::wstring path;
+    double start, end;
+    if (!PeakSource(id, path, start, end)) return;
+    const Track& t = g_lib[id];
+    PrefetchPeaks(path, t.fileSize, t.fileTime, start, end);
+}
+
 // A track change or explicit refresh asks for the current peaks. A theme change also refreshes:
 // Apollo's plain slider can leave a pending request whose completed data is already cached.
 // Reconcile it without replaying the track or changing the seek position.
@@ -97,23 +123,20 @@ void WaveformTrackChanged(bool refresh) {
     // Startup can announce playback before the peak service starts. With no queued request,
     // the same track still needs another chance when UpdateNowPlaying runs after startup.
     if (!refresh && g.playing == g_wave.track && (g_wave.track == kNone || g_wave.ready || g_wave.request)) return;
-    if (g_wave.track != g.playing) CancelPeaks();
+    if (g.playing == kNone) CancelPeaks();
     g_wave.track = g.playing;
     g_wave.request = 0;
-    g_wave.ready = g_wave.track != kNone && Request(g_wave.track);
+    g_wave.ready = g_wave.track != kNone && Request(g_wave.track, g_wave.peaks, g_wave.request);
     g_wave.drawnPos = -1;
     Repaint();
 }
 
-// The background worker finished a request: take the peaks only if it is still the one we want.
+// The worker has more peaks or has finished: take them only for the request we still want.
 void OnPeaksReady(uint32_t requestId) {
-    if (g_wave.track == kNone || g_wave.ready || requestId != g_wave.request) return;
-    g_wave.request = 0;
-    g_wave.ready = Request(g_wave.track);
-    if (g_wave.ready) {
-        g_wave.drawnPos = -1;  // force the next tick to paint the columns
-        Repaint();
-    }
+    if (g_wave.track == kNone || !requestId || requestId != g_wave.request) return;
+    g_wave.ready = Request(g_wave.track, g_wave.peaks, g_wave.request);
+    g_wave.drawnPos = -1;
+    Repaint();
 }
 
 // UpdateStatus calls this every tick. The bar repaints only when the playhead or the color
@@ -157,11 +180,14 @@ std::wstring CurrentChapterText() {
 }
 
 bool LiveWaveformShown() { return RadioPlaying() || (g.liveWaveform && g.playing != kNone); }
-bool WaveformShown() { return LiveWaveformShown() || (g_wave.ready && g_wave.track != kNone && g.playing == g_wave.track); }
+bool WaveformShown() {
+    return LiveWaveformShown() ||
+           (g_wave.track != kNone && g.playing == g_wave.track && (g_wave.ready || g_wave.request));
+}
 
 // The loudest peak, 0..255, between fractions `from` and `to` of the track (0 while none is known).
 int WaveformPeak(double from, double to) {
-    if (LiveWaveformShown() || !WaveformShown() || !(to > from)) return 0;
+    if (LiveWaveformShown() || !g_wave.ready || !WaveformShown() || !(to > from)) return 0;
     int first = std::clamp((int)(from * kPeakBuckets), 0, kPeakBuckets - 1);
     int last = std::clamp((int)(to * kPeakBuckets), first + 1, kPeakBuckets);
     return Loudest(g_wave.peaks, {first, last});
@@ -197,7 +223,7 @@ bool DrawWaveform(HDC dc, const RECT& rc, const RECT& channel, double frac) {
             int first = std::clamp((x - left) * 256 / width, 0, 255);
             int last = std::clamp((x + step - left) * 256 / width, first + 1, 256);
             for (int b = first; b < last; ++b) v = std::max<int>(v, livePeaks[b]);
-        } else if (known) v = Loudest(g_wave.peaks, BucketsFor(x, x + step, left, width));
+        } else if (known && g_wave.ready) v = Loudest(g_wave.peaks, BucketsFor(x, x + step, left, width));
         int h = std::max(1, half * v / 255);
         COLORREF color = x < playedX ? played : rest;
         FillSolid(dc, {x, cy - h, end, cy + h + 1}, color);

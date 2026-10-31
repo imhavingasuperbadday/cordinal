@@ -322,6 +322,17 @@ void ToggleLyricsPanel() {
     LyricsTrackChanged();
 }
 
+// Library compaction renumbers tracks: the panel's loaded id and lines belong to the old order.
+void LyricsLibraryChanged() {
+    if (!p.hwnd) return;
+    ++p.generation;
+    p.requested = p.loadedFor = kNone;
+    p.lines.clear();
+    p.synced = false;
+    p.current = -1;
+    p.layoutWidth = -1;
+}
+
 void LyricsTrackChanged() {
     if (!LyricsPanelShown() || g.playing == p.requested) return;
     p.requested = g.playing;

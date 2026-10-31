@@ -7,19 +7,29 @@ program of about 1.5 MB: no installer, no runtime, nothing else to install. It p
 audio file with its own decoders, keeps your ratings and listening history, and leaves your music
 where it is.
 
-Version **0.1.0**, the first public release. Download `cordinal.exe` from
+Current release: **0.1.1**. Download `cordinal.exe` from
 [Releases](https://github.com/imhavingasuperbadday/cordinal/releases/latest) and run it.
 
 ## What it does
 
-- **A library that watches your folders.** Add your music folders once (Library ▸ Library
-  folders); new files join on their own, moved files keep their history, and an unplugged drive
-  loses nothing. New music can wait in an Inbox for review instead (Preferences ▸ Library).
+- **A library that watches your folders.** Add your music folders in Preferences ▸ Library ▸
+  Library folders, or from the Library menu. Every subfolder is scanned, new files join on their
+  own, moved files keep their history, and an unplugged drive loses nothing. Nothing is scanned
+  automatically until you add a folder. New music can wait in an Inbox for review instead
+  (Preferences ▸ Library).
 - **Several ways to look at it.** A track list grouped by album, a cover grid, albums with their
   tracks, and artists, with a column browser (genre, artist, album, folder...) above them.
+- **One album, many editions.** Original, remaster, deluxe, regional and instrumental releases can
+  share one album tile with an edition selector. cordinal recognizes clear edition names and
+  MusicBrainz release-group tags, keeps every edition's own files, tracklist and artwork, and lets
+  you group, split, rename, compare or choose a preferred edition and group cover by hand from
+  **Library > Album editions**. An optional, cached and rate-limited MusicBrainz lookup can fill in
+  missing release-group ids when you turn it on in Preferences (Library > Album editions on Linux);
+  browsing and playback always work offline. Existing playlists keep pointing at the exact files they named, and album headers and
+  `%edition%` show which edition a row belongs to.
 - **Playlists and auto-playlists.** Tabs for static playlists and for rules-based ones ("rated 4
   stars or more, not played this month"). A play queue, Play next, and M3U/M3U8 import and export.
-- **Almost any format, built in.** FLAC, WAV, AIFF, MP3, Ogg Vorbis, Opus, AAC, ALAC, WMA, APE,
+- **Almost any format, built in.** FLAC, WAV, AIFF, MP3, MP4/M4A, Ogg Vorbis, Opus, AAC, ALAC, WMA, APE,
   WavPack, AC3, Matroska audio, DSD, CUE sheets, tracker modules, MIDI and video game music (NES,
   SNES, Game Boy, Genesis, Commodore 64), plus cordinal's own lossless `.cord`. No codecs to install.
 - **Sound.** Gapless playback, ReplayGain with a built-in loudness scanner, a ten-band equalizer

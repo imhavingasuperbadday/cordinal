@@ -1126,10 +1126,13 @@ bool ReadAt(HANDLE f, int64_t at, void* buf, DWORD size, DWORD& got) {
     return SetFilePointerEx(f, li, nullptr, at < 0 ? FILE_END : FILE_BEGIN) && ReadFile(f, buf, size, &got, nullptr);
 }
 
+// One probe per track id and file time. Compaction clears it (ForgetApolloProbes).
+std::unordered_map<TrackId, Probe> g_probeCache;
+
 // Reads the file's head and tail once: the ID3v2 header, an ID3v1 tag, and the bit depth of FLAC
 // and WAV (lossy formats decode to 16 bits, as Apollo's MPEG plug-in did).
 const Probe& ProbeFile(TrackId id) {
-    static std::unordered_map<TrackId, Probe> cache;
+    auto& cache = g_probeCache;
     const Track& t = g_lib[id];
     auto it = cache.find(id);
     if (it != cache.end() && it->second.fileTime == t.fileTime) return it->second;
@@ -1173,6 +1176,8 @@ const Probe& ProbeFile(TrackId id) {
 }
 
 }  // namespace
+
+void ForgetApolloProbes() { g_probeCache.clear(); }
 
 bool ApolloField(TrackId id, const std::wstring& name, std::wstring& out) {
     if (!g_lib.Contains(id)) return false;

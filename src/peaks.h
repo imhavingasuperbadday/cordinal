@@ -28,17 +28,26 @@ struct Peaks {
     uint8_t v[kPeakBuckets];
 };
 
+class Decoder;
+// Quickly samples a seekable track across its full length. The result is an approximation for
+// display only; the whole-file decode supplies the exact peaks and is the only result cached.
+bool PreviewPeaks(Decoder& decoder, double start, double seconds, Peaks& out, const std::atomic<bool>* cancel);
+
 // Decodes the file, or only the [start, end) seconds of the file when end > 0, and fills `out`.
 // A CUE track's range is passed in file seconds; peaks.cpp does not map it itself.
 // Returns false when the file can't be decoded or `cancel` is set.
 bool ComputePeaks(const std::wstring& path, double start, double end, Peaks& out, const std::atomic<bool>* cancel);
 
-// Starts the background worker. `notify` gets `msg` (wParam = request id) when a queued
-// computation finishes; call GetPeaks again then. Until this runs, GetPeaks never queues.
+// Starts the background worker. `notify` gets `msg` (wParam = request id) as a queued computation
+// progresses and when it finishes; call GetPeaks and GetPeakProgress again then.
+// Until this runs, GetPeaks never queues.
 void StartPeaks(HWND notify, UINT msg, const std::wstring& cacheDir);
 void StopPeaks();
 // Abandons the current and queued waveform requests when no track needs them any more.
 void CancelPeaks();
+// Warms one likely next track without interrupting the playing track's waveform.
+void PrefetchPeaks(const std::wstring& path, uint64_t fileSize, uint64_t fileTime, double start, double end);
+void CancelPeakPrefetch();
 
 // Returns true and fills `out` when the peaks are cached in memory or on disk. Otherwise queues
 // the computation (newest request first; obsolete work is cancelled) and
@@ -46,12 +55,17 @@ void CancelPeaks();
 bool GetPeaks(const std::wstring& path, uint64_t fileSize, uint64_t fileTime, double start, double end, Peaks& out,
               uint32_t& requestId);
 
+// Copies the decoded part of an in-flight request, positioned on the whole track's timeline.
+// The unprocessed part is zero; these provisional peaks are never written to the cache.
+bool GetPeakProgress(uint32_t requestId, Peaks& out);
+
 // Collects peaks while a file is decoded for another purpose (ReplayGain). Memory stays small
 // for any length: fine buckets are merged as the file grows.
 class PeakAccumulator {
 public:
     void Begin(uint64_t totalFrames);  // 0 = unknown
     void Add(const float* stereo, size_t frames);
+    bool Preview(Peaks& out) const;  // false until samples and a known length are available
     bool Finish(Peaks& out);  // false when no audio was seen
 
 private:
@@ -60,6 +74,7 @@ private:
     void Merge();
     std::vector<float> maxima_;  // one linear maximum per block of blockFrames_ frames
     uint64_t blockFrames_ = 512;
+    uint64_t totalFrames_ = 0;
     uint64_t inBlock_ = 0;
     float blockMax_ = 0;
 };

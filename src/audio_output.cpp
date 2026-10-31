@@ -429,6 +429,7 @@ void AudioOutput::Run() {
         mode_ = dev.exclusive ? OutputMode::Exclusive : OutputMode::Shared;
         format_ = dev.format;
         holding_ = true;
+        waiting_ = false;
         std::lock_guard<std::mutex> lock(problemMx_);
         problem_ = problem;
     };
@@ -560,6 +561,7 @@ void AudioOutput::Run() {
                 if (requested) SetEvent(rateDone_);
             } else {
                 if (requested) SetEvent(rateDone_);
+                waiting_ = true;  // the UI says why the clock has stopped until this succeeds
                 Sleep(500);
                 reopen_ = true;  // try again
             }

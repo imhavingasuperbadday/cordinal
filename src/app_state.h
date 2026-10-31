@@ -149,6 +149,9 @@ enum : int {
     IDM_CANCEL_BACKUP, IDM_OPEN_RADIO, IDM_WRITE_STATISTICS,
     IDM_DUPLICATE_PL = 4000, IDM_REOPEN_PL, IDM_MOVE_PL_LEFT, IDM_MOVE_PL_RIGHT, IDM_PLAYING_PL,
     IDM_RELOAD_TAGS, IDM_CANCEL_IMPORT, IDM_WATCH_IMPORTED, IDM_SELECT_PL_BASE = 4020,
+    // Album editions (album_editions.h): manual grouping, preferred choice and comparison.
+    IDM_EDITION_GROUP = 4100, IDM_EDITION_MANAGER, IDM_EDITION_PREFERRED, IDM_EDITION_REMOVE,
+    IDM_EDITION_SPLIT, IDM_EDITION_COMPARE, IDM_EDITION_VERSIONS, IDM_EDITION_ART, IDM_EDITION_CLEAR_ART,
     IDM_SHUFFLE = 3200, IDM_REPEAT_BASE = 3201,  // + Repeat
     IDM_RESUME = 3205, IDM_SKIP_SHUFFLE, IDM_RADIO, IDM_HEADPHONES,
     IDM_REGION_LOOP = 3210, IDM_REGION_CLEAR, IDM_REGION_PLAYER_MENU,
@@ -325,6 +328,8 @@ struct App {
     bool fullLiveWaveform = true;  // light the whole live display instead of splitting it at the song position
     int bandWaveSize = 0;       // normal top/bottom waveform height; 0 follows the layout preset
     bool resumeOn = true;       // remember the stopped / last-playing track's position across restarts
+    bool resumeInSong = false;  // reopen with that track loaded, paused where it stopped
+    bool resumePlay = false;    // start a reopened track at once instead of waiting paused
     bool explorerMenu = true;   // Explorer's folder verbs point at this build (app_platform.cpp)
     HWND buttons[6] = {};
     HWND fbButtons[2] = {};  // stop and pause: the foobar2000 theme's toolbar has its own (app_foobar.cpp)
@@ -347,6 +352,7 @@ struct App {
     std::deque<ClosedPlaylist> closedPlaylists;
     bool searchPending = false, closing = false, restoringView = false, compactPending = false;
     bool startupTheme = true;  // the first ApplyTheme runs before the window can paint
+    bool startupPaths = false;  // the command line named files: they play instead of reopening the last track
     std::unordered_map<uint64_t, std::wstring> cellCache;
     size_t cellCacheBytes = 0;
     std::vector<uint32_t> view;  // the visible item indices of the active playlist, in order
@@ -435,6 +441,7 @@ struct App {
     ReplayGainMode rgMode = ReplayGainMode::Album;
     bool rgOn = true;        // ReplayGain (see RgGainFor in app_workers.cpp)
     bool rgAutoScan = true;  // measure tracks without ReplayGain in the background
+    bool musicBrainzLookup = false;  // optional background album-edition lookup (MusicBrainz)
     float rgPreamp = 0, rgPreampNoInfo = 0;
     float rgHeadphoneHeadroom = 0;  // explicit per-output reserve for EQ performed inside a headset
     float rgKeep = 0.4f;  // the share of a loud album's cut that is skipped, so loud songs stay louder

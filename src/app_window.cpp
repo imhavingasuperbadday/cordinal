@@ -271,6 +271,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP_META: {
             auto* batch = reinterpret_cast<std::vector<TagResult>*>(lp);
             AcceptTagBatch(batch);
+            RequestAlbumGrouping();
             g.dirty = true;
             g.statsDirty = true;
             if (!g.filter.empty()) RebuildView(true);
@@ -416,24 +417,43 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return TRUE;
         case WM_ENDSESSION:
             if (wp) {
+                FinishListening(true);  // the listen in progress counts before the process goes
                 StopAppWorkers(hwnd);
+                // Release the engine's files before writing tag edits that waited for a playing
+                // track. Stop() first records the resume position the saved session should keep.
+                if (g.playing != kNone || g.playingToken || g.decodingToken || g.resumeToken) Stop();
+                g.engine.Shutdown();
+                std::wstring ignored;
+                FlushDeferredTagWrites(ignored);
                 SaveState();
                 if (g.dirty) KeepUnsavedLibrary();  // no time to ask: the next start restores it
             }
             return 0;
-        case WM_CLOSE:
+        case WM_CLOSE: {
             // Shutdown order matters: end text edits, apply pending folder-window changes
-            // (destroying it commits them), stop workers and only then save, so the saved
-            // state reflects the settled library. A failed save is kept or asked about before
-            // the window goes.
+            // (destroying it commits them), stop workers, then release the engine and write any
+            // tag edit that waited for a playing file. Only then save, so the saved state
+            // reflects the settled library and files. A failed save is kept or asked about
+            // before the window goes. Credits the listen in progress before the engine stops.
             EndRename(true);
             FlushSearch();
             if (g.foldersWnd) DestroyWindow(g.foldersWnd);  // applies pending folder changes first
+            FinishListening(true);
             StopAppWorkers(hwnd);
+            if (g.playing != kNone || g.playingToken || g.decodingToken || g.resumeToken) Stop();
+            g.engine.Shutdown();
+            std::wstring tagError;
+            FlushDeferredTagWrites(tagError);
             SaveBeforeClose();
+            if (!tagError.empty()) {
+                const std::wstring text =
+                    L"Some tag edits for files that were playing couldn't be saved before closing:\n\n" + tagError;
+                MessageBoxW(g.hwnd, text.c_str(), kAppName, MB_OK | MB_ICONWARNING);
+            }
             if (g.eqWnd) DestroyWindow(g.eqWnd);
             DestroyWindow(hwnd);
             return 0;
+        }
         case WM_DESTROY: DestroyMainWindow(hwnd); return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);

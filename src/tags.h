@@ -29,6 +29,9 @@ struct TagData {
     // Raw Opus R128 tags (Q7.8 dB relative to -23 LUFS), kept for the tag-undo journal.
     // INT32_MIN = the tag is absent.
     int32_t r128TrackGain = INT32_MIN, r128AlbumGain = INT32_MIN;
+    // MusicBrainz release ids (Picard's MUSICBRAINZ_ALBUMID / MUSICBRAINZ_RELEASEGROUPID and the
+    // ID3/MP4 spellings). They are only read; grouping never requires them.
+    std::string musicBrainzRelease, musicBrainzReleaseGroup;
     // FMPS_RATING and FMPS_PLAYCOUNT as written (TagEdit), kept for the tag-undo journal. Empty = absent.
     std::string rating, playCount;
     // FLAC: the first 8 bytes of the MD5 of the decoded audio, big endian. Identical audio has the

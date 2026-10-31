@@ -1,21 +1,26 @@
 // A command-line check of the portable core on Linux, without the UI:
-//   cordinal-core-test scan DIR              list the audio files under DIR with their tags
-//   cordinal-core-test decode FILE           decode FILE completely and report it
-//   cordinal-core-test play FILE [SECONDS]   play FILE through the engine and PipeWire
-//   cordinal-core-test replaygain FILE...    measure the files' ReplayGain as one album
-//   cordinal-core-test tags FILE DIR         edit FILE's tags with an undo journal in DIR, then undo
-//   cordinal-core-test convert FILE DIR      convert FILE to .cord with its log in DIR, then undo the conversion
-//   cordinal-core-test organize FILE ROOT    organize FILE (and its folder's cover) under ROOT, then undo it
-//   cordinal-core-test copy FILE DEST        copy FILE to DEST, find it there again, then replace it with AAC
-//   cordinal-core-test eq                    check the equalizer's boost through the renderer
-//   cordinal-core-test waveform              check the shared live note response
-//   cordinal-core-test library FILE          list a saved library.cdb: files, titles and ReplayGain
-//   cordinal-core-test listenbrainz DIR     queue a listen and keep a token in DIR, check a bogus token
-//   cordinal-core-test devices              list the PipeWire output devices
-//   cordinal-core-test helpers DIR          read, trust and run a helper made of two shell scripts
-//   cordinal-core-test sfx                  play a clip and an effect on the sound effect stream
-//   cordinal-core-test steam                 list discovered Steam soundtrack folders
-//   cordinal-core-test away DIR             the away-from-home pieces: JSON, STUN, keys, certificates, HTTPS
+//   cordinal-core-test scan DIR               list the audio files under DIR with their tags
+//   cordinal-core-test decode FILE            decode FILE completely and report it
+//   cordinal-core-test play FILE [SECONDS]    play FILE through the engine and PipeWire
+//   cordinal-core-test replaygain FILE...     measure the files' ReplayGain as one album
+//   cordinal-core-test tags FILE DIR          edit FILE's tags with an undo journal in DIR, then undo
+//   cordinal-core-test convert FILE DIR       convert FILE to .cord with its log in DIR, then undo the conversion
+//   cordinal-core-test organize FILE ROOT     organize FILE (and its folder's cover) under ROOT, then undo it
+//   cordinal-core-test copy FILE DEST         copy FILE to DEST, find it again, then replace it with AAC
+//   cordinal-core-test eq                     check the equalizer's boost through the renderer
+//   cordinal-core-test waveform               check live notes and whole-track peak previews
+//   cordinal-core-test weighted-shuffle       check that skip-aware shuffle keeps every occurrence
+//   cordinal-core-test chapters FILE          list FILE's chapters: the first, the last and the next start
+//   cordinal-core-test library FILE           list a saved library.cdb: files, titles and ReplayGain
+//   cordinal-core-test history FILE           list a saved library.cdb's listens and points
+//   cordinal-core-test playlists FILE         list a saved library.cdb: playlists, items, inbox and ratings
+//   cordinal-core-test listenbrainz DIR       queue a listen and keep a token in DIR, check a bogus token
+//   cordinal-core-test devices                list the PipeWire output devices
+//   cordinal-core-test helpers DIR            read, trust and run a helper made of two shell scripts
+//   cordinal-core-test sfx                    play a clip and an effect on the sound effect stream
+//   cordinal-core-test steam [cancel]         list discovered Steam soundtrack folders; "cancel" lists none
+//   cordinal-core-test away DIR               the away-from-home pieces: JSON, STUN, keys, certificates and HTTPS
+//   cordinal-core-test web DIR CONTROL        serve DIR over HTTP; CONTROL gets the port and pairing code
 #include "audio_output.h"
 #include "convert.h"
 #include "decoder.h"
@@ -25,6 +30,7 @@
 #include "library.h"
 #include "listenbrainz.h"
 #include "organize.h"
+#include "peaks.h"
 #include "playlog.h"
 #include "playlist_shuffle.h"
 #include "points.h"
@@ -55,6 +61,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <thread>
 #include <algorithm>
@@ -372,7 +379,7 @@ int CheckEq() {
     return std::fabs(db - want) < 1.0 ? 0 : 1;
 }
 
-int CheckWaveform() {
+int CheckWaveform(const char* flac, const char* vorbis, const char* opus) {
     for (unsigned rate : {44100u, 48000u, 96000u}) {
         std::vector<float> note(rate / 50 * 2), silence(rate / 10 * 2);
         for (size_t i = 0; i < note.size() / 2; ++i) {
@@ -393,7 +400,65 @@ int CheckWaveform() {
         motion.Shape(shape.data(), shape.size());
         if (std::any_of(shape.begin(), shape.end(), [](uint8_t v) { return v != 0; })) return 3;
     }
+    PeakAccumulator accumulator;
+    Peaks preview{};
+    accumulator.Begin(4 * 48000);
+    if (accumulator.Preview(preview)) return 4;
+    std::vector<float> first(48000 * 2, 0.5f), quiet(48000 * 2);
+    accumulator.Add(first.data(), 48000);
+    if (!accumulator.Preview(preview)) return 5;
+    auto positioned = [&] {
+        return std::all_of(preview.v, preview.v + kPeakBuckets / 4, [](uint8_t v) { return v == CompandPeak(0.5f); }) &&
+               std::all_of(preview.v + kPeakBuckets / 4, preview.v + kPeakBuckets, [](uint8_t v) { return v == 0; });
+    };
+    if (!positioned()) return 6;
+    accumulator.Add(quiet.data(), 48000);  // merge blocks while the undecoded half stays empty
+    if (!accumulator.Preview(preview) || !positioned()) return 7;
+    accumulator.Begin(4);
+    accumulator.Add(first.data(), 1);
+    if (!accumulator.Preview(preview) || !positioned()) return 8;
+    struct SampledTrack final : Decoder {
+        double position = 0;
+        bool Seek(double seconds) override { position = seconds; return true; }
+        bool FastSeek() const override { return true; }
+        double Duration() const override { return 4; }
+        unsigned Rate() const override { return 1000; }
+        size_t Read(float* out, size_t frames) override {
+            const float levels[] = {0.1f, 0.3f, 0.6f, 0.9f};
+            for (size_t i = 0; i < frames; ++i) {
+                out[i * 2] = out[i * 2 + 1] = levels[std::clamp((int)position, 0, 3)];
+                position += 0.001;
+            }
+            return frames;
+        }
+    } track;
+    if (!PreviewPeaks(track, 0, 4, preview, nullptr) ||
+        std::abs((int)preview.v[75] - CompandPeak(0.1f)) > 2 ||
+        std::abs((int)preview.v[525] - CompandPeak(0.9f)) > 2 ||
+        !PreviewPeaks(track, 1, 2, preview, nullptr) ||
+        std::abs((int)preview.v[150] - CompandPeak(0.3f)) > 2 ||
+        std::abs((int)preview.v[450] - CompandPeak(0.6f)) > 2) return 9;
+    if (flac) {
+        std::wstring error;
+        auto decoder = OpenDecoder(Wide(flac), 48000, error);
+        if (!decoder || decoder->FastSeek() || !decoder->CanPreview() ||
+            !PreviewPeaks(*decoder, 0, decoder->Duration(), preview, nullptr) ||
+            std::none_of(preview.v, preview.v + kPeakBuckets, [](uint8_t v) { return v != 0; })) return 10;
+        double position = 12;
+        auto reference = OpenDecoder(Wide(flac), 48000, error);
+        float actual[1024]{}, expected[1024]{};
+        if (!decoder->PreviewSeek(position) || !reference || !reference->Seek(position + 0.5 / decoder->Rate()) ||
+            decoder->Read(actual, 512) != 512 || reference->Read(expected, 512) != 512 ||
+            std::memcmp(actual, expected, sizeof(actual)) != 0) return 11;
+    }
+    for (const char* file : {vorbis, opus}) if (file) {
+        std::wstring error;
+        auto decoder = OpenDecoder(Wide(file), 48000, error);
+        if (!decoder || !decoder->CanPreview() || !PreviewPeaks(*decoder, 0, decoder->Duration(), preview, nullptr) ||
+            std::none_of(preview.v, preview.v + kPeakBuckets, [](uint8_t v) { return v != 0; })) return 12;
+    }
     puts("live notes lift the whole shape within 20 ms, release smoothly and clear on reset");
+    puts("whole-track peaks appear in their correct positions as the file is decoded");
     return 0;
 }
 
@@ -537,9 +602,13 @@ int CheckSfx() {
     sfx::PlayClip(clip, 48000, 1.0f);
     sfx::Play(Sfx::Rate, 6, true, 0.2f);
     double top = 0;
+    bool advanced = false;
     for (int i = 0; i < 40; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        top = std::max(top, sfx::ClipPosition());
+        const double position = sfx::ClipPosition();
+        advanced |= position > 0;
+        top = std::max(top, position);
+        if (advanced && position < 0) break;  // the clip has ended; no need to wait out the rest
     }
     int failures = 0;
     bool moved = top > 0.1;
@@ -791,7 +860,8 @@ int main(int argc, char** argv) {
     if (argc >= 4 && !strcmp(argv[1], "organize")) return OrganizeRoundTrip(argv[2], argv[3]);
     if (argc >= 4 && !strcmp(argv[1], "copy")) return CopyRoundTrip(argv[2], argv[3]);
     if (argc >= 2 && !strcmp(argv[1], "eq")) return CheckEq();
-    if (argc >= 2 && !strcmp(argv[1], "waveform")) return CheckWaveform();
+    if (argc >= 2 && !strcmp(argv[1], "waveform"))
+        return CheckWaveform(argc >= 3 ? argv[2] : nullptr, argc >= 4 ? argv[3] : nullptr, argc >= 5 ? argv[4] : nullptr);
     if (argc >= 3 && !strcmp(argv[1], "helpers")) return CheckHelpers(argv[2]);
     if (argc >= 2 && !strcmp(argv[1], "devices")) return ListDevices();
     if (argc >= 2 && !strcmp(argv[1], "sfx")) return CheckSfx();
@@ -802,6 +872,6 @@ int main(int argc, char** argv) {
     if (argc >= 3 && !strcmp(argv[1], "decode")) return Decode(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "play")) return Play(argv[2], argc >= 4 ? atof(argv[3]) : 5);
     fprintf(stderr, "usage: cordinal-core-test scan DIR | decode FILE | play FILE [SECONDS] | replaygain FILE... | "
-                    "tags FILE DIR | convert FILE DIR | organize FILE ROOT | copy FILE DEST | eq | waveform | helpers DIR | devices | sfx | listenbrainz DIR | weighted-shuffle | chapters FILE | library FILE | history FILE | playlists FILE | steam [cancel] | away DIR\n");
+                    "tags FILE DIR | convert FILE DIR | organize FILE ROOT | copy FILE DEST | eq | waveform | helpers DIR | devices | sfx | listenbrainz DIR | weighted-shuffle | chapters FILE | library FILE | history FILE | playlists FILE | steam [cancel] | away DIR | web DIR CONTROL\n");
     return 2;
 }

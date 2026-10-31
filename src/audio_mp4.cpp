@@ -130,13 +130,13 @@ bool Track(PacketFile& out,Bytes track,uint32_t movieScale) {
     Bytes mdhd=Child(mdia,Tag("mdhd"));
     if (mdhd.size()<24 || (mdhd[0]==1 && mdhd.size()<36)) return false;
     uint32_t scale=Be(mdhd.data()+(mdhd[0]==1?20:12));
-    // PCM codecs use their sample rate as media timescale. AAC follows the same convention.
+    // The media clock need not be the sample rate. Keep its ticks until the codec is configured.
     if (!scale) return false;
     if (!out.rate || out.codec==Tag("mp4a")) out.rate=scale;
-    if (scale!=out.rate && out.codec!=Tag("alac")) return false;
-    // Edit list: a leading empty edit becomes the start skip and its duration the valid length.
+    // The nonempty edit gives the start skip and playable duration; a leading empty edit is ignored.
     Bytes elst=Path(track,{Tag("edts"),Tag("elst")});
     out.skip=out.valid=0;
+    uint64_t editDuration=0; bool sawEdit=false;
     if (!elst.empty()) {
         bool large=elst[0]==1; uint32_t edits;
         if (!Table(elst,large?20:12,edits) || edits>2) return false;
@@ -145,14 +145,50 @@ bool Track(PacketFile& out,Bytes track,uint32_t movieScale) {
             uint64_t dur=large?U64(p,true):Be(p);
             int64_t from=large?(int64_t)U64(p+8,true):(int32_t)Be(p+4);
             if (from<0) continue;
-            if (U32(p+(large?16:8),true)!=0x10000 || out.valid) return false;
+            if (U32(p+(large?16:8),true)!=0x10000 || sawEdit) return false;
+            sawEdit=true;
             out.skip=(uint64_t)from;
-            if (movieScale && dur<=UINT64_MAX/scale) out.valid=dur*scale/movieScale;
+            editDuration=dur;
         }
     }
+    out.mp4TimeScale=scale; out.mp4MovieScale=movieScale; out.mp4EditDuration=editDuration;
+    return true;
+}
+
+// Rescale without overflowing when a long file's tick count is multiplied by its sample rate.
+bool Samples(uint64_t ticks,uint32_t scale,unsigned rate,bool nearest,uint64_t& samples,bool* exact=nullptr) {
+    if (!scale || !rate || rate>768000) return false;
+    uint64_t whole=ticks/scale, part=(ticks%scale)*rate;
+    if (whole>UINT64_MAX/rate) return false;
+    uint64_t base=whole*rate, fraction=part/scale, remainder=part%scale;
+    if (nearest && remainder>=(uint64_t(scale)+1)/2) ++fraction;
+    if (fraction>UINT64_MAX-base) return false;
+    samples=base+fraction;
+    if (exact) *exact=remainder==0;
     return true;
 }
 } // namespace
+
+bool PacketFile::NormalizeMp4(unsigned sampleRate) {
+    if (!mp4TimeScale) return true;
+    if (!sampleRate || sampleRate>768000) return false;
+    if (mp4TimeScale!=sampleRate) {
+        // An inexact packet start would create a gap or overlap in the sample timeline.
+        for (auto& packet:packets) {
+            uint64_t start,end; bool exact;
+            if (!Samples(packet.start,mp4TimeScale,sampleRate,false,start,&exact) || !exact ||
+                !Samples(packet.start+packet.frames,mp4TimeScale,sampleRate,true,end) ||
+                end<=start || end-start>UINT32_MAX) return false;
+            packet.start=start; packet.frames=(uint32_t)(end-start);
+        }
+        if (!Samples(frames,mp4TimeScale,sampleRate,true,frames) ||
+            !Samples(skip,mp4TimeScale,sampleRate,true,skip)) return false;
+    }
+    if (mp4MovieScale && mp4EditDuration &&
+        !Samples(mp4EditDuration,mp4MovieScale,sampleRate,false,valid)) return false;
+    rate=sampleRate; mp4TimeScale=0;
+    return true;
+}
 
 // Scan top-level boxes for moov (copied out, since the parser remaps regions), then take
 // the first audio track.

@@ -7,11 +7,13 @@
 //   varint count, then count tracks (fields below, strings as string indices)
 //   varint count, then count playlists (kind, name, rules, varint n + n track indices)
 //   version 2 only: sections, each varint tag, varint byte length, payload; tag 0 ends the list
-//     1 = the play log (playlog.cpp), 2 = cordinal points (points.cpp). Readers skip unknown tags.
+//     1 = the play log (playlog.cpp), 2 = cordinal points (points.cpp), 8 = album groups and
+//     editions (album_editions.h), 9 = explicit group-cover choices. Readers skip unknown tags.
 //
 // Integers are LEB128 varints (signed ones zigzag-encoded) so typical libraries stay small.
 // Saving writes a temp file and swaps it in with ReplaceFile, keeping the previous file as
 // library.cdb.bak. A file that fails to parse is set aside instead of being overwritten.
+#include "album_editions.h"
 #include "library.h"
 #include "library_archive.h"
 #include "playlog.h"
@@ -32,9 +34,9 @@ constexpr uint64_t kMaxSectionBytes = 1ull << 30;
 
 // The payloads of the sections a file carries, copied out of the file.
 struct Sections {
-    std::string playLog, points, audioHash, views, loudness, albums, firstPlayed;
+    std::string playLog, points, audioHash, views, loudness, albums, firstPlayed, albumEditions, albumArt;
     bool hasPlayLog = false, hasPoints = false, hasAudioHash = false, hasViews = false, hasLoudness = false,
-         hasAlbums = false, hasFirstPlayed = false;
+         hasAlbums = false, hasFirstPlayed = false, hasAlbumEditions = false, hasAlbumArt = false;
 };
 
 // Optional version-2 section: old readers skip it, so the database format stays compatible.
@@ -443,7 +445,9 @@ bool ReadSections(Reader& r, Sections& out) {
         if ((tag == kSectionPlayLog && out.hasPlayLog) || (tag == kSectionPoints && out.hasPoints) ||
             (tag == kSectionAudioHash && out.hasAudioHash) || (tag == kSectionPlaylistViews && out.hasViews) ||
             (tag == kSectionLoudness && out.hasLoudness) || (tag == kSectionAlbumMeasurement && out.hasAlbums) ||
-            (tag == kSectionFirstPlayed && out.hasFirstPlayed)) return false;
+            (tag == kSectionFirstPlayed && out.hasFirstPlayed) ||
+            (tag == kSectionAlbumEditions && out.hasAlbumEditions) ||
+            (tag == kSectionAlbumArt && out.hasAlbumArt)) return false;
         if (tag == kSectionPlaylistViews) {
             out.views.assign(body);
             out.hasViews = true;
@@ -465,6 +469,12 @@ bool ReadSections(Reader& r, Sections& out) {
         } else if (tag == kSectionAlbumMeasurement) {
             out.albums.assign(body);
             out.hasAlbums = true;
+        } else if (tag == kSectionAlbumEditions) {
+            out.albumEditions.assign(body);
+            out.hasAlbumEditions = true;
+        } else if (tag == kSectionAlbumArt) {
+            out.albumArt.assign(body);
+            out.hasAlbumArt = true;
         }
     }
 }
@@ -528,6 +538,9 @@ bool ValidateLibrary(FileSource& input, uint64_t& stringCount, uint64_t& trackCo
         if (sections.hasLoudness && !DecodeLoudness(sections.loudness, trackCount, nullptr, nullptr)) return false;
         if (sections.hasAlbums && !DecodeAlbumMeasurements(sections.albums, trackCount, nullptr, nullptr)) return false;
         if (sections.hasFirstPlayed && !DecodeFirstPlayed(sections.firstPlayed, trackCount, nullptr, nullptr)) return false;
+        if (sections.hasAlbumEditions &&
+            !DecodeAlbumDatabase(sections.albumEditions, trackCount, nullptr, nullptr, nullptr)) return false;
+        if (sections.hasAlbumArt && !DecodeAlbumArt(sections.albumArt, trackCount, nullptr, nullptr)) return false;
         if (sections.hasViews && !DecodeViews(sections.views, playlistCount, trackCount, nullptr, nullptr)) return false;
     }
     return r.ok && r.Remaining() == 0;
@@ -538,7 +551,8 @@ bool ValidateLibrary(FileSource& input, uint64_t& stringCount, uint64_t& trackCo
 static bool WriteDatabase(const std::wstring& file, const Library& library,
                           const std::vector<Playlist>& playlists, const std::vector<PlayEvent>& log,
                           const PointsState* points, const std::map<AlbumId, AlbumMeasurement>& measurements,
-                          std::wstring* error) {
+                          const std::vector<AlbumGroup>& albumGroups,
+                          const std::map<TrackId, TrackMusicBrainz>& musicBrainz, std::wstring* error) {
     std::wstring ignored;
     std::wstring& failure = error ? *error : ignored;
     failure.clear();
@@ -560,6 +574,18 @@ static bool WriteDatabase(const std::wstring& file, const Library& library,
                 }
                 newId[id] = 0;
             }
+    // Album organization is user data too: every member of an edition keeps its library record,
+    // even when it is temporarily missing, so a rescan cannot dissolve a manually grouped album.
+    for (const auto& group : albumGroups) {
+        for (const auto& edition : group.editions)
+            for (TrackId id : edition.tracks) if (id < newId.size()) newId[id] = 0;
+        for (const auto& match : group.matches) {
+            if (match.a < newId.size()) newId[match.a] = 0;
+            if (match.b < newId.size()) newId[match.b] = 0;
+        }
+        for (const auto& preferred : group.preferredTracks)
+            if (preferred.track < newId.size()) newId[preferred.track] = 0;
+    }
 
     // A sorted handle dictionary replaces heap nodes per string; binary search needs no
     // second index. Incremental compaction keeps `strings` bounded by unique handles + 8K.
@@ -636,6 +662,10 @@ static bool WriteDatabase(const std::wstring& file, const Library& library,
     w.Bytes(EncodeViews(playlists, newId));
     w.U(kSectionFirstPlayed);
     w.Bytes(EncodeFirstPlayed(library, newId));
+    w.U(kSectionAlbumEditions);
+    w.Bytes(EncodeAlbumDatabase(albumGroups, musicBrainz, newId));
+    w.U(kSectionAlbumArt);
+    w.Bytes(EncodeAlbumArt(albumGroups, newId));
     w.U(kSectionEnd);
     std::vector<uint32_t>().swap(newId);
     return w.Commit();
@@ -745,6 +775,12 @@ bool ReadLibraryArchive(const std::wstring& file, LibraryArchive& out) {
     data.hasPoints = sections.hasPoints;
     if (data.hasPoints) DecodePoints(sections.points, trackCount, savedToId, data.points);
     if (sections.hasFirstPlayed) DecodeFirstPlayed(sections.firstPlayed, trackCount, savedToId, &data.library);
+    data.hasAlbumEditions = sections.hasAlbumEditions;
+    if (sections.hasAlbumEditions &&
+        !DecodeAlbumDatabase(sections.albumEditions, trackCount, savedToId, &data.albumGroups, &data.trackMusicBrainz))
+        return reject();
+    if (sections.hasAlbumArt && !DecodeAlbumArt(sections.albumArt, trackCount, savedToId, &data.albumGroups))
+        return reject();
     for (const auto& e : data.log) if (e.flags & PlayEvent::kCounted) {
         auto& first = data.library[e.id].firstPlayed;
         if (!first || e.time < first) first = e.time;
@@ -756,7 +792,7 @@ bool ReadLibraryArchive(const std::wstring& file, LibraryArchive& out) {
 
 bool WriteLibraryArchive(const std::wstring& file, const LibraryArchive& data, std::wstring& error) {
     return WriteDatabase(file, data.library, data.playlists, data.log, data.hasPoints ? &data.points : nullptr,
-                         data.albums, &error);
+                         data.albums, data.albumGroups, data.trackMusicBrainz, &error);
 }
 
 LibraryArchive CaptureLibraryArchive(const std::vector<Playlist>& playlists) {
@@ -778,28 +814,39 @@ LibraryArchive CaptureLibraryArchive(const std::vector<Playlist>& playlists) {
     // Album keys contain pool handles; the snapshot has its own string pool.
     for (const auto& [key, album] : g_albumMeasurements) if (!album.members.empty())
         data.albums[AlbumKeyOf(data.library[album.members.front()])] = album;
+    // Album groups refer to track ids, which ImportTrack preserves; raw UTF-8 fields need no remap.
+    data.albumGroups = g_albumGroups;
+    for (const auto& [id, value] : g_trackMusicBrainz)
+        if (data.library.Contains(id)) data.trackMusicBrainz[id] = value;
     return data;
 }
 
 bool SaveLibrary(const std::wstring& file, const std::vector<Playlist>& playlists, std::wstring* error) {
     return WriteDatabase(file, g_lib, playlists, PlayLog(), PointsInitialized() ? &CurrentPointsState() : nullptr,
-                         g_albumMeasurements, error);
+                         g_albumMeasurements, g_albumGroups, g_trackMusicBrainz, error);
 }
 
-bool LoadLibrary(const std::wstring& file, std::vector<Playlist>& playlists) {
+bool LoadLibrary(const std::wstring& file, std::vector<Playlist>& playlists, std::wstring* preserved) {
+    if (preserved) preserved->clear();
     LibraryArchive data;
     if (!ReadLibraryArchive(file, data)) {
         // Keep the existing live-profile recovery contract, but never mutate backup input.
         static std::atomic<unsigned> serial{0};
         std::wstring original = file + L".bad-" + std::to_wstring(UnixNow()) + L"-" +
             std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(++serial);
-        MoveFileExW(file.c_str(), original.c_str(), 0);
+        // A locked file stays where it is; either way the caller can name the copy it kept.
+        if (MoveFileExW(file.c_str(), original.c_str(), 0) && preserved) *preserved = std::move(original);
         return false;
     }
     g_lib = std::move(data.library);
     playlists = std::move(data.playlists);
     SetPlayLog(std::move(data.log));
     g_albumMeasurements = std::move(data.albums);
+    g_albumGroups = std::move(data.albumGroups);
+    g_trackMusicBrainz = std::move(data.trackMusicBrainz);
+    AlbumGroupsChanged();
+    if (!data.hasAlbumEditions) AutoGroupAlbums();  // migrate a library written before editions existed
+    else ReconcileAlbumGroups();
     if (data.hasPoints) SetPointsState(std::move(data.points));
     else ResetPoints();
     return true;

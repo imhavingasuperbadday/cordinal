@@ -272,9 +272,10 @@ constexpr wchar_t kAddLabel[] = L"Add to cordinal";
 // This executable's own path: the verbs must start the same build the user is running, even
 // though cordinal is portable and moves.
 std::wstring ExePath() {
-    wchar_t exe[MAX_PATH * 2]{};
-    DWORD n = GetModuleFileNameW(nullptr, exe, (DWORD)std::size(exe));
-    return std::wstring(exe, n);
+    std::wstring exe(32768, L'\0');
+    DWORD n = GetModuleFileNameW(nullptr, exe.data(), (DWORD)exe.size());
+    exe.resize(n && n < exe.size() ? n : 0);
+    return exe;
 }
 
 std::wstring QuotedExe() { return L"\"" + ExePath() + L"\""; }

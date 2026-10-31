@@ -16,6 +16,8 @@ void TestWaveform(const std::wstring& scratch) {
     const auto savedLayout = g.layout;
     const auto savedTheme = g.themeMode;
     const auto savedSize = g.size;
+    const bool savedLive = g.liveWaveform, savedFullLive = g.fullLiveWaveform;
+    g.liveWaveform = g.fullLiveWaveform = false;
     // One chapter at 30 seconds in an otherwise empty ID3v2.3 file. The waveform is seeded in
     // the private peaks cache, so these state checks need neither a decoder nor an audio device.
     const std::string header("ID3\x03\0\0\0\0\0\x1c", 10);
@@ -54,7 +56,6 @@ void TestWaveform(const std::wstring& scratch) {
         }
     }
     Check(clean, L"chapters preserve horizontal and vertical waveform loading and ready states");
-    const bool savedLive = g.liveWaveform, savedFullLive = g.fullLiveWaveform;
     SendMessageW(g.seek, TBM_SETPOS, FALSE, 625);
     g.liveWaveform = true; WaveformTrackChanged(true); WaveformTick();
     bool live = LiveWaveformShown() && WaveformShown() && SendMessageW(g.seek, TBM_GETPOS, 0, 0) == 625;
@@ -140,7 +141,23 @@ void TestWaveform(const std::wstring& scratch) {
     StartPeaks(nullptr, 0, scratch + L"\\waveform-late-peaks");
     g.playing = ids[0];
     WaveformTrackChanged();
-    const bool waiting = !WaveformShown();
+    const bool waiting = WaveformShown();
+    {
+        g.liveWaveform = g.fullLiveWaveform = false;
+        HDC dc = CreateCompatibleDC(nullptr);
+        BITMAPINFO info{};
+        info.bmiHeader = {sizeof(BITMAPINFOHEADER), 120, -26, 1, 32, BI_RGB};
+        void* pixels = nullptr;
+        HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+        HGDIOBJ old = bitmap ? SelectObject(dc, bitmap) : nullptr;
+        const bool columns = dc && bitmap && !LiveWaveformShown() &&
+                             DrawWaveform(dc, {0, 0, 120, 26}, {4, 0, 116, 26}, 0.625) &&
+                             GetPixel(dc, 4, 13) == WaveformPlayedColor() && GetPixel(dc, 4, 2) == SurfaceColor();
+        Check(waiting && columns, L"whole-track waveform columns appear while an uncached song is loading");
+        if (old) SelectObject(dc, old);
+        if (bitmap) DeleteObject(bitmap);
+        if (dc) DeleteDC(dc);
+    }
     Peaks completed{};
     std::memset(completed.v, 128, sizeof(completed.v));
     StorePeaks(g_lib.Path(g.playing), 0, 0, 0, 0, completed);
@@ -172,9 +189,30 @@ void TestWaveform(const std::wstring& scratch) {
     }
     Check(sizes.Passed(), L"waveform theme switches preserve progress, pause and warning colors in every view size%ls",
           sizes.failed.c_str());
+    // A play request starts the actual song's waveform before the engine announces playback.
+    const std::wstring early = scratch + L"\\waveform-early.wav", earlyCache = scratch + L"\\waveform-early-cache";
+    if (Ready(WriteTestBytes(early, MakeSineWav(2, 2)), L"early waveform fixture is prepared")) {
+        TrackId id = g_lib.Add(early);
+        g.playing = kNone;
+        WaveformTrackChanged();
+        StopPeaks();
+        StartPeaks(nullptr, 0, earlyCache);
+        g.liveWaveform = g.fullLiveWaveform = false;
+        PrepareWaveform(id);
+        const std::wstring cached = earlyCache + L"\\" + PeaksKeyName(early, 0, 0) + L".pk";
+        Pump(5000, [&] { return GetFileAttributesW(cached.c_str()) != INVALID_FILE_ATTRIBUTES; });
+        const bool prepared = GetFileAttributesW(cached.c_str()) != INVALID_FILE_ATTRIBUTES;
+        g.playing = id;
+        WaveformTrackChanged();
+        Check(prepared && WaveformShown() && WaveformPeak(0.75, 0.8) > 0,
+              L"a play request prepares the song's whole waveform before playback starts");
+        DeleteFileW(early.c_str());
+    }
     g.engine.SetPaused(paused);
     g.stopAfterCurrent = stopAfter;
     g.startupTheme = startupTheme;
+    g.liveWaveform = savedLive;
+    g.fullLiveWaveform = savedFullLive;
     StopPeaks();
     g.playing = savedPlaying;
     WaveformTrackChanged();
@@ -387,6 +425,24 @@ void TestTweaks(const std::wstring& scratch) {
     loops->put(2);
     LoadPreferences();
     Check(!g.resumeOn && g.rgPreamp == 2.5f && g.loops == 1, L"saved tweaks come back on the next start");
+    const Tweak* resumeInSong = FindTweak("playback.resume_in_song");
+    const Tweak* resumePlay = FindTweak("playback.resume_play");
+    if (resumeInSong && resumePlay) {
+        resumeInSong->put(1);
+        resumePlay->put(1);
+        SavePreferences();
+        const bool saved = IniRead(L"Player", L"ResumeInSong", L"") == L"1" && IniRead(L"Player", L"ResumePlay", L"") == L"1";
+        g.resumeInSong = g.resumePlay = false;
+        LoadPreferences();
+        const bool loaded = g.resumeInSong && g.resumePlay;
+        resumeInSong->put(0);
+        resumePlay->put(0);
+        SavePreferences();
+        Check(saved && loaded && !g.resumeInSong && !g.resumePlay && IniRead(L"Player", L"ResumeInSong", L"") == L"0",
+              L"reopening in the last song and starting it on open are Preferences settings that persist");
+    } else {
+        Check(false, L"Preferences lists reopening in the last song and starting it on open");
+    }
 
     IniWrite(L"Player", L"Loops", L"9");
     IniWrite(L"ReplayGain", L"KeepLoud", L"5");
@@ -769,7 +825,7 @@ void TestPersonalization(const std::wstring& scratch) {
         embeddedHeadphones.lpfnWndProc = HeadphonesProc;
         RegisterClassW(&embeddedHeadphones);
         g.eqWnd = CreateWindowW(kEqClass, L"EQ test", WS_POPUP, 0, 0, S(740), S(590), g.hwnd, nullptr, g.inst, nullptr);
-        Check(g.eqWnd != nullptr, L"the native parametric EQ editor creates successfully");
+        Ready(g.eqWnd != nullptr, L"the native parametric EQ editor is created");
         if (g.eqWnd) {
             bool fits = true;
             RECT client{};

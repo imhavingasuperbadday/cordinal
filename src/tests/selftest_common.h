@@ -23,7 +23,6 @@
 #include "points.h"
 #include "scanner.h"
 #include "sfx.h"
-#include "smtc.h"
 #include "steam.h"
 #include "tagundo.h"
 #include "tagwriter.h"
@@ -84,6 +83,7 @@ void TestSearch();
 bool ReferenceSearch(const Library& library, TrackId id, const std::vector<std::wstring>& words);
 void TestAudioHashSection(const std::wstring& scratch);
 void TestLibraryDb(const std::wstring& scratch);
+void TestAlbumEditions(const std::wstring& scratch);
 void TestPlayLog(const std::wstring& scratch);
 void TestListeningModel();
 void TestEqualizer();
@@ -94,6 +94,7 @@ void TestAutoPlaylists();
 void TestOrganize(const std::wstring& media, const std::wstring& scratch);
 void TestDeviceCopy(const std::wstring& media, const std::wstring& scratch);
 void TestScanner(const std::wstring& media, const std::wstring& scratch);
+void TestLibraryFolders(const std::wstring& scratch);
 void TestTagUndo(const std::wstring& media, const std::wstring& scratch);
 void TestAudioHash(const std::wstring& media, const std::wstring& scratch);
 void TestScanMerge();
@@ -125,12 +126,12 @@ void TestCordConversion(const std::wstring& root, const std::wstring& scratch);
 // Tag checks (selftest_tags.cpp) and DSP checks (selftest_dsp.cpp).
 void TestTags(const std::wstring& dir);
 void TestExtendedTags(const std::wstring& dir);
+void TestMp4Metadata(const std::wstring& scratch);
 void TestReplayGainTags(const std::wstring& root, const std::wstring& scratchDir);
 void TestSteam(const std::wstring& scratch);
 void TestChapters(const std::wstring& scratch);
 void TestLyrics();
 void TestCrashDump(const std::wstring& scratch);
-void TestSmtc();
 void TestListenBrainz(const std::wstring& scratch);
 void TestLoudness();
 void TestTruePeak();

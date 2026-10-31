@@ -4,6 +4,7 @@
 #include "sort.h"
 #include "library.h"
 
+#include "album_editions.h"
 #include "archive.h"
 #include "cue.h"
 #include "helpers.h"
@@ -465,15 +466,16 @@ TrackId Library::ImportTrack(const Library& source, TrackId id) {
     return dest;
 }
 
-void Library::Rename(TrackId id, const std::wstring& path) {
+bool Library::Rename(TrackId id, const std::wstring& path) {
     std::wstring full = NormalizeMediaPath(path);
-    if (!Contains(id) || full.empty() || FileNameOf(full).empty()) return;
+    if (!Contains(id) || full.empty() || FileNameOf(full).empty()) return false;
     TrackId existing = Find(full);
-    if (existing != UINT32_MAX && existing != id) return;
+    if (existing != UINT32_MAX && existing != id) return false;
     Unindex(id);
     SplitPath(full, tracks_[id].dir, tracks_[id].file);
     Index(id);
     ++revision_;
+    return true;
 }
 
 std::wstring Library::Path(TrackId id) const {
@@ -585,16 +587,30 @@ void Library::ApplyTags(TrackId id, const TagData& d) {
     }
     t.flags &= ~(Track::kFailed | Track::kTagFailed);
     t.flags |= Track::kLoaded;
+    // MusicBrainz album ids live beside the library rather than in the compact Track record. They
+    // are read from tags, never fetched, so offline browsing and playback never depend on a network.
+    if (this == &g_lib) SetTrackMusicBrainz(id, d.musicBrainzReleaseGroup, d.musicBrainzRelease);
     ++revision_;
 }
 
 // Rebuilds the library from `live` only, renumbering ids densely. Returns the old id -> new id
 // map (UINT32_MAX for dropped tracks) so callers can remap playlists and the play log.
 std::vector<TrackId> Library::Compact(const std::vector<TrackId>& live) {
+    // The live list is the caller's policy (playlists, history, stats); album editions are library
+    // organization and must survive too, or a compaction would silently dissolve a manual group.
+    std::vector<TrackId> kept;
+    if (this == &g_lib) {
+        std::vector<bool> retain(Count());
+        for (TrackId id : live) if (Contains(id)) retain[id] = true;
+        MarkAlbumTracks(retain);
+        for (TrackId id = 0; id < (TrackId)retain.size(); ++id) if (retain[id]) kept.push_back(id);
+    } else {
+        kept = live;
+    }
     std::vector<TrackId> mapping(Count(), UINT32_MAX);
     Library compact;
-    compact.Reserve(0, live.size());
-    for (TrackId id : live)
+    compact.Reserve(0, kept.size());
+    for (TrackId id : kept)
         if (Contains(id) && mapping[id] == UINT32_MAX) mapping[id] = compact.ImportTrack(*this, id);
     compact.revision_ = revision_ + 1;
     std::map<AlbumId, AlbumMeasurement> measurements;
@@ -609,8 +625,10 @@ std::vector<TrackId> Library::Compact(const std::vector<TrackId>& live) {
         SortRecords(remapped.members.begin(), remapped.members.end());
         measurements[AlbumKeyOf(compact[remapped.members.front()])] = std::move(remapped);
     }
+    bool wasGlobal = this == &g_lib;
     *this = std::move(compact);
     g_albumMeasurements = std::move(measurements);
+    if (wasGlobal) RemapAlbumGroups(mapping);
     return mapping;
 }
 
@@ -652,6 +670,22 @@ bool LookupField(TrackId id, const std::wstring& name, std::wstring& out) {
         if (name == field.name) return set(g_lib.Str(t.*field.field));
     if (name == L"title") return set(t.title ? g_lib.Str(t.title) : StemOf(g_lib.Str(t.file)));
     if (name == L"album artist") return set(g_lib.Str(t.albumArtist ? t.albumArtist : t.artist));
+    if (name == L"edition") {
+        const AlbumEdition* edition = AlbumEditionForTrack(id);
+        return edition && set(EditionLabel(*edition));
+    }
+    if (name == L"edition_kind") {
+        const AlbumEdition* edition = AlbumEditionForTrack(id);
+        return edition && set(EditionKindLabel(edition->kind));
+    }
+    if (name == L"musicbrainz_albumid") {
+        const AlbumEdition* edition = AlbumEditionForTrack(id);
+        return edition && !edition->musicBrainzRelease.empty() && set(FromUtf8(edition->musicBrainzRelease));
+    }
+    if (name == L"musicbrainz_releasegroupid") {
+        const AlbumGroup* group = AlbumGroupForTrack(id);
+        return group && !group->musicBrainzReleaseGroup.empty() && set(FromUtf8(group->musicBrainzReleaseGroup));
+    }
     if (name == L"year") {
         // The year part of a full date ("2005-03-28" -> "2005").
         std::wstring d = g_lib.Str(t.date);
@@ -720,7 +754,7 @@ bool LookupField(TrackId id, const std::wstring& name, std::wstring& out) {
 // Files
 
 namespace {
-const wchar_t* const kAudioExt[] = {L"mp3", L"mp2", L"mp1", L"m4a", L"m4b", L"aac", L"adts", L"flac", L"fla", L"wav", L"wave",
+const wchar_t* const kAudioExt[] = {L"mp3", L"mp2", L"mp1", L"m4a", L"m4b", L"mp4", L"aac", L"adts", L"flac", L"fla", L"wav", L"wave",
                                     L"wma", L"asf", L"ogg", L"oga", L"opus", L"aif", L"aiff", L"aifc", L"ac3", L"ape", L"wv",
                                     L"mka", L"alac", L"spc", L"nsf", L"nsfe", L"gbs", L"vgm", L"vgz", L"gym", L"sid", L"cord",
                                     L"dsf", L"dff", L"mod", L"s3m", L"xm", L"it", L"mid", L"midi", L"kar", L"rmi"};

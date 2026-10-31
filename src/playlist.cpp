@@ -1,5 +1,6 @@
 // Playlist and search helpers with no Win32-control dependency: name sanitizing, item ordering,
 // filter parsing and track matching. Shared by the UI and the persistence code.
+#include "album_editions.h"
 #include "library.h"
 #include "playlog.h"
 #include "playlist_shuffle.h"
@@ -163,6 +164,25 @@ bool TrackMatcher::Matches(TrackId id) {
                 if (match) field.found |= bit;
             }
             if (match) break;
+        }
+        if (!match) {
+            // Edition labels are searchable too ("deluxe", "instrumental", a regional name), but
+            // only for tracks in an explicit group; ordinary albums add no work here.
+            if (editionTrack_ != id) {
+                editionTrack_ = id;
+                editionText_ = AlbumEditionSearchText(id);
+                edition_.tested = edition_.found = 0;
+            }
+            if (!editionText_.empty()) {
+                if (edition_.tested & bit) match = (edition_.found & bit) != 0;
+                else {
+                    match = FindNLSStringEx(LOCALE_NAME_USER_DEFAULT, FIND_FROMSTART | LINGUISTIC_IGNORECASE,
+                        editionText_.data(), (int)editionText_.size(), word.data(), (int)word.size(),
+                        nullptr, nullptr, nullptr, 0) >= 0;
+                    edition_.tested |= bit;
+                    if (match) edition_.found |= bit;
+                }
+            }
         }
         if (!match) return false;
     }

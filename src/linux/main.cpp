@@ -7,6 +7,7 @@
 //   cordinal --check-layout          compares the window's layout with the Windows build's (ui_spec.h)
 //   cordinal --capture-ui DIR        renders every theme and menu into DIR (linux/capture-ui.sh)
 #include "app.h"
+#include "musicbrainz.h"
 #include "radio_ui.h"
 #include "cover.h"
 #include "panels.h"
@@ -197,7 +198,7 @@ int Run(int argc, char** argv) {
         if (!full.empty()) paths.push_back(full);
     }
 
-    SDL_SetAppMetadata("cordinal", "0.1.0", "cordinal");
+    SDL_SetAppMetadata("cordinal", "0.1.1", "cordinal");
     SDL_SetHint(SDL_HINT_VIDEO_WAYLAND_PREFER_LIBDECOR, "1");
     if (parity) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
@@ -209,6 +210,7 @@ int Run(int argc, char** argv) {
     LoadSettings();
     StartTagWorker();
     LoadLibraryFile();
+    musicbrainz::Start(g.dataDir, g.settings.musicBrainzLookup);
 
     Settings& s = g.settings;
     if (parity) {
@@ -289,6 +291,7 @@ int Run(int argc, char** argv) {
     InitWeb();
     InitScrobble();
     if (!paths.empty()) ExpandPaths(paths, Opening::Play);
+    else if (!parity) ReopenLastTrack();  // the last session's song, paused or playing, as Preferences asks
     if (s.folders.empty() && paths.empty()) ShowMessage(L"Welcome! Add your music: Library \x25B8 Library folders...");
     // The parity checks exit without saving anything.
     if (checkLayout) {
@@ -339,6 +342,12 @@ int Run(int argc, char** argv) {
             lastTick = now;
             PlaybackTick();
             PreferenceTick(LastInputTicks());
+            if (musicbrainz::Tick()) {
+                InvalidateCellCache();
+                RebuildRows();
+                g.libraryDirty = true;
+                g.redraw = true;
+            }
             MaybeAutoMeasure(false);
             if (g.playing != kNone || RadioPlaying() || g.searchFocused || now < g.messageUntil + 300) g.redraw = true;
         }
@@ -368,6 +377,7 @@ int Run(int argc, char** argv) {
     StopReplayGain();
     Stop();  // finish the current listening session before saving the library
     ShutdownRadio();
+    musicbrainz::Stop();
     StopTagWriter();
     StopMpris();
     g.scanner.Stop();

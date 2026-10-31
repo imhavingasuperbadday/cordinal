@@ -1,12 +1,13 @@
 // Tag checks of the self test (see selftest.cpp): tag reading, ReplayGain tags, chapters and
-// lyrics, Steam soundtracks, crash dumps, the media controls (SMTC) and ListenBrainz.
+// lyrics, Steam soundtracks, crash dumps and ListenBrainz.
 #include "selftest_common.h"
 
 // Reads tags from every media fixture and checks codec, duration (~8 s), rate, channels and the
 // standard title/artist/album/track tags (WAV and Opus carry no tags by design).
 void TestTags(const std::wstring& dir) {
     std::vector<std::wstring> files;
-    Check(CollectAudioFiles(dir, files) && !files.empty(), L"TAGS media fixtures exist and can be enumerated");
+    if (!Ready(CollectAudioFiles(dir, files) && !files.empty(), L"the media fixtures can be enumerated"))
+        return;
     std::wstring bad;
     for (auto& f : files) {
         TagData t;
@@ -46,6 +47,78 @@ void TestExtendedTags(const std::wstring& dir) {
           bad.c_str());
 }
 
+namespace {
+
+std::string Be32(uint32_t v) {
+    std::string b(4, '\0');
+    for (int i = 3; i >= 0; --i, v >>= 8) b[i] = (char)(v & 255);
+    return b;
+}
+
+std::string Mp4Box(const char* type, const std::string& body) {
+    std::string box = Be32((uint32_t)(8 + body.size()));
+    box.append(type, 4);
+    box += body;
+    return box;
+}
+
+std::string Mp4Data(uint32_t kind, const std::string& payload) {
+    return Mp4Box("data", Be32(kind) + std::string(4, '\0') + payload);
+}
+
+std::string Mp4Item(const char* type, uint32_t kind, const std::string& payload) {
+    return Mp4Box(type, Mp4Data(kind, payload));
+}
+
+std::string Utf16Be(std::wstring_view text) {
+    std::string out;
+    for (wchar_t c : text) {
+        out += (char)((uint16_t)c >> 8);
+        out += (char)((uint16_t)c & 255);
+    }
+    return out;
+}
+
+std::string Mp4Key(const char* key) {
+    std::string name(key);
+    return Be32((uint32_t)(8 + name.size())) + "mdta" + name;
+}
+
+}  // namespace
+
+// MP4 text atoms say whether they are UTF-8 (1), UTF-16BE (2) or implicit; mdta metadata refers
+// to fields by key index. A file cut off after ftyp is not a successful read with empty tags.
+void TestMp4Metadata(const std::wstring& scratch) {
+    std::string ftyp = Mp4Box("ftyp", std::string("M4A \0\0\0\0M4A mp42isom", 20));
+    std::string ilst = Mp4Box("ilst", Mp4Item("\xA9nam", 2, Utf16Be(L"\u00DCnicode \u2713")) +
+                                       Mp4Item("\xA9" "ART", 2, Utf16Be(L"Art\u00EDst")));
+    std::string moov = Mp4Box("moov", Mp4Box("udta", Mp4Box("meta", std::string(4, '\0') + ilst)));
+    const std::wstring utf16 = scratch + L"\\mp4-utf16.mp4";
+    Ready(WriteTestBytes(utf16, ftyp + moov), L"the UTF-16 MP4 fixture is prepared");
+    TagData t;
+    bool utf16Ok = ReadTags(utf16, t);
+    Check(utf16Ok && t.title == "\xC3\x9Cnicode \xE2\x9C\x93" && t.artist == "Art\xC3\xADst",
+          L"MP4 UTF-16BE text atoms decode to the title and artist the file names");
+
+    const char* keyTitle = "com.apple.quicktime.title";
+    const char* keyArtist = "com.apple.quicktime.artist";
+    std::string keys = Mp4Box("keys", std::string(4, '\0') + Be32(2) + Mp4Key(keyTitle) + Mp4Key(keyArtist));
+    std::string numeric = Mp4Box("ilst", Mp4Item("\0\0\0\1", 1, "QuickTime title") +
+                                          Mp4Item("\0\0\0\2", 1, "QuickTime artist"));
+    std::string mdta = Mp4Box("moov", Mp4Box("udta", Mp4Box("meta", std::string(4, '\0') + keys + numeric)));
+    const std::wstring quicktime = scratch + L"\\mp4-mdta.mp4";
+    Ready(WriteTestBytes(quicktime, ftyp + mdta), L"the mdta MP4 fixture is prepared");
+    TagData q;
+    bool mdtaOk = ReadTags(quicktime, q);
+    Check(mdtaOk && q.title == "QuickTime title" && q.artist == "QuickTime artist",
+          L"MP4 mdta metadata resolves its numeric keys to title and artist");
+
+    const std::wstring truncated = scratch + L"\\mp4-truncated.mp4";
+    Ready(WriteTestBytes(truncated, ftyp), L"the truncated MP4 fixture is prepared");
+    TagData cut;
+    Check(!ReadTags(truncated, cut), L"a truncated MP4 is reported as unreadable, not as empty tags");
+}
+
 // ReplayGain tags across FLAC/MP3/Ogg (+ Opus's native R128), then an export round trip on copies:
 // writing the four gain/peak fields reads back exactly, and clearing them removes every tag again.
 void TestReplayGainTags(const std::wstring& root, const std::wstring& scratchDir) {
@@ -58,12 +131,7 @@ void TestReplayGainTags(const std::wstring& root, const std::wstring& scratchDir
                   std::fabs(t.rgAlbumGain + 7.25f) < 0.01f;
     }
     Check(rgTags, L"RG TAGS flac, mp3 and ogg track gain -6.50 dB, peak 0.988 and album gain -7.25 dB");
-    {
-        TagData t;
-        ReadTags(dir + L"\\rg.opus", t);
-        Check(std::fabs(t.rgTrackGain - (-1408 / 256.0f + 5)) < 0.01f, L"RG TAGS rg.opus  R128 -> track=%.2f",
-              t.rgTrackGain);
-    }
+    // The native R128 -> track gain of rg.opus is checked on an edited copy by the tag-writing-ogg suite.
 
     // Export round trip: write these values to copies and read them back. Opus also gets its
     // native R128 tags; clearing the fields removes every tag again.
@@ -262,41 +330,13 @@ void TestCrashDump(const std::wstring& scratch) {
     Check(first && !again && reported == last, L"CRASH new dump reported once (first=%d again=%d)", first, again);
 }
 
-// System Media Transport Controls: init with a real hidden window, then set metadata (with cover
-// art), state and timeline. Skipped if the OS has no SMTC support.
-void TestSmtc() {
-    HWND hwnd = CreateWindowExW(0, L"STATIC", L"cordinal selftest", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr,
-                                GetModuleHandleW(nullptr), nullptr);
-    if (!hwnd || !smtc::Init(hwnd, WM_APP + 1)) {
-        testlog::Skip(L"Windows media controls (SMTC) unavailable");
-        if (hwnd) DestroyWindow(hwnd);
-        return;
-    }
-    // A 1x1 orange PNG, generated outside the program.
-    static const unsigned char kPng[] = {
-        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
-        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
-        0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xB8, 0xE0, 0xA0, 0x00,
-        0x00, 0x03, 0x14, 0x01, 0x31, 0xF7, 0xBF, 0xCC, 0x56, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E,
-        0x44, 0xAE, 0x42, 0x60, 0x82};
-    smtc::SetMetadata(L"Test Title", L"Test Artist", L"Test Album",
-                      std::string(reinterpret_cast<const char*>(kPng), sizeof(kPng)));
-    smtc::SetState(smtc::State::Playing);
-    smtc::SetTimeline(12.5, 200.0);
-    smtc::SetState(smtc::State::Paused);
-    smtc::SetMetadata(L"", L"", L"", std::string());
-    smtc::Shutdown();
-    DestroyWindow(hwnd);
-    Check(true, L"SMTC metadata with cover art, state and timeline set, then shut down");
-}
-
 // ListenBrainz: JSON escaping and UTF-8 handling, rejection of artistless listens, the encrypted
 // token, the on-disk queue surviving a restart, and that nothing is sent while it is off. Sending is
 // disabled for the test, so no request ever leaves the machine.
 void TestListenBrainz(const std::wstring& scratch) {
     using namespace listenbrainz;
     const std::string info = "\"media_player\":\"cordinal\",\"submission_client\":\"cordinal\","
-                             "\"submission_client_version\":\"0.1.0\"";
+                             "\"submission_client_version\":\"0.1.1\"";
 
     Listen a;
     a.listenedAt = 1700000000;

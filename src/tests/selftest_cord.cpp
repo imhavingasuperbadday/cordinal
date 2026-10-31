@@ -416,6 +416,20 @@ void TestCordConversion(const std::wstring& root, const std::wstring& scratch) {
     Check(none.cancelled && none.done.empty() && PlanConvert({{1, tagged}})[0].skip == L"a .cord file of that name already exists",
           L"a cancelled conversion converts nothing, and none replaces an existing .cord");
 
+    // Without an undo log the original must not leave its folder, even when recycling is requested.
+    cancel = false;
+    settings.recycle = true;
+    const std::wstring blockedLogs = dir + L"\\blocked-log";
+    const std::wstring noLogSource = dir + L"\\nolog.flac";
+    WriteTestBytes(blockedLogs, "a regular file, not a log directory");
+    CopyFileW(gains.c_str(), noLogSource.c_str(), FALSE);
+    const ConvertResult noLog = ExecuteConvert(PlanConvert({{1, noLogSource}}), settings, blockedLogs, cancel, nullptr);
+    Check(noLog.done.size() == 1 && !noLog.done[0].recycled && !noLog.logError.empty() && noLog.log.empty() &&
+              GetFileAttributesW(noLogSource.c_str()) != INVALID_FILE_ATTRIBUTES &&
+              GetFileAttributesW((dir + L"\\nolog.cord").c_str()) != INVALID_FILE_ATTRIBUTES,
+          L"conversion keeps the original when its undo log can't be written");
+    settings.recycle = false;
+
     // Logs older than the chosen memory are forgotten.
     CreateDirectoryW(logDir.c_str(), nullptr);
     const std::wstring old = logDir + L"\\20000101-000000-000.log";

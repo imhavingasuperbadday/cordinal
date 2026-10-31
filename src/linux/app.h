@@ -142,6 +142,8 @@ struct Settings {
     bool soundEffects = false;   // small sounds for actions that otherwise happen silently (sounds.cpp)
     bool roboticSounds = true;   // the DELTARUNE theme's sounds crushed in Chapter 2's Cyber World voice
     std::vector<std::wstring> folders;
+    bool foldersChosen = false;  // a folder list was chosen, so it is never treated as a default again
+    bool musicDefaultChecked = false;  // the one-time cleanup of the auto-added system Music folder ran
     bool inboxEnabled = false;
     bool steamOffered = false;
     float volume = 1;
@@ -149,6 +151,8 @@ struct Settings {
     bool skipAwareShuffle = false;
     bool radio = false;
     bool resumeOn = true;
+    bool resumeInSong = false;  // reopen with the last track loaded, paused where it stopped
+    bool resumePlay = false;    // start a reopened track at once instead of waiting paused
     std::wstring resumePath;
     double resumePosition = 0;
     int resumeIndex = -1;
@@ -165,6 +169,7 @@ struct Settings {
     Repeat repeat = Repeat::Off;
     ThemeMode theme = ThemeMode::System;
     bool groupAlbums = true;  // album headers over each album's tracks, as View > Group tracks by album
+    bool musicBrainzLookup = false;  // optional online album-edition lookup, cached and rate-limited
     // Conversion to .cord: originals go to the Recycle Bin or stay (shown in the library or not), and
     // a conversion can be undone for kConvertMemoryDays[convertMemory].
     bool convertRecycle = true, convertShowOriginals = false;
@@ -286,6 +291,8 @@ void StopMigration();
 void FinishMigration();
 void LoadLibraryFile();
 void SaveLibraryFile(bool force);
+// The system Music folder (XDG's, or $HOME/Music): the default library folder on a new profile.
+std::string MusicFolder();
 
 // library_sync.cpp
 void StartScanner();
@@ -302,7 +309,7 @@ void RemoveFolder(size_t index);
 
 // playback.cpp
 void PlayRow(int row);
-void PlayFromQueue(int index, double start = 0);
+void PlayFromQueue(int index, double start = 0, bool paused = false);
 void TogglePause();
 void Stop();
 void Next();
@@ -316,6 +323,8 @@ void SetSkipAwareShuffle(bool on);
 void SetRadio(bool on);
 void SetResumeOn(bool on);
 bool Resume();
+// Opens with the last session's track, paused where it stopped or playing at once, as Preferences asks.
+void ReopenLastTrack();
 PlaybackSection SectionOf(TrackId id);
 void SetSectionFor(TrackId id, const PlaybackSection& section);
 void RemapNowPlaying(const std::vector<size_t>& oldToNew);
@@ -349,7 +358,8 @@ void FinishReplayGain(WPARAM wp, LPARAM lp);
 std::wstring ReplayGainStatus();  // the status bar's work-in-progress text, or ""
 
 // tagwrite.cpp: writing tags on a worker, one undo journal per edit; files playing wait their turn.
-bool SubmitTagWrites(const std::vector<std::pair<TrackId, TagEdit>>& items, bool undoable);
+bool SubmitTagWrites(const std::vector<std::pair<TrackId, TagEdit>>& items, bool undoable,
+                     std::wstring journalAfter = {});
 // Ratings and play counts into the files' tags (migration::StatisticsTags), journaled for undo.
 void WriteStatisticsTags(const std::vector<TrackId>& ids);
 void UndoLastTagEdit();
@@ -408,6 +418,7 @@ void StopCopier();
 
 // views (ui.cpp)
 void RebuildRows();
+void InvalidateCellCache();  // album labels or ids changed without a track revision
 // A small menu of choices below (x, y) for a panel; `pick` gets the index chosen.
 void OpenChoice(float x, float y, const std::vector<std::string>& labels, int selected, std::function<void(int)> pick);
 void SetActiveTab(int tab);

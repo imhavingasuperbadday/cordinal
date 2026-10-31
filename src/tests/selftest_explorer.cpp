@@ -40,56 +40,72 @@ void TestExplorerMenu() {
     const std::wstring base = L"Software\\Cordinal\\Test\\ExplorerMenu";
     // A scratch base: a failed earlier run must not make this pass or fail by accident.
     RemoveExplorerMenu(base.c_str());
-    Check(!ExplorerMenuInstalled(base.c_str()), L"Explorer: the scratch base starts without folder verbs");
+    Ready(!ExplorerMenuInstalled(base.c_str()), L"the scratch folder-menu base starts without verbs");
 
-    Check(InstallExplorerMenu(base.c_str()), L"Explorer: the folder verbs are written");
-    Check(ExplorerMenuInstalled(base.c_str()), L"Explorer: every verb reads back pointing at this build");
+    const bool installed = InstallExplorerMenu(base.c_str());
+    const bool readBack = installed && ExplorerMenuInstalled(base.c_str());
+    Check(readBack, L"Explorer: installing writes the folder verbs and every verb reads back pointing at this "
+          L"build (installed=%d read back=%d)", installed, readBack);
     const std::wstring exe = L"\"" + ExePath() + L"\"";
-    Check(ExplorerPlayCommand() == exe + L" \"%1\"", L"Explorer: Play passes the clicked folder as %%1");
-    Check(ExplorerAddCommand() == exe + L" --add \"%1\"",
-          L"Explorer: Add passes the folder and --add, so nothing starts playing");
-    Check(VerbValue(base, L"Directory\\shell\\Cordinal.Play", nullptr) == L"Play with cordinal" &&
-              VerbValue(base, L"Directory\\shell\\Cordinal.Play", L"Icon") == exe + L",0",
-          L"Explorer: the folder menu names the verb and shows this build's icon");
-    Check(VerbValue(base, L"Directory\\shell\\Cordinal.Add", nullptr) == L"Add to cordinal",
-          L"Explorer: the second verb appends to the active playlist");
-    Check(VerbValue(base, L"Directory\\Background\\shell\\Cordinal.Play", nullptr) == L"Play with cordinal",
-          L"Explorer: right-clicking inside a folder offers the same play verb");
-    Check(VerbValue(base, L"Directory\\Background\\shell\\Cordinal.Play\\command", nullptr) == exe + L" \"%V\"",
-          L"Explorer: the background verb plays the folder being viewed (%%V)");
-    Check(VerbValue(base, L"Directory\\shell\\Cordinal.Play\\command", nullptr) == ExplorerPlayCommand() &&
-              VerbValue(base, L"Directory\\shell\\Cordinal.Add\\command", nullptr) == ExplorerAddCommand(),
-          L"Explorer: the written commands are the ones the player reads back");
+    Check(ExplorerPlayCommand() == exe + L" \"%1\"" && ExplorerAddCommand() == exe + L" --add \"%1\"",
+          L"Explorer: Play passes the clicked folder as %%1, and Add passes it with --add so nothing starts "
+          L"playing");
+    testlog::Cases verbs;
+    verbs.Add(VerbValue(base, L"Directory\\shell\\Cordinal.Play", nullptr) == L"Play with cordinal",
+              L"the Directory Play name");
+    verbs.Add(VerbValue(base, L"Directory\\shell\\Cordinal.Play", L"Icon") == exe + L",0",
+              L"the Directory Play icon");
+    verbs.Add(VerbValue(base, L"Directory\\shell\\Cordinal.Add", nullptr) == L"Add to cordinal",
+              L"the Directory Add name");
+    verbs.Add(VerbValue(base, L"Directory\\Background\\shell\\Cordinal.Play", nullptr) == L"Play with cordinal",
+              L"the Background Play name");
+    verbs.Add(VerbValue(base, L"Directory\\Background\\shell\\Cordinal.Play\\command", nullptr) == exe + L" \"%V\"",
+              L"the Background Play command (%V)");
+    verbs.Add(VerbValue(base, L"Directory\\shell\\Cordinal.Play\\command", nullptr) == ExplorerPlayCommand(),
+              L"the written Play command");
+    verbs.Add(VerbValue(base, L"Directory\\shell\\Cordinal.Add\\command", nullptr) == ExplorerAddCommand(),
+              L"the written Add command");
+    Check(verbs.Passed(), L"Explorer: the folder and background menus name their verbs, show this build's icon "
+          L"and write the commands the player reads back%ls", verbs.failed.c_str());
 
     // A build that moved must be re-registered, not trusted because a key exists.
-    Check(SetVerbCommand(base, L"Directory\\shell\\Cordinal.Play", L"\"C:\\old\\cordinal.exe\" \"%1\"") &&
-              !ExplorerMenuInstalled(base.c_str()),
-          L"Explorer: a verb left by a previous location counts as stale");
-    Check(InstallExplorerMenu(base.c_str()) && ExplorerMenuInstalled(base.c_str()),
-          L"Explorer: installing again repairs a stale verb and keeps the menu idempotent");
+    const bool stale =
+        SetVerbCommand(base, L"Directory\\shell\\Cordinal.Play", L"\"C:\\old\\cordinal.exe\" \"%1\"") &&
+        !ExplorerMenuInstalled(base.c_str());
+    const bool repaired = InstallExplorerMenu(base.c_str()) && ExplorerMenuInstalled(base.c_str());
+    Check(stale && repaired,
+          L"Explorer: a verb left by a previous location counts as stale, and installing again repairs it and "
+          L"keeps the menu idempotent (stale=%d repaired=%d)", stale, repaired);
 
-    Check(RemoveExplorerMenu(base.c_str()) && !ExplorerMenuInstalled(base.c_str()),
-          L"Explorer: turning the menu off removes every verb");
-    Check(RemoveExplorerMenu(base.c_str()), L"Explorer: removing a menu that is already gone succeeds");
+    const bool removed = RemoveExplorerMenu(base.c_str()) && !ExplorerMenuInstalled(base.c_str());
+    const bool absent = RemoveExplorerMenu(base.c_str());
+    Check(removed && absent, L"Explorer: turning the menu off removes every verb, and removing it again "
+          L"succeeds (removed=%d absent=%d)", removed, absent);
 
     // Explorer's Add verb is a command-line switch, stripped before any path reader sees it.
     std::vector<std::wstring> args{L"--add", L"C:\\Music\\Album"};
-    Check(TakeAddSwitch(args) && args.size() == 1 && args[0] == L"C:\\Music\\Album",
-          L"Explorer: --add is taken out and the folder is left for the import");
+    testlog::Cases addSwitch;
+    addSwitch.Add(TakeAddSwitch(args) && args.size() == 1 && args[0] == L"C:\\Music\\Album",
+                  L"--add is taken out and the folder is left");
     args = {L"C:\\Music\\Album"};
-    Check(!TakeAddSwitch(args) && args.size() == 1, L"Explorer: a plain path is left alone");
+    addSwitch.Add(!TakeAddSwitch(args) && args.size() == 1, L"a plain path is left alone");
     args = {L"--add"};
-    Check(TakeAddSwitch(args) && args.empty(), L"Explorer: --add alone leaves no paths");
+    addSwitch.Add(TakeAddSwitch(args) && args.empty(), L"--add alone leaves no paths");
     args = {L"--add", L"--add", L"C:\\Music"};
-    Check(TakeAddSwitch(args) && args.size() == 1, L"Explorer: every --add is removed");
+    addSwitch.Add(TakeAddSwitch(args) && args.size() == 1, L"every --add is removed");
+    Check(addSwitch.Passed(), L"Explorer: --add is taken out of the command line before any path reader sees "
+          L"it%ls", addSwitch.failed.c_str());
 
     // Explorer substitutes a drive root into a quoted verb as `"C:\"`, which CommandLineToArgvW
     // reads as `C:"`. The repair is what makes right-clicking inside a drive work.
-    Check(RepairTrailingQuote(L"C:\"") == L"C:\\", L"Explorer: a quoted drive root keeps its backslash");
-    Check(RepairTrailingQuote(L"C:\\Music with space\"") == L"C:\\Music with space",
-          L"Explorer: a quoted path with a trailing backslash loses the stray quote");
-    Check(RepairTrailingQuote(L"C:\\Music") == L"C:\\Music" && RepairTrailingQuote(L"--add") == L"--add",
-          L"Explorer: ordinary arguments are left alone");
+    testlog::Cases quoted;
+    quoted.Add(RepairTrailingQuote(L"C:\"") == L"C:\\", L"a quoted drive root keeps its backslash");
+    quoted.Add(RepairTrailingQuote(L"C:\\Music with space\"") == L"C:\\Music with space",
+               L"a quoted path with a trailing backslash loses the stray quote");
+    quoted.Add(RepairTrailingQuote(L"C:\\Music") == L"C:\\Music", L"an ordinary path is left alone");
+    quoted.Add(RepairTrailingQuote(L"--add") == L"--add", L"an ordinary switch is left alone");
+    Check(quoted.Passed(), L"Explorer: a quoted drive root keeps its backslash and a stray trailing quote is "
+          L"removed, other arguments untouched%ls", quoted.failed.c_str());
 
     RegDeleteTreeW(HKEY_CURRENT_USER, (base + L"\\Directory").c_str());
     RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\Cordinal\\Test\\ExplorerMenu");

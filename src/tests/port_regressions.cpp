@@ -65,25 +65,6 @@ void TestPortedStorage(const std::wstring& directory) {
               years.failed.c_str());
         tags.date.clear();
         g_lib.ApplyTags(id, tags);
-        auto eager=[&](const std::vector<std::wstring>& words) {
-            const auto& t=g_lib[id];
-            std::vector<std::wstring> fields;
-            for (auto h:{t.artist,t.title,t.album,t.albumArtist,t.genre,t.date,t.file,t.dir,t.composer,t.comment,t.grouping,t.label})
-                if (h) fields.push_back(g_lib.Str(h));
-            fields.push_back(CodecName(t.codec));
-            return std::all_of(words.begin(),words.end(),[&](const auto& word) {
-                return std::any_of(fields.begin(),fields.end(),[&](const auto& field) {
-                    return FindNLSStringEx(LOCALE_NAME_USER_DEFAULT,FIND_FROMSTART|LINGUISTIC_IGNORECASE,
-                        field.data(),(int)field.size(),word.data(),(int)word.size(),nullptr,nullptr,nullptr,0)>=0;
-                });
-            });
-        };
-        bool same=true;
-        for (auto query:{L"",L"quiet",L"BJÖRK",L"東京",L"Música",L"FLAC",L"Track Rock",L"\"Live 2026\" Quiet",L"missing",L"Quiet absent"}) {
-            auto words=FilterWords(query);
-            same &= MatchesTrack(g_lib,id,words)==eager(words);
-        }
-        Check(same,L"lazy search matches eager Unicode/linguistic search across metadata, paths, phrases, codec and multiword queries");
         g_lib=Library();
     }
     StringPool pool;

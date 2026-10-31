@@ -44,6 +44,18 @@ void OpenPalette();  // View > Command palette (Ctrl+Shift+P)
 void OpenFormat();       // the title formatting window (Preferences > View)
 void OpenListenBrainz();  // the token window (Preferences > Library)
 void OnListenBrainzMessage(WPARAM wp, LPARAM lp);  // WM_APP_LISTENBRAINZ: a token check's answer
+// Album editions: the manager and its track-comparison view. Modeless overlays like every panel.
+void EditionsOpenManager(uint32_t group);
+void EditionsOpenComparison(uint32_t group, TrackId focusTrack);
+void OpenAlbumEditions(uint32_t group);
+void OpenAlbumEditionComparison(uint32_t group, TrackId focusTrack = kNone);
+void DrawEditionsPanel(const Palette& p);
+void EditionsMouseDown(float x, float y, int button, int clicks);
+void EditionsKey(const SDL_KeyboardEvent& e);
+void EditionsText(const std::string& text);
+void EditionsWheel(float x, float y, float dy);
+bool EditionsWantsText(float x, float y);
+void EditionsClose();
 void OpenOrganize(std::vector<TrackId> ids);  // the tracks given, or the whole library when there are none
 // Library > Copy to folder or device: `playlist` names the playlist the tracks are (its .m3u8, and the
 // copies it owns), empty for a selection.

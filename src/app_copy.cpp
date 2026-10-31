@@ -428,13 +428,13 @@ void OnCopyMessage(WPARAM wp, LPARAM lp) {
     std::vector<std::wstring>().swap(g_names);
     std::vector<size_t>().swap(g_ordinal);
     if (g.closing) return;
-    std::wstring done = L"Copied " + Songs(r->copied + r->converted);
+    std::wstring done = r->copied + r->converted ? L"Copied " + Songs(r->copied + r->converted) : L"Nothing was copied";
     if (r->converted) done += L" (" + std::to_wstring(r->converted) + L" as AAC)";
     if (r->bytes) done += L", " + Size(r->bytes);
     if (r->removed) done += L"; removed " + std::to_wstring(r->removed) + L" earlier " + (r->removed == 1 ? L"copy" : L"copies");
     done += r->cancelled ? L"; the rest was cancelled." : L".";
     if (!r->failed.empty()) {
-        std::wstring text = done + L"\n\n" + std::to_wstring(r->failed.size()) + L" couldn't be copied:\n\n";
+        std::wstring text = done + L"\n\n" + std::to_wstring(r->failed.size()) + L" item(s) couldn't be copied or removed:\n\n";
         for (size_t i = 0; i < r->failed.size() && i < 8; ++i) text += r->failed[i].first + L"\n    " + r->failed[i].second + L"\n";
         MessageBoxW(g.hwnd, text.c_str(), kAppName, MB_OK | MB_ICONWARNING);
     } else if (r->copied + r->converted) {

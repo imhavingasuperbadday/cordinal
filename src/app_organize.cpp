@@ -274,7 +274,10 @@ void OnOrganizeDone(LPARAM lp) {
     } else if (!r->moved.empty()) {
         PlaySfx(Sfx::Organized);
     }
-    ShowMessage(L"Organized " + std::to_wstring(r->moved.size()) + L" file(s).");
+    if (r->moved.empty())
+        ShowMessage(r->failed.empty() ? L"No files needed moving." : L"No files were moved.");
+    else
+        ShowMessage(L"Organized " + std::to_wstring(r->moved.size()) + L" file(s).");
     UpdateStatus();
 }
 

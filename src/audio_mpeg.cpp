@@ -669,6 +669,7 @@ public:
     bool OpenLive(std::shared_ptr<LiveAudioSource> source);
     size_t Read(float* out,size_t frames) override;
     bool Seek(double seconds) override;
+    bool FastSeek() const override { return !live_; }
     double Duration() const override { return live_ ? 0 : (double)total_/header_.rate; }
     unsigned Rate() const override { return header_.rate; }
     void Abort() override { if (live_) live_->Abort(); }

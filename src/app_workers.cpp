@@ -54,6 +54,7 @@ void QueueTags(const std::vector<TrackId>& ids) {
 void AcceptTagBatch(std::vector<TagResult>* results) {
     std::unique_ptr<std::vector<TagResult>> owned(results);
     if (!owned) return;
+    if (!owned->empty()) g.dirty = true;  // tags or the retry flag changed, even when the read failed
     for (auto& r : *results) {
         g.tagPending.erase(r.id);
         if (!g_lib.Contains(r.id) || g_lib.Path(r.id) != r.path) continue;
@@ -96,7 +97,13 @@ void TagWorker(HWND hwnd) {
         }
         auto* results = new std::vector<TagResult>();
         results->reserve(batch.size());
+        bool quitting = false;
         for (const auto& source : batch) {
+            {
+                std::lock_guard<std::mutex> lock(g.tagMx);
+                quitting = g.tagQuit;  // shutdown: don't wait out the rest of a slow network folder
+            }
+            if (quitting) break;
             TagResult r{source.id, {}, false, source.Path()};
             // Capture identity before reading: a later replacement must still look changed to
             // the scanner. Virtual subtrack paths have no direct stat and retain their scan stamp.
@@ -108,6 +115,10 @@ void TagWorker(HWND hwnd) {
             }
             r.success = ReadTags(r.path, r.tags);
             results->push_back(std::move(r));
+        }
+        if (quitting) {
+            delete results;
+            break;
         }
         if (!PostMessageW(hwnd, WM_APP_META, 0, (LPARAM)results)) {
             delete results;

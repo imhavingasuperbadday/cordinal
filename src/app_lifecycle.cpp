@@ -1,6 +1,8 @@
 // Main-window startup, idle work and ordered shutdown.
 #include "app.h"
 
+#include "musicbrainz.h"
+
 namespace app {
 
 // Builds the whole UI, called once from WM_CREATE. Order matters: LoadState first so
@@ -49,10 +51,15 @@ void FinishStartup(HWND hwnd) {
     InitTray();
     g.headsets.Start();
     InitPlatform(hwnd);
+    // The last session's song, loaded and paused or playing. Files named on the command line play
+    // instead, so nothing is reopened behind them.
+    if (!g.startupPaths) ReopenLastTrack();
     UpdateNowPlaying();
+    UpdateStatus();
     FountainWake();  // ApplyTheme skipped it while the window was still hidden
     InitConvert();
     InitWebServer();
+    musicbrainz::Start(g.dataDir, g.musicBrainzLookup);
 }
 
 // Ordered shutdown of every worker. Each is signalled and joined, then its already
@@ -60,6 +67,7 @@ void FinishStartup(HWND hwnd) {
 // freed and nothing is left in the message queue when the window is destroyed.
 void StopAppWorkers(HWND hwnd) {
     DestroyRadio();
+    musicbrainz::Stop();
     StopHelpers();  // first: it ends helper programs that workers below may be waiting on
     StopLyrics();
     StopBackup();
@@ -125,6 +133,8 @@ void MainTick() {
     if (g.compactPending && !g.searchPending) CompactLibrary();
     TrackListening();
     FlushDeferredTags();
+    AlbumGroupingTick();
+    MusicBrainzTick();
     MaybeAutoMeasure(false);
     if (!g.busyTimer && AnyTrackBusy()) g.busyTimer = SetTimer(g.hwnd, kBusyTimer, 90, nullptr) != 0;
     if (g.viewRevision != g_lib.Revision() && Active().IsView() && GetTickCount64() - g.viewBuilt > 1000)

@@ -11,6 +11,7 @@
 // g.selected like the list's, so menus and commands act on it.
 #include "libview.h"
 
+#include "album_editions.h"
 #include "text.h"
 
 #include <bitset>
@@ -141,9 +142,13 @@ void BrowserChanged() {
 // --- views --------------------------------------------------------------------------------------------
 struct Album {
     StringPool::Handle artist = 0, album = 0, date = 0, genre = 0;
-    std::vector<TrackId> tracks;
+    std::vector<TrackId> tracks;  // the shown edition's tracks
     double seconds = 0;
     wchar_t letter = L'#';
+    uint32_t group = 0, edition = 0;
+    int editions = 0;
+    TrackId artTrack = kNone;
+    std::wstring canonicalTitle;
 };
 struct Artist {
     StringPool::Handle name = 0;
@@ -165,6 +170,7 @@ struct Canvas {
     bool layoutDirty = true;
     int expanded = -1;              // Albums: the open album
     TrackId expandedTrack = kNone;  // ... by its first track, across rebuilds
+    std::unordered_map<uint32_t, uint32_t> chosenEdition;  // group -> edition chosen this session
     std::vector<char> selAlbum, selArtist;
     std::unordered_set<TrackId> selTrack;
     int focus = -1;  // album or artist
@@ -184,11 +190,15 @@ float GroupX(const Rect& rc) { return rc.x + GroupArt() + F(20); }
 Rect GroupRow(const Rect& rc, int t) { return {GroupX(rc) - F(6), rc.y + GroupHead() + t * RowH(), rc.R() - (GroupX(rc) - F(6)), RowH()}; }
 
 std::wstring AlbumTitle(const Album& a) {
+    if (!a.canonicalTitle.empty()) return a.canonicalTitle;
     if (a.album) return g_lib.Str(a.album);
     std::wstring t;
     return a.tracks.size() == 1 && LookupField(a.tracks[0], L"title", t) ? t : L"Unknown album";
 }
 std::wstring ArtistName(StringPool::Handle h) { return h ? g_lib.Str(h) : L"Unknown artist"; }
+TrackId ArtTrackOf(const Album& a) {
+    return a.artTrack != kNone && g_lib.Contains(a.artTrack) ? a.artTrack : a.tracks.front();
+}
 std::wstring AlbumYear(const Album& a) { return a.date ? g_lib.Str(a.date).substr(0, 4) : L""; }
 
 std::wstring AlbumSubtitle(const Album& a, bool year = true) {
@@ -197,6 +207,7 @@ std::wstring AlbumSubtitle(const Album& a, bool year = true) {
     if (a.genre) s += L"  \x2022  " + g_lib.Str(a.genre);
     s += L"  \x2022  " + std::to_wstring(a.tracks.size()) + (a.tracks.size() == 1 ? L" track, " : L" tracks, ") +
          FormatTotalDuration(a.seconds);
+    if (a.editions > 1) s += L"  \x2022  " + std::to_wstring(a.editions) + L" editions";
     return s;
 }
 
@@ -225,9 +236,38 @@ float PanelHeight(const Album& a, float width) {
 void BuildGroups() {
     v.albums.clear();
     v.artists.clear();
+    struct ShowEditions {
+        std::vector<std::pair<uint32_t, std::vector<TrackId>>> visible;
+    };
+    std::vector<ShowEditions> editions;
     std::unordered_map<uint64_t, size_t> byKey;
+    std::unordered_map<uint32_t, size_t> byGroup;
     for (TrackId id : g.rows) {
         const Track& t = g_lib[id];
+        const AlbumGroup* group = AlbumGroupForTrack(id);
+        const AlbumEdition* edition = group ? AlbumEditionForTrack(id) : nullptr;
+        if (group && edition) {
+            auto [it, added] = byGroup.try_emplace(group->id, v.albums.size());
+            if (added) {
+                Album a;
+                a.group = group->id;
+                a.editions = (int)group->editions.size();
+                a.artist = t.albumArtist ? t.albumArtist : t.artist;
+                a.date = t.date;
+                a.genre = t.genre;
+                a.letter = SectionLetter(a.artist);
+                std::string title = group->title.empty() ? edition->album : group->title;
+                a.canonicalTitle = FromUtf8(title);
+                v.albums.push_back(std::move(a));
+                editions.emplace_back();
+            }
+            auto& slot = editions[it->second];
+            auto found = std::find_if(slot.visible.begin(), slot.visible.end(),
+                                      [&](const auto& item) { return item.first == edition->id; });
+            if (found == slot.visible.end()) slot.visible.push_back({edition->id, {}});
+            else found->second.push_back(id);
+            continue;
+        }
         StringPool::Handle artist = t.albumArtist ? t.albumArtist : t.artist;
         // Albums are album artist + album; tracks without an album group per artist.
         auto [it, added] = byKey.try_emplace((uint64_t)artist << 32 | t.album, v.albums.size());
@@ -238,13 +278,61 @@ void BuildGroups() {
             a.date = t.date;
             a.genre = t.genre;
             a.letter = SectionLetter(artist);
+            a.artTrack = id;
             v.albums.push_back(std::move(a));
+            editions.emplace_back();
         }
         Album& a = v.albums[it->second];
         a.tracks.push_back(id);
         a.seconds += t.Duration();
         if (!a.genre) a.genre = t.genre;
     }
+    std::vector<size_t> drop;
+    for (size_t index = 0; index < v.albums.size(); ++index) {
+        Album& a = v.albums[index];
+        if (!a.group) continue;
+        const AlbumGroup* group = FindAlbumGroupConst(a.group);
+        if (!group) { drop.push_back(index); continue; }
+        auto& visible = editions[index].visible;
+        if (visible.empty()) { drop.push_back(index); continue; }
+        auto hasVisible = [&](uint32_t editionId) {
+            return std::any_of(visible.begin(), visible.end(), [&](const auto& item) { return item.first == editionId; });
+        };
+        uint32_t preferred = PreferredEditionId(*group), chosen = 0;
+        auto remembered = v.chosenEdition.find(a.group);
+        if (remembered != v.chosenEdition.end() && hasVisible(remembered->second)) chosen = remembered->second;
+        if (!chosen && hasVisible(preferred)) chosen = preferred;
+        if (!chosen) chosen = visible.front().first;
+        const AlbumEdition* shown = FindAlbumEdition(*group, chosen);
+        if (!shown) shown = FindAlbumEdition(*group, visible.front().first);
+        if (!shown) { drop.push_back(index); continue; }
+        std::unordered_set<TrackId> allowed;
+        for (const auto& item : visible) if (item.first == shown->id) allowed.insert(item.second.begin(), item.second.end());
+        if (allowed.empty()) {
+            shown = FindAlbumEdition(*group, visible.front().first);
+            if (!shown) { drop.push_back(index); continue; }
+            chosen = shown->id;
+            for (const auto& item : visible) if (item.first == shown->id) allowed.insert(item.second.begin(), item.second.end());
+        }
+        a.tracks.clear();
+        a.seconds = 0;
+        a.edition = chosen;
+        a.editions = (int)group->editions.size();
+        v.chosenEdition[a.group] = chosen;
+        for (TrackId id : shown->tracks) {
+            if (!allowed.count(id)) continue;
+            a.tracks.push_back(id);
+            a.seconds += g_lib[id].Duration();
+            if (!a.genre) a.genre = g_lib[id].genre;
+        }
+        if (a.tracks.empty()) { drop.push_back(index); continue; }
+        a.artTrack = group->artTrack != kInvalidTrack && g_lib.Contains(group->artTrack)
+                         ? group->artTrack
+                         : (shown->tracks.empty() ? a.tracks.front() : shown->tracks.front());
+        std::string title = group->title.empty() ? shown->album : group->title;
+        a.canonicalTitle = FromUtf8(title);
+    }
+    for (auto it = drop.rbegin(); it != drop.rend(); ++it) v.albums.erase(v.albums.begin() + (ptrdiff_t)*it);
     if (g.settings.libraryMode == LibraryMode::Artists) {
         // "Toby Fox; Geoffrey Day" is two artists: the album shows under each of them.
         std::unordered_map<StringPool::Handle, uint32_t> byArtist;
@@ -377,6 +465,11 @@ Rect PlayButton(const Item& it) {
     return {it.rc.R() - F(8) - d, it.rc.y + TileArt() - F(8) - d, d, d};
 }
 Rect PanelClose(const Item& it) { return {it.rc.x + Margin(), it.rc.y + F(14), F(22), F(22)}; }
+bool HasEditionSwitch(const Album& a) { return a.group && a.editions > 1; }
+Rect PanelEditionRect(const Item& it) {
+    float right = it.rc.R() - Margin() - F(28) - F(280);
+    return {right - F(210), it.rc.y + F(48), F(210), F(24)};
+}
 
 // Selection, as the views show it, into g.selected (and the focus row, for Play and the menus).
 void SyncSelection() {
@@ -441,7 +534,7 @@ void ShowArtist(int artist) {
 
 struct Hit {
     int item = -1, row = -1;
-    bool play = false, close = false, stars = false;
+    bool play = false, close = false, stars = false, editions = false;
     float starsX = 0;
 };
 
@@ -468,6 +561,7 @@ Hit HitTest(const Rect& area, float x, float y) {
         } else if (it.kind == ItemKind::Panel) {
             h.close = PanelClose(it).In(cx, cy);
             const Album& a = v.albums[it.index];
+            if (HasEditionSwitch(a)) h.editions = PanelEditionRect(it).In(cx, cy);
             Rect area2 = PanelArea(it);
             for (int t = 0; t < (int)a.tracks.size() && h.row < 0; ++t) rowAt(PanelRow(a, area2, t), t);
         } else if (it.kind == ItemKind::AlbumGroup) {
@@ -567,7 +661,7 @@ void DrawItem(const Item& item, int index, float ox, float oy, const Palette& p)
             if (open) Fill({bg.x, bg.B() - F(2), bg.w, F(2)}, p.border);
             Rect art{rc.x, rc.y, rc.w, TileArt()};
             std::wstring title = AlbumTitle(a);
-            DrawAlbumCover(a.tracks[0], a.album, title, art, p);
+            DrawAlbumCover(ArtTrackOf(a), a.album, title, art, p);
             bool playing = std::find(a.tracks.begin(), a.tracks.end(), g.playing) != a.tracks.end();
             if (hover || playing) {
                 Rect button = PlayButton(it);
@@ -579,7 +673,9 @@ void DrawItem(const Item& item, int index, float ox, float oy, const Palette& p)
             }
             uint32_t tc = sel ? p.selectText : playing ? p.playing : p.text, sc = sel ? p.selectText : p.sub;
             DrawText(Font::Bold, Utf8(title), rc.x, art.B() + F(6), tc, rc.w);
-            DrawText(Font::Small, Utf8(ArtistName(a.artist)), rc.x, art.B() + F(24), sc, rc.w);
+            std::wstring sub = ArtistName(a.artist);
+            if (a.editions > 1) sub += L"  \x2022  " + std::to_wstring(a.editions) + L" editions";
+            DrawText(Font::Small, Utf8(sub), rc.x, art.B() + F(24), sc, rc.w);
             break;
         }
         case ItemKind::Panel: {
@@ -598,16 +694,31 @@ void DrawItem(const Item& item, int index, float ox, float oy, const Palette& p)
             ThickLine(close.R() - m, close.y + m, close.x + m, close.B() - m, std::max(1.0f, F(1.2f)), p.sub);
             float x = Margin() + F(28), right = rc.R() - Margin() - F(28) - F(280);
             DrawText(Font::Title, Utf8(AlbumTitle(a) + L"  \x25B8"), x, rc.y + F(16), p.text, right - x);
-            DrawText(Font::Normal, Utf8(AlbumSubtitle(a)), x, rc.y + F(52), p.sub, right - x);
+            float subtitleRight = right;
+            if (HasEditionSwitch(a)) {
+                Rect chip = PanelEditionRect(it);
+                subtitleRight = chip.x - F(10);
+                Fill(chip, hover && g_hover.editions ? p.hover : p.surface2);
+                Frame(chip, p.border);
+                const AlbumGroup* group = FindAlbumGroupConst(a.group);
+                const AlbumEdition* edition = group ? FindAlbumEdition(*group, a.edition) : nullptr;
+                std::wstring label = edition ? EditionLabel(*edition) : L"Edition";
+                int position = 1;
+                if (group) for (size_t i = 0; i < group->editions.size(); ++i)
+                    if (group->editions[i].id == a.edition) position = (int)i + 1;
+                label = std::to_wstring(position) + L"/" + std::to_wstring(a.editions) + L"  " + label + L"  \x25BE";
+                DrawText(Font::Small, Utf8(label), chip.x + F(8), TextY(chip, Font::Small), p.text, chip.w - F(14));
+            }
+            DrawText(Font::Normal, Utf8(AlbumSubtitle(a)), x, rc.y + F(52), p.sub, subtitleRight - x);
             Rect area = PanelArea(it);
             for (int t = 0; t < (int)a.tracks.size(); ++t) DrawTrackRow(a, t, PanelRow(a, area, t), hover && g_hover.row == t, p);
             float side = std::min(F(280), rc.h - F(40));
-            DrawAlbumCover(a.tracks[0], a.album, AlbumTitle(a), {rc.R() - Margin() - side, rc.y + F(20), side, side}, p);
+            DrawAlbumCover(ArtTrackOf(a), a.album, AlbumTitle(a), {rc.R() - Margin() - side, rc.y + F(20), side, side}, p);
             break;
         }
         case ItemKind::AlbumGroup: {
             const Album& a = v.albums[it.index];
-            DrawAlbumCover(a.tracks[0], a.album, AlbumTitle(a), {rc.x, rc.y + F(4), GroupArt(), GroupArt()}, p);
+            DrawAlbumCover(ArtTrackOf(a), a.album, AlbumTitle(a), {rc.x, rc.y + F(4), GroupArt(), GroupArt()}, p);
             // The heading: the title and the year on the right, then the details and a rule.
             float x = GroupX(rc), right = rc.R() - F(6);
             std::wstring year = AlbumYear(a);
@@ -627,7 +738,7 @@ void DrawItem(const Item& item, int index, float ox, float oy, const Palette& p)
             if (sel || hover) Fill({rc.x - F(6), rc.y - F(6), rc.w + F(12), rc.h + F(6)}, sel ? p.select : p.hover);
             Rect art{rc.x, rc.y, rc.w, rc.w};
             const Album& first = v.albums[ar.albums[0]];
-            DrawAlbumCover(first.tracks[0], first.album, ArtistName(ar.name), art, p);
+            DrawAlbumCover(ArtTrackOf(first), first.album, ArtistName(ar.name), art, p);
             uint32_t tc = sel ? p.selectText : p.text, sc = sel ? p.selectText : p.sub;
             DrawText(Font::Bold, Utf8(ArtistName(ar.name)), rc.x, art.B() + F(9), tc, rc.w);
             DrawText(Font::Small, std::to_string(ar.albums.size()) + (ar.albums.size() == 1 ? " album" : " albums"), rc.x,
@@ -970,6 +1081,42 @@ void DrawCanvas(const Rect& area, const Palette& p, float mouseX, float mouseY) 
     SDL_SetRenderClipRect(g.renderer, nullptr);
 }
 
+void ChooseEdition(uint32_t group, uint32_t edition) {
+    const AlbumGroup* found = FindAlbumGroupConst(group);
+    if (!found || !FindAlbumEdition(*found, edition)) return;
+    v.chosenEdition[group] = edition;
+    RebuildRows();
+    for (int i = 0; i < (int)v.albums.size(); ++i)
+        if (v.albums[i].group == group && !v.albums[i].tracks.empty()) {
+            v.expanded = i;
+            v.expandedTrack = v.albums[i].tracks.front();
+            break;
+        }
+    v.layoutDirty = true;
+    g.redraw = true;
+}
+
+void OpenEditionChoice(int album, float x, float y) {
+    if (album < 0 || album >= (int)v.albums.size() || !v.albums[album].group) return;
+    const Album& shown = v.albums[album];
+    const AlbumGroup* group = FindAlbumGroupConst(shown.group);
+    if (!group) return;
+    std::vector<std::string> labels;
+    std::vector<uint32_t> ids;
+    int selected = 0;
+    for (const auto& edition : group->editions) {
+        std::string label = ToUtf8(EditionLabel(edition)) + "  (" + std::to_string(edition.tracks.size()) +
+                            (edition.tracks.size() == 1 ? " track)" : " tracks)");
+        labels.push_back(std::move(label));
+        ids.push_back(edition.id);
+        if (edition.id == shown.edition) selected = (int)ids.size() - 1;
+    }
+    uint32_t chosenGroup = shown.group;
+    OpenChoice(x, y, labels, selected, [chosenGroup, ids](int pick) {
+        if (pick >= 0 && pick < (int)ids.size()) ChooseEdition(chosenGroup, ids[(size_t)pick]);
+    });
+}
+
 void CanvasMouseDown(const Rect& area, float x, float y, int button, int clicks, SDL_Keymod mod) {
     Relayout(area);
     Hit h = HitTest(area, x, y);
@@ -1030,6 +1177,10 @@ void CanvasMouseDown(const Rect& area, float x, float y, int button, int clicks,
                 v.expanded = -1;
                 v.expandedTrack = kNone;
                 LayoutItems(area.w);
+                break;
+            }
+            if (h.editions) {
+                OpenEditionChoice(it.index, x, y);
                 break;
             }
             if (h.row < 0) {
@@ -1139,7 +1290,21 @@ bool CanvasKey(const SDL_KeyboardEvent& e) {
     // The keys act on the canvas as it was last drawn.
     const float width = v.laidWidth > 0 ? v.laidWidth : 800, viewH = std::max(1.0f, v.viewH);
     const bool ctrl = e.mod & SDL_KMOD_CTRL;
+    auto cycleEdition = [&](int direction) {
+        if (v.expanded < 0 || v.expanded >= (int)v.albums.size()) return false;
+        Album& album = v.albums[v.expanded];
+        const AlbumGroup* group = album.group ? FindAlbumGroupConst(album.group) : nullptr;
+        if (!group || group->editions.size() < 2) return false;
+        int current = 0;
+        for (size_t i = 0; i < group->editions.size(); ++i)
+            if (group->editions[i].id == album.edition) current = (int)i;
+        ChooseEdition(group->id, group->editions[(size_t)((current + direction + (int)group->editions.size()) %
+                                                          (int)group->editions.size())].id);
+        return true;
+    };
     switch (e.key) {
+        case SDLK_LEFTBRACKET: if (cycleEdition(-1)) return true; return false;
+        case SDLK_RIGHTBRACKET: if (cycleEdition(1)) return true; return false;
         case SDLK_LEFT: if (ctrl) return false; MoveCanvasFocus(-1, 0, width, viewH); return true;
         case SDLK_RIGHT: if (ctrl) return false; MoveCanvasFocus(1, 0, width, viewH); return true;
         case SDLK_UP: MoveCanvasFocus(0, -1, width, viewH); return true;
@@ -1186,10 +1351,41 @@ void CanvasSelectAll() {
     SyncSelection();
 }
 
+std::vector<AlbumSelection> CanvasSelectedAlbums() {
+    std::vector<AlbumSelection> result;
+    if (!CanvasActive()) return result;
+    for (int i = 0; i < (int)v.albums.size(); ++i) {
+        if (!v.selAlbum[i] || v.albums[i].tracks.empty()) continue;
+        const Album& album = v.albums[i];
+        AlbumSelection selection;
+        selection.groupId = album.group;
+        selection.editionId = album.edition;
+        selection.tracks = album.tracks;
+        const Track& first = g_lib[album.tracks.front()];
+        selection.artist = first.albumArtist ? g_lib.View(first.albumArtist) : g_lib.View(first.artist);
+        selection.album = album.canonicalTitle.empty() ? g_lib.View(first.album) : ToUtf8(album.canonicalTitle);
+        selection.date = g_lib.View(first.date);
+        result.push_back(std::move(selection));
+    }
+    return result;
+}
+
+bool CanvasFocusedEdition(uint32_t& group, uint32_t& edition) {
+    if (!CanvasActive()) return false;
+    int index = v.expanded;
+    if (index < 0 && v.focus >= 0 && v.focus < (int)v.albums.size() && v.selAlbum[v.focus]) index = v.focus;
+    if (index < 0 || index >= (int)v.albums.size() || !v.albums[index].group) return false;
+    group = v.albums[index].group;
+    edition = v.albums[index].edition;
+    return true;
+}
+
+void CanvasChooseEdition(uint32_t group, uint32_t edition) { ChooseEdition(group, edition); }
+
 bool CanvasWantsHand(const Rect& area, float x, float y) {
     if (!area.In(x, y)) return false;
     Hit h = HitTest(area, x, y);
-    return h.play || h.close || h.stars;
+    return h.play || h.close || h.stars || h.editions;
 }
 
 }  // namespace lx

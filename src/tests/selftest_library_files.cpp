@@ -197,9 +197,57 @@ void TestScanner(const std::wstring& media, const std::wstring& scratch) {
     SHFileOperationW(&op);
 }
 
+// Watching the system Music folder is off by default. The auto-added folder from the earlier
+// build is cleaned up once; a folder list the user chose (including none) stays as it is. MP4 is
+// one of the scanner's audio types.
+void TestLibraryFolders(const std::wstring& scratch) {
+    using namespace app;
+    const std::wstring originalIni = g.iniPath;
+    const auto originalFolders = g.libraryFolders;
+    const std::wstring profile = scratch + L"\\folder-settings.ini";
+    DeleteFileW(profile.c_str());
+    g.iniPath = profile;
+    g.libraryFolders.clear();
+    const std::wstring music = MusicFolder();
+    LoadLibrarySettings();
+    Check(g.libraryFolders.empty(), L"LIBRARY FOLDERS a new profile watches no folder, even the system Music folder");
+
+    WritePrivateProfileStringW(L"Library", L"FoldersChosen", nullptr, g.iniPath.c_str());
+    WritePrivateProfileStringW(L"Library", L"Folders", music.c_str(), g.iniPath.c_str());
+    LoadLibrarySettings();
+    Check(g.libraryFolders.empty() && IniInt(L"Library", L"FoldersChosen", 0) != 0,
+          L"LIBRARY FOLDERS the auto-added system Music folder is cleared once and never added again");
+
+    g.libraryFolders = {music};
+    SaveLibrarySettings();
+    g.libraryFolders.clear();
+    LoadLibrarySettings();
+    Check(g.libraryFolders == std::vector<std::wstring>{music},
+          L"LIBRARY FOLDERS a Music folder the user chose is kept");
+
+    g.libraryFolders = {L"D:\\Custom Music"};
+    SaveLibrarySettings();
+    g.libraryFolders.clear();
+    LoadLibrarySettings();
+    Check(g.libraryFolders == std::vector<std::wstring>{L"D:\\Custom Music"},
+          L"LIBRARY FOLDERS a chosen folder list is read back without adding a default");
+
+    g.libraryFolders.clear();
+    SaveLibrarySettings();
+    LoadLibrarySettings();
+    Check(g.libraryFolders.empty(), L"LIBRARY FOLDERS removing every folder is remembered");
+
+    Check(IsSupportedAudioFile(L"video.mp4") && OpenFileFilterSpec().find(L"*.mp4") != std::wstring::npos,
+          L"LIBRARY FOLDERS MP4 audio is discovered, and the open dialog offers it");
+
+    g.iniPath = originalIni;
+    g.libraryFolders = originalFolders;
+}
+
 // Tag undo: an edit on a copy is recorded, applied, then reversed from its journal. The audio
 // must come back bit-identical and the tags must read as before.
 void TestTagUndo(const std::wstring& media, const std::wstring& scratch) {
+    using namespace app;
     const std::wstring dir = scratch + L"\\tagundo_test";
     DeleteTestFolder(dir);
     CreateDirectoryW(dir.c_str(), nullptr);
@@ -260,6 +308,46 @@ void TestTagUndo(const std::wstring& media, const std::wstring& scratch) {
     for (const auto& entry : std::filesystem::directory_iterator(dir))
         kept += entry.path().extension() == L".cdu";
     Check(kept == 10, L"TAG UNDO keeps the newest 10 journals (%zu kept of 12)", kept);
+
+    // A file the engine has open waits for playback, then is written during shutdown. This is the
+    // path that used to drop the edit silently when cordinal closed while the song was playing.
+    const std::wstring deferredCopy = scratch + L"\\deferred.flac";
+    Ready(WriteTestBytes(deferredCopy, ReadTestBytes(media + L"\\sine.flac")), L"deferred tag fixture is written");
+    const std::wstring savedDataDir = g.dataDir;
+    g.dataDir = scratch;
+    g_lib = Library();
+    TrackId deferredId = g_lib.Add(deferredCopy);
+    g.playing = deferredId;
+    TagEdit deferredEdit;
+    deferredEdit.title = "Deferred title";
+    WriteTagsInBackground({deferredId}, deferredEdit, false);
+    TagData deferredBefore;
+    ReadTags(deferredCopy, deferredBefore);
+    const bool waited = deferredBefore.title != "Deferred title";
+    g.playing = kNone;
+    std::wstring deferredError;
+    const bool flushed = FlushDeferredTagWrites(deferredError);
+    TagData deferredAfter;
+    ReadTags(deferredCopy, deferredAfter);
+    Check(waited && flushed && deferredError.empty() && deferredAfter.title == "Deferred title" &&
+              !TagWriterRetainsTracks(),
+          L"TAG UNDO a playing file's deferred edit is written when playback lets go and at shutdown");
+
+    // A format cordinal can't rewrite is reported instead of closing as if the edit was saved.
+    const std::wstring unsupported = scratch + L"\\unsupported.wav";
+    Ready(WriteTestBytes(unsupported, ReadTestBytes(media + L"\\sine.wav")), L"unsupported tag fixture is written");
+    g_lib = Library();
+    TrackId unsupportedId = g_lib.Add(unsupported);
+    TagEdit unsupportedEdit;
+    unsupportedEdit.title = "Not writable";
+    g.message.clear();
+    WriteTagsInBackground({unsupportedId}, unsupportedEdit, false);
+    TagData unsupportedAfter;
+    ReadTags(unsupported, unsupportedAfter);
+    Check(g.message.find(L"can't be written") != std::wstring::npos && unsupportedAfter.title != "Not writable",
+          L"TAG UNDO files whose format can't be written are named instead of silently skipped");
+    g_lib = Library();
+    g.dataDir = savedDataDir;
 }
 
 // Two copies of one FLAC with different tags share the audio MD5 in STREAMINFO, so they group.
@@ -336,6 +424,18 @@ void TestScanMerge() {
     Check(held && g_lib.Count() == 1 && g_lib.Find(L"C:\\ScanMerge\\Other\\01 Song.flac") == t2 && g_lib[t2].playCount == 7,
           L"SCANMERGE a move found across chunks renames the track, no duplicate (%zu tracks)", g_lib.Count());
 
+    // A destination indexed by another root or import keeps its row; the stale row is hidden as
+    // missing instead of remaining live beside it.
+    reset();
+    TrackId stale = add(L"C:\\ScanMerge\\Z\\Song.flac", 111, 222, 7);
+    post(false, true, false, true, {{L"C:\\ScanMerge\\A\\Song.flac", 111, 222}});
+    TrackId destination = add(L"C:\\ScanMerge\\A\\Song.flac", 111, 222, 0);
+    post(false, false, true, true, {});
+    Check(g_lib.Count() == 2 && (g_lib[stale].flags & Track::kMissing) &&
+              !(g_lib[destination].flags & Track::kMissing) && g_lib[destination].InLibrary() &&
+              g_lib[stale].playCount == 7,
+          L"SCANMERGE a move onto an already indexed path leaves one visible track");
+
     // The track's old file appears in a later chunk: the new file is a new track, nothing moves.
     reset();
     TrackId t3 = add(L"C:\\ScanMerge\\Album\\01 Song.flac", 111, 222, 7);
@@ -389,6 +489,15 @@ void TestScanMerge() {
     post(true, false, true, true, {{L"C:\\ScanMerge\\C.flac", 5, 6}});
     Check(early && g_lib.Count() == 3 && (g_lib[g_lib.Find(L"C:\\ScanMerge\\A.flac")].flags & Track::kInLibrary),
           L"SCANMERGE an empty library adds files as they arrive (%zu tracks)", g_lib.Count());
+
+    // A malformed cue entry or an over-long path can reach a scan batch without being a legal
+    // library path. It is skipped instead of indexing past the end of the track store.
+    reset();
+    std::wstring badPath = L"C:\\ScanMerge\\Bad";
+    badPath += L'\x01';
+    badPath += L"Name.flac";
+    post(true, true, true, true, {{badPath, 1, 2}});
+    Check(g_lib.Count() == 0, L"SCANMERGE a path the library can't represent is skipped (%zu tracks)", g_lib.Count());
 
     // An unreachable root marks nothing missing.
     reset();

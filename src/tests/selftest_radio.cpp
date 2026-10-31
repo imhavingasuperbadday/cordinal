@@ -29,6 +29,24 @@ void TestRadioDirectory(const std::wstring& scratch) {
               radio::StationMatches(local, {"WMYK-FM", {}, "US", 0, {}}) &&
               !radio::StationMatches(local, {"98.5", {}, "US", 0, "Texas"}),
           L"local broadcast results match frequencies and call signs without leaking across states");
+    testlog::Cases builtIn;
+    const auto& catalog = radio::BuiltInStations();
+    builtIn.Add(catalog.size() >= 6, L"music station catalog");
+    std::vector<std::string> urls;
+    for (const auto& station : catalog) {
+        builtIn.Add(!station.id.empty() && !station.name.empty() && station.url.starts_with("https://") &&
+                        station.country == "US",
+                    FromUtf8(station.name));
+        urls.push_back(station.url);
+    }
+    std::sort(urls.begin(), urls.end());
+    builtIn.Add(std::adjacent_find(urls.begin(), urls.end()) == urls.end(), L"unique stream addresses");
+    builtIn.Add(std::any_of(catalog.begin(), catalog.end(), [](const radio::Station& station) {
+                    return radio::StationMatches(station, {"Kokomo", {}, "US", 0, "Indiana"});
+                }),
+                L"Kokomo search");
+    Check(builtIn.Passed(), L"built-in music stations are valid, unique and found by a Kokomo search%ls",
+          builtIn.failed.c_str());
     const std::wstring profile = scratch + L"\\profile";
     if (Ready(CreateDirectoryW(profile.c_str(), nullptr) != 0, L"radio profile")) {
         radio::Browser browser(profile);

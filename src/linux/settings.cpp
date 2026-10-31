@@ -23,6 +23,16 @@ std::wstring EnvDir(const char* xdg, const char* fallback) {
     return compat::Widen(home ? home : "/tmp") + L"/" + compat::Widen(fallback);
 }
 
+}  // namespace
+
+std::string MusicFolder() {
+    if (const char* music = SDL_GetUserFolder(SDL_FOLDER_MUSIC); music && *music) return music;
+    const char* home = getenv("HOME");
+    return std::string(home ? home : "/") + "/Music";
+}
+
+namespace {
+
 std::map<std::string, std::string> ReadIni(const std::wstring& path) {
     std::map<std::string, std::string> values;
     FILE* f = fopen(compat::Narrow(path.c_str()).c_str(), "r");
@@ -182,10 +192,24 @@ void LoadSettings() {
         if (auto it = v.find(key); it != v.end() && !it->second.empty()) *target = compat::Widen(it->second.c_str());
     s.soundEffects = ToInt(v, "sound_effects", 0) != 0;
     s.roboticSounds = ToInt(v, "robotic_sounds", 1) != 0;
+    bool folderKey = false;
     for (int i = 0;; ++i) {
         auto it = v.find("folder" + std::to_string(i));
         if (it == v.end()) break;
+        folderKey = true;
         if (!it->second.empty()) s.folders.push_back(compat::Widen(it->second.c_str()));
+    }
+    // Watching the system Music folder is off by default. The earlier build marked the auto-added
+    // folder as chosen; a profile whose only folder is that folder is returned to an empty list
+    // once, leaving the tracks and files in place. New profiles start empty.
+    const bool autoAdded = ToInt(v, "folders_chosen", 0) != 0;
+    s.foldersChosen = autoAdded || folderKey;
+    s.musicDefaultChecked = ToInt(v, "music_default_checked", 0) != 0;
+    if (!s.musicDefaultChecked) {
+        std::wstring music = compat::Widen(MusicFolder().c_str());
+        while (music.size() > 1 && music.back() == L'/') music.pop_back();
+        if (autoAdded && s.folders.size() == 1 && s.folders[0] == music) s.folders.clear();
+        s.musicDefaultChecked = true;
     }
     s.inboxEnabled = ToInt(v, "inbox_enabled", 0) != 0;
     s.steamOffered = ToInt(v, "steam_offered", 0) != 0;
@@ -194,6 +218,8 @@ void LoadSettings() {
     s.skipAwareShuffle = ToInt(v, "skip_aware_shuffle", 0) != 0;
     s.radio = ToInt(v, "radio", 0) != 0;
     s.resumeOn = ToInt(v, "resume_on", 1) != 0;
+    s.resumeInSong = ToInt(v, "resume_in_song", 0) != 0;
+    s.resumePlay = ToInt(v, "resume_play", 0) != 0;
     if (auto it = v.find("resume_path"); it != v.end()) s.resumePath = compat::Widen(it->second.c_str());
     s.resumePosition = ToFloat(v, "resume_position", 0, 0, 1e9f);
     s.resumeIndex = ToInt(v, "resume_index", -1);
@@ -220,6 +246,7 @@ void LoadSettings() {
     s.theme = AvailableTheme(v.count("ui_theme") ? (ThemeMode)std::clamp(ToInt(v, "ui_theme", 0), 0, (int)ThemeMode::Count - 1)
                                                  : kOldThemes[std::clamp(ToInt(v, "theme", 0), 0, 3)]);
     s.groupAlbums = ToInt(v, "group_albums", 1) != 0;
+    s.musicBrainzLookup = ToInt(v, "musicbrainz_lookup", 0) != 0;
     s.convertRecycle = ToInt(v, "convert_recycle", 1) != 0;
     s.convertShowOriginals = ToInt(v, "convert_show_originals", 0) != 0;
     s.convertMemory = (uint8_t)std::clamp(ToInt(v, "convert_undo_days", 3), 0, (int)std::size(kConvertMemoryDays) - 1);
@@ -292,6 +319,8 @@ void SaveSettings() {
             "\nweb_away_port=" + std::to_string(s.webAwayPort) + "\nweb_code=" + s.webCode + "\nweb_hosts=" + s.webHosts + "\n";
     for (size_t i = 0; i < s.folders.size(); ++i)
         text += "folder" + std::to_string(i) + "=" + compat::Narrow(s.folders[i].c_str()) + "\n";
+    text += "folders_chosen=" + std::to_string(s.foldersChosen ? 1 : 0) + "\n";
+    text += "music_default_checked=" + std::to_string(s.musicDefaultChecked ? 1 : 0) + "\n";
     text += "inbox_enabled=" + std::to_string(s.inboxEnabled) + "\n";
     text += "steam_offered=" + std::to_string(s.steamOffered) + "\n";
     text += "volume=" + std::to_string((int)std::lround(s.volume * 100)) + "\n";
@@ -302,7 +331,8 @@ void SaveSettings() {
     bool haveResume = g_lib.Contains(resume);
     double resumePosition = g.playing != kNone ? g.engine.Position() : g.resumePosition;
     int resumeIndex = g.playing != kNone ? g.queuePos : g.resumeIndex;
-    text += "resume_on=" + std::to_string(s.resumeOn) + "\nresume_path=" +
+    text += "resume_on=" + std::to_string(s.resumeOn) + "\nresume_in_song=" + std::to_string(s.resumeInSong) +
+            "\nresume_play=" + std::to_string(s.resumePlay) + "\nresume_path=" +
             (haveResume ? compat::Narrow(g_lib.Path(resume).c_str()) : std::string()) +
             "\nresume_position=" + FloatText(haveResume && std::isfinite(resumePosition) ? (float)std::max(0.0, resumePosition) : 0) +
             "\nresume_index=" + std::to_string(haveResume ? resumeIndex : -1) + "\n";
@@ -314,6 +344,7 @@ void SaveSettings() {
     text += "preference_saving=" + std::to_string((int)s.preferenceSaving) + "\npreference_saving_chosen=" + std::to_string(s.preferenceSavingChosen) +
             "\nsuggestion_last_review=" + std::to_string(s.suggestionLastReview) + "\n";
     text += "group_albums=" + std::to_string(s.groupAlbums) + "\n";
+    text += "musicbrainz_lookup=" + std::to_string(s.musicBrainzLookup) + "\n";
     text += "output_device=" + s.outputDevice + "\n";
     text += "layout_hidden=" + std::to_string(s.hiddenParts) + "\n";
     text += "packs_on=" + s.packsOn + "\nhelpers_on=" + s.helpersOn + "\n";
@@ -365,11 +396,26 @@ void SaveSettings() {
 }
 
 void LoadLibraryFile() {
-    bool loaded = LoadLibrary(g.libraryPath, g.playlists);
+    const bool hadOriginal = GetFileAttributesW(g.libraryPath.c_str()) != INVALID_FILE_ATTRIBUTES;
+    std::wstring preserved;
+    bool loaded = LoadLibrary(g.libraryPath, g.playlists, &preserved);
+    bool fromBackup = false;
     if (!loaded && GetFileAttributesW((g.libraryPath + L".bak").c_str()) != INVALID_FILE_ATTRIBUTES) {
         g_lib = Library();
         g.playlists.clear();
-        loaded = LoadLibrary(g.libraryPath + L".bak", g.playlists);
+        std::wstring backupPreserved;
+        fromBackup = LoadLibrary(g.libraryPath + L".bak", g.playlists, &backupPreserved);
+        loaded = fromBackup;
+        if (!fromBackup && !backupPreserved.empty()) preserved = std::move(backupPreserved);
+    }
+    if (hadOriginal && !loaded) {
+        // The unreadable file is kept beside itself by LoadLibrary; say where it went instead of
+        // silently starting with an empty library.
+        g.message = fromBackup ? L"Couldn't read library.cdb; using the previous save. "
+                               : L"Couldn't read library.cdb; the library starts empty. ";
+        g.message += preserved.empty() ? L"The file is still in place."
+                                       : L"The unreadable file was kept as " + FileNameOf(preserved) + L".";
+        g.messageUntil = SDL_GetTicks() + 15000;
     }
     if (!loaded) {
         g_lib = Library();

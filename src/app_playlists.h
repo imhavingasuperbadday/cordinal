@@ -1,6 +1,7 @@
 // Playlists shared by the application modules: the list view and its columns, selection and
 // grouped row mapping, the canvas library view, and playlist (tab) management.
 #pragma once
+#include "album_editions.h"
 #include "app_state.h"
 
 namespace app {
@@ -61,6 +62,12 @@ void LibViewDpiChanged();
 void LibViewReleaseGraphics();
 std::vector<TrackId> LibViewSelection();
 void LibViewPlaySelection();
+// Album-canvas edition helpers: selected album tiles in the current order, the group under the
+// open panel or keyboard focus, and a session-local edition choice (playback never substitutes).
+std::vector<AlbumSelection> LibViewSelectedAlbums();
+bool LibViewFocusedEdition(uint32_t& group, uint32_t& edition);
+void LibViewChooseEdition(uint32_t group, uint32_t edition);
+void LibViewShowGroup(uint32_t group);
 void SortLibraryOrder(std::vector<TrackId>& items);
 void SortItems(std::vector<TrackId>& items, int column, bool ascending, std::vector<uint32_t>* mapping = nullptr);
 void RebuildViewItems(Playlist& pl);

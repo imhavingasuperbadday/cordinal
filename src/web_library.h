@@ -10,6 +10,7 @@ public:
     ~LibraryBuilder();
     std::shared_ptr<Snapshot> Tick(const Library& library, const std::vector<::Playlist>& playlists,
                                    bool showOriginals = false);
+    bool Busy() const;  // a snapshot is being captured over several ticks
     void Reset();
 private:
     struct Impl;

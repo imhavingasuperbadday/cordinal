@@ -21,6 +21,11 @@ public:
     virtual size_t Read(float* out, size_t frames) = 0;
     // Positions the stream at `seconds` from the start of this decoder's own timeline.
     virtual bool Seek(double seconds) = 0;
+    // True when a seek can use a bounded index/preroll rather than decoding from the beginning.
+    virtual bool FastSeek() const { return false; }
+    // A quick preview seek may land on a nearby sample; update seconds to its actual position.
+    virtual bool CanPreview() const { return FastSeek(); }
+    virtual bool PreviewSeek(double& seconds) { return FastSeek() && Seek(seconds); }
     virtual double Duration() const = 0;
     virtual unsigned Rate() const = 0;
     // Optional cancellation for decoders that perform blocking work.

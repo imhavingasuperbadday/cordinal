@@ -3,6 +3,7 @@
 // for the contract that a failed write leaves the original untouched.
 #include "tagwriter.h"
 
+#include "archive.h"
 #include "library.h"
 
 #include <algorithm>
@@ -17,6 +18,7 @@ bool TagEdit::Empty() const {
 
 bool CanWriteTags(const std::wstring& path) {
     if (IsSubtrack(path)) return false;  // a CUE track's tags come from its sheet
+    if (IsArchiveMember(path)) return false;  // a song inside a ZIP has no file to rewrite
     std::wstring ext = ExtOf(path);
     return ext == L"mp3" || ext == L"flac" || ext == L"ogg" || ext == L"oga" || ext == L"opus" || ext == L"m4a" ||
            ext == L"m4b" || ext == L"mp4" || ext == L"cord";
@@ -24,6 +26,10 @@ bool CanWriteTags(const std::wstring& path) {
 
 bool WriteTags(const std::wstring& path, const TagEdit& edit, std::wstring& error) {
     if (edit.Empty()) return true;
+    if (IsArchiveMember(path)) {
+        error = L"Tags of a song inside a ZIP archive can't be written.";
+        return false;
+    }
     std::wstring ext = ExtOf(path);
     if (ext == L"mp3") return WriteTagsMp3(path, edit, error);
     if (ext == L"flac") return WriteTagsFlac(path, edit, error);

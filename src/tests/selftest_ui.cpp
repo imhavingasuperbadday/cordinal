@@ -439,8 +439,7 @@ void TestUiControls(const std::wstring& scratch) {
     RegisterClassW(&wc);
     g.hwnd = CreateWindowW(wc.lpszClassName, L"UI self-test", WS_OVERLAPPEDWINDOW, 0, 0, kUiWidth, kUiHeight,
                            nullptr, nullptr, g.inst, nullptr);
-    Check(g.hwnd != nullptr, L"UI: hidden test window created");
-    if (!g.hwnd) return;
+    if (!Ready(g.hwnd != nullptr, L"the hidden test window is created")) return;
     CreateFonts();
     CreateControls(g.hwnd);
     g.pointsChip = CreateWindowW(WC_STATICW, L"", WS_CHILD, 0, 0, 0, 0, g.hwnd, nullptr, g.inst, nullptr);
@@ -486,6 +485,27 @@ void TestUiControls(const std::wstring& scratch) {
         Check(played && RadioPlaying() && RadioStationName() == L"Test rock station",
               L"UI: Play starts the selected station and retries it after Stop");
         Stop();
+        ActivatePlaylist(0);
+    }
+    {
+        ActivateRadio();
+        int before = (int)RadioCount();
+        bool savedShown = before > 0;
+        HWND discover = FindWindowExW(RadioView(), nullptr, WC_BUTTONW, L"Discover");
+        HWND savedButton = FindWindowExW(RadioView(), nullptr, WC_BUTTONW, L"My stations");
+        if (discover) SendMessageW(discover, BM_CLICK, 0, 0);
+        bool cleared = RadioCount() == 0 && RadioActive();
+        if (savedButton) SendMessageW(savedButton, BM_CLICK, 0, 0);
+        int after = (int)RadioCount();
+        bool restored = after == before;
+        testlog::Cases discovery;
+        discovery.Add(savedShown, L"My stations shown (" + std::to_wstring(before) + L")");
+        discovery.Add(discover != nullptr, L"Discover button");
+        discovery.Add(savedButton != nullptr, L"My stations button");
+        discovery.Add(cleared, L"Discover starts empty");
+        discovery.Add(restored, L"My stations restore (" + std::to_wstring(after) + L")");
+        Check(discovery.Passed(), L"UI: Discover clears My stations immediately while the directory loads%ls",
+              discovery.failed.c_str());
         ActivatePlaylist(0);
     }
     {
@@ -560,12 +580,15 @@ void TestUiControls(const std::wstring& scratch) {
     SendMessageW(g.search, WM_KEYDOWN, 'A', 0);
     DWORD start = 0, end = 0;
     SendMessageW(g.search, EM_GETSEL, (WPARAM)&start, (LPARAM)&end);
-    Check(start == 0 && end == 10, L"UI: Ctrl+A selects the entire search query");
+    testlog::Cases selectAll;
+    selectAll.Add(start == 0 && end == 10, L"the search query");
     BeginRename(1);
     SendMessageW(g.rename, EM_SETSEL, 2, 2);
     SendMessageW(g.rename, WM_KEYDOWN, 'A', 0);
     SendMessageW(g.rename, EM_GETSEL, (WPARAM)&start, (LPARAM)&end);
-    Check(start == 0 && end == 13, L"UI: Ctrl+A selects the entire playlist name");
+    selectAll.Add(start == 0 && end == 13, L"the playlist name");
+    Check(selectAll.Passed(), L"UI: Ctrl+A selects the whole search query and playlist name%ls",
+          selectAll.failed.c_str());
     EndRename(false);
     SetKeyboardState(savedKeys);
     {
@@ -887,10 +910,13 @@ void TestUiControls(const std::wstring& scratch) {
     TestFoobarControls();
     wchar_t cue[128] = {};
     SendMessageW(g.search, EM_GETCUEBANNER, (WPARAM)cue, (LPARAM)std::size(cue));
-    Check(wcscmp(cue, L"Search library (Ctrl+F)") == 0, L"UI: the search box names the Library");
+    testlog::Cases cueNames;
+    cueNames.Add(wcscmp(cue, L"Search library (Ctrl+F)") == 0, L"the Library");
     ActivatePlaylist(2);
     SendMessageW(g.search, EM_GETCUEBANNER, (WPARAM)cue, (LPARAM)std::size(cue));
-    Check(wcscmp(cue, L"Search Test auto-playlist (Ctrl+F)") == 0, L"UI: the search box names the playlist it searches");
+    cueNames.Add(wcscmp(cue, L"Search Test auto-playlist (Ctrl+F)") == 0, L"the auto-playlist");
+    Check(cueNames.Passed(), L"UI: the search box names the Library or the playlist it searches%ls",
+          cueNames.failed.c_str());
     g.timeRemaining = true;
     ShowPlaybackTime(72, 199);
     wchar_t left[32] = {}, right[32] = {};
@@ -979,9 +1005,13 @@ void TestUiControls(const std::wstring& scratch) {
     UpdateNowPlaying();
     wchar_t npText[256] = {};
     GetWindowTextW(g.npTitle, npText, (int)std::size(npText));
-    Check(std::wstring(npText).rfind(L"Continue: ", 0) == 0, L"UI: the stopped strip offers to continue the stopped track");
+    testlog::Cases stoppedStrip;
+    stoppedStrip.Add(std::wstring(npText).rfind(L"Continue: ", 0) == 0, L"it offers to continue the track");
     GetWindowTextW(g.npSub, npText, (int)std::size(npText));
-    Check(std::wstring(npText).find(L"1:12") != std::wstring::npos, L"UI: the stopped strip shows where playback stopped");
+    stoppedStrip.Add(std::wstring(npText).find(L"1:12") != std::wstring::npos,
+                     L"it shows where playback stopped");
+    Check(stoppedStrip.Passed(), L"UI: the stopped strip offers to continue the stopped track and shows where "
+          L"it stopped%ls", stoppedStrip.failed.c_str());
     g.resumeTrack = kNone;
     UpdateNowPlaying();
 

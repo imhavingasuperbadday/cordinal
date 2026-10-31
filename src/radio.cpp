@@ -185,15 +185,26 @@ std::string SearchPath(const Search& s) {
     return path;
 }
 
-bool Discover(const Search& search, std::vector<Station>& stations, std::atomic<bool>& cancel) {
-    // These broadcasters publish streams on their own sites but are missing from the directory.
-    // Sources: https://www.rock985.com/ and https://www.z925fm.com/ (October 28, 2026).
-    static const Station local[] = {
-        {"local-wmyk", "Rock 98.5 WMYK - Kokomo", "https://streaming.live365.com/a70319", {}, "US", "rock", "MP3", 0, false, "Indiana"},
-        {"local-wzwz", "Z 92.5 WZWZ - Kokomo", "https://streaming.live365.com/a66695", {}, "US", "pop,rock,hits", "MP3", 0, false, "Indiana"}
+const std::vector<Station>& BuiltInStations() {
+    // Broadcasters in the Kokomo and Frankfort area stream on their own sites but are absent from
+    // Radio Browser. Sources: rock985.com, z925fm.com, wwki.com, wfrn.com, shine.fm and
+    // clintoncountydailynews.com (October 30, 2026).
+    static const std::vector<Station> stations = {
+        {"local-wmyk", "Rock 98.5 WMYK - Kokomo", "https://streaming.live365.com/a70319", {}, "US", "rock", "MP3", 192, false, "Indiana"},
+        {"local-wzwz", "Z 92.5 WZWZ - Kokomo", "https://streaming.live365.com/a66695", {}, "US", "pop,rock,hits", "MP3", 192, false, "Indiana"},
+        {"local-wwki", "KI 100.5 WWKI - Kokomo", "https://playerservices.streamtheworld.com/api/livestream-redirect/WWKIFMAAC.aac",
+         {}, "US", "country", "AAC", 48, false, "Indiana"},
+        {"local-wfrn", "WFRN 93.7 - Kokomo", "https://streaming.live365.com/a00051", {}, "US", "christian,contemporary", "MP3", 128, false, "Indiana"},
+        {"local-wshw", "Shine 99 WSHW - Frankfort", "https://mist.olivet.edu/shine128", {}, "US", "christian,adult contemporary", "MP3", 128, false, "Indiana"},
+        {"local-shine-worship", "Shine Worship - Olivet", "https://mist.olivet.edu/shineworship128", {}, "US", "christian,worship", "MP3", 128, false, "Illinois"},
+        {"local-wilo", "WILO 96.9 - Frankfort", "https://ice23.securenetsystems.net/WILO", {}, "US", "classic hits", "AAC", 32, false, "Indiana"}
     };
+    return stations;
+}
+
+bool Discover(const Search& search, std::vector<Station>& stations, std::atomic<bool>& cancel) {
     std::vector<Station> extra;
-    for (const auto& station : local) if (StationMatches(station, search)) extra.push_back(station);
+    for (const auto& station : BuiltInStations()) if (StationMatches(station, search)) extra.push_back(station);
     auto servers = DirectoryServers(cancel);
     for (const auto& server : servers) {
         if (cancel) return false;

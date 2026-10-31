@@ -17,6 +17,9 @@
 #include <utility>
 #include <vector>
 
+// Defined in selftest.cpp beside testlog::Check: a failed setup step is reported but not counted.
+bool Ready(testlog::Condition ok, const wchar_t* what);
+
 namespace {
 
 // Byte access for the FLAC metadata scan in the FLAC/Ogg driver (same helpers the writers use).
@@ -266,7 +269,31 @@ int TestTagWriterMp3Mp4(const std::wstring& fixtures, const std::wstring& scratc
         copies.Add(copied, std::wstring(from) + L" error " + std::to_wstring(copied ? 0 : GetLastError()));
         if (copied) files.push_back(dir + L"\\" + to);
     }
-    testlog::Check(copies.Passed(), L"tag writer prepares scratch copies of the MP3 and MP4 fixtures%ls", copies.failed.c_str());
+    Ready(copies.Passed(), L"scratch copies of the MP3 and MP4 fixtures are prepared");
+    // A frame that claims more bytes than the tag holds means the tag is damaged. Writing it would
+    // silently drop every later frame, so the writer must refuse and leave the file byte-identical.
+    std::string damaged;
+    const std::wstring damagedPath = dir + L"\\damaged-tag.mp3";
+    if (ReadFileBytes(dir + L"\\sine.mp3", damaged) && damaged.size() > 20 && damaged.compare(0, 3, "ID3") == 0) {
+        const uint8_t version = (uint8_t)damaged[3];
+        damaged[14] = (char)(version == 4 ? 0x7F : 0xFF);
+        damaged[15] = (char)(version == 4 ? 0x7F : 0xFF);
+        damaged[16] = (char)(version == 4 ? 0x7F : 0xFF);
+        damaged[17] = (char)(version == 4 ? 0x7F : 0x7F);
+        HANDLE h = CreateFileW(damagedPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        DWORD written = 0;
+        const bool kept = h != INVALID_HANDLE_VALUE && WriteFile(h, damaged.data(), (DWORD)damaged.size(), &written, nullptr) &&
+                          written == damaged.size();
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        TagEdit edit;
+        edit.title = "Must not be written";
+        std::wstring error;
+        std::string after;
+        const bool refused = kept && !WriteTags(damagedPath, edit, error) && !error.empty() &&
+                             ReadFileBytes(damagedPath, after) && after == damaged;
+        testlog::Check(refused, L"tag writer refuses a damaged ID3 frame instead of dropping the frames after it");
+        DeleteFileW(damagedPath.c_str());
+    }
     // Variants FFmpeg makes: ID3v2.4, no ID3 tag at all, and an M4A with moov before mdat
     // (edits then have to move the audio, so chunk offsets must be fixed).
     std::wstring src = QuoteArg(fixtures + L"\\media\\sine.mp3"), srcM4a = QuoteArg(fixtures + L"\\media\\sine.m4a");
@@ -329,8 +356,8 @@ int TestTagWriterFlacOgg(const std::wstring& fixtures, const std::wstring& scrat
         if (ok) { files.push_back(out); prepared = true; }
     }
     copies.Add(prepared, L"a FLAC without padding");
-    testlog::Check(copies.Passed(), L"tag writer prepares scratch copies of the FLAC, Ogg and Opus fixtures and a FLAC "
-                   L"without padding for the file-rebuild path%ls", copies.failed.c_str());
+    Ready(copies.Passed(), L"scratch copies of the FLAC, Ogg and Opus fixtures and a FLAC without padding "
+                           L"are prepared");
     TestTagWriterFiles(files, log, L"tag writing: FLAC, Ogg and Opus", true);
     DeleteTestFolder(dir);
     return testlog::Failures() - before;

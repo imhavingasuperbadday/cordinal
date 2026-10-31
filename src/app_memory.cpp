@@ -43,8 +43,12 @@ void CompactLibrary() {
     g.compactPending = true;
     bool editor = false;
     EnumThreadWindows(GetCurrentThreadId(), HasEditor, (LPARAM)&editor);
+    // A conversion carries TrackIds from its plan to its result after the worker has finished. Until
+    // it has been applied, compaction must not renumber them: the result would then name a different
+    // track, renaming the wrong library record when the converted file lands.
     if (g.closing || editor || g.scanner.Busy() || ScanInProgress() || g.rgRunning ||
-        g.importRunning || TagWriterRetainsTracks() || OrganizeBusy() || !g.tagPending.empty() || !HelperToolRunning().empty())
+        g.importRunning || TagWriterRetainsTracks() || OrganizeBusy() || ConvertBusy() || !g.tagPending.empty() ||
+        !HelperToolRunning().empty())
         return;
     {
         std::lock_guard<std::mutex> lock(g.tagMx);
@@ -103,6 +107,8 @@ void CompactLibrary() {
     for (auto& id : g.queue) remap(id);
     for (TrackId* id : {&g.playing, &g.resumeTrack, &g.statTrack, &g.artFor}) remap(*id);
     ForgetAlbumDynamics(true);  // Compact remapped the measurements; discard only the derived cache
+    ForgetApolloProbes();       // its per-id file probes cannot follow the new numbering
+    LyricsLibraryChanged();     // and the lyrics panel's loaded lines belong to the old ids
     RemapPlayLog(mapping);
     RemapPoints(mapping);
     ClearBrowserCaches();

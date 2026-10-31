@@ -22,9 +22,17 @@ bool ForwardToRunningInstance(const std::vector<std::wstring>& args, bool addOnl
         // UTF-16; an empty join (all paths rejected) is still a valid wake-up.
         std::wstring joined;
         for (const auto& a : args) {
-            wchar_t full[MAX_PATH * 4];
-            DWORD n = GetFullPathNameW(a.c_str(), (DWORD)std::size(full), full, nullptr);
-            joined += (n && n < std::size(full) ? std::wstring(full) : a) + L"\n";
+            // Size the buffer first: a deep library path is longer than MAX_PATH * 4, and falling
+            // back to the raw argument would resolve it against the receiver's folder instead.
+            DWORD needed = GetFullPathNameW(a.c_str(), 0, nullptr, nullptr);
+            std::wstring full;
+            if (needed) {
+                full.resize(needed);
+                DWORD got = GetFullPathNameW(a.c_str(), needed, full.data(), nullptr);
+                if (got && got < needed) full.resize(got);
+                else full.clear();
+            }
+            joined += (full.empty() ? a : full) + L"\n";
         }
         COPYDATASTRUCT cds{addOnly ? kCopyDataAddPaths : kCopyDataPaths, (DWORD)(joined.size() * sizeof(wchar_t)),
                            joined.data()};
@@ -103,7 +111,10 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int showCmd) {
     g.accel = BuildAccelerators();
     RestoreWindowPlacement(showCmd);
     UpdateWindow(hwnd);
-    if (!args.empty()) AddPaths(args, !addOnly);  // paths from our own command line
+    if (!args.empty()) {
+        g.startupPaths = true;
+        AddPaths(args, !addOnly);  // paths from our own command line
+    }
     // The first frame is on screen; finish tray/media/headset startup from the message loop.
     PostMessageW(hwnd, WM_APP_STARTUP, 0, 0);
     if (openWeb) PostMessageW(hwnd, WM_APP_WEB, 1, 0);
@@ -114,6 +125,7 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int showCmd) {
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         if (PaletteDialogMessage(&msg)) continue;
+        if (EditionDialogMessage(&msg)) continue;
         if (PreferencesDialogMessage(&msg)) continue;
         if (EqualizerDialogMessage(&msg)) continue;
         if (WebDialogMessage(&msg)) continue;

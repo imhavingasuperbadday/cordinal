@@ -15,7 +15,7 @@ SOCKET Listener(unsigned short& port) {
     port = ntohs(address.sin_port);
     return s;
 }
-void Serve(SOCKET server, bool stalled) {
+void Serve(SOCKET server, bool stalled, HANDLE release) {
     fd_set read; FD_ZERO(&read); FD_SET(server, &read);
     timeval timeout{4, 0};
     SOCKET client = select(0, &read, nullptr, nullptr, &timeout) > 0 ? accept(server, nullptr, nullptr) : INVALID_SOCKET;
@@ -27,7 +27,9 @@ void Serve(SOCKET server, bool stalled) {
                         "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
     send(client, reply.data(), (int)reply.size(), 0);
     if (stalled) {
-        Sleep(1000);
+        // Hold the socket open until the test has aborted its blocked reader, so the server never
+        // closes it first. The cap keeps a failed test from hanging this thread.
+        WaitForSingleObject(release, 4000);
     } else {
         std::string meta = "StreamTitle='Example - Song';";
         meta.resize(32, '\0');
@@ -79,7 +81,7 @@ void TestRadioStream() {
     unsigned short port = 0;
     SOCKET listener = Listener(port);
     if (!Ready(listener != INVALID_SOCKET, L"loopback radio station")) { WSACleanup(); return; }
-    std::thread server(Serve, listener, false);
+    std::thread server(Serve, listener, false, nullptr);
     auto stream = radio::Stream::Open("http://127.0.0.1:" + std::to_string(port) + "/stream");
     uint8_t bytes[8]{};
     bool received = ReadLiveBytes(*stream, bytes, sizeof(bytes));
@@ -90,7 +92,11 @@ void TestRadioStream() {
 
     listener = Listener(port);
     if (!Ready(listener != INVALID_SOCKET, L"stalled loopback radio station")) { WSACleanup(); return; }
-    std::thread stalled(Serve, listener, true);
+    HANDLE release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!Ready(release != nullptr, L"stalled station release event")) {
+        closesocket(listener); WSACleanup(); return;
+    }
+    std::thread stalled(Serve, listener, true, release);
     auto waiting = radio::Stream::Open("http://127.0.0.1:" + std::to_string(port) + "/stream");
     std::atomic<bool> ended{false};
     std::thread reader([&] { uint8_t c; waiting->Read(&c, 1); ended = true; });
@@ -99,7 +105,9 @@ void TestRadioStream() {
     waiting->Abort();
     for (int i = 0; i < 50 && !ended; ++i) Sleep(10);
     bool prompt = ended;
+    SetEvent(release);
     reader.join(); stalled.join();
+    CloseHandle(release);
     Check(connected && prompt, L"stopping a stalled station promptly unblocks the decoder");
     listener = Listener(port);
     if (Ready(listener != INVALID_SOCKET, L"HLS loopback station")) {

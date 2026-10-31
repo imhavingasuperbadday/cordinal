@@ -382,6 +382,9 @@ void WebTick() {
     if (!server.GetStatus().running) return;
     server.SetTheme(BuiltInTheme(g.themeMode), P().dark);  // the server thread knows only built-in themes
     if (auto snapshot = builder.Tick(g_lib, g.playlists, g.convertShowOriginals)) server.Publish(std::move(snapshot));
+    // Capture runs on a 20 ms timer; once the snapshot is ready, checking for changes every second
+    // is plenty and leaves the UI thread alone (a browser may stay open all day).
+    SetTimer(g.hwnd, kWebTimer, builder.Busy() ? 20 : 1000, nullptr);
 }
 void InvalidateWebLibrary() { builder.Reset(); }
 bool WebDialogMessage(MSG* message) { return window.hwnd && IsDialogMessageW(window.hwnd, message); }

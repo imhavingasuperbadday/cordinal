@@ -35,6 +35,8 @@ void Search() {
     if (!browser) return;
     query = WindowText(g.search);
     if (discover) {
+        // Drop the previous view before the worker starts so Discover never shows My stations.
+        rows.clear();
         radio::Search search{ToUtf8(query), ToUtf8(WindowText(genre)), ToUtf8(WindowText(country)), 0, ToUtf8(WindowText(state))};
         browser->SearchDirectory(search);
         if (!browser->Searching() && !browser->Problem().empty()) ShowMessage(browser->Problem());
@@ -111,7 +113,7 @@ void Draw(HDC dc, RECT rc) {
     int saved = SaveDC(dc);
     IntersectClipRect(dc, rc.left, ContentTop(), rc.right, rc.bottom);
     if (rows.empty()) {
-        std::wstring text = browser && browser->Searching() ? L"Finding stations..." :
+        std::wstring text = discover && browser && browser->Searching() ? L"Finding stations..." :
             browser && !browser->Problem().empty() ? browser->Problem() :
             discover ? L"No stations found. Try another name, genre or country." :
                        L"No saved stations yet. Choose Discover to find stations.";

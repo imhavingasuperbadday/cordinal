@@ -7,7 +7,7 @@
 
 namespace app {
 
-void PlayList(const std::vector<TrackId>& items, int index);
+void PlayList(const std::vector<TrackId>& items, int index, double start = 0, bool paused = false);
 void QueueTracks(const std::vector<TrackId>& ids, bool next);
 void ClearQueue();
 int QueuePosition(TrackId id);
@@ -25,7 +25,7 @@ int ComputeNext(unsigned long long fromToken, bool manual, int& plOut);
 std::vector<TrackId> UpcomingTracks();
 void AnswerNext(unsigned long long token);
 void RefreshNext();
-void PlayTrack(int pl, int index, bool remember);
+void PlayTrack(int pl, int index, bool remember, double start = 0, bool paused = false);
 void PlayRow(int row);
 void PlayFocusedOrFirst();
 void Stop();
@@ -34,6 +34,8 @@ void Previous();
 void PlayButton();
 void TogglePause();
 bool Resume();
+// Reopens the last session's track, paused where it stopped or playing at once, as Preferences asks.
+void ReopenLastTrack();
 void SetVolumePercent(int percent);
 void ToggleMute();
 void ApplyEffects();  // reverb and smart volume to the engine
@@ -50,6 +52,8 @@ void UpdateStatus();
 void ShowPlaybackTime(double pos, double duration);
 void PaintArt(HDC dc);
 void OnEngineEvent(EngineEvent e, unsigned long long token);
+void PrepareWaveform(TrackId id);
+void PrefetchWaveform(TrackId id);
 void WaveformTrackChanged(bool refresh = false);
 void OnPeaksReady(uint32_t requestId);
 bool WaveformShown();

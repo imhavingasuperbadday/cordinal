@@ -200,12 +200,21 @@ public:
         return false;
     }
     // A card has no Recycle Bin, so removed copies are deleted; on a drive with one they go there.
+    // If recycling fails on such a drive, the file is left for a later run rather than deleted:
+    // the confirmation only promised permanent deletion for cards and phones.
+    static bool RemovePermanently(const std::wstring& path) {
+#ifdef _WIN32
+        wchar_t root[MAX_PATH];
+        if (GetVolumePathNameW(path.c_str(), root, MAX_PATH) && GetDriveTypeW(root) == DRIVE_FIXED) return false;
+#endif
+        return DeleteFileW(path.c_str()) != FALSE;
+    }
     // Folders left empty go too, never the destination itself.
     bool Remove(const std::vector<std::wstring>& rels, std::vector<bool>& removed) override {
         removed.assign(rels.size(), false);
         for (size_t i = 0; i < rels.size(); ++i) {
             const std::wstring path = root_ + kPathSep + rels[i];
-            removed[i] = !::Exists(path) || RecycleFile(path) || DeleteFileW(path.c_str());
+            removed[i] = !::Exists(path) || RecycleFile(path) || RemovePermanently(path);
             for (std::wstring dir = RelDir(rels[i]); removed[i] && !dir.empty(); dir = RelDir(dir))
                 if (!RemoveDirectoryW((root_ + kPathSep + dir).c_str())) break;
         }

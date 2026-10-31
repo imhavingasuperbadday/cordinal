@@ -42,6 +42,8 @@ void RadioSearch() {
     if (!state.browser) return;
     state.query = g.search;
     if (state.discover) {
+        // Drop the previous view before the worker starts so Discover never shows My stations.
+        state.rows.clear();
         state.browser->SearchDirectory({ToUtf8(state.query), ToUtf8(state.genre), ToUtf8(state.country), 0, ToUtf8(state.region)});
         if (!state.browser->Searching() && !state.browser->Problem().empty()) ShowMessage(state.browser->Problem());
         state.scroll = 0;

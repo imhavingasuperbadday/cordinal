@@ -39,8 +39,8 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 const wchar_t kHost[] = L"api.listenbrainz.org";
-const wchar_t kUserAgent[] = L"cordinal/0.1.0";
-const char kClientVersion[] = "0.1.0";
+const wchar_t kUserAgent[] = L"cordinal/0.1.1";
+const char kClientVersion[] = "0.1.1";
 const wchar_t kQueueName[] = L"listenbrainz-queue.txt";
 #ifdef _WIN32
 const wchar_t kSep[] = L"\\";
@@ -811,8 +811,15 @@ void Submit(const Listen& l) {
     PostStatus();
 }
 
-// Starts one token check on its own thread; the result arrives as a message.
+// Starts one token check on its own thread; the result arrives as a message. Finished threads are
+// reaped in small batches: a long session with a few retries otherwise keeps every handle and
+// stack reservation until shutdown.
 void Validate(const std::wstring& token) {
+    if (g_validators.size() >= 4) {
+        for (std::thread& t : g_validators)
+            if (t.joinable()) t.join();
+        g_validators.clear();
+    }
     g_validators.emplace_back(ValidateWorker, Trim(token));
 }
 

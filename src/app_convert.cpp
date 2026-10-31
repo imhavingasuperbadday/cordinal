@@ -158,13 +158,16 @@ void OnConvertMessage(WPARAM wp, LPARAM lp) {
     int64_t saved = 0;
     for (const ConvertDone& d : r->done) {
         if (exporting) continue;
-        if (!g_lib.Contains(d.id)) continue;
-        const int64_t before = (int64_t)g_lib[d.id].fileSize;
+        // The worker can outlive an idle library compaction. Its result names the source by path,
+        // so resolve the live track now instead of trusting the id it was planned with.
+        TrackId id = g_lib.Find(d.from);
+        if (id == kNone) continue;
+        const int64_t before = (int64_t)g_lib[id].fileSize;
         WIN32_FILE_ATTRIBUTE_DATA a{};
         if (GetFileAttributesExW(d.to.c_str(), GetFileExInfoStandard, &a))
             saved += before - (int64_t)((uint64_t)a.nFileSizeHigh << 32 | a.nFileSizeLow);
-        g_lib.Rename(d.id, d.to);
-        Reread(reread, d.id);
+        g_lib.Rename(id, d.to);
+        Reread(reread, id);
         if (!d.recycled) {
             TrackId original = g_lib.Find(d.from);
             if (original == kNone) original = g_lib.Add(d.from);
@@ -182,15 +185,17 @@ void OnConvertMessage(WPARAM wp, LPARAM lp) {
     StartScanner();
     PruneConvertLogs(LogDir(), MemoryDays());
     g_canUndo = CanUndoConvert(LogDir());
-    std::wstring done = (exporting ? L"Exported " : L"Converted ") + Files(r->done.size()) + L" to " + kCordExports[(unsigned)g_format].label;
+    std::wstring done = r->done.empty() ? (exporting ? L"Nothing was exported" : L"Nothing was converted")
+                                        : (exporting ? L"Exported " : L"Converted ") + Files(r->done.size()) + L" to " +
+                                              kCordExports[(unsigned)g_format].label;
     if (saved > 0) done += L", " + Megabytes(saved) + L" smaller";
     done += r->cancelled ? L"; the rest was cancelled." : L".";
     if (exporting) done += L" The .cord files were kept.";
     if (!exporting && g.convertRecycle) {
         const size_t kept = (size_t)std::count_if(r->done.begin(), r->done.end(), [](const ConvertDone& d) { return !d.recycled; });
         if (kept)
-            done += L" " + Files(kept) + (kept == 1 ? L" was" : L" were") +
-                    L" kept: the Recycle Bin wasn't available there.";
+            done += L" " + Files(kept) + (kept == 1 ? L" was" : L" were") + L" kept: " +
+                    (r->logError.empty() ? L"the Recycle Bin wasn't available there." : r->logError + L".");
     }
     if (g.closing) return;  // shutting down: the library is updated, nothing to say
     if (!r->failed.empty()) {

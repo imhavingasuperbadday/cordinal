@@ -59,7 +59,9 @@ void ExportPlaylistFile() {
     if (FAILED(dlg->Show(g.hwnd)) || FAILED(dlg->GetResult(&item)) || FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)))
         return;
     bool ok = ExportM3U(path, Active());
-    ShowMessage(ok ? L"Saved playlist to " + std::wstring(path) : L"Couldn't save the playlist.");
+    ShowMessage(ok ? L"Saved playlist to " + std::wstring(path)
+                   : L"Couldn't save the playlist to " + std::wstring(path) +
+                         L". Check that the file isn't open in another program and that every entry still exists.");
     CoTaskMemFree(path);
 }
 
@@ -122,7 +124,7 @@ void ShowAbout() {
     wchar_t mem[200];
     swprintf_s(mem, L"Memory: %.1f MB committed, %.1f MB working set\nLibrary: %zu tracks in %.1f KB",
                pmc.PrivateUsage / 1048576.0, pmc.WorkingSetSize / 1048576.0, g_lib.Count(), g_lib.MemoryBytes() / 1024.0);
-    std::wstring text = std::wstring(L"cordinal 0.1.0\n\nA fast, lightweight music player and library for Windows and Linux.\n\n"
+    std::wstring text = std::wstring(L"cordinal 0.1.1\n\nA fast, lightweight music player and library for Windows and Linux.\n\n"
                                      L"Watched library folders with an Inbox, a column browser, album and artist views, "
                                      L"auto-playlists, ratings and play counts, a tag editor and file organizer.\n"
                                      L"Cordinal decoders for FLAC, WAV, AIFF, MPEG audio, Vorbis, AAC-LC, ALAC, "

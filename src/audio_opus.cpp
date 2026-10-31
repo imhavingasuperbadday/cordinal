@@ -45,6 +45,7 @@ private:
     // No preroll distance guarantees a clean start: a packet may depend on
     // arbitrarily old history, so the caller must supply a captured state.
     size_t Preroll() const override { return SIZE_MAX; }
+    size_t PreviewPreroll() const override { return 12; }
     void Reset() override { celt_.Reset(); silk_.Reset(); previous_=-1;previousRedundancy_=false; }
     bool Decode(const uint8_t* data,size_t bytes,std::vector<float>& out) override {
         OpusPacket packet;

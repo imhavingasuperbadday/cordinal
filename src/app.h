@@ -7,6 +7,7 @@
 #include "app_ui.h"
 #include "app_settings.h"
 #include "app_playlists.h"
+#include "app_editions.h"
 #include "app_playback.h"
 #include "app_panels.h"
 #include "app_tools.h"

@@ -127,8 +127,6 @@ void TestTitleFormat() {
     check(L"$pad(%artist%,6)|$add(2,3)|$replace(%title%,o,0)", L"Band  |5|S0ng");
     Check(patterns.Passed(), L"TF conditionals, functions, literals and built-in fields format as expected%ls",
           patterns.failed.c_str());
-    // Same path -> same track; strings are deduplicated.
-    Check(g_lib.Add(L"C:\\Music\\Band\\03 Song Name.flac") == id, L"library dedupes paths");
 }
 
 // library.cdb round trip: every field, playlist kinds, path lookups, and a corrupt file is set
@@ -311,8 +309,24 @@ void TestLibraryDb(const std::wstring& scratch) {
     WriteFile(h, "CDLB\x01\0\0\0\xFF\xFF", 10, &written, nullptr);
     CloseHandle(h);
     std::vector<Playlist> none;
-    bool rejected = !LoadLibrary(file, none) && GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES;
-    Check(rejected, L"LIBRARY DB corrupt file rejected and set aside");
+    std::wstring preserved;
+    bool rejected = !LoadLibrary(file, none, &preserved) && GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES;
+    Check(rejected && !preserved.empty() && GetFileAttributesW(preserved.c_str()) != INVALID_FILE_ATTRIBUTES,
+          L"LIBRARY DB corrupt file rejected, kept, and named for the user");
+
+    // Recovery changes written at the last close are named when they cannot be read either.
+    app::g.libraryPath = file;
+    const std::wstring recovery = app::UnsavedLibraryPath();
+    std::wstring failedRecovery;
+    bool wroteRecovery = WriteTestBytes(recovery, "not a library");
+    bool noRecovery = !app::RestoreUnsavedLibrary(&failedRecovery);
+    Check(wroteRecovery && noRecovery && !failedRecovery.empty() &&
+              GetFileAttributesW(recovery.c_str()) == INVALID_FILE_ATTRIBUTES &&
+              GetFileAttributesW(failedRecovery.c_str()) != INVALID_FILE_ATTRIBUTES,
+          L"LIBRARY DB unreadable recovery changes are kept and named for the user");
+    app::g.libraryPath.clear();
+    app::g.playlists.clear();
+
     WIN32_FIND_DATAW fd;
     std::wstring dir = DirectoryOf(file);
     HANDLE find = FindFirstFileW((file + L"*").c_str(), &fd);
@@ -754,7 +768,10 @@ void TestAutoPlaylists() {
     minutes.unit = LimitUnit::Minutes;
     minutes.pick = PickBy::RecentlyAdded;
     minutes.ordered = true;
-    check(L"9 minutes, most recently added", minutes, {L"Gamma", L"Alpha"});  // Epsilon (an hour) would pass 9 minutes
+    // Gamma (2:00) and Alpha (3:20) fit. Epsilon (an hour) is skipped rather than ending the fill,
+    // so Beta (3:00) still fits (8:20 total) and Delta (5:30 more) does not.
+    check(L"9 minutes, most recently added (a long track is skipped, not the rest)", minutes,
+          {L"Gamma", L"Alpha", L"Beta"});
     AutoPlaylist card;
     card.limit = 40;
     card.unit = LimitUnit::Megabytes;

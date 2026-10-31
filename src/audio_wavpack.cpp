@@ -497,6 +497,7 @@ public:
         pcm_.clear();used_=0;failed_=false;return true;
     }
     unsigned Rate() const override { return rate_; }
+    bool FastSeek() const override { return true; }
     bool Failed() const override { return failed_; }
     double Duration() const override { return (double)frames_/rate_; }
 private:

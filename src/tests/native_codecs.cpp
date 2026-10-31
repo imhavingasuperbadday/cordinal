@@ -14,6 +14,214 @@
 // Every check lands in the caller's "native codecs" group; the message names the file so a failure
 // still points at the format that regressed.
 namespace {
+struct TestMp4Box { size_t type, body, end; };
+
+bool NextMp4Box(const std::string& bytes, size_t& at, size_t end, TestMp4Box& box) {
+    if (at > end || end > bytes.size() || end - at < 8) return false;
+    const auto* p = (const uint8_t*)bytes.data() + at;
+    uint64_t size = nativeaudio::U32(p, true); size_t head = 8;
+    if (size == 1) {
+        if (end - at < 16) return false;
+        size = nativeaudio::U64(p + 8, true); head = 16;
+    } else if (!size) size = end - at;
+    if (size < head || size > end - at) return false;
+    box = {at + 4, at + head, at + (size_t)size}; at = box.end;
+    return true;
+}
+
+bool Mp4Child(const std::string& bytes, size_t start, size_t end, const char* type, TestMp4Box& result) {
+    TestMp4Box box{};
+    while (NextMp4Box(bytes, start, end, box)) if (!bytes.compare(box.type, 4, type)) { result = box; return true; }
+    return false;
+}
+
+// Change only the audio track's clock: packet data and real playback time remain identical.
+bool RescaleMp4Fixture(std::string& bytes, unsigned factor, bool removeEdit, bool inexact = false) {
+    TestMp4Box moov{}, trak{}, mdia{}, handler{}, mdhd{}, minf{}, stbl{}, stts{};
+    if (!Mp4Child(bytes, 0, bytes.size(), "moov", moov)) return false;
+    size_t at = moov.body; bool sound = false;
+    while (NextMp4Box(bytes, at, moov.end, trak)) {
+        if (bytes.compare(trak.type, 4, "trak") || !Mp4Child(bytes, trak.body, trak.end, "mdia", mdia) ||
+            !Mp4Child(bytes, mdia.body, mdia.end, "hdlr", handler) || handler.end - handler.body < 12) continue;
+        if (!bytes.compare(handler.body + 8, 4, "soun")) { sound = true; break; }
+    }
+    if (!sound || !Mp4Child(bytes, mdia.body, mdia.end, "mdhd", mdhd) ||
+        !Mp4Child(bytes, mdia.body, mdia.end, "minf", minf) ||
+        !Mp4Child(bytes, minf.body, minf.end, "stbl", stbl) ||
+        !Mp4Child(bytes, stbl.body, stbl.end, "stts", stts)) return false;
+    auto read = [&](size_t pos, size_t width) {
+        uint64_t value = 0;
+        for (size_t i = 0; i < width; ++i) value = (value << 8) | (uint8_t)bytes[pos + i];
+        return value;
+    };
+    auto write = [&](size_t pos, size_t width, uint64_t value) {
+        for (size_t i = width; i-- > 0; value >>= 8) bytes[pos + i] = (char)value;
+    };
+    auto multiply = [&](size_t pos, size_t width) {
+        uint64_t value = read(pos, width), max = width == 8 ? UINT64_MAX : UINT32_MAX;
+        if (value > max / factor) return false;
+        write(pos, width, value * factor); return true;
+    };
+    if (mdhd.end - mdhd.body < 24 || stts.end - stts.body < 8) return false;
+    bool large = bytes[mdhd.body] == 1;
+    if (large && mdhd.end - mdhd.body < 36) return false;
+    if (!multiply(mdhd.body + (large ? 20 : 12), 4) ||
+        !multiply(mdhd.body + (large ? 24 : 16), large ? 8 : 4)) return false;
+    uint64_t count = read(stts.body + 4, 4);
+    if (!count || count > (stts.end - stts.body - 8) / 8) return false;
+    for (size_t i = 0; i < count; ++i) if (!multiply(stts.body + 12 + i * 8, 4)) return false;
+    if (inexact) {
+        uint64_t first = read(stts.body + 12, 4);
+        if (first == UINT32_MAX) return false;
+        write(stts.body + 12, 4, first + 1);
+    }
+    TestMp4Box edts{}, elst{};
+    if (!Mp4Child(bytes, trak.body, trak.end, "edts", edts) ||
+        !Mp4Child(bytes, edts.body, edts.end, "elst", elst)) return false;
+    {
+        if (removeEdit) bytes.replace(elst.type, 4, "free");
+        else {
+            if (elst.end - elst.body < 8) return false;
+            large = bytes[elst.body] == 1;
+            size_t width = large ? 8 : 4, stride = large ? 20 : 12;
+            count = read(elst.body + 4, 4);
+            if (count > (elst.end - elst.body - 8) / stride) return false;
+            for (size_t i = 0; i < count; ++i) {
+                size_t pos = elst.body + 8 + i * stride + width;
+                if (!(read(pos, width) & (uint64_t(1) << (width * 8 - 1))) && !multiply(pos, width)) return false;
+            }
+        }
+    }
+    return true;
+}
+
+void TestWaveformPreviews(const std::wstring& root, const std::wstring& scratch) {
+    const std::wstring path = root + L"\\native\\preview.flac";
+    auto decoder = OpenFlacDecoder(path);
+    bool sampled = decoder && !decoder->FastSeek() && decoder->CanPreview();
+    for (double target : {1.0, 4.0, 9.0, 14.0, 19.0}) {
+        if (!decoder) break;
+        double actual = target;
+        bool found = decoder->PreviewSeek(actual) && actual >= 0 && actual < decoder->Duration();
+        auto reference = OpenFlacDecoder(path);
+        float got[1024]{}, expected[1024]{};
+        bool same = found && reference && reference->Seek(actual + 0.5 / decoder->Rate()) &&
+                    decoder->Read(got, 512) == 512 && reference->Read(expected, 512) == 512 &&
+                    std::memcmp(got, expected, sizeof(got)) == 0;
+        sampled = sampled && same;
+    }
+    decoder = OpenFlacDecoder(path);
+    Peaks whole{}, slice{};
+    bool shaped = decoder && PreviewPeaks(*decoder, 0, decoder->Duration(), whole, nullptr) &&
+                  whole.v[500] > whole.v[100] && PreviewPeaks(*decoder, 5, 10, slice, nullptr) &&
+                  slice.v[500] > slice.v[100];
+    Check(sampled && shaped,
+          L"unindexed FLAC previews use real decoded frames at their actual positions, including track ranges");
+
+    const std::wstring ogg = root + L"\\media\\sine.ogg";
+    auto vorbis = OpenVorbisDecoder(ogg);
+    testlog::Cases pages;
+    for (double target : {0.5, 2.0, 4.0, 6.0}) {
+        double actual = target;
+        auto reference = OpenVorbisDecoder(ogg);
+        float got[1024]{}, expected[1024]{};
+        bool ok = vorbis && vorbis->CanPreview() && vorbis->PreviewSeek(actual) && reference &&
+                  reference->Seek(actual + 0.5 / vorbis->Rate()) &&
+                  vorbis->Read(got, 512) == 512 && reference->Read(expected, 512) == 512;
+        for (size_t i = 0; ok && i < std::size(got); ++i) ok = std::fabs(got[i] - expected[i]) < 1e-6f;
+        pages.Add(ok, std::to_wstring((int)target));
+    }
+    Check(pages.Passed(), L"Vorbis preview pages rebuild the overlap at their actual sample positions%ls", pages.failed.c_str());
+
+    StartPeaks(nullptr, 0, scratch + L"\\preview-cache");
+    testlog::Cases exact;
+    for (const wchar_t* name : {L"native\\preview.flac", L"media\\sine.ogg", L"media\\sine.opus"}) {
+        const std::wstring file = root + L"\\" + name;
+        Peaks direct{}, cached{};
+        bool computed = ComputePeaks(file, 0, 0, direct, nullptr);
+        uint32_t request = 0;
+        bool ready = GetPeaks(file, 0, 0, 0, 0, cached, request);
+        const ULONGLONG until = GetTickCount64() + 5000;
+        while (!ready && request && GetTickCount64() < until) {
+            Sleep(1);
+            ready = GetPeaks(file, 0, 0, 0, 0, cached, request);
+        }
+        exact.Add(computed && ready && std::memcmp(direct.v, cached.v, kPeakBuckets) == 0, name);
+    }
+    StopPeaks();
+    Check(exact.Passed(), L"sampled previews are replaced by exact whole-file peaks before caching%ls", exact.failed.c_str());
+
+    testlog::Cases formats;
+    for (const wchar_t* name : {L"media\\sine.wav", L"media\\sine.mp3", L"media\\sine.m4a", L"media\\sine.ogg",
+                                L"media\\sine.opus", L"native\\sine.wv", L"native\\preview.flac"}) {
+        const ULONGLONG started = GetTickCount64();
+        std::wstring error;
+        auto source = OpenDecoder(root + L"\\" + name, 48000, error);
+        Peaks preview{};
+        bool ok = source && PreviewPeaks(*source, 0, source->Duration(), preview, nullptr) &&
+                  preview.v[kPeakBuckets / 4] && preview.v[3 * kPeakBuckets / 4];
+        formats.Add(ok, name);
+        if (g_log) fwprintf(g_log, L"waveform preview %ls: %llu ms\n", name, GetTickCount64() - started);
+    }
+    Check(formats.Passed(), L"common audio formats produce a full-song preview%ls", formats.failed.c_str());
+}
+
+void TestMp4TimeScales(const std::wstring& root, const std::wstring& scratch) {
+    struct Case { const wchar_t* source; unsigned factor; bool removeEdit; const wchar_t* name; };
+    const Case cases[] = {
+        {L"native\\video-aac.mp4", 10, false, L"video with AAC and an edit"},
+        {L"native\\video-aac.mp4", 10, true, L"video with AAC and no edit"},
+        {L"native\\video-aac.mp4", 3, false, L"video with a threefold clock"},
+        {L"media\\alac.m4a", 10, false, L"ALAC with an edit"},
+    };
+    testlog::Cases same;
+    for (size_t i = 0; i < std::size(cases); ++i) {
+        const auto& c = cases[i];
+        std::string original = ReadTestBytes(root + L"\\" + c.source), scaled = original;
+        bool prepared = !original.empty() && RescaleMp4Fixture(original, 1, c.removeEdit) &&
+                        RescaleMp4Fixture(scaled, c.factor, c.removeEdit);
+        std::wstring ext = ExtOf(c.source), base = scratch + L"\\mp4-clock-" + std::to_wstring(i);
+        std::wstring referencePath = base + L"-original." + ext, scaledPath = base + L"-scaled." + ext;
+        prepared = prepared && WriteTestBytes(referencePath, original) && WriteTestBytes(scaledPath, scaled);
+        if (!Ready(prepared, L"the MP4 clock fixture is prepared")) { same.Add(false, c.name); continue; }
+        std::wstring error;
+        auto reference = OpenDecoder(referencePath, 48000, error), decoder = OpenDecoder(scaledPath, 48000, error);
+        bool ok = reference && decoder && reference->Rate() == decoder->Rate() &&
+                  reference->Duration() == decoder->Duration();
+        std::vector<float> expected;
+        float block[4096 * 2];
+        if (reference) {
+            while (size_t n = reference->Read(block, 4096)) expected.insert(expected.end(), block, block + n * 2);
+            ok = ok && !reference->Failed() && expected.size() ==
+                 (size_t)std::llround(reference->Duration() * reference->Rate()) * 2;
+        }
+        size_t position = 0;
+        if (decoder) {
+            while (size_t n = decoder->Read(block, 4096)) {
+                if (position + n * 2 > expected.size() ||
+                    memcmp(block, expected.data() + position, n * 2 * sizeof(float))) { ok = false; break; }
+                position += n * 2;
+            }
+            ok = ok && !decoder->Failed() && position == expected.size();
+            size_t frames = expected.size() / 2;
+            for (size_t target : {size_t(0), size_t(137), frames / 2, frames > 128 ? frames - 128 : size_t(0)}) {
+                size_t want = std::min<size_t>(128, frames - std::min(target, frames));
+                bool seek = decoder->Seek((target + 0.25) / decoder->Rate()) && decoder->Read(block, want) == want;
+                if (seek && want) seek = !memcmp(block, expected.data() + target * 2, want * 2 * sizeof(float));
+                ok = ok && seek;
+            }
+        }
+        same.Add(ok, c.name);
+    }
+    testlog::Check(same.Passed(), L"MP4 audio clocks preserve every decoded sample, edit and seek%ls", same.failed.c_str());
+
+    std::string inexact = ReadTestBytes(root + L"\\native\\video-aac.mp4");
+    std::wstring path = scratch + L"\\mp4-inexact-clock.mp4", error;
+    if (Ready(!inexact.empty() && RescaleMp4Fixture(inexact, 10, false, true) && WriteTestBytes(path, inexact),
+              L"the inexact MP4 clock fixture is prepared"))
+        testlog::Check(!OpenDecoder(path, 48000, error), L"MP4 packet boundaries that fall between samples are rejected");
+}
+
 // A failed packet may follow good PCM in the same read. Nothing from it may leak on later calls,
 // and seeking to an intact part must recover without retaining the old error.
 bool FailedPlayback(std::unique_ptr<Decoder> decoder) {
@@ -218,8 +426,10 @@ void TestCrc16() {
 }
 
 void TestNativeCodecs(const std::wstring& root, const std::wstring& scratch) {
+    TestWaveformPreviews(root, scratch);
     TestPcmBlocks(scratch);
     TestCrc16();
+    TestMp4TimeScales(root, scratch);
     testlog::Cases failures;
     failures.Add(TestFlacFixed(scratch), L"FLAC truncated at a frame boundary");
     const std::wstring hybrid = scratch + L"\\hybrid.wv", plain = scratch + L"\\plain.wv";

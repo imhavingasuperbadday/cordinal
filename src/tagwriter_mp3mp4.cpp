@@ -99,7 +99,10 @@ bool ParseId3(FileSource& input, const TagEdit& e, Id3Tag& tag, std::wstring& er
     size_t p = 10, end = 10 + Syncsafe(head, 6);
     if (flags & 0x40) {
         std::string ext;
-        if (!input.Read(10, 4, ext)) return false;
+        if (!input.Read(10, 4, ext)) {
+            error = L"Couldn't read the file's ID3 tag.";
+            return false;
+        }
         p += tag.version == 4 ? Syncsafe(ext, 0) : 4 + BE32(ext, 0);  // skip (and drop) the extended header
     }
     std::string fh;
@@ -108,11 +111,19 @@ bool ParseId3(FileSource& input, const TagEdit& e, Id3Tag& tag, std::wstring& er
         std::string id = fh.substr(0, 4);
         uint32_t len = tag.version == 4 ? Syncsafe(fh, 4) : BE32(fh, 4);
         uint16_t fl = (uint16_t)BE16(fh, 8);
-        if (p + 10 + len > end) break;
+        // A frame that overruns the tag means the tag is damaged. Rewriting the frames before it
+        // would silently drop everything after it, so leave the file alone instead.
+        if (p + 10 + len > end) {
+            error = L"The file's ID3 tag is damaged.";
+            return false;
+        }
         // Skip old cover payloads when replacing/removing the cover.
         if (len && !(e.cover && id == "APIC")) {
             std::string data;
-            if (!input.Read(p + 10, len, data)) return false;
+            if (!input.Read(p + 10, len, data)) {
+                error = L"Couldn't read the file's ID3 tag.";
+                return false;
+            }
             tag.frames.push_back({std::move(id), std::move(data), fl});
         }
         p += 10 + len;

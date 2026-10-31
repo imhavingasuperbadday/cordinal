@@ -26,6 +26,8 @@ bool ParseStations(std::string_view json, std::vector<Station>& stations);
 std::string SearchPath(const Search& search);
 std::string RadioCountry(std::string value);
 bool StationMatches(const Station& station, const Search& search);
+// Music stations whose broadcasters stream on their own sites but which Radio Browser omits.
+const std::vector<Station>& BuiltInStations();
 // Uses Radio Browser's DNS-discovered mirrors, retrying another when one is unavailable.
 bool Discover(const Search& search, std::vector<Station>& stations, std::atomic<bool>& cancel);
 bool CountPlay(const std::string& stationId, std::atomic<bool>& cancel);

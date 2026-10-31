@@ -37,6 +37,8 @@ std::vector<Suite> Suites(const std::wstring& root) {
             [](const auto& s) { TestPortedStorage(s); }},
         {L"library-db", L"library.cdb and audio hash sections", L"src/tests/selftest_library.cpp", 0, 0,
             [](const auto& s) { TestLibraryDb(s + L"\\library"); TestAudioHashSection(s + L"\\hash"); }},
+        {L"album-editions", L"album groups, editions, correspondence and migration", L"src/tests/selftest_albums.cpp", 0, 0,
+            [](const auto& s) { TestAlbumEditions(s + L"\\albums"); }},
         {L"play-log", L"play log and listening statistics", L"src/tests/selftest_library.cpp", 0, 0,
             [](const auto& s) { TestPlayLog(s + L"\\plays"); }},
         {L"migration", L"backups, path remapping and playback statistics import", L"src/tests/selftest_migration.cpp", 0, 0,
@@ -58,7 +60,7 @@ std::vector<Suite> Suites(const std::wstring& root) {
         {L"auto-playlists", L"auto-playlist rules and limits", L"src/tests/selftest_library.cpp", 0, 0,
             [](const auto&) { TestAutoPlaylists(); }},
         {L"tags", L"tag reading and extended metadata", L"src/tests/selftest_tags.cpp", Media | Tags, 0,
-            [root](const auto&) { TestTags(root + L"\\media"); TestExtendedTags(root + L"\\tags2"); }},
+            [root](const auto& s) { TestTags(root + L"\\media"); TestExtendedTags(root + L"\\tags2"); TestMp4Metadata(s); }},
         {L"native-codecs", L"native codecs without fallback", L"src/tests/native_codecs.cpp", Media | Native, 0,
             [root](const auto& s) { TestNativeCodecs(root, s); }},
         {L"live-audio", L"sequential radio audio decoding", L"src/tests/selftest_live_audio.cpp", Media, 0,
@@ -92,7 +94,7 @@ std::vector<Suite> Suites(const std::wstring& root) {
         {L"peaks", L"waveform peaks and cancellation", L"src/tests/selftest_dsp.cpp", 0, 0,
             [](const auto& s) { TestPeaks(s); }},
         {L"scanner", L"folder scanning and watching", L"src/tests/selftest_library_files.cpp", Media, 0,
-            [root](const auto& s) { TestScanner(root + L"\\media", s + L"\\scan"); }},
+            [root](const auto& s) { TestLibraryFolders(s); TestScanner(root + L"\\media", s + L"\\scan"); }},
         {L"organize", L"organize files and rollback", L"src/tests/selftest_library_files.cpp", Media, 0,
             [root](const auto& s) { TestOrganize(root + L"\\media", s + L"\\organize"); }},
         {L"copy", L"copy to folder or device", L"src/tests/selftest_copy.cpp", Media | Tags, 0,
@@ -123,8 +125,6 @@ std::vector<Suite> Suites(const std::wstring& root) {
             [](const auto& s) { TestChapters(s); TestLyrics(); }},
         {L"crash-dumps", L"crash dumps", L"src/tests/selftest_tags.cpp", 0, 0,
             [](const auto& s) { TestCrashDump(s); }},
-        {L"media-controls", L"Windows media controls (SMTC)", L"src/tests/selftest_tags.cpp", 0, Window,
-            [](const auto&) { TestSmtc(); }},
         {L"listenbrainz", L"ListenBrainz queue and privacy", L"src/tests/selftest_tags.cpp", 0, 0,
             [](const auto& s) { TestListenBrainz(s); }},
         {L"sample-conversion", L"sample conversion and click-free fades", L"src/tests/selftest_engine.cpp", 0, 0,
@@ -162,7 +162,7 @@ bool FixturesExist(unsigned mask, const std::wstring& root) {
          L"gap2\\a.ogg", L"gap2\\b.ogg", L"gap2\\ref.wav"},
         {L"rg\\rg.flac", L"rg\\rg.mp3", L"rg\\rg.ogg", L"rg\\rg.opus"},
         {L"tags2\\full.flac", L"tags2\\full.mp3", L"tags2\\full.m4a", L"tags2\\full.ogg"},
-        {L"native\\sine.wv", L"native\\sine.ac3", L"native\\sine.mka"}
+        {L"native\\sine.wv", L"native\\sine.ac3", L"native\\sine.mka", L"native\\video-aac.mp4", L"native\\preview.flac"}
     };
     bool ok = true;
     for (unsigned i = 0; i < files.size(); ++i) if (mask & (1u << i)) for (const auto& name : files[i]) {

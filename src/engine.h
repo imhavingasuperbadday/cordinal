@@ -56,7 +56,9 @@ public:
     bool Init(HWND notify, std::wstring& error, bool deferOutput = false);
     void Shutdown();
 
-    void Play(const PlayItem& item, double start = 0);
+    // `paused` opens the track at `start` without playing it: the first SetPaused(false) carries on
+    // from there, so a saved place can be restored without a sound.
+    void Play(const PlayItem& item, double start = 0, bool paused = false);
     // nullptr stops after `after`. Replacing a decoded-ahead next track preserves the current
     // song; samples already submitted to the output device cannot be recalled.
     void SetNext(unsigned long long after, const PlayItem* next);
@@ -75,7 +77,7 @@ public:
     void SetOutputDevice(const std::string& node);  // a PipeWire sink by node name; empty is the default
 #endif
     struct OutputInfo {
-        bool exclusive = false, bitPerfect = false, ready = false;
+        bool exclusive = false, bitPerfect = false, ready = false, waiting = false;
         unsigned rate = 0;
         int bits = 32;         // device sample format: 16, 24 or 32
         bool floatFormat = true;

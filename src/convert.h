@@ -59,6 +59,7 @@ struct ConvertResult {
     std::vector<ConvertDone> done;
     std::vector<std::pair<std::wstring, std::wstring>> failed;  // file -> what went wrong
     std::wstring log;     // the log written, or ""
+    std::wstring logError;  // why originals were kept: the undo log couldn't be written
     bool cancelled = false;
 };
 

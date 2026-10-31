@@ -196,6 +196,10 @@ void ApplyField(TagData& t, sv rawKey, const std::string& value, bool append, st
         t.compilation = (vstr == "1" || vstr == "TRUE" || vstr == "YES");
     }
     else if (key == "LYRICS" || key == "UNSYNCEDLYRICS" || key == "WM/LYRICS") { if (lyrics) *lyrics = value; }
+    else if (key == "MUSICBRAINZ_ALBUMID" || key == "MUSICBRAINZ_RELEASEID" || key == "MUSICBRAINZ ALBUM ID" ||
+             key == "MUSICBRAINZ RELEASE ID") t.musicBrainzRelease = value;
+    else if (key == "MUSICBRAINZ_RELEASEGROUPID" || key == "MUSICBRAINZ RELEASE GROUP ID")
+        t.musicBrainzReleaseGroup = value;
     else if (key == "FMPS_RATING") t.rating = value;
     else if (key == "FMPS_PLAYCOUNT") t.playCount = value;
     else if (key == "REPLAYGAIN_TRACK_GAIN") t.rgTrackGain = v;
@@ -845,6 +849,21 @@ struct Mp4Reader {
     uint32_t movieScale = 0;
     uint64_t movieDuration = 0;
     bool sawAudio = false;
+    std::vector<std::string> keys;  // mdta key names, indexed by an ilst item's numeric type
+
+    // ISO mdta metadata names its fields in a 'keys' box and refers to them by index, as iPhone
+    // and some QuickTime/ffmpeg files do instead of the ©nam/©ART atoms.
+    void Keys(sv c) {
+        if (c.size() < 8) return;
+        uint32_t count = BE32(c, 4);
+        size_t p = 8;
+        for (uint32_t i = 0; i < count && p + 8 <= c.size(); ++i) {
+            uint32_t len = BE32(c, p);
+            if (len < 8 || p + len > c.size()) break;
+            keys.emplace_back(Trim(std::string(c.substr(p + 8, len - 8))));
+            p += len;
+        }
+    }
 
     void Walk(sv b, int depth) {
         if (depth > 64) return;
@@ -864,6 +883,8 @@ struct Mp4Reader {
                 movieDuration = v1 ? BE64(c, 24) : BE32(c, 16);
             } else if (type == "trak") {
                 Track(c);
+            } else if (type == "keys") {
+                Keys(c);
             } else if (type == "udta" || type == "ilst") {
                 Walk(c, depth + 1);
             } else if (type == "meta") {
@@ -947,37 +968,48 @@ struct Mp4Reader {
             p += len;
         }
         if (data.empty() && type != "----") return;
-        std::string text(data);
-        if (type == "\xA9nam") t.title = text;
-        else if (type == "\xA9" "ART") t.artist = text;
-        else if (type == "\xA9" "alb") t.album = text;
-        else if (type == "aART") t.albumArtist = text;
-        else if (type == "\xA9" "day") t.date = text.substr(0, 10);
-        else if (type == "\xA9gen") t.genre = text;
-        else if (type == "\xA9" "wrt") t.composer = text;
-        else if (type == "\xA9" "cmt") t.comment = text;
-        else if (type == "\xA9" "grp") t.grouping = text;
-        else if (type == "\xA9" "lyr") { if (art.lyrics) *art.lyrics = text; }
-        else if (type == "gnre" && data.size() >= 2) t.genre = GenreFromId((int)BE16(data, 0) - 1);
-        else if (type == "trkn" && data.size() >= 4) {
+        // A data atom declares its text encoding: 2 is UTF-16BE (common in iPhone/QuickTime
+        // files), 1 is UTF-8, and 0 leaves it to the atom. Reading UTF-16 as raw bytes made every
+        // letter a separate NUL-separated byte, which the library showed as a spaced-out name.
+        std::string text = dataType == 2 ? Utf16ToUtf8(data, true) : std::string(data);
+        if (text.starts_with("\xEF\xBB\xBF")) text.erase(0, 3);
+        text = Trim(text);
+        std::string field(type);
+        if (type.size() == 4 && type[0] == 0 && type[1] == 0 && type[2] == 0) {
+            uint32_t index = ((uint32_t)U8(type, 0) << 24) | ((uint32_t)U8(type, 1) << 16) |
+                             ((uint32_t)U8(type, 2) << 8) | U8(type, 3);
+            if (index >= 1 && index <= keys.size()) field = keys[index - 1];
+        }
+        if (field == "\xA9nam" || field == "com.apple.quicktime.title") t.title = text;
+        else if (field == "\xA9" "ART" || field == "com.apple.quicktime.artist") t.artist = text;
+        else if (field == "\xA9" "alb" || field == "com.apple.quicktime.album") t.album = text;
+        else if (field == "aART" || field == "com.apple.quicktime.albumartist") t.albumArtist = text;
+        else if (field == "\xA9" "day" || field == "com.apple.quicktime.creationdate") t.date = text.substr(0, 10);
+        else if (field == "\xA9gen" || field == "com.apple.quicktime.genre") t.genre = text;
+        else if (field == "\xA9" "wrt" || field == "com.apple.quicktime.composer") t.composer = text;
+        else if (field == "\xA9" "cmt" || field == "com.apple.quicktime.comment" ||
+                 field == "com.apple.quicktime.description") t.comment = text;
+        else if (field == "\xA9" "grp") t.grouping = text;
+        else if (field == "\xA9" "lyr") { if (art.lyrics) *art.lyrics = text; }
+        else if (field == "gnre" && data.size() >= 2) t.genre = GenreFromId((int)BE16(data, 0) - 1);
+        else if (field == "trkn" && data.size() >= 4) {
             t.track = BE16(data, 2);
             if (data.size() >= 6) t.trackTotal = BE16(data, 4);
         }
-        else if (type == "disk" && data.size() >= 6) {
+        else if (field == "disk" && data.size() >= 6) {
             t.disc = BE16(data, 2);
             t.discTotal = BE16(data, 4);
         }
-        else if (type == "tmpo" && data.size() >= 2) t.bpm = BE16(data, 0);
-        else if (type == "cpil" && data.size() >= 1) t.compilation = (U8(data, 0) != 0);
-        else if (type == "covr") art.Offer(3, data);
-        else if (type == "----" && !name.empty()) ApplyField(t, name, Trim(text), false, art.lyrics);
-        (void)dataType;
+        else if (field == "tmpo" && data.size() >= 2) t.bpm = BE16(data, 0);
+        else if (field == "cpil" && data.size() >= 1) t.compilation = (U8(data, 0) != 0);
+        else if (field == "covr") art.Offer(3, data);
+        else if (field == "----" && !name.empty()) ApplyField(t, name, text, false, art.lyrics);
     }
 };
 
 bool ReadMp4(const File& f, TagData& t, ArtSink& art) {
     uint64_t pos = 0, size = f.Size();
-    bool any = false;
+    bool sawMoov = false;
     while (pos + 8 <= size) {
         std::string h = f.Read(pos, 16);
         uint64_t box = BE32(h, 0);
@@ -990,15 +1022,17 @@ bool ReadMp4(const File& f, TagData& t, ArtSink& art) {
             Mp4Reader r{t, art};
             r.Walk(moov, 0);
             if (r.movieScale && r.movieDuration) t.duration = (double)r.movieDuration / r.movieScale;
-            any = true;
-        } else if (h.compare(4, 4, "ftyp") == 0) {
-            any = true;
+            sawMoov = true;
         }
         pos += box;
     }
+    // A file cut off after its ftyp box used to count as a successful read with no tags, which
+    // then replaced good tags and was never retried. Only a moov (where the metadata lives)
+    // proves the file could be read.
+    if (!sawMoov) return false;
     if (t.duration > 0) t.bitrate = (uint32_t)(size * 8 / t.duration / 1000 + 0.5);
     if (t.codec == Codec::Unknown && t.video) t.codec = Codec::Video;
-    return any;
+    return true;
 }
 
 // ---------------------------------------------------------------------------

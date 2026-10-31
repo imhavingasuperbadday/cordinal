@@ -30,12 +30,27 @@ void LoadLibrarySettings() {
         if (bar > start) g.libraryFolders.push_back(all.substr(start, bar - start));
         start = bar + 1;
     }
+    // Watching the system Music folder is off by default. An earlier build added it on its own;
+    // a profile whose only folder is that folder and which never chose folders is returned to an
+    // empty list once, leaving the tracks and files in place. New profiles start empty.
+    if (!IniInt(L"Library", L"FoldersChosen", 0)) {
+        std::wstring music = MusicFolder();
+        if (g.libraryFolders.size() == 1 && !music.empty() &&
+            CompareStringOrdinal(g.libraryFolders[0].c_str(), -1, music.c_str(), -1, TRUE) == CSTR_EQUAL) {
+            g.libraryFolders.clear();
+            WritePrivateProfileStringW(L"Library", L"Folders", L"", g.iniPath.c_str());
+            if (g.message.empty())
+                g.message = L"Stopped watching the Music folder automatically; add it again in Library folders to keep it.";
+        }
+        WritePrivateProfileStringW(L"Library", L"FoldersChosen", L"1", g.iniPath.c_str());
+    }
 }
 
 void SaveLibrarySettings() {
     std::wstring all;
     for (auto& f : g.libraryFolders) all += (all.empty() ? L"" : L"|") + f;
     IniWrite(L"Library", L"Folders", all);
+    IniWrite(L"Library", L"FoldersChosen", L"1");
     FoobarFoldersChanged();
 }
 
@@ -73,6 +88,11 @@ struct ScopeScan {
     size_t added = 0, moved = 0, missing = 0;
     // Cached 0/1 values share the existing handle-to-uint32_t map implementation.
     std::unordered_map<StringPool::Handle, uint32_t> dirUnder;
+    // Library folders that are not readable right now (a drive letter changed, a NAS is off): tracks
+    // under them can be the files a new folder brings, so their stats follow them instead of
+    // leaving a duplicate library behind.
+    std::vector<std::wstring> unreachable;
+    std::unordered_map<StringPool::Handle, uint32_t> dirUnreachable;
 };
 // Live scans by scope (a root folder or one changed folder); entries exist only mid-listing.
 std::unordered_map<std::wstring, ScopeScan> g_scans;
@@ -94,10 +114,28 @@ bool Under(const std::wstring& scope, ScopeScan& st, const Track& t) {
     return it->second != 0;
 }
 
+// Whether a track lives under a configured library folder that can't be reached now.
+bool UnderUnreachable(ScopeScan& st, const Track& t) {
+    if (st.unreachable.empty()) return false;
+    auto [it, added] = st.dirUnreachable.try_emplace(t.dir, uint32_t(0));
+    if (added) {
+        std::wstring dir = g_lib.Str(t.dir);
+        for (const std::wstring& root : st.unreachable)
+            if (SameName(dir, root) || PathIsUnder(dir, root)) {
+                it->second = 1;
+                break;
+            }
+    }
+    return it->second != 0;
+}
+
 // A file that just entered the library: counted, and put in the Inbox when a later scan found
-// it and the Inbox is on. The caller applies the common file flags next.
+// it and the Inbox is on. The caller applies the common file flags next. A path the library
+// rejects (a malformed cue entry, an over-long name) is skipped: a scan must not index past the
+// end of the track store.
 TrackId AddScanned(ScopeScan& st, const ScanFile& f) {
     TrackId id = g_lib.Add(f.path);
+    if (id == kNone) return kNone;
     Track& t = g_lib[id];
     if (!(t.flags & (Track::kInLibrary | Track::kInbox | Track::kExcluded))) {
         ++st.added;
@@ -131,30 +169,36 @@ void FinishScope(const std::wstring& scope, ScopeScan& st) {
         for (TrackId id = 0; id < (TrackId)st.startCount; ++id) {
             const Track& t = g_lib[id];
             if (!(t.flags & (Track::kInLibrary | Track::kInbox)) || st.seen[id]) continue;
-            if ((t.flags & Track::kMissing) || (st.rootOk && Under(scope, st, t))) gone.emplace_back(t.fileSize ^ t.fileTime, id);
+            if ((t.flags & Track::kMissing) || (st.rootOk && Under(scope, st, t)) || UnderUnreachable(st, t))
+                gone.emplace_back(t.fileSize ^ t.fileTime, id);
         }
         std::vector<char>().swap(st.seen);
         SortRecords(gone.begin(), gone.end());
         for (ScanFile& f : st.pending) {
             TrackId id = kNone;
             uint64_t key = f.size ^ f.time;
+            std::pair<uint64_t, TrackId>* match = nullptr;
             auto it = std::lower_bound(gone.begin(), gone.end(), std::make_pair(key, TrackId(0)));
             for (; it != gone.end() && it->first == key; ++it) {
                 if (it->second == kNone) continue;
                 const Track& t = g_lib[it->second];
                 if (t.fileSize == f.size && t.fileTime == f.time && SameName(g_lib.Str(t.file), FileNameOf(f.path))) {
-                    id = it->second;
-                    it->second = kNone;
+                    match = &*it;
                     break;
                 }
             }
-            if (id != kNone) {
-                g_lib.Rename(id, f.path);
+            if (match && g_lib.Rename(match->second, f.path)) {
+                id = match->second;
+                match->second = kNone;
                 ++st.moved;
             } else {
-                id = AddScanned(st, f);
+                // The destination can already be indexed when another root or an import added it
+                // first. Use that record and let the old one stay in `gone`, so the file has one
+                // visible row instead of a live old row beside the new one.
+                id = g_lib.Find(f.path);
+                if (id == kNone) id = AddScanned(st, f);
             }
-            FoundScanned(st, id, f);
+            if (id != kNone) FoundScanned(st, id, f);
         }
         std::vector<ScanFile>().swap(st.pending);
         if (st.rootOk)
@@ -169,6 +213,7 @@ void FinishScope(const std::wstring& scope, ScopeScan& st) {
     }
     QueueTags(st.toRead);
     st.toRead.clear();
+    RequestAlbumGrouping();  // after the tag reads settle, not during the scan
     g_lib.Touch();
     g.dirty = true;
     UpdateInboxTab();
@@ -178,7 +223,9 @@ void FinishScope(const std::wstring& scope, ScopeScan& st) {
         lastChirp = GetTickCount64();
         PlaySfx(Sfx::NewFiles);
     }
-    if (!st.initial && (added || moved || missing)) {
+    if (!st.rootOk && st.initial) {
+        ShowMessage(L"Couldn't read " + scope + L"; its tracks were left as they were.");
+    } else if ((!st.initial && (added || moved)) || missing) {
         std::wstring msg = L"Library: ";
         if (added) msg += std::to_wstring(added) + (g.inboxEnabled ? L" new in the Inbox" : L" added");
         if (moved) msg += (added ? L", " : L"") + std::to_wstring(moved) + L" moved";
@@ -210,13 +257,16 @@ void OnScanResult(ScanResult* r, bool firstScanDone) {
         st.rootOk = r->rootOk;
         st.startCount = g_lib.Count();
         st.seen.assign(st.startCount, 0);
+        for (const std::wstring& root : g.libraryFolders)
+            if (GetFileAttributesW(root.c_str()) == INVALID_FILE_ATTRIBUTES) st.unreachable.push_back(root);
         // New files wait for the whole listing only when a track of this scope (or one already
-        // missing anywhere) could turn out to have moved. A fresh or unrelated library adds them
-        // as they arrive, so a first scan keeps only one chunk at a time in memory.
+        // missing anywhere, or under a library folder that isn't reachable now) could turn out to
+        // have moved. A fresh or unrelated library adds them as they arrive, so a first scan keeps
+        // only one chunk at a time in memory.
         for (TrackId id = 0; id < (TrackId)st.startCount && !st.deferNew; ++id) {
             const Track& t = g_lib[id];
             st.deferNew = (t.flags & (Track::kInLibrary | Track::kInbox)) &&
-                          ((t.flags & Track::kMissing) || (st.rootOk && Under(r->scope, st, t)));
+                          ((t.flags & Track::kMissing) || (st.rootOk && Under(r->scope, st, t)) || UnderUnreachable(st, t));
         }
     }
     st.rootOk = st.rootOk && r->rootOk;
@@ -227,7 +277,7 @@ void OnScanResult(ScanResult* r, bool firstScanDone) {
                 st.pending.push_back(f);
             } else {
                 TrackId addedId = AddScanned(st, f);
-                FoundScanned(st, addedId, f);
+                if (addedId != kNone) FoundScanned(st, addedId, f);
             }
             continue;
         }
@@ -291,8 +341,10 @@ void RemoveMissingTracks() {
         ShowMessage(L"No missing files in the library.");
         return;
     }
-    std::wstring q = std::to_wstring(missing.size()) + (missing.size() == 1 ? L" library file is" : L" library files are") +
-                     L" missing. Forget them, with their play counts and ratings?\n\nPlaylists keep their entries.";
+    std::wstring q = std::to_wstring(missing.size()) +
+                     (missing.size() == 1 ? L" library file is" : L" library files are") +
+                     L" missing. Forget them?\n\nThey leave your library; their play counts and ratings stay in "
+                     L"your listening history, and playlists keep their entries.";
     if (MessageBoxW(g.hwnd, q.c_str(), kAppName, MB_YESNO | MB_ICONQUESTION) != IDYES) return;
     for (TrackId id : missing) g_lib[id].flags &= ~(Track::kInLibrary | Track::kInbox);
     g_lib.Touch();
@@ -309,6 +361,14 @@ struct FoldersControls {
     HWND list = nullptr, add = nullptr, music = nullptr, remove = nullptr, rescan = nullptr, hint = nullptr;
 } g_fc;
 bool g_foldersChanged = false;
+
+// Add and Remove apply at once, so a folder starts scanning while its window is still open.
+void ApplyLibraryFolderChanges() {
+    if (!g_foldersChanged) return;
+    g_foldersChanged = false;
+    SaveLibrarySettings();
+    StartScanner();
+}
 
 void FoldersFill() {
     SendMessageW(g_fc.list, LB_RESETCONTENT, 0, 0);
@@ -370,6 +430,7 @@ void AddLibraryFolder() {
         AddLibraryFolderPath(std::move(p));
     }
     FoldersFill();
+    ApplyLibraryFolderChanges();
 }
 
 void RemoveLibraryFolder() {
@@ -382,7 +443,8 @@ void RemoveLibraryFolder() {
             inside.push_back(id);
     if (!inside.empty()) {
         std::wstring q = L"Also remove its " + std::to_wstring(inside.size()) +
-                         L" tracks from the library?\n\nYes: they leave the library (the files stay on disk).\n"
+                         L" tracks from the library?\n\nYes: they leave the library (the files stay on disk, and "
+                         L"playlists keep their entries).\n"
                          L"No: they stay in the library but the folder is no longer watched.";
         int answer = MessageBoxW(g.foldersWnd, q.c_str(), kAppName, MB_YESNOCANCEL | MB_ICONQUESTION);
         if (answer == IDCANCEL) return;
@@ -395,6 +457,7 @@ void RemoveLibraryFolder() {
     g.libraryFolders.erase(g.libraryFolders.begin() + sel);
     g_foldersChanged = true;
     FoldersFill();
+    ApplyLibraryFolderChanges();
 }
 
 LRESULT CALLBACK FoldersProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -412,7 +475,7 @@ LRESULT CALLBACK FoldersProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             g_fc.music = make(0, WC_BUTTONW, L"Add &Music folder", BS_PUSHBUTTON | WS_TABSTOP, IDC_FOLDERS_MUSIC);
             g_fc.remove = make(0, WC_BUTTONW, L"&Remove", BS_PUSHBUTTON | WS_TABSTOP, IDC_FOLDERS_REMOVE);
             g_fc.rescan = make(0, WC_BUTTONW, L"Re&scan now", BS_PUSHBUTTON | WS_TABSTOP, IDC_FOLDERS_RESCAN);
-            g_fc.hint = make(0, WC_STATICW, L"Folders are watched while cordinal runs.",
+            g_fc.hint = make(0, WC_STATICW, L"Folders and their subfolders are watched while cordinal runs.",
                              SS_LEFT | SS_ENDELLIPSIS | SS_NOPREFIX, IDC_FOLDERS_HINT);
             for (HWND c : {g_fc.list, g_fc.add, g_fc.music, g_fc.remove, g_fc.rescan}) ApplyControlTheme(c, g.dark);
             ApplyWindowTheme(h, P());
@@ -437,16 +500,14 @@ LRESULT CALLBACK FoldersProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_COMMAND:
             switch (LOWORD(wp)) {
                 case IDC_FOLDERS_ADD: AddLibraryFolder(); break;
-                case IDC_FOLDERS_MUSIC: AddLibraryFolderPath(MusicFolder()); break;
+                case IDC_FOLDERS_MUSIC:
+                    AddLibraryFolderPath(MusicFolder());
+                    ApplyLibraryFolderChanges();
+                    break;
                 case IDC_FOLDERS_REMOVE: RemoveLibraryFolder(); break;
                 case IDC_FOLDERS_RESCAN:
-                    if (g_foldersChanged) {
-                        g_foldersChanged = false;
-                        SaveLibrarySettings();
-                        StartScanner();
-                    } else {
-                        g.scanner.RescanAll();
-                    }
+                    if (g_foldersChanged) ApplyLibraryFolderChanges();
+                    else g.scanner.RescanAll();
                     break;
                 case IDC_FOLDERS_LIST:
                     if (HIWORD(wp) == LBN_SELCHANGE) EnableWindow(g_fc.remove, TRUE);
@@ -457,10 +518,7 @@ LRESULT CALLBACK FoldersProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == VK_ESCAPE) DestroyWindow(h);
             return 0;
         case WM_DESTROY:
-            if (g_foldersChanged) {
-                SaveLibrarySettings();
-                StartScanner();
-            }
+            ApplyLibraryFolderChanges();
             g.foldersWnd = nullptr;
             RebuildView();
             return 0;

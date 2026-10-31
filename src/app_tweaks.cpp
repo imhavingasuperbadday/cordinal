@@ -5,6 +5,8 @@
 // change does. Pages also link to the windows that hold the rest of their area's settings.
 #include "app.h"
 
+#include "musicbrainz.h"
+
 namespace app {
 
 namespace {
@@ -29,6 +31,14 @@ const Tweak kTweaks[] = {
     {"playback.resume", L"Player", L"ResumeOn", L"Resume where you left off",
      L"When cordinal starts, offer to continue the track that was playing when it closed.", TweakType::Bool, 0, 1, 1,
      [] { return (double)g.resumeOn; }, [](double v) { g.resumeOn = v != 0; }, IDM_RESUME},
+    {"playback.resume_in_song", L"Player", L"ResumeInSong", L"Reopen in the last song",
+     L"Cordinal starts with the last track loaded and paused at the point it stopped, instead of waiting for Continue.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)g.resumeInSong; }, [](double v) { g.resumeInSong = v != 0; }, 0,
+     [] { ReopenLastTrack(); }},
+    {"playback.resume_play", L"Player", L"ResumePlay", L"Start it playing on open",
+     L"The track reopened from the last session starts playing as soon as cordinal opens, instead of waiting paused.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)g.resumePlay; }, [](double v) { g.resumePlay = v != 0; }, 0,
+     [] { ReopenLastTrack(); }},
     {"playback.time_remaining", L"Player", L"TimeRemaining", L"Show the time remaining",
      L"The time beside the seek bar counts down to the end of the track instead of up from its start.",
      TweakType::Bool, 0, 1, 1, [] { return (double)g.timeRemaining; }, [](double v) { g.timeRemaining = v != 0; }, 0,
@@ -156,6 +166,12 @@ const Tweak kTweaks[] = {
      TweakType::Choice, 0, 1, 0, [] { return (double)g.inboxEnabled; }, [](double v) { g.inboxEnabled = v != 0; },
      0, [] { ShowMessage(g.inboxEnabled ? L"New music will wait in the Inbox." : L"New music will be added to the library."); },
      kNewMusicNames},
+    {"library.musicbrainz", L"Library", L"MusicBrainz", L"Look up missing album editions online",
+     L"Asks MusicBrainz for a release-group id when two local albums share an artist and base title and their tags "
+     L"carry none. Results are cached; browsing and playback never wait for or require the network.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)g.musicBrainzLookup; },
+     [](double v) { g.musicBrainzLookup = v != 0; musicbrainz::SetEnabled(g.musicBrainzLookup); }, 0,
+     [] { musicbrainz::SetEnabled(g.musicBrainzLookup); }},
     {"library.explorer_menu", L"Explorer", L"FolderMenu", L"Play folders from Explorer",
      L"Right-clicking a folder offers Play with cordinal and Add to cordinal; a folder plays its tracks like a "
      L"command line does.", TweakType::Bool, 0, 1, 1, [] { return (double)g.explorerMenu; },

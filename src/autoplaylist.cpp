@@ -436,9 +436,19 @@ void EvaluateAutoPlaylist(const AutoPlaylist& a, const Library& library, const s
     }
     if (a.limit) {
         if (a.unit == LimitUnit::Minutes) {
-            double budget = a.limit * 60.0, used = 0;
+            // Filling a card, like the byte limits: a track that would pass the budget is skipped so
+            // shorter ones later still fill it. Stopping at the first long track left a list empty
+            // when the first random pick happened to be an hour long.
+            const double budget = a.limit * 60.0;
+            double used = 0;
             size_t n = 0;
-            while (n < out.size() && used + library[out[n]].Duration() <= budget) used += library[out[n++]].Duration();
+            for (TrackId id : out) {
+                const double duration = library[id].Duration();
+                if (used + duration <= budget) {
+                    used += duration;
+                    out[n++] = id;
+                }
+            }
             out.resize(n);
         } else if (a.unit != LimitUnit::Tracks) {
             // Filling a card: a big file that doesn't fit is skipped so smaller ones fill the rest.

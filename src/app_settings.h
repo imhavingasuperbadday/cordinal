@@ -11,7 +11,9 @@ void SaveLibraryNow();
 // restores it when it is newer than library.cdb, and the next successful save removes it.
 std::wstring UnsavedLibraryPath();
 bool KeepUnsavedLibrary();
-bool RestoreUnsavedLibrary();
+// `kept` names the copy set aside when the recovery file itself can't be read, so the caller can
+// tell the user rather than starting a silently empty library.
+bool RestoreUnsavedLibrary(std::wstring* kept = nullptr);
 // Saves everything at close, falling back to library.cdb.unsaved. When neither can be written, asks
 // whether to try again, save a copy elsewhere, or quit without it; returns once the user has chosen.
 void SaveBeforeClose();

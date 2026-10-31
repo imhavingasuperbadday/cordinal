@@ -2,6 +2,7 @@
 // build's app_browser.cpp and libview.cpp: Tracks, Albums & Tracks, Albums and Artists, and the
 // Genre | Album artist | Album browser over them.
 #pragma once
+#include "album_editions.h"
 #include "app.h"
 #include "draw.h"
 
@@ -40,6 +41,11 @@ void CanvasWheel(const Rect& area, float dy, bool ctrl);
 bool CanvasKey(const SDL_KeyboardEvent& e);  // false for keys the window handles itself
 void CanvasSelectAll();
 bool CanvasWantsHand(const Rect& area, float x, float y);  // over a play button or stars
+// Album editions: selected album tiles for manual grouping, the open/focused group, and a
+// session-local edition choice (playback never substitutes another edition's files).
+std::vector<AlbumSelection> CanvasSelectedAlbums();
+bool CanvasFocusedEdition(uint32_t& group, uint32_t& edition);
+void CanvasChooseEdition(uint32_t group, uint32_t edition);
 
 // ui.cpp, shared with the views.
 void DrawAlbumCover(TrackId first, StringPool::Handle album, const std::wstring& title, const Rect& r, const Palette& p);

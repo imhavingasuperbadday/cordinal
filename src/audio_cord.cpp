@@ -50,6 +50,7 @@ public:
     size_t Read(float* out, size_t frames) override;
     size_t ReadExact(int32_t* out, size_t frames);
     bool Seek(double seconds) override;
+    bool FastSeek() const override { return true; }
     double Duration() const override { return (double)info_.frames / info_.rate; }
     unsigned Rate() const override { return info_.rate; }
     bool Failed() const override { return failed_; }

@@ -58,6 +58,7 @@ public:
     bool Open(const std::wstring& path);
     size_t Read(float* out, size_t frames) override;
     bool Seek(double seconds) override;
+    bool FastSeek() const override { return true; }
     double Duration() const override { return (double)total_ / rate_; }
     unsigned Rate() const override { return rate_; }
     bool Failed() const override { return failed_; }

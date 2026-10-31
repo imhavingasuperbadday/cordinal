@@ -10,6 +10,8 @@
 #include <wincodec.h>
 #include <wrl/client.h>
 
+#include <algorithm>
+
 using Microsoft::WRL::ComPtr;
 
 namespace {
@@ -62,6 +64,38 @@ bool LoadJpeg(const std::wstring& file, int size, ArtImage& out) {
            DecodeImage(s.Get(), size, out);
 }
 
+// Every cover is cached at every size it was drawn at, so months of browsing can leave thousands
+// of entries for files that moved or were deleted. Keep the newest under a fixed disk budget.
+constexpr uint64_t kCacheLimit = 64ull << 20;
+
+struct CacheEntry {
+    std::wstring file;
+    uint64_t size;
+    FILETIME written;
+};
+
+void PruneCache(const std::wstring& dir) {
+    std::vector<CacheEntry> entries;
+    uint64_t total = 0;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"\\*.jpg").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        uint64_t size = (uint64_t)fd.nFileSizeHigh << 32 | fd.nFileSizeLow;
+        entries.push_back({dir + L"\\" + fd.cFileName, size, fd.ftLastWriteTime});
+        total += size;
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    if (total <= kCacheLimit) return;
+    std::sort(entries.begin(), entries.end(), [](const CacheEntry& a, const CacheEntry& b) {
+        return CompareFileTime(&a.written, &b.written) < 0;
+    });
+    for (const CacheEntry& e : entries) {
+        if (total <= kCacheLimit) break;
+        if (DeleteFileW(e.file.c_str())) total -= e.size;
+    }
+}
+
 }  // namespace
 
 // FNV-1a over the lowercased path, mixed with the file time so a changed file gets a new key.
@@ -86,6 +120,8 @@ void ThumbLoader::Start(HWND notify, UINT msg, std::wstring cacheDir, int thread
     msg_ = msg;
     dir_ = std::move(cacheDir);
     SHCreateDirectoryExW(nullptr, dir_.c_str(), nullptr);
+    PruneCache(dir_);
+    savedSincePrune_ = 0;
     quit_ = false;
     pendingLimit_ = reducedMemory ? 64 : 128;
     readyLimit_ = reducedMemory ? 1 : 2;
@@ -127,13 +163,17 @@ void ThumbLoader::Request(uint64_t key, const std::wstring& mediaPath, int size)
 // again after eviction.
 std::unique_ptr<ThumbResult> ThumbLoader::TakeResult() {
     std::unique_ptr<ThumbResult> result;
+    bool prune = false;
     {
         std::lock_guard<std::mutex> lock(mx_);
         if (results_.empty()) return {};
         result = std::move(results_.front());
         results_.pop_front();
         active_.erase({result->key, result->size});
+        prune = ++savedSincePrune_ >= 256;  // a long session can browse past the cache budget
+        if (prune) savedSincePrune_ = 0;
     }
+    if (prune) PruneCache(dir_);
     cv_.notify_all();
     return result;
 }

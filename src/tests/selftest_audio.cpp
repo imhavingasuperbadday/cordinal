@@ -76,7 +76,7 @@ void TestGapless(const std::wstring& dir) {
             if (snr > best) { best = snr; bestLag = lag; }
         }
         size_t seam = a.size() / 2;
-        double seamSnr = err(bestLag, seam - 2048, seam + 2048), bodySnr = err(bestLag, 30000, 90000);
+        double seamSnr = err(bestLag, seam - 2048, seam + 2048), bodySnr = err(bestLag, 20000, 60000);
         // Lossy codecs smear their own file edges, so compare the seam with FFmpeg's decode of
         // the same two files: matching it means the trimming is right.
         double vsReference = 999;
@@ -102,7 +102,7 @@ void TestGapless(const std::wstring& dir) {
             };
             // Different decoders (Media Foundation vs FFmpeg AAC) differ slightly everywhere;
             // the seam must agree as well as the inside of a track does.
-            vsReference = agree(seam - 2048, seam + 2048) - std::min(agree(30000, 90000), 60.0) + 60;
+            vsReference = agree(seam - 2048, seam + 2048) - std::min(agree(20000, 60000), 60.0) + 60;
         }
         bool lossless = std::wstring(ext) == L"flac";
         // Media Foundation's AAC decoder rebuilds part of the first block after the priming
@@ -671,12 +671,12 @@ void TestCue(const std::wstring& media, const std::wstring& scratch) {
                    listed(SubtrackPath(album + L"\\Binary.flac", 1)) && !listed(album + L"\\Ramp.wav") &&
                    !listed(album + L"\\Swap.flac") && !listed(album + L"\\Embedded.flac") && !listed(album + L"\\Binary.flac") &&
                    !listed(album + L"\\Third.flac");
-    Check(scanned, L"CUE scanner: %zu entries, covered audio listed only as tracks, plain files as themselves", scan.size());
     uint64_t wavSize = ReadTestBytes(ramp).size();
     bool scanSize = std::any_of(scan.begin(), scan.end(), [&](const ScanFile& f) {
         return f.path == SubtrackPath(ramp, 1) && f.size == wavSize;
     });
-    Check(scanSize, L"CUE scanner: a track carries its file's size");
+    Check(scanned && scanSize, L"CUE scanner: %zu entries, covered audio listed only as tracks carrying their "
+          L"file's size, plain files as themselves", scan.size());
 
     // Decoding each range matches the same slice of the whole file.
     auto slice = [](const std::vector<float>& whole, unsigned rate, double start, double end, const std::vector<float>& got) {

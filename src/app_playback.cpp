@@ -5,6 +5,7 @@
 #include "app.h"
 #include "cue.h"
 #include "game_music.h"
+#include "peaks.h"
 #include "playlog.h"
 
 namespace app {
@@ -241,6 +242,7 @@ unsigned long long QueuedToken(unsigned long long fromToken) {
 void AnswerNext(unsigned long long token) {
     if (g.stopAfterCurrent && (token == g.playingToken || g.playingToken == 0)) {
         g.engine.SetNext(token, nullptr);
+        PrefetchWaveform(kNone);
         return;
     }
     // The queue comes first. It's only popped when the track starts, so re-answering (after the
@@ -249,17 +251,20 @@ void AnswerNext(unsigned long long token) {
         unsigned long long next = QueuedToken(token);
         PlayItem item = MakeItem(next, g.queue.front());
         g.engine.SetNext(token, &item);
+        PrefetchWaveform(g.queue.front());
         return;
     }
     int pl = 0;
     int k = ComputeNext(token, false, pl);
     if (k < 0) {
         g.engine.SetNext(token, nullptr);
+        PrefetchWaveform(kNone);
         return;
     }
     TrackId id = g.playlists[pl].items[k];
     PlayItem item = MakeItem(NewToken(id, pl, (uint32_t)k), id);
     g.engine.SetNext(token, &item);
+    PrefetchWaveform(id);
 }
 
 // Re-answers the pending "what comes next" after the order or playlist changed.
@@ -327,7 +332,7 @@ int QueuePosition(TrackId id) {
 }
 
 // Plays `items` (an album, a selection) from `index`, through Now Playing.
-void PlayList(const std::vector<TrackId>& items, int index) {
+void PlayList(const std::vector<TrackId>& items, int index, double start, bool paused) {
     if (items.empty()) return;
     int np = FindPlaylist(PlaylistKind::NowPlaying);
     if (np < 0) {
@@ -340,13 +345,13 @@ void PlayList(const std::vector<TrackId>& items, int index) {
     g.shuffleStarted = false;
     g.dirty = true;
     if (g.active == np) RebuildView();
-    PlayTrack(np, std::clamp(index, 0, (int)items.size() - 1), true);
+    PlayTrack(np, std::clamp(index, 0, (int)items.size() - 1), true, start, paused);
 }
 
 // Starts `index` of playlist `pl`. A view is snapshotted into Now Playing first, so later edits to
 // the view can't change what plays. `remember` pushes the outgoing track onto the history that
-// Previous uses in Shuffle.
-void PlayTrack(int pl, int index, bool remember) {
+// Previous uses in Shuffle. `start` and `paused` open it at a place, waiting to be played.
+void PlayTrack(int pl, int index, bool remember, double start, bool paused) {
     if (pl < 0 || pl >= (int)g.playlists.size()) return;
     if (index < 0 || index >= (int)g.playlists[pl].items.size()) return;
     RadioCancelPlayback();
@@ -363,7 +368,8 @@ void PlayTrack(int pl, int index, bool remember) {
     g.firstValidToken = token;
     g.consecutiveErrors = 0;
     g.decodingToken = token;
-    g.engine.Play(MakeItem(token, id));
+    PrepareWaveform(id);
+    g.engine.Play(MakeItem(token, id), start, paused);
 }
 
 // A header row plays its album from the top.
@@ -385,6 +391,7 @@ void PlayFocusedOrFirst() {
 
 void Stop() {
     RadioCancelPlayback();
+    CancelPeaks();
     if (g.playing != kNone && g.resumeOn) {
         g.resumeTrack = g.playing;
         g.resumePl = g.playingPl;
@@ -414,6 +421,7 @@ void Next() {
         unsigned long long token = QueuedToken(g.playingToken);
         g.firstValidToken = token;
         g.decodingToken = token;
+        PrepareWaveform(g.queue.front());
         g.engine.Play(MakeItem(token, g.queue.front()));
         return;
     }
@@ -462,6 +470,36 @@ bool Resume() {
     g.resumeToken = pos > 1 && pos < g_lib[id].Duration() - 2 ? g.decodingToken : 0;
     g.resumePos = pos;
     return true;
+}
+
+// Reopens the last session's track as Preferences asks: loaded and paused where it stopped, or
+// playing from there. Both choices need Resume where you left off on. Runs at startup, and when
+// those choices change while the stopped track is still waiting, so a change shows what it does.
+void ReopenLastTrack() {
+    if (!g.resumeOn || g.playing != kNone || (!g.resumeInSong && !g.resumePlay)) return;
+    TrackId id = g.resumeTrack;
+    if (id == kNone || id >= g_lib.Count()) return;
+    double pos = g.resumePos, duration = g_lib[id].Duration();
+    if (pos <= 1 || (duration > 0 && pos >= duration - 2)) pos = 0;
+    bool paused = !g.resumePlay;
+    int pl = g.resumePl, k = IndexIn(pl, id);
+    if (k < 0) {
+        pl = FindPlaylist(PlaylistKind::NowPlaying);
+        k = IndexIn(pl, id);
+    }
+    if (k >= 0) PlayTrack(pl, k, false, pos, paused);
+    else PlayList({id}, 0, pos, paused);
+    if (!paused) return;  // TrackStarted announces it once it is heard
+    // The engine announces a track only after a sample of it has been heard, and a paused one never
+    // gets that far, so adopt it here: it is the current song, waiting at the place it stopped.
+    g.playing = id;
+    g.playingToken = g.decodingToken;
+    auto info = g.tokens.find(g.decodingToken);
+    g.playingPl = info != g.tokens.end() ? info->second.pl : pl;
+    g.resumeTrack = kNone;
+    InvalidateRect(g.list, nullptr, FALSE);
+    LibViewInvalidate();
+    InvalidateRect(g.tabs, nullptr, FALSE);
 }
 
 // Stopped with nothing selected, Play continues where playback stopped.
@@ -765,9 +803,19 @@ void UpdateStatus() {
         // track a helper program decodes says so, and claims no bit-perfect path: cordinal hasn't
         // checked that program's decoding as it checks its own.
         Engine::OutputInfo o = g.engine.Output();
+        // A lost device (unplugged headphones, a Bluetooth speaker that went away) freezes the
+        // clock while the output thread retries. Say so instead of looking like a stuck player.
+        static bool waitedForDevice = false;
+        if (o.waiting != waitedForDevice) {
+            waitedForDevice = o.waiting;
+            ShowMessage(o.waiting ? L"No audio output device; waiting for it to come back."
+                                  : L"Audio output is back.");
+        }
         const std::wstring helper = active ? HelperDecoding(g.playing) : L"";
         wchar_t out[96];
-        if (!o.ready)
+        if (o.waiting)
+            swprintf_s(out, L"No audio output; waiting");
+        else if (!o.ready)
             swprintf_s(out, L"%ls (idle)", g.exclusive ? L"Exclusive" : L"Shared");
         else if (o.exclusive)
             swprintf_s(out, L"Exclusive %g kHz %d-bit%ls%ls", o.rate / 1000.0, o.bits, o.floatFormat ? L" float" : L"",
@@ -1015,6 +1063,18 @@ void OnEngineEvent(EngineEvent e, unsigned long long token) {
             std::wstring msg = std::move(problem);
             if (it != g.tokens.end()) g_lib[it->second.id].flags |= Track::kFailed;
             ShowMessage(msg.empty() ? L"Couldn't play the file." : msg);
+            // A track adopted for a paused reopen never became audible: it is not playing, so the
+            // Continue offer comes back for it instead of a dead pause.
+            if (g.playing != kNone && token == g.playingToken && g.engine.Paused()) {
+                g.playing = kNone;
+                g.playingToken = 0;
+                g.playingPl = -1;
+                g.resumeTrack = it != g.tokens.end() ? it->second.id : kNone;
+                g.resumePl = it != g.tokens.end() ? it->second.pl : -1;
+                g.resumePos = 0;  // the file couldn't be opened, so there is no place to continue from
+                UpdateNowPlaying();
+                UpdateStatus();
+            }
             InvalidateRect(g.list, nullptr, FALSE);
             LibViewInvalidate();
             int total = it != g.tokens.end() && it->second.pl >= 0 ? (int)g.playlists[it->second.pl].items.size() : 1;

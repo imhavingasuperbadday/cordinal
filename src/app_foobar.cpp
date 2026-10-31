@@ -750,7 +750,9 @@ void DrawFoobarHeader(HDC dc, int group, RECT rc) {
     const TrackGroup& gr = g.groups[group];
     FillSolid(dc, rc, WindowBg());
     std::wstring year = gr.date ? g_lib.Str(gr.date).substr(0, 4) : L"";
+    std::wstring edition = TrackEditionLabel(Active().items[g.view[gr.firstView]]);
     std::wstring text = StrOr(gr.artist, L"?") + L" - " + (year.empty() ? L"" : L"[" + year + L"] ") + StrOr(gr.album, L"?");
+    if (!edition.empty()) text += L"  \x00B7  " + edition;
     RECT client;
     GetClientRect(g.list, &client);
     RECT tr{rc.left + S(4), rc.top, std::min(rc.right, client.right) - S(4), rc.bottom};

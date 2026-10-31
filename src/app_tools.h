@@ -46,10 +46,13 @@ bool TagWriterRetainsTracks();
 std::wstring TagWriteStatus();
 void OnTagWriteMessage(WPARAM wp, LPARAM lp);
 void FlushDeferredTags();
+// Shutdown only, after the engine has stopped: writes edits that waited for a playing file.
+bool FlushDeferredTagWrites(std::wstring& error);
 void StopTagWriter();
 void AnnouncePoints(const PointsAward& a);
 void ShowToast(const std::wstring& title, const std::wstring& body);
-bool SubmitTagWrites(const std::vector<std::pair<TrackId, TagEdit>>& items, bool announce, bool undoable);
+bool SubmitTagWrites(const std::vector<std::pair<TrackId, TagEdit>>& items, bool announce, bool undoable,
+                     std::wstring journalAfter = {});
 void BuildRows();
 std::vector<std::wstring> PickPaths(bool folders);
 void ImportPlaylistFile();

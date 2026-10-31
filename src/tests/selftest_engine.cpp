@@ -454,8 +454,8 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
         return -1;
     };
     double s1 = at(EngineEvent::TrackStarted, 1), s2 = at(EngineEvent::TrackStarted, 2), end = at(EngineEvent::Ended, 0);
-    Check(s1 >= 0 && s2 > 0 && end > 0 && std::fabs((s2 - s1) - 2.5) < 0.15 && std::fabs((end - s1) - 6.0) < 0.2,
-          L"ENGINE gapless a.flac -> b.flac: started %.2fs, switched after %.2fs (expect 2.50), ended after %.2fs (expect 6.00)",
+    Check(s1 >= 0 && s2 > 0 && end > 0 && std::fabs((s2 - s1) - 1.5) < 0.15 && std::fabs((end - s1) - 4.0) < 0.2,
+          L"ENGINE gapless a.flac -> b.flac: started %.2fs, switched after %.2fs (expect 1.50), ended after %.2fs (expect 4.00)",
           s1, s2 - s1, end - s1);
     Pump(350);
     auto endedEvent = std::find_if(ev.list.begin(), ev.list.end(), [](const auto& e) { return e.first == EngineEvent::Ended; });
@@ -505,7 +505,7 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
         nextChanges.Add(ahead && level > 1e-7 && lowest > level * (change.tempo == 1 ? 0.8 : 0.1) &&
                             std::fabs(advanced - elapsed * change.tempo) < 0.12 &&
                             first > 0 && changedTo > first &&
-                            std::fabs(changedTo - first - 2.5 / change.tempo) < 0.18 && noOldTrack,
+                            std::fabs(changedTo - first - 1.5 / change.tempo) < 0.18 && noOldTrack,
                         std::wstring(stop ? L"stop after current" : L"replace next") +
                             L" at " + std::to_wstring(change.tempo) + L"x tempo" +
                             L" (advanced " + std::to_wstring(advanced) + L" in " + std::to_wstring(elapsed) +
@@ -602,10 +602,10 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
     for (int i = 0; i < 8; ++i) {
         Pump(100);
         double p = engine.Position();
-        sectionOk &= p >= 0.5 && p < 0.75 && std::fabs(engine.Duration() - 2.5) < 0.001;
+        sectionOk &= p >= 0.5 && p < 0.75 && std::fabs(engine.Duration() - 1.5) < 0.001;
     }
     sectionOk &= std::none_of(ev.list.begin(), ev.list.end(), [](const auto& e) { return e.first == EngineEvent::Ended; });
-    engine.Seek(2.0);
+    engine.Seek(1.2);
     Pump(100);
     Check(sectionOk && engine.Position() >= 0.5 && engine.Position() < 0.75,
           L"ENGINE section repeats without ending and keeps the playhead and seeks within its marks");
@@ -626,7 +626,7 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
     Pump(100);
 
     // Tempo and then speed at 2x, chosen while a track plays as the menu does: the position runs at
-    // twice the clock in each track's own time, and the gapless b.flac (3.5 s) lasts half as long. The
+    // twice the clock in each track's own time, and the gapless b.flac (2.5 s) lasts half as long. The
     // slope is measured once the change is heard, so neither start-up nor the re-time counts.
     testlog::Cases rates;
     for (bool speed : {false, true}) {
@@ -636,12 +636,14 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
         Pump(3000, [&] { return engine.Position() > 0.05; });
         if (speed) engine.SetSpeed(2.0);
         else engine.SetTempo(2.0);
+        // Let the retime settle, then measure the steady rate; b.flac proves it over a complete
+        // gapless track (2.5 s at 1x, 1.25 s at 2x).
         Pump(400);
         LARGE_INTEGER frequency, first, last;
         QueryPerformanceFrequency(&frequency);
         QueryPerformanceCounter(&first);
         const double from = engine.Position();
-        Pump(800);
+        Pump(200);
         QueryPerformanceCounter(&last);
         const double slope = (engine.Position() - from) / ((last.QuadPart - first.QuadPart) / (double)frequency.QuadPart);
         Pump(6000, [&] { return !ev.list.empty() && ev.list.back().first == EngineEvent::Ended; });
@@ -649,13 +651,13 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
         const double second = at(EngineEvent::TrackStarted, 2), ended = at(EngineEvent::Ended, 0);
         wchar_t detail[96];
         swprintf_s(detail, L"%ls runs at %.2fx, b.flac for %.2f s", speed ? L"speed" : L"tempo", slope, ended - second);
-        rates.Add(second > 0 && std::fabs((ended - second) - 1.75) < 0.15 && std::fabs(slope - 2) < 0.1, detail);
+        rates.Add(second > 0 && std::fabs((ended - second) - 1.25) < 0.15 && std::fabs(slope - 2) < 0.1, detail);
         engine.SetSpeed(1);
         engine.SetTempo(1);
         engine.Stop();
         Pump(200);
     }
-    Check(rates.Passed(), L"ENGINE at 2x speed and 2x tempo track time runs at twice the clock and b.flac plays for 1.75 s%ls",
+    Check(rates.Passed(), L"ENGINE at 2x speed and 2x tempo track time runs at twice the clock and b.flac plays for 1.25 s%ls",
           rates.failed.c_str());
 
     // An empty range reaches EOF without presenting any audio to the device. A marker at the
@@ -828,6 +830,65 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
             }
             Check(controls.Passed(), L"SHUFFLE, REPEAT, skip-aware shuffle and radio leave the playing audio unchanged%ls",
                   controls.failed.c_str());
+            // Preferences: cordinal can open with the last session's song loaded, paused where it
+            // stopped, or playing from there; neither starts at the beginning of the track.
+            {
+                const bool wasResumeOn = g.resumeOn, wasInSong = g.resumeInSong, wasPlay = g.resumePlay;
+                const TrackId wasResumeTrack = g.resumeTrack, wasPlaying = g.playing;
+                const int wasResumePl = g.resumePl, wasPlayingPl = g.playingPl;
+                const double wasResumePos = g.resumePos;
+                const auto wasPlayingToken = g.playingToken, wasDecodingToken = g.decodingToken;
+                auto silence = [&] {
+                    g.engine.Stop();
+                    Pump(250);
+                    g.playing = kNone;
+                    g.playingToken = g.decodingToken = 0;
+                    g.playingPl = -1;
+                };
+                silence();
+                g.resumeOn = true;
+                g.resumeInSong = true;
+                g.resumePlay = false;
+                g.resumeTrack = id;
+                g.resumePl = 0;
+                g.resumePos = 3;
+                ReopenLastTrack();
+                Pump(3000, [&] { return g.engine.Position() > 2.9; });
+                const double openedAt = g.engine.Position();
+                const bool waited = g.playing == id && g.engine.Paused() && std::fabs(openedAt - 3) < 0.06;
+                Pump(500);
+                const double stayedAt = g.engine.Position();
+                const bool stayed = std::fabs(stayedAt - 3) < 0.06;
+                TogglePause();
+                Pump(3000, [&] { return g.engine.Position() > 3.3; });
+                const double carriedTo = g.engine.Position();
+                const bool carriedOn = waited && !g.engine.Paused() && carriedTo > 3.2;
+                silence();
+                g.resumeInSong = false;
+                g.resumePlay = true;
+                g.resumeTrack = id;
+                g.resumePl = 0;
+                g.resumePos = 3;
+                ReopenLastTrack();
+                Pump(3000, [&] { return g.engine.Position() > 3.2; });
+                const double playedTo = g.engine.Position();
+                const bool played = !g.engine.Paused() && playedTo > 3.2;
+                silence();
+                g.resumeOn = wasResumeOn;
+                g.resumeInSong = wasInSong;
+                g.resumePlay = wasPlay;
+                g.resumeTrack = wasResumeTrack;
+                g.resumePl = wasResumePl;
+                g.resumePos = wasResumePos;
+                g.playing = wasPlaying;
+                g.playingPl = wasPlayingPl;
+                g.playingToken = wasPlayingToken;
+                g.decodingToken = wasDecodingToken;
+                Check(waited && stayed && carriedOn && played,
+                      L"opening with the last session's song waits paused at 3 s and plays on from there when asked "
+                      L"(paused %d at %.2f, then %.2f; carried to %.2f, resumed at %.2f)",
+                      waited, openedAt, stayedAt, carriedTo, playedTo);
+            }
             {
                 const auto savedLayout = g.layout;
                 const auto savedTheme = g.themeMode;

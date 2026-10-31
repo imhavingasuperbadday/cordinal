@@ -493,6 +493,8 @@ void ShowListContextMenu(POINT pt) {
     AppendMenuW(m, MF_STRING | en, IDM_PROPERTIES, L"Edit &tags...\tAlt+Enter");
     AppendHelperTools(m, en == MF_ENABLED);
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    AppendEditionMenu(m);
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, IDM_ADD_FILES, L"&Add files...");
     AppendMenuW(m, MF_STRING, IDM_ADD_FOLDER, L"Import &folder once...");
     TrackPopupMenu(m, TPM_RIGHTBUTTON, pt.x, pt.y, 0, g.hwnd, nullptr);

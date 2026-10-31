@@ -906,6 +906,67 @@ void TestPeaks(const std::wstring& scratch) {
     span(accPeaks, 0, kPeakBuckets, lo, hi);
     Check(ok && lo >= 179 && hi <= 181, L"PEAKS accumulator, unknown length, 20 s: %d..%d", lo, hi);
 
+    // A partial decode stays in its place on the full track, including after the blocks merge.
+    PeakAccumulator previewAcc;
+    Peaks preview{};
+    previewAcc.Begin(4 * 48000);
+    bool previewOk = !previewAcc.Preview(preview);
+    previewAcc.Add(stereo.data(), 48000);
+    previewOk = previewOk && previewAcc.Preview(preview);
+    span(preview, 0, kPeakBuckets / 4, lo, hi);
+    span(preview, kPeakBuckets / 4, kPeakBuckets, lo2, hi2);
+    previewOk = previewOk && lo >= 179 && hi <= 181 && hi2 == 0;
+    std::vector<float> quiet(48000 * 2);
+    previewAcc.Add(quiet.data(), 48000);
+    previewOk = previewOk && previewAcc.Preview(preview);
+    span(preview, 0, kPeakBuckets / 4, lo, hi);
+    span(preview, kPeakBuckets / 4, kPeakBuckets, lo2, hi2);
+    previewOk = previewOk && lo >= 179 && hi <= 181 && hi2 == 0;
+    previewAcc.Begin(0);
+    previewAcc.Add(stereo.data(), 4096);
+    previewOk = previewOk && !previewAcc.Preview(preview);
+    previewAcc.Begin(4);
+    previewAcc.Add(stereo.data() + 24, 1);  // one half-scale frame, over a quarter of this short track
+    previewOk = previewOk && previewAcc.Preview(preview);
+    span(preview, 0, kPeakBuckets / 4, lo, hi);
+    span(preview, kPeakBuckets / 4, kPeakBuckets, lo2, hi2);
+    Check(previewOk && lo >= 179 && hi <= 181 && hi2 == 0,
+          L"PEAKS partial waveforms stay on the known track timeline, including after blocks merge");
+
+    struct SampledTrack final : Decoder {
+        double position = 0;
+        bool fast = true;
+        int seeks = 0;
+        bool Seek(double seconds) override { position = seconds; ++seeks; return true; }
+        bool FastSeek() const override { return fast; }
+        double Duration() const override { return 4; }
+        unsigned Rate() const override { return 1000; }
+        size_t Read(float* out, size_t frames) override {
+            const float level[] = {0.1f, 0.3f, 0.6f, 0.9f};
+            for (size_t i = 0; i < frames; ++i) {
+                float value = level[std::clamp((int)position, 0, 3)];
+                out[i * 2] = out[i * 2 + 1] = value;
+                position += 0.001;
+            }
+            return frames;
+        }
+    } sampled;
+    Peaks overview{};
+    bool whole = PreviewPeaks(sampled, 0, 4, overview, nullptr) &&
+                 std::abs((int)overview.v[75] - CompandPeak(0.1f)) <= 2 &&
+                 std::abs((int)overview.v[225] - CompandPeak(0.3f)) <= 2 &&
+                 std::abs((int)overview.v[375] - CompandPeak(0.6f)) <= 2 &&
+                 std::abs((int)overview.v[525] - CompandPeak(0.9f)) <= 2;
+    bool slice = PreviewPeaks(sampled, 1, 2, overview, nullptr) &&
+                 std::abs((int)overview.v[150] - CompandPeak(0.3f)) <= 2 &&
+                 std::abs((int)overview.v[450] - CompandPeak(0.6f)) <= 2;
+    sampled.fast = false;
+    int beforeSeek = sampled.seeks;
+    bool bounded = !PreviewPeaks(sampled, 0, 4, overview, nullptr) && sampled.seeks == beforeSeek;
+    sampled.fast = true;
+    Check(whole && slice && bounded && !PreviewPeaks(sampled, 0, 4, overview, &cancelled),
+          L"PEAKS quick preview represents the whole song and CUE range, skips slow seeks and honors cancellation");
+
     // The disk cache: a fresh service must answer from disk what the first one computed.
     const std::wstring cache = scratch + L"\\peaks_cache";
     std::error_code ec;
@@ -934,6 +995,23 @@ void TestPeaks(const std::wstring& scratch) {
     Check(!hit, L"PEAKS a changed file size is a cache miss");
     StopPeaks();
 
+    // The actual next song is warmed behind the current one, so the hand-off can read its
+    // complete waveform without waiting for a second decode.
+    StartPeaks(nullptr, 0, cache);
+    uint32_t foreground = 0;
+    bool front = !GetPeaks(sine, size + 10, time, 0, 0, got, foreground) && foreground;
+    PrefetchPeaks(half, size + 11, time, 0, 0);
+    const std::wstring prefetched = cache + L"\\" + PeaksKeyName(half, size + 11, time) + L".pk";
+    ULONGLONG prefetchUntil = GetTickCount64() + 5000;
+    while (GetFileAttributesW(prefetched.c_str()) == INVALID_FILE_ATTRIBUTES && GetTickCount64() < prefetchUntil) Sleep(1);
+    uint32_t current = 0, future = 0;
+    bool both = GetPeaks(sine, size + 10, time, 0, 0, got, current) &&
+                std::memcmp(got.v, sinePeaks.v, kPeakBuckets) == 0 &&
+                GetPeaks(half, size + 11, time, 0, 0, got, future) &&
+                std::memcmp(got.v, halfPeaks.v, kPeakBuckets) == 0;
+    Check(front && both && !future, L"PEAKS prefetch leaves the current request intact and makes the next song ready");
+    StopPeaks();
+
     // A sparse, long PCM file keeps the worker busy without writing a gigabyte to disk. Waiting
     // until the decoder has it open makes the cancellation check exercise in-flight work.
     const std::wstring longFile = scratch + L"\\peaks-long.wav";
@@ -951,6 +1029,15 @@ void TestPeaks(const std::wstring& scratch) {
     end.QuadPart = audioBytes + header.size();
     bool prepared = sparse && WriteFile(file, header.data(), (DWORD)header.size(), &written, nullptr) && written == header.size() &&
                     SetFilePointerEx(file, end, nullptr, FILE_BEGIN) && SetEndOfFile(file);
+    // Each sampled part has a different real peak; most of the sparse file remains silent.
+    for (int i = 0; prepared && i < 32; ++i) {
+        LARGE_INTEGER at{};
+        at.QuadPart = header.size() + (uint64_t)(audioBytes / 4) * (2 * i + 1) / 64 * 4;
+        int16_t amplitude = (int16_t)(1000 + i * 450);
+        int16_t sample[] = {amplitude, amplitude};
+        prepared = SetFilePointerEx(file, at, nullptr, FILE_BEGIN) &&
+                   WriteFile(file, sample, sizeof(sample), &written, nullptr) && written == sizeof(sample);
+    }
     if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
     if (!sparse) {
         testlog::Skip(L"PEAKS in-flight cancellation: filesystem lacks sparse-file support");
@@ -968,20 +1055,27 @@ void TestPeaks(const std::wstring& scratch) {
             return predicate();
         };
         StartPeaks(nullptr, 0, cache);
-        uint32_t first = 0, next = 0;
+        uint32_t first = 0, intermediate = 0, next = 0;
         bool queued = !GetPeaks(longFile, end.QuadPart, time, 0, 0, got, first) && first;
-        Sleep(75);
-        bool deferred = !isOpen();
-        Sleep(425);  // after the settling delay the worker opens the file
-        bool started = isOpen();
+        bool progressed = waitFor([&] { return GetPeakProgress(first, got); });
+        bool started = progressed && isOpen();
+        bool fullPreview = progressed && got.v[kPeakBuckets - 1] > got.v[kPeakBuckets / 4] && got.v[kPeakBuckets / 4] > 0;
+        // Make two requests together so the second is rapid even on a busy test machine.
+        bool switched = !GetPeaks(sine, size + 3, time, 0, 0, got, intermediate) && intermediate;
+        PrefetchPeaks(half, size + 2, time, 0, 0);
         bool nextQueued = !GetPeaks(half, size + 2, time, 0, 0, got, next) && next;
+        bool oldHidden = !GetPeakProgress(first, got);
+        Sleep(150);
+        uint32_t pending = 0;
+        bool deferred = !GetPeaks(half, size + 2, time, 0, 0, got, pending) && pending == next;
+        bool rapidPreview = GetPeakProgress(next, got) && got.v[kPeakBuckets / 4] > 100 &&
+                            got.v[3 * kPeakBuckets / 4] == 0;
         bool nextReady = waitFor([&] { return GetPeaks(half, size + 2, time, 0, 0, got, next); });
         const std::wstring longCache = cache + L"\\" + PeaksKeyName(longFile, end.QuadPart, time) + L".pk";
         bool abandoned = GetFileAttributesW(longCache.c_str()) == INVALID_FILE_ATTRIBUTES;
         uint32_t retry = 0;
         bool retryQueued = !GetPeaks(longFile, end.QuadPart, time, 0, 0, got, retry) && retry && retry != first;
-        Sleep(500);
-        bool restarted = isOpen();
+        bool restarted = waitFor([&] { return GetPeakProgress(retry, got); }) && isOpen();
         bool cached = GetPeaks(sine, size, time, 0, 0, got, next);
         bool closed = waitFor([&] { return !isOpen(); });
         uint32_t again = 0, afterCancel = 0;
@@ -990,11 +1084,14 @@ void TestPeaks(const std::wstring& scratch) {
         bool canReturn = !GetPeaks(longFile, end.QuadPart, time, 0, 0, got, afterCancel) && afterCancel && afterCancel != again;
         CancelPeaks();
         StopPeaks();
-        Check(queued && deferred && started && nextQueued && nextReady && abandoned && retryQueued && restarted && cached && closed &&
-                  canRetry && canReturn,
-              L"PEAKS rapid changes wait to decode; switching, a cached song and stop cancel work without caching partial results "
-              L"(queue=%d delayed=%d started=%d next=%d ready=%d abandoned=%d retry=%d restarted=%d cached=%d closed=%d return=%d/%d)",
-              queued, deferred, started, nextQueued, nextReady, abandoned, retryQueued, restarted, cached, closed, canRetry, canReturn);
+        Check(queued && started && progressed && fullPreview && switched && nextQueued && oldHidden && deferred && rapidPreview &&
+                  nextReady && abandoned &&
+                  retryQueued && restarted && cached && closed && canRetry && canReturn,
+              L"PEAKS shows a full-width preview while decoding; rapid changes cancel without caching partial results "
+              L"(queue=%d started=%d progress=%d preview=%d switched=%d next=%d old=%d delayed=%d rapid-preview=%d ready=%d abandoned=%d "
+              L"retry=%d restarted=%d cached=%d closed=%d return=%d/%d)",
+              queued, started, progressed, fullPreview, switched, nextQueued, oldHidden, deferred, rapidPreview, nextReady, abandoned,
+              retryQueued, restarted, cached, closed, canRetry, canReturn);
     }
     DeleteFileW(longFile.c_str());
 }

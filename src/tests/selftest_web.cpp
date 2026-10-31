@@ -874,9 +874,8 @@ void TestWeb(const std::wstring& scratch) {
               resumed.headers.find("Content-Range: bytes " + std::to_string(midpoint) + '-') != resumed.headers.npos,
               L"a halfway compressed reconnection returns the remaining bytes without repeating the start of the song");
         auto suffix = Request(port, L"/api/v1/audio?id=fixture-track&format=aac", nullptr, cookie, L"Range: bytes=-123\r\n");
-        Check(suffix.status == 206 && suffix.body == compressed.body.substr(compressed.body.size() - 123) &&
-              Request(port, L"/api/v1/audio?id=fixture-track&format=aac", nullptr, cookie, L"Range: bytes=9999999-\r\n").status == 416,
-              L"compressed suffix probes and invalid ranges follow the same rules as source audio");
+        Check(suffix.status == 206 && suffix.body == compressed.body.substr(compressed.body.size() - 123),
+              L"compressed suffix probes follow the same rules as source audio");
         auto compressedHead = Request(port, L"/api/v1/audio?id=fixture-track&format=aac", nullptr, cookie, {}, true);
         Check(compressedHead.status == 200 && compressedHead.body.empty() &&
               compressedHead.headers.find("Content-Length: " + std::to_string(compressed.body.size()) + "\r\n") != compressedHead.headers.npos,
@@ -893,8 +892,11 @@ void TestWeb(const std::wstring& scratch) {
               L"HTTP offers both compressed modes and refuses malformed or unsupported bitrate requests");
         Check(Request(port, L"/api/v1/state", nullptr, cookie).body.find("\"dataSaver\":true") != std::string::npos,
               L"the browser can discover the host's compressed streaming option");
-        Check(Request(port, L"/api/v1/audio?id=fixture-track", nullptr, cookie, L"Range: bytes=9999999-\r\n").status == 416,
-              L"out-of-bounds HTTP ranges return 416");
+        Check(Request(port, L"/api/v1/audio?id=fixture-track&format=aac", nullptr, cookie,
+                      L"Range: bytes=9999999-\r\n").status == 416 &&
+              Request(port, L"/api/v1/audio?id=fixture-track", nullptr, cookie,
+                      L"Range: bytes=9999999-\r\n").status == 416,
+              L"out-of-bounds HTTP ranges return 416 for compressed and source audio");
         auto listen = [&](const char* event, unsigned seq, double heard) {
             std::string body = "session=00112233445566778899aabbccddeeff&id=fixture-track&event=" + std::string(event) +
                 "&seq=" + std::to_string(seq) + "&heard=" + std::to_string(heard);

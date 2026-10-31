@@ -16,6 +16,9 @@
 //    a preview of every file, copied by copy_run.cpp.
 #include "panels.h"
 
+#include "album_editions.h"
+#include "musicbrainz.h"
+
 #include "audio_output.h"
 #include "cover.h"
 #include "listenbrainz.h"
@@ -36,7 +39,7 @@ namespace lx {
 
 namespace {
 
-enum class Kind { None, Eq, Tags, Prefs, Rules, Organize, Copy, ListenBrainz, Format, Device, Points, Review, Palette, Layout, Packs, Helpers, Games };
+enum class Kind { None, Eq, Tags, Prefs, Rules, Organize, Copy, ListenBrainz, Format, Device, Points, Review, Palette, Layout, Packs, Helpers, Games, Editions };
 Kind g_kind = Kind::None;
 float g_mx = -1, g_my = -1;
 
@@ -970,6 +973,14 @@ const Pref kPrefs[] = {
     {"resume_on", "Playback", "Resume where you left off",
      "When cordinal starts, offer to continue the track that was playing when it closed.", PrefType::Bool,
      0, 1, 1, 1, [] { return (double)Cfg().resumeOn; }, [](double v) { SetResumeOn(v != 0); }},
+    {"resume_in_song", "Playback", "Reopen in the last song",
+     "Cordinal starts with the last track loaded and paused at the point it stopped, instead of waiting for Continue.",
+     PrefType::Bool, 0, 1, 0, 1, [] { return (double)Cfg().resumeInSong; },
+     [](double v) { Cfg().resumeInSong = v != 0; ReopenLastTrack(); Saved(); }},
+    {"resume_play", "Playback", "Start it playing on open",
+     "The track reopened from the last session starts playing as soon as cordinal opens, instead of waiting paused.",
+     PrefType::Bool, 0, 1, 0, 1, [] { return (double)Cfg().resumePlay; },
+     [](double v) { Cfg().resumePlay = v != 0; ReopenLastTrack(); Saved(); }},
     {"skip_aware_shuffle", "Playback", "Skip-aware shuffle",
      "Shuffle favors tracks you haven't repeatedly skipped in their first 30 seconds.", PrefType::Bool,
      0, 1, 0, 1, [] { return (double)Cfg().skipAwareShuffle; }, [](double v) { SetSkipAwareShuffle(v != 0); }},
@@ -1031,6 +1042,11 @@ const Pref kPrefs[] = {
      "Sets the waveform's height in the normal player bar. Other player modes keep their own sizes.",
      PrefType::Choice, 0, 5, 0, 1, [] { return (double)Cfg().bandWaveSize; },
      [](double v) { Cfg().bandWaveSize = (int)v; Saved(); }, kBandWaveSizes},
+    {"musicbrainz_lookup", "Library", "Look up missing album editions online",
+     "Asks MusicBrainz for a release-group id when two local albums share an artist and base title and their tags carry none. "
+     "Results are cached; browsing and playback never wait for or require the network.", PrefType::Bool, 0, 1, 0, 1,
+     [] { return (double)Cfg().musicBrainzLookup; },
+     [](double v) { Cfg().musicBrainzLookup = v != 0; musicbrainz::SetEnabled(v != 0); Saved(); }},
     {"group_albums", "View", "Group tracks by album", "The track list shows a header with the cover above each album's tracks.",
      PrefType::Bool, 0, 1, 1, 1, [] { return (double)Cfg().groupAlbums; },
      [](double v) { Cfg().groupAlbums = v != 0; RebuildRows(); Saved(); }},
@@ -1134,7 +1150,7 @@ std::wstring Lower(std::wstring s) {
 
 // The settings of themes this build leaves out (theme_palette.h) are never shown.
 bool PrefShown(const Pref& t) {
-    return kExtraThemes || (strcmp(t.key, "live_fountain") && strcmp(t.key, "robotic_sounds"));
+    return kExtraThemes || !t.key || (strcmp(t.key, "live_fountain") && strcmp(t.key, "robotic_sounds"));
 }
 
 // The settings shown: the open page's, or with a search, every one whose words match.
@@ -3494,6 +3510,22 @@ void OpenFormat() {
     SDL_StartTextInput(g.window);
 }
 
+void OpenAlbumEditions(uint32_t group) {
+    if (!FindAlbumGroupConst(group)) return;
+    ClosePanel();
+    EditionsOpenManager(group);
+    g_kind = Kind::Editions;
+    g.redraw = true;
+}
+
+void OpenAlbumEditionComparison(uint32_t group, TrackId focusTrack) {
+    if (!FindAlbumGroupConst(group)) return;
+    ClosePanel();
+    EditionsOpenComparison(group, focusTrack);
+    g_kind = Kind::Editions;
+    g.redraw = true;
+}
+
 void OpenListenBrainz() {
     g_lb = LbPanel{};
     g_kind = Kind::ListenBrainz;
@@ -3540,8 +3572,10 @@ void ClosePanel() {
     }
     if (g_kind == Kind::Copy) g_copy = CopyPanel{};
     if (g_kind == Kind::Games) CloseGames();
+    if (g_kind == Kind::Editions) EditionsClose();
     if (g_kind == Kind::Tags || g_kind == Kind::Prefs || g_kind == Kind::Rules || g_kind == Kind::Organize || g_kind == Kind::Copy ||
-        g_kind == Kind::ListenBrainz || g_kind == Kind::Format || g_kind == Kind::Palette || g_kind == Kind::Games)
+        g_kind == Kind::ListenBrainz || g_kind == Kind::Format || g_kind == Kind::Palette || g_kind == Kind::Games ||
+        g_kind == Kind::Editions)
         SDL_StopTextInput(g.window);
     if (g_kind == Kind::ListenBrainz) g_lb.token = TextField{};  // a token is not left lying in memory
     g_kind = Kind::None;
@@ -3568,6 +3602,7 @@ void DrawPanel(const Palette& p, float mouseX, float mouseY) {
     else if (g_kind == Kind::Packs) DrawPacks(p);
     else if (g_kind == Kind::Helpers) DrawHelpers(p);
     else if (g_kind == Kind::Games) DrawGames(p, mouseX, mouseY);
+    else if (g_kind == Kind::Editions) DrawEditionsPanel(p);
 }
 
 void PanelMouseDown(float x, float y, int button, int clicks) {
@@ -3591,6 +3626,7 @@ void PanelMouseDown(float x, float y, int button, int clicks) {
     else if (g_kind == Kind::Packs) PacksMouseDown(x, y);
     else if (g_kind == Kind::Helpers) HelpersMouseDown(x, y);
     else if (g_kind == Kind::Games) GamesMouseDown(x, y);
+    else if (g_kind == Kind::Editions) EditionsMouseDown(x, y, button, clicks);
 }
 
 void PanelMouseMove(float x, float y) {
@@ -3629,6 +3665,8 @@ void PanelWheel(float x, float y, float dy) {
         g_packsUi.first = std::clamp(g_packsUi.first - (int)std::lround(dy * 2), 0, std::max(0, (int)PackCount() - kPackRows));
     } else if (g_kind == Kind::Palette) {
         g_palette.first = std::clamp(g_palette.first - (int)std::lround(dy * 2), 0, std::max(0, (int)g_palette.shown.size() - kPaletteRows));
+    } else if (g_kind == Kind::Editions) {
+        EditionsWheel(x, y, dy);
     } else if (g_kind == Kind::Device) {
         g_dev.first = std::clamp(g_dev.first - (int)std::lround(dy * 2), 0, std::max(0, (int)g_dev.devices.size() + 1 - kDeviceRows));
     } else if (g_kind == Kind::Prefs) {
@@ -3665,6 +3703,7 @@ void PanelKey(const SDL_KeyboardEvent& e) {
     else if (g_kind == Kind::Packs) PacksKey(e);
     else if (g_kind == Kind::Helpers) HelpersKey(e);
     else if (g_kind == Kind::Games) GamesKey(e);
+    else if (g_kind == Kind::Editions) EditionsKey(e);
 }
 
 void PanelText(const char* text) {
@@ -3676,6 +3715,7 @@ void PanelText(const char* text) {
     if (g_kind == Kind::Palette && text) PaletteText(compat::Widen(text));
     if (g_kind == Kind::Tags && text) InsertText(compat::Widen(text));
     if (g_kind == Kind::Games && text) GamesText(compat::Widen(text));
+    if (g_kind == Kind::Editions && text) EditionsText(text);
     if (g_kind == Kind::Prefs && text && !(g_prefs.focus >= 0 && !strcmp(text, " "))) {
         g_prefs.search += compat::Widen(text);
         g_prefs.scroll = 0;
@@ -3703,6 +3743,7 @@ void PanelFileChosen(int purpose, const std::wstring& path) {
 
 bool PanelWantsText(float x, float y) {
     if (g_kind == Kind::ListenBrainz) return g_lb.field.In(x, y);
+    if (g_kind == Kind::Editions) return EditionsWantsText(x, y);
     if (g_kind == Kind::Palette) return g_palette.field.In(x, y);
     if (g_kind == Kind::Games) return GamesWantsText(x, y);
     if (g_kind == Kind::Format) {

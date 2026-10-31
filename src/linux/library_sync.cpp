@@ -4,6 +4,7 @@
 // and newly arrived files wait in the Inbox when it is enabled.
 #include "app.h"
 
+#include "album_editions.h"
 #include "archive.h"
 #include "cue.h"
 #include "game_music.h"
@@ -26,6 +27,8 @@ struct ScopeScan {
     std::vector<TrackId> joined;
     size_t added = 0, moved = 0, missing = 0;
     std::unordered_map<StringPool::Handle, bool> dirUnder;
+    std::vector<std::wstring> unreachable;  // configured folders that can't be read right now
+    std::unordered_map<StringPool::Handle, bool> dirUnreachable;
 };
 std::unordered_map<std::wstring, ScopeScan> g_scans;
 
@@ -39,6 +42,20 @@ bool Under(const std::wstring& scope, ScopeScan& st, const Track& t) {
     if (added) {
         std::wstring dir = g_lib.Str(t.dir);
         it->second = dir == scope || PathIsUnder(dir, scope);
+    }
+    return it->second;
+}
+
+bool UnderUnreachable(ScopeScan& st, const Track& t) {
+    if (st.unreachable.empty()) return false;
+    auto [it, added] = st.dirUnreachable.try_emplace(t.dir, false);
+    if (added) {
+        std::wstring dir = g_lib.Str(t.dir);
+        for (const std::wstring& root : st.unreachable)
+            if (dir == root || PathIsUnder(dir, root)) {
+                it->second = true;
+                break;
+            }
     }
     return it->second;
 }
@@ -71,29 +88,34 @@ void FinishScope(const std::wstring& scope, ScopeScan& st) {
         for (TrackId id = 0; id < (TrackId)st.startCount; ++id) {
             const Track& t = g_lib[id];
             if (!(t.flags & (Track::kInLibrary | Track::kInbox)) || st.seen[id]) continue;
-            if ((t.flags & Track::kMissing) || (st.rootOk && Under(scope, st, t))) gone.emplace_back(t.fileSize ^ t.fileTime, id);
+            if ((t.flags & Track::kMissing) || (st.rootOk && Under(scope, st, t)) || UnderUnreachable(st, t))
+                gone.emplace_back(t.fileSize ^ t.fileTime, id);
         }
         std::vector<char>().swap(st.seen);
         std::sort(gone.begin(), gone.end());
         for (ScanFile& f : st.pending) {
             TrackId id = kNone;
+            std::pair<uint64_t, TrackId>* match = nullptr;
             auto it = std::lower_bound(gone.begin(), gone.end(), std::make_pair(f.size ^ f.time, TrackId(0)));
             for (; it != gone.end() && it->first == (f.size ^ f.time); ++it) {
                 if (it->second == kNone) continue;
                 const Track& t = g_lib[it->second];
                 if (t.fileSize == f.size && t.fileTime == f.time && g_lib.Str(t.file) == FileNameOf(f.path)) {
-                    id = it->second;
-                    it->second = kNone;
+                    match = &*it;
                     break;
                 }
             }
-            if (id != kNone) {
-                g_lib.Rename(id, f.path);
+            if (match && g_lib.Rename(match->second, f.path)) {
+                id = match->second;
+                match->second = kNone;
                 ++st.moved;
             } else {
-                id = AddScanned(st, f);
+                // Another root or an import may have indexed the destination first; use that row
+                // and let the stale one be marked missing instead of leaving both visible.
+                id = g_lib.Find(f.path);
+                if (id == kNone) id = AddScanned(st, f);
             }
-            FoundScanned(st, id, f);
+            if (id != kNone) FoundScanned(st, id, f);
         }
         std::vector<ScanFile>().swap(st.pending);
         if (st.rootOk)
@@ -117,7 +139,9 @@ void FinishScope(const std::wstring& scope, ScopeScan& st) {
         lastChirp = SDL_GetTicks();
         PlaySfx(Sfx::NewFiles);
     }
-    if (!st.initial && (st.added || st.moved || st.missing)) {
+    if (!st.rootOk && st.initial) {
+        ShowMessage(L"Couldn't read " + scope + L"; its tracks were left as they were.");
+    } else if ((!st.initial && (st.added || st.moved)) || st.missing) {
         std::wstring msg = L"Library: ";
         if (st.added) msg += std::to_wstring(st.added) + (g.settings.inboxEnabled ? L" new in the Inbox" : L" added");
         if (st.moved) msg += (st.added ? L", " : L"") + std::to_wstring(st.moved) + L" moved";
@@ -209,10 +233,12 @@ void OnScanResult(ScanResult* r, bool firstScanDone) {
         st.rootOk = r->rootOk;
         st.startCount = g_lib.Count();
         st.seen.assign(st.startCount, 0);
+        for (const std::wstring& root : g.settings.folders)
+            if (GetFileAttributesW(root.c_str()) == INVALID_FILE_ATTRIBUTES) st.unreachable.push_back(root);
         for (TrackId id = 0; id < (TrackId)st.startCount && !st.deferNew; ++id) {
             const Track& t = g_lib[id];
             st.deferNew = (t.flags & (Track::kInLibrary | Track::kInbox)) &&
-                          ((t.flags & Track::kMissing) || (st.rootOk && Under(r->scope, st, t)));
+                          ((t.flags & Track::kMissing) || (st.rootOk && Under(r->scope, st, t)) || UnderUnreachable(st, t));
         }
     }
     st.rootOk = st.rootOk && r->rootOk;
@@ -310,6 +336,12 @@ void AcceptTags(std::vector<TagResult>* results) {
     g_lib.Touch();
     g.libraryDirty = true;
     g.redraw = true;
+    // Album tags have just been applied; a conservative grouping pass can now recognize a new
+    // edition. Manual groups are skipped by the algorithm.
+    if (AutoGroupAlbums()) {
+        g.libraryDirty = true;
+        g.redraw = true;
+    }
     if (playingChanged) MprisChanged();
 }
 
@@ -322,6 +354,7 @@ void AddFolder(const std::wstring& folder) {
             return;
         }
     g.settings.folders.push_back(f);
+    g.settings.foldersChosen = true;
     SaveSettings();
     StartScanner();
     ShowMessage(L"Adding " + f + L" to the library...");
@@ -331,6 +364,7 @@ void RemoveFolder(size_t index) {
     if (index >= g.settings.folders.size()) return;
     std::wstring folder = g.settings.folders[index];
     g.settings.folders.erase(g.settings.folders.begin() + (ptrdiff_t)index);
+    g.settings.foldersChosen = true;
     // Its tracks leave the library (they keep their stats, should the folder come back).
     for (TrackId id = 0; id < (TrackId)g_lib.Count(); ++id) {
         Track& t = g_lib[id];

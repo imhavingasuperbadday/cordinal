@@ -429,6 +429,8 @@ public:
     bool Open(const std::wstring& path);
     size_t Read(float* out, size_t frames) override;
     bool Seek(double seconds) override;
+    bool CanPreview() const override { return !media_.matroska && total_ && file_.Size() > dataOffset_; }
+    bool PreviewSeek(double& seconds) override;
     double Duration() const override { return (double)(total_-media_.skip)/rate_; }
     unsigned Rate() const override { return rate_; }
     bool Failed() const override { return failed_; }
@@ -446,7 +448,7 @@ private:
     unsigned segments_ = 0, segment_ = 0;
     uint64_t payload_ = 0, pageEnd_ = 0, granule_ = UINT64_MAX;
     uint8_t laces_[255]{};
-    bool seen_ = false, ended_ = false, failed_ = false;
+    bool seen_ = false, ended_ = false, failed_ = false, previewing_ = false;
     std::vector<uint8_t> packet_,classes_;
     unsigned rate_ = 0, channels_ = 0, block_[2]{}, previous_ = 0;
     std::vector<Book> books_;
@@ -469,6 +471,51 @@ private:
     };
     std::vector<Point> seek_;
 };
+
+// Start a preview after a complete Ogg page. Decoding that page first rebuilds the overlap tail;
+// its granule gives the actual position of the audio that follows it.
+bool VorbisDecoder::PreviewSeek(double& seconds) {
+    if (!CanPreview() || !std::isfinite(seconds) || seconds < 0) return false;
+    if (seek_.empty()) {
+        Point point{produced_, offset_, payload_, sequence_, segments_, segment_, previous_, ended_, {}};
+        memcpy(point.laces.data(), laces_, sizeof laces_);
+        seek_.push_back(point);
+    }
+    const uint64_t bytes = file_.Size() - dataOffset_;
+    const double target = std::clamp((seconds * rate_ + media_.skip) / (double)total_, 0.0, 0.999999999);
+    const uint64_t from = dataOffset_ + (uint64_t)(bytes * target);
+    const size_t length = (size_t)std::min<uint64_t>(65536, file_.Size() - from);
+    const uint8_t* data = file_.View(from, length);
+    if (!data) return false;
+    for (size_t i = 0; i + 27 <= length; ++i) {
+        const uint8_t* page = data + i;
+        if (!Is(page, "OggS") || page[4] || (page[5] & 5) || U32(page + 14) != serial_) continue;
+        unsigned count = page[26];
+        if (!count || i + 27u + count > length || page[27 + count - 1] == 255) continue;
+        size_t pageSize = 27 + count;
+        for (unsigned j = 0; j < count; ++j) pageSize += page[27 + j];
+        uint64_t granule = U64(page + 6);
+        if (pageSize > length - i || granule == UINT64_MAX || granule < media_.skip || granule >= total_ ||
+            OggCrc(page, pageSize) != U32(page + 22)) continue;
+        const uint32_t sequence = U32(page + 18);
+        const uint64_t end = from + i + pageSize;
+        offset_ = from + i;
+        sequence_ = sequence - 1;
+        seen_ = true;
+        ended_ = failed_ = false;
+        segments_ = segment_ = previous_ = 0;
+        produced_ = pos_ = 0;
+        cursor_ = buffered_ = 0;
+        previewing_ = true;
+        std::fill(time_.begin(), time_.end(), 0.0f);
+        while (offset_ < end || segment_ < segments_) if (!Audio()) return false;
+        produced_ = pos_ = granule;
+        cursor_ = buffered_ = 0;
+        seconds = (double)(granule - media_.skip) / rate_;
+        return true;
+    }
+    return false;
+}
 
 // Assemble the next packet. In Ogg, a lacing value of 255 continues a packet and
 // the first value below 255 ends it; pages are validated for sequence and CRC,
@@ -741,7 +788,7 @@ bool VorbisDecoder::DecodeResidue(PacketBits& packet, const Residue& r, std::spa
 // MDCT, window and overlap-add. `previous_` is the last block size because Vorbis
 // overlaps unequal-length blocks. Seek points are recorded as it advances.
 bool VorbisDecoder::Audio() {
-    if (seek_.empty() || produced_ >= seek_.back().sample+rate_*2ull) {
+    if (!previewing_ && (seek_.empty() || produced_ >= seek_.back().sample+rate_*2ull)) {
         Point point{produced_,offset_,payload_,sequence_,segments_,segment_,previous_,ended_,{}};
         memcpy(point.laces.data(),laces_,sizeof laces_);
         seek_.push_back(point);
@@ -861,6 +908,7 @@ size_t VorbisDecoder::Read(float* out, size_t frames) {
 // the overlap tail is reconstructed correctly.
 bool VorbisDecoder::Seek(double seconds) {
     if (!std::isfinite(seconds)) return false;
+    previewing_ = false;
     uint64_t target = seconds <= 0 ? media_.skip : seconds >= Duration() ? total_ : media_.skip+(uint64_t)(seconds*rate_);
     if (!failed_ && target >= produced_-buffered_ && target <= produced_) {
         cursor_ = (size_t)(target-(produced_-buffered_)); pos_ = target; return true;

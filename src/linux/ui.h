@@ -34,6 +34,8 @@ int CheckLayout();
 // PNG files named like docs/ui-reference/windows/ (linux/capture-ui.sh). Returns nonzero on failure.
 int CaptureUi(const std::string& dir);
 bool UiBusy();       // album covers or the waveform still computing
+void PrepareWaveform(TrackId id);
+void PrefetchWaveform(TrackId id);
 void OnPeaksReady(uint32_t request);  // WM_APP_PEAKS: the seek bar's waveform may be ready
 void CapturePump();  // main.cpp: handles what workers posted until the library and covers settle
 

@@ -157,6 +157,21 @@ HMENU BuildMenu() {
     AppendMenuW(library, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(library, MF_STRING, IDM_COPY_TO, L"Cop&y to folder or device...");
     AppendMenuW(library, MF_SEPARATOR, 0, nullptr);
+    HMENU editions = CreatePopupMenu();
+    AppendMenuW(editions, MF_STRING, IDM_EDITION_GROUP, L"&Group selected albums as editions");
+    AppendMenuW(editions, MF_STRING, IDM_EDITION_MANAGER, L"Album &editions...");
+    AppendMenuW(editions, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(editions, MF_STRING, IDM_EDITION_PREFERRED, L"Set &preferred edition");
+    AppendMenuW(editions, MF_STRING, IDM_EDITION_REMOVE, L"&Remove edition from group");
+    AppendMenuW(editions, MF_STRING, IDM_EDITION_SPLIT, L"&Split album group");
+    AppendMenuW(editions, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(editions, MF_STRING, IDM_EDITION_ART, L"Use this edition's &cover for the group");
+    AppendMenuW(editions, MF_STRING, IDM_EDITION_CLEAR_ART, L"&Clear group cover choice");
+    AppendMenuW(editions, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(editions, MF_STRING, IDM_EDITION_COMPARE, L"&Compare editions...");
+    AppendMenuW(editions, MF_STRING, IDM_EDITION_VERSIONS, L"Other &versions...");
+    AppendMenuW(library, MF_POPUP, (UINT_PTR)editions, L"Album &editions");
+    AppendMenuW(library, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(library, MF_STRING, IDM_DUPLICATES, L"Find &duplicate audio");
     AppendMenuW(library, MF_STRING, IDM_STEAM, L"Add &Steam soundtracks");
 
@@ -329,6 +344,7 @@ void UpdateMainMenu(HMENU m) {
     const int tool = HelperToolIndex();
     ShowWhileRunning(m, IDM_HELPER_TOOL_BASE + std::max(tool, 0), IDM_HELPER_CANCEL, HelperCancelText().c_str(), tool >= 0);
     UpdateHelperMenu(m);
+    UpdateEditionMenu(m);
     EnableMenuItem(m, IDM_COPY_TO, MF_BYCOMMAND | (CopyBusy() ? MF_GRAYED : MF_ENABLED));
 }
 

@@ -26,5 +26,7 @@ void ApolloDrawTrackIcon(HDC dc, const RECT& cell);
 // Apollo's own playlist fields: apollo_size ("7510 KB", "11 MB"), apollo_bits ("16 bit stereo")
 // and apollo_tag (the ID3 tag version, "v2.3.0"). The last two read the file's header once.
 bool ApolloField(TrackId id, const std::wstring& name, std::wstring& out);
+// Compaction renumbers tracks: its per-track file-header probes must not be reused by the new ids.
+void ForgetApolloProbes();
 
 }  // namespace app

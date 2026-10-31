@@ -305,6 +305,27 @@ ConvertResult ExecuteConvert(const std::vector<ConvertItem>& plan, const Convert
                              const std::atomic<bool>& cancel, const std::function<void(size_t)>& progress) {
     ConvertResult result;
     HANDLE log = INVALID_HANDLE_VALUE;
+    // The log is opened before the first original can leave its folder: a conversion that can't be
+    // recorded is not undone later, so its original is kept instead of recycled.
+    auto openLog = [&]() -> bool {
+        if (log != INVALID_HANDLE_VALUE) return true;
+        if (!result.logError.empty()) return false;
+        CreateDirectoryW(logDir.c_str(), nullptr);
+        result.log = logDir + kPathSep + Now() + L".log";
+        log = CreateFileW(result.log.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW, 0, nullptr);
+        if (log == INVALID_HANDLE_VALUE) {
+            result.log.clear();
+            result.logError = L"the undo log couldn't be written";
+            return false;
+        }
+        return true;
+    };
+    auto record = [&](const ConvertDone& done, bool recycled) -> bool {
+        const std::string line = LogLine({done.to, done.from, recycled});
+        DWORD written = 0;
+        return WriteFile(log, line.data(), (DWORD)line.size(), &written, nullptr) && written == line.size() &&
+               FlushFileBuffers(log);
+    };
     for (size_t i = 0; i < plan.size(); ++i) {
         const ConvertItem& item = plan[i];
         if (!item.skip.empty()) continue;
@@ -356,20 +377,21 @@ ConvertResult ExecuteConvert(const std::vector<ConvertItem>& plan, const Convert
             result.failed.push_back({item.from, L"The new file didn't read back identical to the original, so it was removed."});
             continue;
         }
-        if (log == INVALID_HANDLE_VALUE) {
-            CreateDirectoryW(logDir.c_str(), nullptr);
-            result.log = logDir + kPathSep + Now() + L".log";
-            log = CreateFileW(result.log.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW, 0, nullptr);
-            if (log == INVALID_HANDLE_VALUE) result.log.clear();
+        const bool wantRecycle = settings.recycle;
+        bool recycled = false;
+        if (openLog()) {
+            // Recorded first, claiming the recycle: if the recycle then fails the original is still
+            // there, and Undo sees it and only removes the .cord.
+            if (record({item.id, item.from, item.to, wantRecycle}, wantRecycle)) {
+                if (wantRecycle) recycled = RecycleFile(item.from);
+            } else {
+                result.logError = L"the undo log couldn't be written";
+                CloseHandle(log);
+                log = INVALID_HANDLE_VALUE;
+                result.log.clear();
+            }
         }
-        ConvertDone done{item.id, item.from, item.to, settings.recycle && RecycleFile(item.from)};
-        if (log != INVALID_HANDLE_VALUE) {
-            const std::string line = LogLine({done.to, done.from, done.recycled});
-            DWORD written = 0;
-            WriteFile(log, line.data(), (DWORD)line.size(), &written, nullptr);
-            FlushFileBuffers(log);
-        }
-        result.done.push_back(std::move(done));
+        result.done.push_back({item.id, item.from, item.to, recycled});
     }
     if (log != INVALID_HANDLE_VALUE) CloseHandle(log);
     return result;

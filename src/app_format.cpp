@@ -137,7 +137,8 @@ LRESULT CALLBACK FormatProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 f.previews[i] = make(0, WC_STATICW, L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, 0);
             }
             f.help = make(0, WC_STATICW,
-                          L"%field% inserts a field: title, artist, album artist, album, date, year, genre, tracknumber, "
+                          L"%field% inserts a field: title, artist, album artist, album, date, year, genre, edition, edition_kind, "
+                          L"musicbrainz_albumid, musicbrainz_releasegroupid, tracknumber, "
                           L"discnumber, length, codec, bitrate, samplerate, channels, rating, play_count, last_played, path, "
                           L"and playback_time / playback_time_remaining in the status bar.  [ ... ] disappears when its fields "
                           L"are empty.  'text' is literal.  $if(), $upper(), $num(), $pad() and friends are listed in the README.",

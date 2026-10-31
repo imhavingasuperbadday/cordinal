@@ -217,9 +217,14 @@ void ToggleStartWithWindows() {
     if (StartWithWindows()) {
         RegDeleteValueW(key, kRunValue);
     } else {
-        wchar_t exe[MAX_PATH]{};
-        GetModuleFileNameW(nullptr, exe, MAX_PATH);
-        std::wstring command = L"\"" + std::wstring(exe) + L"\"";
+        std::wstring exe(32768, L'\0');
+        DWORD n = GetModuleFileNameW(nullptr, exe.data(), (DWORD)exe.size());
+        if (!n || n >= exe.size()) {  // no usable path: leave the logon entry off
+            RegCloseKey(key);
+            return;
+        }
+        exe.resize(n);
+        std::wstring command = L"\"" + exe + L"\"";
         RegSetValueExW(key, kRunValue, 0, REG_SZ, reinterpret_cast<const BYTE*>(command.c_str()),
                        (DWORD)((command.size() + 1) * sizeof(wchar_t)));
     }

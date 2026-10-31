@@ -32,7 +32,8 @@ struct TagEdit {
     bool Empty() const;
 };
 
-// Formats WriteTags supports, by extension: mp3, flac, ogg/oga, opus, m4a/m4b/mp4, cord.
+// Formats WriteTags supports, by extension: mp3, flac, ogg/oga, opus, m4a/m4b/mp4, cord. A CUE
+// subtrack or a song inside a ZIP archive has no file of its own to rewrite, so it is false too.
 bool CanWriteTags(const std::wstring& path);
 bool WriteTags(const std::wstring& path, const TagEdit& edit, std::wstring& error);
 

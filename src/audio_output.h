@@ -75,6 +75,8 @@ public:
     unsigned RequestRate(unsigned rate);
     SampleFormat Format() const { return format_; }
     std::wstring Problem() const;  // why exclusive mode isn't in use, or isn't at the asked rate
+    // True while a lost output device is being re-opened; playback is frozen until it returns.
+    bool Waiting() const { return waiting_; }
     // False once a paused output has let the endpoint go (see Run). An exclusive stream keeps the
     // device claimed for as long as its IAudioClient exists, stopped or not, so a paused player
     // would otherwise block every other program from rendering.
@@ -109,6 +111,7 @@ private:
     std::atomic<unsigned> rate_{48000}, wantedRate_{0};
     std::atomic<OutputMode> mode_{OutputMode::Shared}, wantedMode_{OutputMode::Shared};
     std::atomic<bool> holding_{false};
+    std::atomic<bool> waiting_{false};  // lost device, retrying the open
     std::atomic<SampleFormat> format_{SampleFormat::Float32};
     std::atomic<unsigned long long> played_{0}, flushPos_{0};
     mutable std::mutex problemMx_;

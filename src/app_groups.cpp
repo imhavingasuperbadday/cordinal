@@ -78,6 +78,8 @@ const ArtImage* Cover(const TrackGroup& gr, int size) {
         c.started = true;
     }
     TrackId id = Active().items[g.view[gr.firstView]];
+    if (const AlbumGroup* group = AlbumGroupForTrack(id); group && group->artTrack != kInvalidTrack && g_lib.Contains(group->artTrack))
+        id = group->artTrack;
     uint64_t base = ThumbLoader::Key(g_lib.Path(id), g_lib[id].fileTime);
     auto it = c.images.find(base ^ (uint64_t)size);
     if (it != c.images.end()) {
@@ -306,6 +308,8 @@ void DrawGroupRow(HDC dc, int row, RECT rc) {
     std::wstring year = g_lib.Str(gr.date).substr(0, 4);
     std::wstring stats = std::to_wstring(gr.count) + L" tracks  \x00B7  " + FormatDuration(gr.seconds);
     std::wstring line2text = year.empty() ? artist : artist + L"  \x00B7  " + year;
+    std::wstring edition = TrackEditionLabel(Active().items[g.view[gr.firstView]]);
+    if (!edition.empty()) line2text += L"  \x00B7  " + edition;
     if (look) {
         if (!look->title.empty()) album = PackHeaderText(look->title, gr);
         if (!look->subtitle.empty()) line2text = PackHeaderText(look->subtitle, gr);

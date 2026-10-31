@@ -10,11 +10,17 @@ namespace app {
 namespace { uint64_t iniWriteFailures = 0; }
 
 // Thin wrappers over the Win32 profile API, always targeting g.iniPath. Reads take a
-// default; IniWrite creates the section/key as needed. InitDataPaths() must have run.
+// default; IniWrite creates the section/key as needed. InitDataPaths() must have run. Values can
+// be long (the pipe-separated library folder list), so a full small buffer retries with the
+// largest string the API returns instead of silently dropping the tail.
 std::wstring IniRead(const wchar_t* section, const wchar_t* key, const wchar_t* def) {
-    wchar_t buf[2048];
-    GetPrivateProfileStringW(section, key, def, buf, (DWORD)std::size(buf), g.iniPath.c_str());
-    return buf;
+    std::vector<wchar_t> buf(2048);
+    DWORD n = GetPrivateProfileStringW(section, key, def, buf.data(), (DWORD)buf.size(), g.iniPath.c_str());
+    if (n == buf.size() - 1) {
+        buf.assign(32768, 0);
+        n = GetPrivateProfileStringW(section, key, def, buf.data(), (DWORD)buf.size(), g.iniPath.c_str());
+    }
+    return std::wstring(buf.data(), n);
 }
 int IniInt(const wchar_t* section, const wchar_t* key, int def) {
     return (int)GetPrivateProfileIntW(section, key, def, g.iniPath.c_str());
@@ -241,26 +247,32 @@ void SaveLibraryNow() {
 std::wstring UnsavedLibraryPath() { return g.libraryPath + L".unsaved"; }
 
 // A lock on library.cdb (a sync client, a virus scanner) usually leaves its folder writable, so the
-// changes go beside it rather than being lost with the process.
+// changes go beside it rather than being lost with the process. The new copy is written first; the
+// old one only goes once the new one is safely on disk.
 bool KeepUnsavedLibrary() {
     const std::wstring unsaved = UnsavedLibraryPath();
-    DeleteFileW(unsaved.c_str());  // a stale copy would otherwise be kept as its .bak
-    return SaveLibrary(unsaved, g.playlists);
+    if (!SaveLibrary(unsaved, g.playlists)) return false;
+    DeleteFileW((unsaved + L".bak").c_str());  // the previous copy, now superseded
+    return true;
 }
 
 // Only a copy newer than library.cdb wins: one left behind by a failed delete is older than the save
 // that followed it.
-bool RestoreUnsavedLibrary() {
+bool RestoreUnsavedLibrary(std::wstring* keptName) {
+    if (keptName) keptName->clear();
     const std::wstring unsaved = UnsavedLibraryPath();
     WIN32_FILE_ATTRIBUTE_DATA kept{}, main{};
     if (!GetFileAttributesExW(unsaved.c_str(), GetFileExInfoStandard, &kept)) return false;
     if (GetFileAttributesExW(g.libraryPath.c_str(), GetFileExInfoStandard, &main) &&
         CompareFileTime(&kept.ftLastWriteTime, &main.ftLastWriteTime) <= 0)
         return false;
-    if (LoadLibrary(unsaved, g.playlists)) {
+    if (LoadLibrary(unsaved, g.playlists, keptName)) {
         g.dirty = true;  // the autosave puts it back into library.cdb and removes the copy
         return true;
     }
+    // A locked copy stays in place rather than being moved aside; still name it so the user knows
+    // the newer changes were not used.
+    if (keptName && keptName->empty()) *keptName = unsaved;
     g_lib = Library();
     g.playlists.clear();
     return false;
@@ -360,24 +372,42 @@ bool SaveBackupSettings(std::string& bytes) {
 // Loads everything from disk. Order matters: the library must exist before playlists,
 // the active index and the resume track can be resolved against it.
 void LoadState() {
-    // Fallback chain for the library: library.cdb, else its .bak, else the original is
-    // preserved aside and re-loaded into library.recovered.cdb, else a one-time import
-    // of Waveforge's playlists.wfl (kept as is). Changes that couldn't be saved at the last close come
-    // first, when they are newer.
-    const bool restored = RestoreUnsavedLibrary();
-    bool loaded = restored || LoadLibrary(g.libraryPath, g.playlists);
-    bool preservedOriginal = !loaded && GetFileAttributesW(g.libraryPath.c_str()) != INVALID_FILE_ATTRIBUTES;
+    // Fallback chain for the library: the changes that couldn't be saved at the last close, then
+    // library.cdb, then its .bak. An unreadable file is kept aside and named to the user. A
+    // one-time import of Waveforge's playlists.wfl follows when there is no library at all.
+    const bool hadOriginal = GetFileAttributesW(g.libraryPath.c_str()) != INVALID_FILE_ATTRIBUTES;
+    std::wstring preserved, failedUnsaved;
+    const bool restored = RestoreUnsavedLibrary(&failedUnsaved);
+    bool loaded = restored || LoadLibrary(g.libraryPath, g.playlists, &preserved);
+    bool fromBackup = false;
     if (!loaded && GetFileAttributesW((g.libraryPath + L".bak").c_str()) != INVALID_FILE_ATTRIBUTES) {
         g_lib = Library();
-        loaded = LoadLibrary(g.libraryPath + L".bak", g.playlists);
+        std::wstring backupPreserved;
+        fromBackup = LoadLibrary(g.libraryPath + L".bak", g.playlists, &backupPreserved);
+        if (fromBackup) loaded = true;
+        else if (!backupPreserved.empty()) preserved = std::move(backupPreserved);
     }
-    int active = IniInt(L"Player", L"ActivePlaylist", 0);
-    if (preservedOriginal) {
-        g.libraryPath = g.dataDir + L"\\library.recovered.cdb";
-        loaded = LoadLibrary(g.libraryPath, g.playlists) || loaded;
-        g.message = L"Couldn't read library.cdb. Original preserved; using library.recovered.cdb.";
+    std::wstring warning;
+    if (!failedUnsaved.empty())
+        warning = L"The changes kept from the last close couldn't be read; they were kept as " +
+                  FileNameOf(failedUnsaved) + L". ";
+    if (!restored && !loaded) {
+        if (fromBackup) warning += L"Couldn't read library.cdb; using the previous save. ";
+        else if (hadOriginal) warning += L"Couldn't read library.cdb; the library starts empty. ";
+        else if (!failedUnsaved.empty() || !preserved.empty()) warning += L"The library starts empty. ";
+        if (!preserved.empty()) warning += L"The unreadable file was kept as " + FileNameOf(preserved) + L".";
+        else if (hadOriginal && failedUnsaved.empty()) warning += L"The file is still in place.";
+    } else if (fromBackup) {
+        warning += L"library.cdb couldn't be read; using the previous save. ";
+        if (!preserved.empty()) warning += L"The unreadable file was kept as " + FileNameOf(preserved) + L".";
+    } else if (!preserved.empty()) {
+        warning += L"The unreadable library file was kept as " + FileNameOf(preserved) + L".";
+    }
+    if (!warning.empty()) {
+        g.message = warning;
         g.messageUntil = GetTickCount64() + 15000;
     }
+    int active = IniInt(L"Player", L"ActivePlaylist", 0);
     if (restored) {
         g.message = L"Restored changes that couldn't be saved when cordinal last closed.";
         g.messageUntil = GetTickCount64() + 15000;

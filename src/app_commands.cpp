@@ -88,6 +88,7 @@ void OnCommand(int id, int code, HWND ctl) {
         ActivatePlaylist(id == IDM_SELECT_PL_BASE + 8 ? (int)g.playlists.size() - 1 : id - IDM_SELECT_PL_BASE);
         return;
     }
+    if (EditionCommand(id)) return;
     if (id == IDC_RENAME && code == EN_KILLFOCUS) {
         EndRename(true);
         return;

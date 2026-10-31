@@ -212,7 +212,7 @@ public:
     // The track for a path, or UINT32_MAX.
     TrackId Find(const std::wstring& path) const;
     // Points a track at a new file (after a move or rename).
-    void Rename(TrackId id, const std::wstring& path);
+    bool Rename(TrackId id, const std::wstring& path);  // false if another track holds the target
     void Reserve(size_t strings, size_t tracks);
     Track& operator[](TrackId id) { return tracks_[id]; }
     const Track& operator[](TrackId id) const { return tracks_[id]; }
@@ -313,8 +313,9 @@ bool CollectAudioFiles(const std::wstring& path, std::vector<std::wstring>& out,
 // Persistence. library.cdb holds every library track with its stats, plus all playlists; the
 // older playlists.wfl text format (Waveforge) is still read for the one-time import.
 bool SaveLibrary(const std::wstring& file, const std::vector<Playlist>& playlists, std::wstring* error = nullptr);
-// Replaces the library and playlists only after the entire file has been validated.
-bool LoadLibrary(const std::wstring& file, std::vector<Playlist>& playlists);
+// Replaces the library and playlists only after the entire file has been validated. An unreadable
+// file is kept beside itself as <file>.bad-... and its name is returned in `preserved`.
+bool LoadLibrary(const std::wstring& file, std::vector<Playlist>& playlists, std::wstring* preserved = nullptr);
 bool LoadPlaylists(const std::wstring& file, std::vector<Playlist>& playlists);
 bool ImportM3U(const std::wstring& file, std::vector<std::wstring>& paths);
 struct M3UExportEntry { std::string info, path; };
@@ -348,5 +349,10 @@ private:
     const Library& library_;
     const std::vector<std::wstring>& words_;
     Field fields_[13];
+    // A grouped track also matches its edition label and group title. Kept out of fields_ because
+    // most tracks have no edition and pay nothing for the extra searchable text.
+    TrackId editionTrack_ = kInvalidTrack;
+    std::wstring editionText_;
+    Field edition_;
 };
 void SanitizePlaylistPosition(Playlist& playlist);

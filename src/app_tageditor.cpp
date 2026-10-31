@@ -383,12 +383,15 @@ struct WriteJob {
     std::vector<TrackPath> files;
     std::vector<TagEdit> edits;  // one per file
     bool announce;               // the user just saved (not a deferred write catching up later)
-    std::wstring journalDir;     // empty: this write is not undoable (it is an undo)
+    std::wstring journalDir;     // empty: this write is not recorded for undo (it is an undo)
+    std::wstring journalAfter;   // an existing undo record to remove once every write succeeds
 };
 struct WriteDone {
     bool announce = false;
     std::vector<TrackId> written;
     std::vector<std::pair<TrackId, std::wstring>> failed;  // track, error
+    std::wstring journalFile;    // the new undo record, kept for the next Undo
+    std::wstring removeJournal;  // an older record to remove after this undo lands cleanly
 };
 struct Deferred {
     TrackId id;
@@ -403,9 +406,10 @@ std::unordered_set<TrackId> g_writing;  // the running write's tracks (UI thread
 
 std::wstring TagUndoDir() { return g.dataDir + L"\\tagundo"; }
 
-void WriterThread(HWND hwnd, WriteJob job) {
-    auto* done = new WriteDone();
-    done->announce = job.announce;
+// Runs one write job on the calling thread. `progressTo`, when set, receives a status update per
+// file; shutdown writes pass none. The outcome is left in `done`.
+void RunWriteJob(WriteJob job, WriteDone& done, HWND progressTo) {
+    done.announce = job.announce;
     // The old values are recorded before any file changes. A file whose old values can't be
     // read is not written, since the edit could not be undone.
     std::vector<bool> capturedOk(job.files.size(), true);
@@ -421,26 +425,37 @@ void WriterThread(HWND hwnd, WriteJob job) {
         if (!journal.files.empty()) {
             journaled = SaveTagJournal(job.journalDir, journal, journalError);
             if (!journaled) journalError = L"couldn't save the undo record: " + journalError;
+            else done.journalFile = job.journalDir + L"\\" + std::to_wstring(journal.time) + L".cdu";
         }
     }
+    done.removeJournal = job.journalAfter;
     for (size_t i = 0; i < job.files.size(); ++i) {
         const auto& file = job.files[i];
         std::wstring error;
         if (!journalError.empty()) {
-            done->failed.emplace_back(file.id, journalError);
+            done.failed.emplace_back(file.id, journalError);
         } else if (!capturedOk[i]) {
-            done->failed.emplace_back(file.id, L"couldn't read its tags, so the change can't be undone");
+            done.failed.emplace_back(file.id, L"couldn't read its tags, so the change can't be undone");
         } else if (WriteTags(file.Path(), job.edits[i], error)) {
-            done->written.push_back(file.id);
+            done.written.push_back(file.id);
         } else {
-            done->failed.emplace_back(file.id, error);
+            done.failed.emplace_back(file.id, error);
         }
-        ++g_writeDone;
-        PostMessageW(hwnd, WM_APP_TAGWRITE, 1, 0);
+        if (progressTo) {
+            ++g_writeDone;
+            PostMessageW(progressTo, WM_APP_TAGWRITE, 1, 0);
+        }
     }
     // Nothing changed, so there is nothing to undo.
-    if (journaled && done->written.empty())
-        DeleteTagJournal(job.journalDir + L"\\" + std::to_wstring(journal.time) + L".cdu");
+    if (journaled && done.written.empty()) {
+        DeleteTagJournal(done.journalFile);
+        done.journalFile.clear();
+    }
+}
+
+void WriterThread(HWND hwnd, WriteJob job) {
+    auto* done = new WriteDone();
+    RunWriteJob(std::move(job), *done, hwnd);
     if (!PostMessageW(hwnd, WM_APP_TAGWRITE, 0, (LPARAM)done)) delete done;
 }
 
@@ -460,14 +475,16 @@ std::wstring TagWriteStatus() {
     return L"Writing tags " + std::to_wstring(g_writeDone.load()) + L"/" + std::to_wstring(g_writeTotal.load());
 }
 
-// Queues one edit per track. Files the engine has open are deferred. False when a write is still running.
-bool SubmitTagWrites(const std::vector<std::pair<TrackId, TagEdit>>& items, bool announce, bool undoable) {
+// Queues one edit per track. Files the engine has open are deferred. False when a write is still
+// running. `journalAfter` is an undo record to remove once this write lands cleanly.
+bool SubmitTagWrites(const std::vector<std::pair<TrackId, TagEdit>>& items, bool announce, bool undoable,
+                     std::wstring journalAfter) {
     if (g_writeTotal > 0) {
         MessageBoxW(g.hwnd, L"Tags are still being written; try again in a moment.", kAppName, MB_OK | MB_ICONINFORMATION);
         return false;
     }
-    WriteJob job{{}, {}, announce, undoable ? TagUndoDir() : std::wstring()};
-    size_t deferred = 0;
+    WriteJob job{{}, {}, announce, undoable ? TagUndoDir() : std::wstring(), std::move(journalAfter)};
+    size_t deferred = 0, unsupported = 0;
     bool cueSkipped = false;
     for (const auto& [id, edit] : items) {
         std::wstring path = g_lib.Path(id);
@@ -475,6 +492,7 @@ bool SubmitTagWrites(const std::vector<std::pair<TrackId, TagEdit>>& items, bool
             cueSkipped = true;
             continue;
         } else if (!CanWriteTags(path)) {
+            ++unsupported;
             continue;
         } else if (EngineHasOpen(id)) {
             g_deferred.push_back({id, edit, undoable});
@@ -484,8 +502,19 @@ bool SubmitTagWrites(const std::vector<std::pair<TrackId, TagEdit>>& items, bool
             job.edits.push_back(edit);
         }
     }
-    if (cueSkipped) ShowMessage(L"Tags of CUE tracks come from the cue sheet; editing them isn't supported yet.");
-    if (deferred) ShowMessage(std::to_wstring(deferred) + L" playing file(s) will be updated when playback moves on.");
+    std::wstring skipped;
+    if (cueSkipped) skipped = L"Tags of CUE tracks come from the cue sheet; editing them isn't supported yet.";
+    if (unsupported) {
+        if (!skipped.empty()) skipped += L" ";
+        skipped += std::to_wstring(unsupported) + (unsupported == 1 ? L" file's tags can't be written: "
+                                                                   : L" files' tags can't be written: ") +
+                   L"only MP3, FLAC, Ogg, Opus, M4A and .cord files are editable.";
+    }
+    if (deferred) {
+        if (!skipped.empty()) skipped += L" ";
+        skipped += std::to_wstring(deferred) + L" playing file(s) will be updated when playback moves on.";
+    }
+    if (!skipped.empty()) ShowMessage(skipped);
     if (job.files.empty()) return true;
     if (g_writer.joinable()) g_writer.join();
     g_writeDone = 0;
@@ -537,9 +566,15 @@ void UndoLastTagEdit() {
         if (!f.coverRestorable) edit.cover.reset();
         if (!edit.Empty()) items.emplace_back(id, edit);
     }
-    // The journal goes once its writes are queued: the undo itself is not journaled.
-    if (SubmitTagWrites(items, false, false)) DeleteTagJournal(file);
-    if (items.empty()) ShowMessage(L"None of those files are in the library any more.");
+    if (items.empty()) {
+        DeleteTagJournal(file);
+        ShowMessage(L"None of those files are in the library any more.");
+        return;
+    }
+    // A playing file waits for playback to move on; its record has to stay until that write lands.
+    const bool deferred = std::any_of(items.begin(), items.end(),
+                                      [](const auto& item) { return EngineHasOpen(item.first); });
+    SubmitTagWrites(items, false, false, deferred ? std::wstring() : file);
 }
 
 void OnTagWriteMessage(WPARAM wp, LPARAM lp) {
@@ -562,7 +597,18 @@ void OnTagWriteMessage(WPARAM wp, LPARAM lp) {
     } else if (done->announce && !done->written.empty()) {
         PlaySfx(Sfx::TagsSaved);
     }
-    ShowMessage(L"Saved tags to " + std::to_wstring(done->written.size()) + L" file(s).");
+    // The old record only goes once every file has the new tags; a partial failure must stay undoable.
+    if (!done->removeJournal.empty() && done->failed.empty()) DeleteTagJournal(done->removeJournal);
+    if (done->written.empty()) {
+        ShowMessage(done->failed.empty() ? L"No tags were changed." : L"No tags were saved.");
+    } else if (done->failed.empty()) {
+        g.dirty = true;  // the library's saved metadata now matches the files
+        ShowMessage(L"Saved tags to " + std::to_wstring(done->written.size()) + L" file(s).");
+    } else {
+        g.dirty = true;
+        ShowMessage(L"Saved tags to " + std::to_wstring(done->written.size()) + L" file(s); " +
+                    std::to_wstring(done->failed.size()) + L" couldn't be written.");
+    }
     UpdateStatus();
 }
 
@@ -576,6 +622,44 @@ void FlushDeferredTags() {
         SubmitTagWrites({{d.id, d.edit}}, false, d.undoable);
         return;  // one job at a time; the next flush picks up the rest
     }
+}
+
+// Writes deferred edits during shutdown, after the engine has released every file. The normal
+// timer cannot pick them up once the workers are stopped, so a playing file's edit would otherwise
+// disappear when cordinal closes. This runs synchronously on the UI thread and writes no status
+// messages; an edit that fails is returned in `error` for the caller to show before the window goes.
+bool FlushDeferredTagWrites(std::wstring& error) {
+    error.clear();
+    if (g_deferred.empty()) return true;
+    std::vector<Deferred> deferred = std::move(g_deferred);
+    g_deferred.clear();
+    size_t failed = 0;
+    for (Deferred& d : deferred) {
+        if (!g_lib.Contains(d.id)) {
+            ++failed;
+            if (error.empty()) error = L"the track left the library";
+            continue;
+        }
+        WriteJob job;
+        job.files.push_back(g_lib.SnapshotPath(d.id));
+        job.edits.push_back(std::move(d.edit));
+        job.journalDir = d.undoable ? TagUndoDir() : std::wstring();
+        WriteDone done;
+        RunWriteJob(std::move(job), done, nullptr);
+        if (!done.failed.empty()) {
+            ++failed;
+            if (error.empty()) error = done.failed.front().second;
+        }
+        if (!done.journalFile.empty() && done.failed.empty()) DeleteTagJournal(done.journalFile);
+        if (!done.written.empty()) {
+            g_lib[d.id].flags &= ~Track::kLoaded;  // the tags on disk changed; read them again next start
+            g.dirty = true;
+        }
+    }
+    if (!failed) return true;
+    error = std::to_wstring(failed) + (failed == 1 ? L" playing file's tag edit couldn't be saved: "
+                                                   : L" playing files' tag edits couldn't be saved: ") + error;
+    return false;
 }
 
 void StopTagWriter() {

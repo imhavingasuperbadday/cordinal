@@ -385,6 +385,17 @@ public:
     size_t Read(float* out, size_t frames) override { return Copy(out, pcm_, 2, frames); }
     size_t ReadExact(int32_t* out, size_t frames) { return Copy(out, exactPcm_, channels_, frames); }
     bool Seek(double seconds) override;
+    bool FastSeek() const override {
+        const uint64_t gap = uint64_t(rate_) * 3;
+        uint64_t previous = 0;
+        for (const auto& point : seek_) {
+            if (point.sample > previous + gap) return false;
+            previous = point.sample;
+        }
+        return rate_ && total_ <= previous + gap;
+    }
+    bool CanPreview() const override { return FastSeek() || (!media_.matroska && total_ && file_.Size() > start_); }
+    bool PreviewSeek(double& seconds) override;
     double Duration() const override { return (double)(total_-media_.skip) / rate_; }
     unsigned Rate() const override { return rate_; }
     bool Failed() const override { return failed_; }
@@ -415,6 +426,34 @@ private:
     std::vector<float> pcm_;
     std::vector<int32_t> exactPcm_;
 };
+
+// Without a seek table, find a nearby frame by its authenticated header and use its own sample
+// number for the preview. The complete decode still starts at the exact requested position.
+bool FlacDecoder::PreviewSeek(double& seconds) {
+    if (FastSeek()) return Seek(seconds);
+    if (!CanPreview() || !std::isfinite(seconds) || seconds < 0) return false;
+    const uint64_t bytes = file_.Size() - start_;
+    const double target = std::clamp((seconds * rate_ + media_.skip) / (double)total_, 0.0, 0.999999999);
+    const uint64_t offset = start_ + (uint64_t)(bytes * target);
+    const size_t length = (size_t)std::min<uint64_t>(65536, file_.Size() - offset);
+    const uint8_t* data = file_.View(offset, length);
+    if (!data) return false;
+    for (size_t i = 0; i + 6 <= length; ++i) {
+        Header h;
+        if (data[i] != 255 || !ParseHeader(data + i, length - i, rate_, bits_, channels_, h) || h.frames > maxBlock_)
+            continue;
+        const uint64_t sample = h.variable ? h.number : h.number * fixedBlock_;
+        if (sample < media_.skip || sample >= total_) continue;
+        offset_ = offset + i;
+        pos_ = nextSample_ = sample;
+        cursor_ = buffered_ = 0;
+        failed_ = false;
+        if (!Frame()) return false;  // Frame validates the complete frame, not just the header.
+        seconds = (double)(sample - media_.skip) / rate_;
+        return true;
+    }
+    return false;
+}
 
 // Open a native FLAC stream or a FLAC track muxed in Matroska. Metadata blocks
 // are walked with STREAMINFO first; when the total sample count is absent the

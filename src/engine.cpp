@@ -51,6 +51,7 @@ struct Command {
     enum Type { Play, SetNext, Stop, Seek, Reopen, Retime } type;
     PlayItem item;
     bool hasItem = false;
+    bool paused = false;  // Play: open the track without starting the output
     unsigned long long after = 0;
     double seconds = 0;
 };
@@ -734,8 +735,14 @@ struct Engine::Impl {
                 }
                 Hold hold(*this);
                 OpenTrack(c.item, c.seconds, true);
-                out.SetPaused(false);
-                pauseReq = false;  // resumes with the new track, faded in
+                // A paused start holds the track at its first sample: nothing is heard until Play.
+                if (c.paused && dec) {
+                    out.SetPaused(true);
+                    pauseReq = true;
+                } else {
+                    out.SetPaused(false);
+                    pauseReq = false;  // resumes with the new track, faded in
+                }
                 break;
             }
             case Command::SetNext:
@@ -1083,11 +1090,15 @@ void Engine::Shutdown() {
     { std::lock_guard<std::mutex> lock(d.errMx); d.errors.clear(); }
 }
 
-void Engine::Play(const PlayItem& item, double start) {
+void Engine::Play(const PlayItem& item, double start, bool paused) {
     Command c{Command::Play};
     c.item = item;
     c.hasItem = true;
     c.seconds = start;
+    c.paused = paused;
+    // The UI asks "am I paused?" right away: answer before the decode thread reaches the command,
+    // which sets the same state again when it opens the track.
+    if (paused) impl_->pauseReq = true;
     impl_->Enqueue(std::move(c));
 }
 
@@ -1148,6 +1159,7 @@ Engine::OutputInfo Engine::Output() const {
     OutputInfo o;
     o.ready = d.outputStarted;
     o.exclusive = d.out.Mode() == OutputMode::Exclusive;
+    o.waiting = d.out.Waiting();
     o.rate = d.out.Rate();
     o.bits = SampleBits(d.out.Format());
     o.floatFormat = d.out.Format() == SampleFormat::Float32;

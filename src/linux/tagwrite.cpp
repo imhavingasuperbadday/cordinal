@@ -19,11 +19,14 @@ namespace {
 struct WriteJob {
     std::vector<TrackPath> files;
     std::vector<TagEdit> edits;  // one per file
-    std::wstring journalDir;     // empty: this write is not undoable (it is an undo)
+    std::wstring journalDir;     // empty: this write is not recorded for undo (it is an undo)
+    std::wstring journalAfter;   // an existing undo record to remove once every write succeeds
 };
 struct WriteDone {
     std::vector<TrackId> written;
     std::vector<std::pair<TrackId, std::wstring>> failed;  // track, error
+    std::wstring journalFile;    // the new undo record, kept for the next Undo
+    std::wstring removeJournal;  // an older record to remove after this undo lands cleanly
 };
 struct Deferred {
     TrackId id;
@@ -55,8 +58,10 @@ void WriterThread(WriteJob job) {
         if (!journal.files.empty()) {
             journaled = SaveTagJournal(job.journalDir, journal, journalError);
             if (!journaled) journalError = L"couldn't save the undo record: " + journalError;
+            else done->journalFile = job.journalDir + L"/" + std::to_wstring(journal.time) + L".cdu";
         }
     }
+    done->removeJournal = job.journalAfter;
     for (size_t i = 0; i < job.files.size(); ++i) {
         const auto& file = job.files[i];
         std::wstring error;
@@ -68,7 +73,10 @@ void WriterThread(WriteJob job) {
         PostMessageW(nullptr, WM_APP_TAGWRITE, 1, 0);
     }
     // Nothing changed, so there is nothing to undo.
-    if (journaled && done->written.empty()) DeleteTagJournal(job.journalDir + L"/" + std::to_wstring(journal.time) + L".cdu");
+    if (journaled && done->written.empty()) {
+        DeleteTagJournal(done->journalFile);
+        done->journalFile.clear();
+    }
     if (!PostMessageW(nullptr, WM_APP_TAGWRITE, 0, (LPARAM)done)) delete done;
 }
 
@@ -82,7 +90,7 @@ std::wstring TagWriteStatus() {
 }
 
 // Queues one edit per track; the file playing is deferred. False when a write is still running.
-bool SubmitTagWrites(const std::vector<std::pair<TrackId, TagEdit>>& items, bool undoable) {
+bool SubmitTagWrites(const std::vector<std::pair<TrackId, TagEdit>>& items, bool undoable, std::wstring journalAfter) {
     if (g_writeTotal > 0) {
         ShowMessage(L"Tags are still being written; try again in a moment.");
         return false;
@@ -91,7 +99,7 @@ bool SubmitTagWrites(const std::vector<std::pair<TrackId, TagEdit>>& items, bool
         ShowMessage(L"Files are being organized; try again in a moment.");
         return false;
     }
-    WriteJob job{{}, {}, undoable ? TagUndoDir() : std::wstring()};
+    WriteJob job{{}, {}, undoable ? TagUndoDir() : std::wstring(), std::move(journalAfter)};
     size_t deferred = 0, unsupported = 0;
     bool cueSkipped = false;
     for (const auto& [id, edit] : items) {
@@ -170,10 +178,10 @@ void UndoLastTagEdit() {
         DeleteTagJournal(file);
         return;
     }
-    if (SubmitTagWrites(items, false)) {
-        DeleteTagJournal(file);
+    bool deferred = false;
+    for (const auto& item : items) deferred = deferred || item.first == g.playing;
+    if (SubmitTagWrites(items, false, deferred ? std::wstring() : file))
         ShowMessage(L"Putting back the tags of " + std::to_wstring(items.size()) + L" file(s)...");
-    }
 }
 
 void OnTagWriteMessage(WPARAM wp, LPARAM lp) {
@@ -193,6 +201,7 @@ void OnTagWriteMessage(WPARAM wp, LPARAM lp) {
         ShowMessage(L"Saved tags to " + std::to_wstring(done->written.size()) + L" file(s).");
         PlaySfx(Sfx::TagsSaved);
     }
+    if (!done->removeJournal.empty() && done->failed.empty()) DeleteTagJournal(done->removeJournal);
     FlushDeferredTags();
 }
 

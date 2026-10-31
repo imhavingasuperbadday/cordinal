@@ -103,11 +103,12 @@ void AppendFiles(int playlist, const std::vector<std::wstring>& files, bool play
     auto& items = g.playlists[playlist].items;
     int first = (int)items.size();
     std::vector<TrackId> unloaded, joined;
-    size_t addedCount = files.size();
+    size_t addedCount = 0;
     TrackId firstAdded = kNone;
     for (auto& f : files) {
         TrackId id = g_lib.Add(f);
         if (id == kNone) continue;
+        ++addedCount;
         Track& t = g_lib[id];
         if (toLibrary) {
             t.flags = (uint16_t)((t.flags | Track::kInLibrary) & ~(Track::kExcluded | Track::kMissing | Track::kInbox));

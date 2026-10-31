@@ -125,7 +125,8 @@ enum Action {
     kPlay, kPlayNext, kAddToQueue, kClearQueue, kAddToNowPlaying, kAddToPlaylist, kRemoveFromNowPlaying, kOpenFolder, kColumnToggle,
     kSectionPlay, kSectionLoop, kSectionStart, kSectionEnd, kSectionClear,
     kRating, kEditTags, kUndoTags, kEqualizer, kPreferences, kRgEnable, kRgScanSel, kRgScanPl, kRgCancel, kRgClear, kRgWrite, kWriteStatistics,
-    kNewAuto, kEditAuto, kChoice,
+    kNewAuto, kEditAuto, kChoice, kGroupEditions, kPreferredEdition, kRemoveEdition, kSplitEditions,
+    kAlbumEditions, kEditionVersions,
 };
 std::function<void(int)> g_choicePick;  // the choice a panel's OpenChoice menu is for
 struct MenuItem {
@@ -247,7 +248,7 @@ struct WebPanel {
 } g_web;
 
 // The seek bar's waveform (app_waveform.cpp): the playing track's peaks, computed in the background
-// the first time it plays and cached; until they arrive the bar is the flat channel.
+// the first time it plays and cached; its columns fill as the worker decodes an uncached track.
 struct Wave {
     TrackId track = kNone;  // the track `peaks` belongs to (or is being computed for)
     bool ready = false;
@@ -777,6 +778,11 @@ std::vector<MenuItem> PlaylistDestinations() {
 }
 
 // The menu bar's menus, with the Windows build's wording, order and shortcuts. `m` indexes ui::kMenuBar.
+bool CanvasHasFocusedEdition() {
+    uint32_t group = 0, edition = 0;
+    return CanvasFocusedEdition(group, edition);
+}
+
 std::vector<MenuItem> BarMenu(int m) {
     bool editable = !g.playlists.empty() && Active().Editable(), any = !g.rows.empty();
     switch (m) {
@@ -870,6 +876,20 @@ std::vector<MenuItem> BarMenu(int m) {
                 Submenu("Export .cord", CordExportItems()),
                 Item("Undo last conversion", kConvertUndo, {}, false, CanUndoConversion() && !ConvertBusy()), Separator(),
                 Item("Copy to folder or device...", kCopyTo, {}, false, !CopyBusy()), Separator(),
+                Submenu("Album editions", {Item("Group selected albums as editions", kGroupEditions, {}, false,
+                                               CanvasSelectedAlbums().size() >= 2),
+                                          Item("Album editions...", kAlbumEditions, {}, false,
+                                               CanvasHasFocusedEdition()),
+                                          Item("Set preferred edition", kPreferredEdition, {}, false,
+                                               CanvasHasFocusedEdition()),
+                                          Item("Remove edition from group", kRemoveEdition, {}, false,
+                                               CanvasHasFocusedEdition()),
+                                          Item("Split album group", kSplitEditions, {}, false,
+                                               CanvasHasFocusedEdition()),
+                                          Item("Other versions...", kEditionVersions, {}, false,
+                                               SelectedTracks().size() == 1 &&
+                                                   AlbumGroupForTrack(SelectedTracks().front()) != nullptr)}),
+                Separator(),
                 Item("Find duplicate audio", kDuplicateAudio, {}, false, !g_playlistFileBusy && !g_playlistImport),
                 Item("Add Steam soundtracks", kSteam, {}, false, !g_playlistFileBusy && !g_playlistImport)};
             if (ConvertBusy()) items.push_back(Item("Cancel conversion", kCancelConvert));
@@ -1189,12 +1209,6 @@ void FolderDialogCallback(void*, const char* const* list, int) {
     if (!PostMessageW(nullptr, WM_APP + 30, 0, (LPARAM)folders)) delete folders;
 }
 
-std::string MusicFolder() {
-    if (const char* music = SDL_GetUserFolder(SDL_FOLDER_MUSIC); music && *music) return music;
-    const char* home = getenv("HOME");
-    return std::string(home ? home : "/") + "/Music";
-}
-
 void ChooseFolder() {
     std::string music = MusicFolder();
     SDL_ShowOpenFolderDialog(FolderDialogCallback, nullptr, g.window, music.c_str(), true);
@@ -1498,6 +1512,58 @@ void RunAction(const MenuItem& item) {
             SaveSettings();
             RebuildRows();
             break;
+        case kGroupEditions: {
+            auto albums = CanvasSelectedAlbums();
+            std::wstring error;
+            if (GroupAlbumsAsEditions(albums, &error)) {
+                InvalidateCellCache();
+                RebuildRows();
+                ShowMessage(L"Grouped " + std::to_wstring(albums.size()) + L" albums as editions.");
+            } else {
+                ShowMessage(error.empty() ? L"Select two or more album tiles to group them." : error);
+            }
+            break;
+        }
+        case kAlbumEditions: {
+            uint32_t group = 0, edition = 0;
+            if (CanvasFocusedEdition(group, edition)) OpenAlbumEditions(group);
+            break;
+        }
+        case kEditionVersions: {
+            auto tracks = SelectedTracks();
+            if (tracks.size() == 1) {
+                if (const AlbumGroup* group = AlbumGroupForTrack(tracks.front()))
+                    OpenAlbumEditionComparison(group->id, tracks.front());
+            }
+            break;
+        }
+
+        case kPreferredEdition: {
+            uint32_t group = 0, edition = 0;
+            if (CanvasFocusedEdition(group, edition) && SetPreferredEdition(group, edition)) {
+                CanvasChooseEdition(group, edition);
+                InvalidateCellCache();
+                RebuildRows();
+                ShowMessage(L"Preferred edition set.");
+            }
+            break;
+        }
+        case kRemoveEdition: {
+            uint32_t group = 0, edition = 0;
+            if (CanvasFocusedEdition(group, edition) && RemoveEditionFromGroup(group, edition)) {
+                InvalidateCellCache();
+                RebuildRows();
+            }
+            break;
+        }
+        case kSplitEditions: {
+            uint32_t group = 0, edition = 0;
+            if (CanvasFocusedEdition(group, edition) && SplitAlbumGroup(group)) {
+                InvalidateCellCache();
+                RebuildRows();
+            }
+            break;
+        }
         case kStartOnLogin: ToggleStartOnLogin(); break;
         case kAbout: g_aboutOpen = true; break;
         case kNameThatTrack: OpenGames(0); break;
@@ -1912,7 +1978,7 @@ void DrawAbout(const Palette& p) {
         SDL_RenderTexture(g.renderer, g_about.texture, nullptr, &dst);
     }
     float x = g_about.icon.R() + S(18), y = panel.y + S(18);
-    DrawText(Font::Title, "cordinal 0.1.0", x, y, p.text);
+    DrawText(Font::Title, "cordinal 0.1.1", x, y, p.text);
     y += S(34);
     for (const std::string& line : lines) {
         if (y + lineH > panel.B() - S(30)) break;
@@ -2019,14 +2085,21 @@ void DrawSlider(const Rect& r, double frac, bool enabled, bool hot, const Palett
     Fill({cx - std::floor(tw / 2), std::round(r.y + r.h / 2 - th / 2), tw, th}, hot ? p.accent : p.text);
 }
 
-// Queues (or answers at once) the peaks for `id`; a CUE track asks for its range of the file.
-bool RequestPeaks(TrackId id) {
+bool PeakSource(TrackId id, std::wstring& path, double& start, double& end) {
     if (id == kNone || id >= g_lib.Count()) return false;
-    std::wstring path = g_lib.Path(id);
-    double start = 0, end = 0;
+    path = g_lib.Path(id);
+    start = end = 0;
     if (IsSubtrack(path) && !SubtrackRange(path, start, end)) return false;
+    return true;
+}
+
+// Queues (or answers at once) the peaks for `id`; a CUE track asks for its range of the file.
+bool RequestPeaks(TrackId id, Peaks& peaks, uint32_t& request) {
+    std::wstring path;
+    double start, end;
+    if (!PeakSource(id, path, start, end)) { request = 0; return false; }
     const Track& t = g_lib[id];
-    return GetPeaks(path, t.fileSize, t.fileTime, start, end, g_wave.peaks, g_wave.request);
+    return GetPeaks(path, t.fileSize, t.fileTime, start, end, peaks, request) || GetPeakProgress(request, peaks);
 }
 
 // The waveform over the seek bar's channel: columns two pixels wide a pixel apart, each the loudest
@@ -2037,7 +2110,7 @@ bool LiveFountainShown() { return g.settings.liveFountain && g.settings.theme ==
 bool DrawWaveform(const Rect& r, double frac, const Palette& p) {
     if (LiveFountainShown() && DrawLiveFountain(r, frac, p)) return true;
     bool live = LiveWaveformShown();
-    if (!live && (!g_wave.ready || g_wave.track != g.playing || g.playing == kNone)) return false;
+    if (!live && (g_wave.track != g.playing || g.playing == kNone || (!g_wave.ready && !g_wave.request))) return false;
     std::array<uint8_t, 256> livePeaks{};
     // The shared engine shapes live heights around audible note attacks, as on Windows.
     if (live) g.engine.WaveformPeaks(livePeaks.data(), livePeaks.size());
@@ -2052,7 +2125,8 @@ bool DrawWaveform(const Rect& r, double frac, const Palette& p) {
         int first = std::clamp((int)((x - left) * count / width), 0, count - 1);
         int last = std::clamp((int)((x + step - left) * count / width), first + 1, count);
         int v = 0;
-        for (int b = first; b < last; ++b) v = std::max<int>(v, live ? livePeaks[b] : g_wave.peaks.v[b]);
+        for (int b = first; b < last; ++b)
+            v = std::max<int>(v, live ? livePeaks[b] : g_wave.ready ? g_wave.peaks.v[b] : 0);
         float h = std::max(1.0f, std::floor(half * v / 255));
         uint32_t color = x < playedX ? played : rest;
         float barWidth = std::min(x + col, right) - x;
@@ -2269,7 +2343,7 @@ void DrawRadio(const Palette& p) {
     SDL_Rect clip{(int)L.radioGrid.x, (int)L.radioGrid.y, (int)L.radioGrid.w, (int)L.radioGrid.h};
     SDL_SetRenderClipRect(g.renderer, &clip);
     if (radio.rows.empty()) {
-        std::wstring message = radio.browser && radio.browser->Searching() ? L"Finding stations..." :
+        std::wstring message = radio.discover && radio.browser && radio.browser->Searching() ? L"Finding stations..." :
             radio.browser && !radio.browser->Problem().empty() ? radio.browser->Problem() :
             radio.discover ? L"No stations found. Try another name, genre or country." :
                              L"No saved stations yet. Choose Discover to find stations.";
@@ -2400,6 +2474,8 @@ void DrawGroupHeader(const Group& gr, int index, float top, float right, const P
     float x = cover.R() + S(10), r = right - S(10);
     std::wstring artist = gr.artist ? g_lib.Str(gr.artist) : L"Various artists";
     std::wstring year = g_lib.Str(gr.date).substr(0, 4);
+    std::wstring edition = TrackEditionLabel(g.rows[gr.first]);
+    if (!edition.empty()) artist += L"  \x00B7  " + edition;
     std::string stats = std::to_string(gr.count) + " tracks  \xC2\xB7  " + Utf8(FormatDuration(gr.seconds));
     Rect line1{x, top + S(3), r - x, h - S(2)}, line2{x, top + h - S(1), r - x, h - S(2)};
     float sw = TextWidth(Font::Normal, stats);
@@ -2914,7 +2990,8 @@ void MouseDown(const SDL_MouseButtonEvent& e) {
             radio.filterFocus = L.radioGenre.In(x, y) ? 1 : L.radioCountry.In(x, y) ? 2 : 3;
             radio.editSelectAll = false; SDL_StartTextInput(g.window);
         } else if (L.radioSearch.In(x, y)) {
-            radio.filterFocus = 0; radio.discover = true; RadioSearch();
+            radio.filterFocus = 0;
+            if (!radio.discover) RadioSetMode(true); else RadioSearch();
         } else {
             radio.filterFocus = 0;
             for (int i = 0; i < (int)radio.rows.size(); ++i) {
@@ -3488,10 +3565,10 @@ void Draw() {
         RequestCover(shown);
     }
     if (g.playing != g_wave.track) {  // a new track: drop the old peaks and ask for the new ones
-        CancelPeaks();
+        if (g.playing == kNone) CancelPeaks();
         g_wave.track = g.playing;
         g_wave.request = 0;
-        g_wave.ready = g.playing != kNone && RequestPeaks(g.playing);
+        g_wave.ready = g.playing != kNone && RequestPeaks(g.playing, g_wave.peaks, g_wave.request);
     }
     UpdateWindowTitle();
     const Palette& p = CurrentPalette();
@@ -3869,6 +3946,11 @@ void StopPlaylistFiles() {
     g_playlistImport.reset();
 }
 
+void InvalidateCellCache() {
+    g_cells.clear();
+    g_cellsRevision = g_lib.Revision();
+}
+
 void RebuildRows() {
     if (g.playlists.empty()) return;
     g.active = std::clamp(g.active, 0, (int)g.playlists.size() - 1);
@@ -4109,12 +4191,27 @@ int CheckLayout() {
     return off;
 }
 
-bool UiBusy() { return g_thumbsPending > 0 || (g_wave.track != kNone && !g_wave.ready && g_wave.request); }
+bool UiBusy() { return g_thumbsPending > 0 || (g_wave.track != kNone && g_wave.request); }
+
+void PrepareWaveform(TrackId id) {
+    if (g.settings.liveWaveform) return;
+    Peaks peaks{};
+    uint32_t request = 0;
+    RequestPeaks(id, peaks, request);
+}
+
+void PrefetchWaveform(TrackId id) {
+    if (id == kNone || g.settings.liveWaveform) { CancelPeakPrefetch(); return; }
+    std::wstring path;
+    double start, end;
+    if (!PeakSource(id, path, start, end)) return;
+    const Track& t = g_lib[id];
+    PrefetchPeaks(path, t.fileSize, t.fileTime, start, end);
+}
 
 void OnPeaksReady(uint32_t request) {
-    if (g_wave.track == kNone || g_wave.ready || request != g_wave.request) return;
-    g_wave.request = 0;
-    g_wave.ready = RequestPeaks(g_wave.track);
+    if (g_wave.track == kNone || !request || request != g_wave.request) return;
+    g_wave.ready = RequestPeaks(g_wave.track, g_wave.peaks, g_wave.request);
     g.redraw = true;
 }
 
@@ -4239,7 +4336,10 @@ int CaptureUi(const std::string& dir) {
 // album without one a tile in a color of its own with the initial of `title` (app_ui.cpp).
 void DrawAlbumCover(TrackId first, StringPool::Handle album, const std::wstring& title, const Rect& r, const Palette& p) {
     const int size = (int)std::max(r.w, S(64));
-    const uint64_t key = ((uint64_t)album << 32 | g_lib[first].dir) * 0x9E3779B97F4A7C15ull ^ (uint64_t)size;
+    // The track id is part of the key: a group cover override can switch between two files in the
+    // same folder and album, where the folder identity alone would keep the old texture.
+    const uint64_t key = (((uint64_t)first << 32) ^ (uint64_t)album ^ g_lib[first].dir) * 0x9E3779B97F4A7C15ull ^
+                         (uint64_t)size;
     auto it = g_thumbs.find(key);
     if (it == g_thumbs.end()) {
         if (g_thumbs.size() >= kThumbsKept) {  // let the least recently drawn half go

@@ -4,6 +4,7 @@
 // first, as on Windows.
 #include "app.h"
 #include "radio_ui.h"
+#include "ui.h"
 
 #include "cue.h"
 #include "game_music.h"
@@ -217,11 +218,13 @@ void AnswerNext(unsigned long long token, bool failed) {
         step = {};
     if (step.id == kNone) {
         g.engine.SetNext(token, nullptr);
+        PrefetchWaveform(kNone);
         return;
     }
     unsigned long long next = step.queued ? NewQueuedToken(step.index, step.id) : NewToken(step.index, step.id);
     PlayItem item = MakeItem(next, step.id);
     g.engine.SetNext(token, &item);
+    PrefetchWaveform(step.id);
 }
 
 // The queued track that has been playing leaves the queue once the engine asks what follows it (decoding
@@ -374,7 +377,7 @@ void StartRadio(const radio::Station& station) {
     RadioBegin(station, token);
 }
 
-void PlayFromQueue(int index, double start) {
+void PlayFromQueue(int index, double start, bool paused) {
     auto& q = Queue();
     if (index < 0 || index >= (int)q.size()) return;
     RadioCancelPlayback();
@@ -383,8 +386,9 @@ void PlayFromQueue(int index, double start) {
     g.resumeIndex = -1;
     g.resumePosition = 0;
     unsigned long long token = NewToken(index, q[index]);
-    g.engine.Play(MakeItem(token, q[index]), start);
-    g.engine.SetPaused(false);
+    PrepareWaveform(q[index]);
+    g.engine.Play(MakeItem(token, q[index]), start, paused);
+    g.engine.SetPaused(paused);
     if (g.settings.shuffle && (g.shuffleOrder.size() != q.size() || g.shufflePos < 0)) Reshuffle(index);
     // The display follows at once; TrackStarted confirms it when the engine reaches it.
     g.queuePos = index;
@@ -417,6 +421,32 @@ bool Resume() {
     if (position <= 1 || position >= duration - 2) position = 0;
     PlayFromQueue(index, position);
     return true;
+}
+
+// Reopens the last session's track as Preferences asks: loaded and paused where it stopped, or
+// playing from there. Both choices need Resume where you left off on. Runs at startup, and when
+// those choices change while the stopped track is still waiting, so a change shows what it does.
+void ReopenLastTrack() {
+    if (!g.settings.resumeOn || g.playing != kNone || !(g.settings.resumeInSong || g.settings.resumePlay)) return;
+    TrackId id = g.resumeTrack;
+    if (!g_lib.Contains(id)) return;
+    auto& queue = Queue();
+    int index = g.resumeIndex;
+    if (index < 0 || index >= (int)queue.size() || queue[index] != id) {
+        auto it = std::find(queue.begin(), queue.end(), id);
+        index = it == queue.end() ? -1 : (int)(it - queue.begin());
+    }
+    double position = g.resumePosition;
+    double duration = g_lib[id].Duration();
+    if (position <= 1 || position >= duration - 2) position = 0;
+    if (index < 0) {
+        queue.assign(1, id);
+        index = 0;
+        g.shuffleOrder.clear();
+        g.libraryDirty = true;
+        if (g.active == NowPlayingTab()) RebuildRows();
+    }
+    PlayFromQueue(index, position, !g.settings.resumePlay);
 }
 
 // Now Playing can be closed while playback is stopped. Whatever needs it makes it again, after the
@@ -479,6 +509,7 @@ void TogglePause() {
 
 void Stop() {
     RadioCancelPlayback();
+    CancelPeaks();
     if (g.settings.resumeOn && g.playing != kNone && g_lib.Contains(g.playing)) {
         g.resumeTrack = g.playing;
         g.resumeIndex = g.queuePos;
@@ -561,6 +592,7 @@ void PlayQueued(TrackId id, int anchor) {
     g.resumeIndex = -1;
     g.resumePosition = 0;
     unsigned long long token = NewQueuedToken(anchor, id);
+    PrepareWaveform(id);
     g.engine.Play(MakeItem(token, id));
     g.engine.SetPaused(false);
     g.queuePos = anchor;

@@ -20,7 +20,8 @@ enum AudioCodec : uint32_t { AudioAac=0x6d703461,AudioAlac=0x616c6163,AudioOpus=
 // audio_ogg.cpp.
 uint32_t OggCrc(const uint8_t* page,size_t bytes);
 // A packet is either one contiguous file range (pieces == 0) or a run of `pieces`
-// segments starting at segments[first]. start/frames are absolute sample counts.
+// segments starting at segments[first]. start/frames are sample counts, except while an MP4
+// track still holds media-clock ticks before NormalizeMp4.
 struct Packet { uint64_t offset = 0, start = 0; uint32_t bytes = 0, frames = 0, first = 0, pieces = 0; };
 struct Segment { uint64_t offset; uint32_t bytes; };
 // Parsed container: the packet list, codec config, and the trim amounts
@@ -32,6 +33,9 @@ public:
     bool OpenAsf(const std::wstring& path);
     bool OpenOggOpus(const std::wstring& path);
     bool OpenMatroska(const std::wstring& path,bool index=true);
+    // MP4's media clock can differ from the codec's sample rate, which is known only after
+    // reading its configuration. Convert its packet and edit times before playback.
+    bool NormalizeMp4(unsigned sampleRate);
     bool IsMatroska() {
         const uint8_t* p=file.View(0,4);return p && U32(p,true)==0x1a45dfa3;
     }
@@ -89,6 +93,8 @@ public:
     uint64_t consumedDelay=0; // Priming samples already suppressed by the codec core.
     std::vector<std::pair<size_t,int64_t>> timestamps;
     uint64_t timestampScale=1000000;
+    uint32_t mp4TimeScale=0,mp4MovieScale=0;
+    uint64_t mp4EditDuration=0;
     bool matroska=false;
 private:
     std::vector<uint8_t> scratch_;
@@ -106,7 +112,7 @@ public:
         while (done < count && pos_ < total_) {
             if (used_ == pcm_.size()/2) {
                 if (next_ == media_.packets.size()) { failed_=true;break; }
-                Remember(next_);
+                if (!previewing_) Remember(next_);
                 const auto& packet = media_.packets[next_];
                 const uint8_t* bytes = media_.Data(next_++);
                 if (!overwritePcm_) pcm_.clear();
@@ -131,6 +137,7 @@ public:
     // target; failing that, rewind by Preroll() packets and Reset() the codec.
     bool Seek(double seconds) override {
         if (!std::isfinite(seconds)) return false;
+        previewing_ = false;
         pos_ = (uint64_t)std::min<double>((double)total_,std::max(0.0,std::floor(seconds*rate_)));
         uint64_t raw = media_.skip+pos_;
         auto at = std::upper_bound(media_.packets.begin(),media_.packets.end(),raw,
@@ -149,6 +156,22 @@ public:
         return true;
     }
     unsigned Rate() const override { return rate_; }
+    bool FastSeek() const override { return Preroll() != SIZE_MAX; }
+    bool CanPreview() const override { return FastSeek() || PreviewPreroll() != SIZE_MAX; }
+    bool PreviewSeek(double& seconds) override {
+        if (FastSeek()) return Seek(seconds);
+        const size_t preroll = PreviewPreroll();
+        if (preroll == SIZE_MAX || !std::isfinite(seconds)) return false;
+        pos_ = (uint64_t)std::min<double>((double)total_, std::max(0.0, std::floor(seconds * rate_)));
+        const uint64_t raw = media_.skip + pos_;
+        auto at = std::upper_bound(media_.packets.begin(), media_.packets.end(), raw,
+            [](uint64_t v, const Packet& p) { return v < p.start; });
+        next_ = at == media_.packets.begin() ? 0 : (size_t)(at - media_.packets.begin() - 1);
+        next_ -= std::min(next_, preroll);
+        pcm_.clear(); used_ = 0; failed_ = false; previewing_ = true;
+        Reset();
+        return true;
+    }
     bool Failed() const override { return failed_; }
     double Duration() const override { return (double)total_/rate_; }
 protected:
@@ -160,7 +183,7 @@ protected:
         media_.file.Sequential();
         overwritePcm_=overwritePcm;
         rate_ = rate;
-        if (!media_.Trim(rate_)) return false;
+        if (!media_.NormalizeMp4(rate_) || !media_.Trim(rate_)) return false;
         if (!rate_ || media_.skip >= media_.frames) return false;
         total_ = media_.frames-media_.skip;
         if (media_.valid) total_ = std::min(total_,media_.valid);
@@ -169,6 +192,8 @@ protected:
     virtual bool Decode(const uint8_t*,size_t,std::vector<float>&) = 0;
     virtual void Reset() {}
     virtual size_t Preroll() const { return 0; }
+    // Approximate previews can use bounded preroll even when an exact seek needs a checkpoint.
+    virtual size_t PreviewPreroll() const { return SIZE_MAX; }
     struct State { virtual ~State()=default; };
     virtual std::shared_ptr<const State> Capture() const { return {}; }
     virtual bool Restore(const State&) { return false; }
@@ -201,6 +226,7 @@ private:
     std::map<size_t,std::shared_ptr<const State>> checkpoints_;
     unsigned checkpointSeconds_=5;
     bool failed_=false;
+    bool previewing_=false;
     bool overwritePcm_=false; // The codec overwrites/resizes every sample on success.
 };
 } // namespace nativeaudio

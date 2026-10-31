@@ -564,8 +564,9 @@ void TestZipArchives(const std::wstring& dir) {
     TagData tags;
     Check(ReadTags(stored + L"\\chip.sid|2", tags) && tags.title == "cordinal test #2" && tags.codec == Codec::SID,
           L"tags are read from a song inside a ZIP");
-    Check(ContainerOf(tone) == stored && ContainerOf(plain) == plain && IsArchiveMember(tone) && !IsArchiveMember(plain),
-          L"a member path names its archive as the file on disk");
+    Check(ContainerOf(tone) == stored && ContainerOf(plain) == plain && IsArchiveMember(tone) && !IsArchiveMember(plain) &&
+              !CanWriteTags(tone) && CanWriteTags(dir + L"\\plain.flac"),
+          L"a member path names its archive as the file on disk and never claims writable tags");
 
     std::string damaged = Zip(files, false);
     const size_t at = damaged.find("data") + 100;  // inside the WAV's samples

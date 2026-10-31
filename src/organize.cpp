@@ -46,10 +46,23 @@ void RemoveEmptyFolders(std::wstring dir, const std::vector<std::wstring>& keep)
     }
 }
 
-bool AppendLog(HANDLE log, const std::wstring& to, const std::wstring& from) {
+bool AppendLog(HANDLE log, const std::wstring& to, const std::wstring& from, uint64_t* before = nullptr) {
+    if (before) {
+        LARGE_INTEGER size{};
+        if (!GetFileSizeEx(log, &size) || size.QuadPart < 0) return false;
+        *before = (uint64_t)size.QuadPart;
+    }
     std::string line = ToUtf8(to) + "\t" + ToUtf8(from) + "\r\n";
     DWORD written;
     return WriteFile(log, line.data(), (DWORD)line.size(), &written, nullptr) && written == line.size() && FlushFileBuffers(log);
+}
+
+// Drops the last intent line after its move failed, so a later undo doesn't mistake an untouched
+// source for a half-done move.
+bool TruncateLog(HANDLE log, uint64_t size) {
+    LARGE_INTEGER at{};
+    at.QuadPart = (LONGLONG)size;
+    return SetFilePointerEx(log, at, nullptr, FILE_BEGIN) && SetEndOfFile(log) && FlushFileBuffers(log);
 }
 
 }  // namespace
@@ -161,29 +174,46 @@ OrganizeResult ExecuteOrganize(const std::vector<OrganizeMove>& plan, const std:
     }
     std::map<std::wstring, std::vector<std::wstring>> destsBySource;  // source folder -> destination folders
     std::map<std::wstring, std::wstring> sourceCase;
-    for (const auto& m : plan) {
+    size_t stoppedAt = plan.size();
+    for (size_t i = 0; i < plan.size(); ++i) {
+        const OrganizeMove& m = plan[i];
         if (!m.skip.empty()) {
             destsBySource[LowerPath(DirectoryOf(m.from))].push_back(L"");  // something stays behind
             continue;
         }
         SHCreateDirectoryExW(nullptr, DirectoryOf(m.to).c_str(), nullptr);
+        // A destination created after the plan was made wins: never replace it.
+        if (Exists(m.to)) {
+            r.failed.emplace_back(m.from, L"A file with that name appeared before the move.");
+            destsBySource[LowerPath(DirectoryOf(m.from))].push_back(L"");
+            continue;
+        }
+        // The undo record goes first: a crash between the move and the log write would otherwise
+        // leave a file that Library > Undo last organize cannot bring back.
+        uint64_t logBefore = 0;
+        if (!AppendLog(log, m.to, m.from, &logBefore)) {
+            r.failed.emplace_back(m.from, L"Couldn't save the undo log; the file was not moved.");
+            destsBySource[LowerPath(DirectoryOf(m.from))].push_back(L"");
+            stoppedAt = i + 1;
+            break;  // stop before risking any further moves without an undo record
+        }
         if (MoveFileExW(m.from.c_str(), m.to.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH)) {
-            if (!AppendLog(log, m.to, m.from)) {
-                bool restored = MoveFileExW(m.to.c_str(), m.from.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH) != FALSE;
-                r.failed.emplace_back(m.from, restored ? L"Couldn't save the undo log; the file was restored."
-                                                       : L"Couldn't save the undo log or restore the file: " + m.to);
-                if (!restored) r.moved.emplace_back(m.id, m.to);
-                destsBySource[LowerPath(DirectoryOf(m.from))].push_back(L"");
-                break;  // stop before risking any further moves without an undo record
-            }
             r.moved.emplace_back(m.id, m.to);
             destsBySource[LowerPath(DirectoryOf(m.from))].push_back(DirectoryOf(m.to));
             sourceCase[LowerPath(DirectoryOf(m.from))] = DirectoryOf(m.from);
         } else {
-            r.failed.emplace_back(m.from, ErrorText(GetLastError()));
+            // Nothing reached the destination (a partial cross-volume copy is kept in the log so
+            // the user can still undo it).
+            DWORD error = GetLastError();
+            if (!Exists(m.to)) TruncateLog(log, logBefore);
+            r.failed.emplace_back(m.from, ErrorText(error));
             destsBySource[LowerPath(DirectoryOf(m.from))].push_back(L"");
         }
     }
+    // The run stopped early; report every file it did not reach, so the summary can't look complete.
+    if (stoppedAt < plan.size())
+        for (size_t i = stoppedAt; i < plan.size(); ++i)
+            if (plan[i].skip.empty()) r.failed.emplace_back(plan[i].from, L"Not moved: the undo log couldn't be written.");
     // Cover images follow when every audio file of a folder went to the same new folder.
     for (auto& [lower, dests] : destsBySource) {
         auto src = sourceCase.find(lower);
@@ -205,8 +235,17 @@ OrganizeResult ExecuteOrganize(const std::vector<OrganizeMove>& plan, const std:
         if (together && !audioLeft)
             for (auto& img : images) {
                 std::wstring from = src->second + kPathSep + img, to = dests[0] + kPathSep + img;
-                if (!Exists(to) && MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH))
-                    if (!AppendLog(log, to, from)) MoveFileExW(to.c_str(), from.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH);
+                if (Exists(to)) continue;
+                uint64_t logBefore = 0;
+                if (!AppendLog(log, to, from, &logBefore)) {
+                    r.failed.emplace_back(from, L"Couldn't save the undo log; the cover was not moved.");
+                    continue;
+                }
+                if (!MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH)) {
+                    DWORD error = GetLastError();
+                    if (!Exists(to)) TruncateLog(log, logBefore);
+                    r.failed.emplace_back(from, ErrorText(error));
+                }
             }
         RemoveEmptyFolders(src->second, keep);
     }
