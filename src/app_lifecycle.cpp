@@ -74,6 +74,7 @@ void StopAppWorkers(HWND hwnd) {
     StopWebServer();
     g.headsets.Stop();
     StopBackgroundJobs();
+    StopSteamDiscovery();
     KillTimer(hwnd, kUiTimer);
     KillTimer(hwnd, kBusyTimer);
     KillTimer(hwnd, kSearchTimer);

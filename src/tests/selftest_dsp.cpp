@@ -7,6 +7,7 @@
 
 namespace {
 void TestWaveformMotion() {
+    testlog::Batch batch;
     auto tone = [](unsigned rate, double seconds, float amplitude, double frequency = 440) {
         std::vector<float> pcm((size_t)std::lround(rate * seconds) * 2);
         for (size_t i = 0; i < pcm.size() / 2; ++i)
@@ -52,9 +53,13 @@ void TestWaveformMotion() {
             stereo.Add(opposite.Level() == loud.Level(), name);
         }
     }
+    batch.Next(L"live waveforms swell within 20 ms on bass and melodic note attacks and release smoothly "
+               L"between accents");
     Check(attacks.Passed(), L"live waveforms swell within 20 ms on bass and melodic note attacks, including repeated notes%ls",
           attacks.failed.c_str());
     Check(falls.Passed(), L"live note attacks release smoothly and settle between accents%ls", falls.failed.c_str());
+    batch.Next(L"live waveforms keep soft notes visible against strong ones and respond identically across "
+               L"chunk sizes and phase");
     Check(dynamics.Passed(), L"live waveforms keep soft notes visible with more contrast against strong notes%ls",
           dynamics.failed.c_str());
     Check(cadence.Passed(), L"live response is identical across PCM chunk sizes and display refresh schedules%ls",
@@ -67,6 +72,8 @@ void TestWaveformMotion() {
     std::array<uint8_t, 5> shape{0, 32, 96, 180, 255}, held = shape;
     motion.Shape(shape.data(), shape.size());
     motion.Shape(held.data(), held.size());
+    batch.Next(L"the live shape lifts with a note, holds the same frame twice, resets to silence and "
+               L"ignores non-finite PCM");
     Check(shape == held && shape.front() > 50 && shape.back() > 165 &&
               std::is_sorted(shape.begin(), shape.end()) && shape.front() < shape.back(),
           L"a note lifts the whole live shape while retaining its texture; drawing twice holds the same frame");
@@ -83,7 +90,10 @@ void TestWaveformMotion() {
 
 void TestVisuals() {
     TestWaveformMotion();
+    testlog::Batch batch;
     AudioVisuals frame;
+    batch.Next(L"VIS stopped audio stays silent, a 1 kHz tone lands in its band at each rate, and stop "
+               L"drains the display");
     Check(!frame.Update(false, 48000) && !frame.Moving() &&
               std::all_of(frame.wave.begin(), frame.wave.end(), [](float v) { return v == 0; }),
           L"VIS stopped audio is silent and does not keep the display timer running");
@@ -109,6 +119,7 @@ void TestVisuals() {
           L"VIS stop clears the waveform while spectrum peaks finish their hold and fall");
     for (int i = 0; i < 160; ++i) frame.Update(false, 48000);
     Check(!frame.Moving(), L"VIS stopped spectrum settles completely");
+    batch.Next(L"VIS non-finite display samples cannot escape into drawing coordinates or spectrum levels");
     frame.wave[0] = std::numeric_limits<float>::quiet_NaN();
     frame.wave[1] = std::numeric_limits<float>::infinity();
     frame.Update(true, 48000);
@@ -116,6 +127,8 @@ void TestVisuals() {
               std::all_of(frame.levels.begin(), frame.levels.end(), [](float v) { return std::isfinite(v); }),
           L"VIS non-finite display samples cannot escape into drawing coordinates");
 
+    batch.Next(L"VIS the scope keeps 300 ms at a fixed linear scale and averages signed stereo into "
+               L"weighted spans at every rate");
     testlog::Cases windows;
     for (unsigned rate : {44100u, 48000u, 96000u, 192000u, 384000u}) {
         size_t frames = frame.Prepare(rate);
@@ -147,6 +160,8 @@ void TestVisuals() {
     auto averaged = frame.Curve(2);
     Check(averaged[0] == 0 && averaged[1] == 0,
           L"VIS rapid alternation averages to silence instead of aliasing into a full-height trace");
+    batch.Next(L"VIS spectrum peaks hold and fall in bass-band dB, follow elapsed time and scroll with the "
+               L"playback clock");
     frame = {};
     frame.Prepare(48000);
     for (size_t i = 0; i < frame.wave.size() / 2; ++i)
@@ -181,9 +196,12 @@ void TestVisuals() {
 }
 
 void TestEqualizer() {
+    testlog::Batch batch;
     EqSettings settings;
     settings.crossfeed = true;
     std::wstring error;
+    batch.Next(L"AutoEq imports preamp, shelves, Q and disabled filters from BOM'd text, round trips it and "
+               L"rejects bad profiles");
     bool parsed = ParseAutoEq("\xEF\xBB\xBF# AutoEq\r\nPreamp: -6.25 dB\r\n"
         "Filter 1: ON LSC Fc 105 Hz Gain 5.5 dB Q 0.7\n"
         "Filter 2: ON PK Fc 1200 Hz Gain -3 dB Q 2.1 # notch\n"
@@ -211,6 +229,8 @@ void TestEqualizer() {
                 roundTrip.filterCount == 20;
     Check(rejected, L"AutoEq rejects malformed, unsupported, non-finite and oversized profiles without partial changes");
 
+    batch.Next(L"parametric and graphic bands and shelves reach their gains at every rate, and neighbouring "
+               L"sliders stay independent");
     auto response = [](EqSettings s, double frequency, unsigned rate = 48000) {
         Equalizer eq;
         eq.Configure(s, rate);
@@ -265,6 +285,8 @@ void TestEqualizer() {
     Check(worstBand < 0.1 && skirt > 3.5,
           L"graphic sliders land within %.2f dB of their values with neighbours set; a +12 dB 16 kHz peak gives %.1f dB at 10 kHz",
           worstBand, skirt);
+    batch.Next(L"profile preamp and crossfeed work with filters off, mono level holds and disabling fades "
+               L"to bit-exact bypass");
     settings.filters[0] = {EqFilterType::LowShelf, 1000, 6, 0.707f, true};
     auto low = response(settings, 40).first, lowFlat = response(settings, 10000).first;
     settings.filters[0].type = EqFilterType::HighShelf;
@@ -297,6 +319,8 @@ void TestEqualizer() {
 
     // Changing the curve while playing crossfades instead of restarting filters: the output moves
     // no faster than the signal itself does (a reset filter state would jump by about the signal).
+    batch.Next(L"EQ changes crossfade without clicks, denormals stay contained, a zero rate bypasses and "
+               L"re-applying keeps tails");
     bool smooth = true;
     for (bool parametric : {false, true}) for (bool toggle : {false, true}) {
         EqSettings before, after;
@@ -357,6 +381,8 @@ void TestEqualizer() {
     }
     Check(uninterrupted == refreshed, L"reapplying unchanged EQ preserves biquad tails and crossfeed history exactly");
 
+    batch.Next(L"the production renderer stays exact with EQ off, applies the preamp, and limits boosted "
+               L"output instead of clipping");
     std::vector<float> signal(48000 * 2);
     for (size_t i = 0; i < signal.size() / 2; ++i)
         signal[i * 2] = signal[i * 2 + 1] = (float)(0.8 * std::sin(2 * 3.14159265358979 * 1000 * i / 48000));
@@ -394,6 +420,8 @@ void TestEqualizer() {
 
     settings = {};
     settings.enabled = true;
+    batch.Next(L"EQ headroom follows the combined overlapping-band response, finds narrow peaks at every "
+               L"rate and skips crossfeed");
     settings.gains[4] = settings.gains[5] = 6;
     eq.Configure(settings, 48000);
     const double overlap = eq.PeakGainDb();
@@ -420,6 +448,7 @@ void TestEqualizer() {
 }
 
 void TestLoudness() {
+    testlog::Batch batch;
     // EBU Tech 3341 case 1: stereo 1 kHz sine at -23 dBFS reads -23.0 LUFS.
     const unsigned rate = 48000;
     LoudnessMeter meter(rate);
@@ -430,12 +459,14 @@ void TestLoudness() {
             buf[i * 2] = buf[i * 2 + 1] = (float)(amp * std::sin(2 * 3.14159265358979 * 1000 * (sec * (double)rate + i) / rate));
         meter.Add(buf.data(), rate);
     }
+    batch.Next(L"LOUDNESS EBU 3341 sine reads -23 LUFS and the ReplayGain reference follows it");
     double lufs = meter.Integrated();
     Check(std::fabs(lufs + 23.0) < 0.1, L"LOUDNESS EBU 3341 sine: %.2f LUFS (expected -23.00), ReplayGain %+.2f dB", lufs,
           kReplayGainReference - lufs);
 }
 
 void TestTruePeak() {
+    testlog::Batch batch;
     // Independent original scalar FIR oracle: stereo lanes, ring wrap, arbitrary chunking,
     // startup and Reset must all keep exactly the same reported peaks.
     struct Reference {
@@ -484,8 +515,12 @@ void TestTruePeak() {
     }
     optimized.Reset(); reference=Reference{};
     reference.Add(noise.data(),17); optimized.Add(noise.data(),17);
+    batch.Next(L"TRUE PEAK SIMD matches the original scalar FIR exactly across stereo lanes, wrap, chunks "
+               L"and reset");
     Check(identical && optimized.Peak()==(float)reference.peak,L"TRUE PEAK SIMD matches original scalar FIR exactly across stereo, wrap, chunks and reset");
 
+    batch.Next(L"TRUE PEAK sees inter-sample and half-sample peaks, reads DC and impulses at their own "
+               L"level");
     // A sine at fs/4 with a 45-degree phase: the samples are all +/-0.7071, but the waveform
     // peaks at 1.0 between them. Sample peak cannot see that; true peak must.
     const unsigned rate = 48000;
@@ -523,6 +558,7 @@ void TestTruePeak() {
 }
 
 void TestPeakLimiter() {
+    testlog::Batch batch;
     const unsigned rate = 48000;
     const double pi = 3.14159265358979;
     // Below full scale the limiter only delays: every sample comes out bit-exact, block sizes aside.
@@ -539,6 +575,8 @@ void TestPeakLimiter() {
     const size_t lag = quiet.Latency();
     bool exact = lag > 0 && lag < rate / 100;
     for (size_t i = lag * 2; i < out.size() && exact; ++i) exact = out[i] == in[i - lag * 2];
+    batch.Next(L"LIMITER under full scale delays bit-exactly and continues the waveform when engaged "
+               L"mid-song");
     Check(exact, L"LIMITER under full scale: bit-exact, delayed %zu frames", lag);
     // Engaged mid-song, the look-ahead holds the last frame out instead of inserting silence.
     PeakLimiter joined;
@@ -551,6 +589,8 @@ void TestPeakLimiter() {
     for (size_t i = 0; i < steady.size(); i += 2) gapless &= steady[i] == 0.5f && steady[i + 1] == -0.5f;
     Check(gapless, L"LIMITER engaged mid-song continues the waveform instead of inserting a silent gap");
 
+    batch.Next(L"LIMITER catches loud passages, single clicks and peaks between samples without leaving "
+               L"full scale");
     // A 1 kHz sine at +6 dB for half a second, between quiet passages: nothing leaves full scale,
     // the loud part sits just under the limiter's ceiling (limited, not clipped), and the quiet
     // parts are untouched except shortly after the loud part, while the gain recovers.
@@ -599,6 +639,8 @@ void TestPeakLimiter() {
     Check(hiddenPeak < 0.8f, L"LIMITER catches peaks between samples: a tone sampled at 0.85 peaking at 1.2 plays at %.3f",
           hiddenPeak);
 
+    batch.Next(L"the production limiter preserves headphone reserves and leaves audio below the reserve "
+               L"ceiling bit-exact");
     bool reservedPeaks = true;
     for (float reserve : {3.0f, 6.0f, 12.0f}) {
         auto protectedPcm = RenderPlayerPcm(sig.data(), sig.size() / 2, rate, {}, true, 1, reserve);
@@ -628,6 +670,7 @@ void TestPeakLimiter() {
 // The ReplayGain model (RgGainFor): album gain first, loud albums only partly turned down, quiet
 // ones lifted fully, peaks capped with a limiting budget that grows with the dynamic range.
 void TestReplayGainModel() {
+    testlog::Batch batch;
     auto& g = app::g;
     const bool on = g.rgOn;
     const float keep = g.rgKeep, preamp = g.rgPreamp, noInfo = g.rgPreampNoInfo;
@@ -665,6 +708,8 @@ void TestReplayGainModel() {
         modes &= std::fabs(gainDb(ReplayGainMode::Track, false) + 5) < 0.01;
         t.rgTrackGain = -1200; t.rgAlbumGain = kNoGain;
         modes &= std::fabs(gainDb(ReplayGainMode::Album, false) + 12) < 0.01;
+        batch.Next(L"ReplayGain chooses album, track or playback-order gain and falls back when one is "
+                   L"missing");
         Check(modes, L"ReplayGain chooses album, track or playback-order gain and falls back when missing");
     }
     auto high = [](double lu) { return (uint8_t)std::clamp(1 + (int)std::lround(lu * 4), 1, 255); };
@@ -681,6 +726,8 @@ void TestReplayGainModel() {
     const double peakDb = 20 * std::log10(0.891f), loudParts = kReplayGainReference - 10.0 + 1.0,
                  budget = std::clamp((peakDb - loudParts - 9.0) / 3.0, 0.0, 3.0),
                  peakyGain = std::min(10.0, budget - peakDb);
+    batch.Next(L"RG MODEL turns loud albums down partly, lifts quiet ones, budgets peaks and keeps hot "
+               L"masters present");
     Check(std::fabs(db(finale) + 6.0) < 0.01 && std::fabs(db(quiet) - 5.0) < 0.01 &&
           std::fabs(db(peaky) - peakyGain) < 0.05 && std::fabs(db(unknown)) < 0.01 && std::fabs(db(single) + 4.8) < 0.01,
           L"RG MODEL finale %+.2f (expect -6), quiet %+.2f (+5), peaky %+.2f (%+.2f), unknown %+.2f, single %+.2f (-4.8)",
@@ -704,6 +751,8 @@ void TestReplayGainModel() {
     g.eq.enabled = true;
     g.eq.gains[5] = 6;
     const double boosted = db(peaky);
+    batch.Next(L"RG budgets EQ boosts, AutoEq preamp, negative net gain, headphone headroom, off bypass and "
+               L"unmeasured tracks");
     Check(std::fabs(boosted - (peakyGain - 6)) < 0.06 && std::fabs(db(single) + 6) < 0.06,
           L"RG budgets EQ boosts before the limiter while retaining the track's existing limiting allowance");
     g.eq.preamp = -6;
@@ -758,12 +807,16 @@ void TestReplayGainModel() {
             transparent &= std::isfinite(rendered[i * 2 + ch]) &&
                 std::fabs(rendered[i * 2 + ch] - expected[(i - delay.Latency()) * 2 + ch]) < 1e-5f;
     }
+    batch.Next(L"production ReplayGain with EQ preamps, crossfeed and a headset reserve avoids extra "
+               L"limiting and double gain");
     Check(transparent, L"production ReplayGain + graphic/AutoEq preamps + crossfeed + headset reserve avoid extra limiting and double gain");
     g.eq = {};
     g.rgHeadphoneHeadroom = 0;
     g.rgKeep = 0;
     const double full = db(finale);
     g.rgOn = false;
+    batch.Next(L"RG MODEL keep-nothing and off give unity, album gain waits for measurements and clears "
+               L"with them");
     Check(std::fabs(full + 10.0) < 0.01 && app::RgGainFor(finale) == 1.0f, L"RG MODEL keep nothing: %+.2f (-10); off: unity", full);
     // Album gain comes from the tracks' measurements (energy mean), once every playable track is
     // measured; an undecodable track doesn't hold the album back.
@@ -834,6 +887,7 @@ std::string MakeSineWav(double seconds, double silentFrom) {
 // mapping (a track's waveform is a range of the file, asked for in file seconds), the streaming
 // accumulator, and the disk cache's store/read-by-key behaviour.
 void TestPeaks(const std::wstring& scratch) {
+    testlog::Batch batch;
     const std::wstring sine = scratch + L"\\peaks_sine.wav", half = scratch + L"\\peaks_half.wav",
                        silent = scratch + L"\\peaks_silent.wav";
     WriteTestBytes(sine, MakeSineWav(2, 2));
@@ -846,6 +900,8 @@ void TestPeaks(const std::wstring& scratch) {
     };
     int lo = 0, hi = 0;
     Peaks sinePeaks{}, halfPeaks{}, p{};
+    batch.Next(L"PEAKS turns a half-scale sine, a half-silent file and silence into the expected bucket "
+               L"values");
     bool ok = ComputePeaks(sine, 0, 0, sinePeaks, nullptr);
     span(sinePeaks, 0, kPeakBuckets, lo, hi);
     Check(ok && lo >= 179 && hi <= 181, L"PEAKS sine at half scale: %d..%d (expected 180 in every bucket)", lo, hi);
@@ -861,6 +917,8 @@ void TestPeaks(const std::wstring& scratch) {
     Check(ok && hi == 0, L"PEAKS silence is all zero (max %d)", hi);
 
     testlog::Cases ranges;
+    batch.Next(L"PEAKS ranges preserve their samples, reject reversed bounds and cancellation, and CUE "
+               L"tracks match the file's window");
     ok = ComputePeaks(half, 1.0, 2.0, p, nullptr);
     span(p, 0, kPeakBuckets, lo, hi);
     ranges.Add(ok && hi == 0, L"silent second");
@@ -899,6 +957,8 @@ void TestPeaks(const std::wstring& scratch) {
     for (size_t i = 0; i < stereo.size() / 2; ++i)
         stereo[i * 2] = stereo[i * 2 + 1] = (float)(0.5 * std::sin(2 * 3.14159265358979 * 1000 * i / 48000.0));
     PeakAccumulator acc;
+    batch.Next(L"PEAKS the accumulator and partial previews keep the track timeline, merge blocks and "
+               L"quick-preview any range");
     acc.Begin(0);
     for (size_t i = 0; i < stereo.size(); i += 4096 * 2) acc.Add(stereo.data() + i, std::min<size_t>(4096, stereo.size() / 2 - i / 2));
     Peaks accPeaks{};
@@ -976,6 +1036,8 @@ void TestPeaks(const std::wstring& scratch) {
     uint32_t req = 0;
     Peaks got{};
     bool hit = GetPeaks(sine, size, time, 0, 0, got, req);
+    batch.Next(L"PEAKS the worker queues and answers requests, and its disk cache round trips by file key "
+               L"and range");
     Check(!hit && req != 0, L"PEAKS first request queues work (request %u)", req);
     for (int i = 0; i < 500 && !hit; ++i) {
         Sleep(20);
@@ -1009,6 +1071,7 @@ void TestPeaks(const std::wstring& scratch) {
                 std::memcmp(got.v, sinePeaks.v, kPeakBuckets) == 0 &&
                 GetPeaks(half, size + 11, time, 0, 0, got, future) &&
                 std::memcmp(got.v, halfPeaks.v, kPeakBuckets) == 0;
+    batch.Next(L"PEAKS prefetch warms the next song without disturbing the current request");
     Check(front && both && !future, L"PEAKS prefetch leaves the current request intact and makes the next song ready");
     StopPeaks();
 
@@ -1084,6 +1147,8 @@ void TestPeaks(const std::wstring& scratch) {
         bool canReturn = !GetPeaks(longFile, end.QuadPart, time, 0, 0, got, afterCancel) && afterCancel && afterCancel != again;
         CancelPeaks();
         StopPeaks();
+        batch.Next(L"PEAKS previews in full width while decoding and cancels rapid changes without caching "
+                   L"partial results");
         Check(queued && started && progressed && fullPreview && switched && nextQueued && oldHidden && deferred && rapidPreview &&
                   nextReady && abandoned &&
                   retryQueued && restarted && cached && closed && canRetry && canReturn,
@@ -1098,6 +1163,7 @@ void TestPeaks(const std::wstring& scratch) {
 
 // Reverb, tempo, loudness compensation and night mode (dsp.h), alone and through the production renderer.
 void TestEffects() {
+    testlog::Batch batch;
     constexpr unsigned rate = 48000;
     constexpr double pi = 3.14159265358979;
     auto run = [](auto& effect, std::vector<float>& pcm) {
@@ -1145,6 +1211,8 @@ void TestEffects() {
         audible &= db > -14 && db < -3;
         levelText += L" " + std::to_wstring((int)std::lround(db));
     }
+    batch.Next(L"REVERB every preset rings and decays audibly; off rings out, a seek ducks the tail and "
+               L"silence sleeps until sound");
     Check(decays && audible, L"REVERB every preset rings and decays; the default amount's wet level is -14..-3 dB (dB:%ls)",
           levelText.c_str());
 
@@ -1208,6 +1276,7 @@ void TestEffects() {
         }
         stretch.Flush(out);
     }
+    batch.Next(L"TEMPO keeps a tone's pitch and level, divides the length by the tempo, ignoring chunking");
     Check(lengths && pitch && steadyLevel && whole == pieces && owed < 2,
           L"TEMPO keeps a tone's pitch and level, divides the length by the tempo, and ignores chunking");
 
@@ -1230,6 +1299,8 @@ void TestEffects() {
     for (float volume = 0.001f; volume < 1; volume *= 1.3f)
         belowAttenuation &= LoudnessContour::BassDb(volume) < -20 * std::log10(volume) &&
                             LoudnessContour::TrebleDb(volume) < -20 * std::log10(volume);
+    batch.Next(L"LOUDNESS is flat at full volume and lifts bass and treble towards -20 dB without exceeding "
+               L"the attenuation");
     Check(untouched == tone(1000, 0.5, 0.5) && !contour.Active() && low > 5.5 && low < 7.5 && std::fabs(middle) < 1 &&
               high > 1.2 && high < 2.2 && belowAttenuation,
           L"LOUDNESS is flat at full volume; at -20 dB it lifts 40 Hz by %.1f dB and 14 kHz by %.1f dB, 1 kHz by %.2f dB",
@@ -1283,6 +1354,8 @@ void TestEffects() {
     const double softened = night.LiftDb();
     auto floor = passage(-80, 4);
     nightRun(hiss, floor);
+    batch.Next(L"NIGHT lifts quiet passages, softens loud ones and ignores near-silence; effects off stay "
+               L"exact and reverb is limited");
     Check(std::fabs(lifted - 9) < 0.5 && std::fabs(softened + 5) < 0.5 && hiss.LiftDb() == 0,
           L"NIGHT lifts a -39 dB passage by %.1f dB (expect 9), softens a -6 dB one by %.1f dB (expect -5), ignores -80 dB",
           lifted, softened);

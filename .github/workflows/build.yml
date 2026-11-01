@@ -53,7 +53,7 @@ jobs:
           install -m 755 linux/install.sh cordinal/install.sh
           install -m 644 linux/cordinal.desktop cordinal/cordinal.desktop
           install -m 644 docs/icon.png cordinal/cordinal.png
-          install -m 644 src/encode/LICENSE.txt cordinal/glint-LICENSE.txt
+          install -m 644 LICENSE cordinal/LICENSE
           strip cordinal/cordinal
           tar -czf dist/cordinal-linux-x64.tar.gz cordinal
           cp linux/install.sh dist/

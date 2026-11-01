@@ -116,6 +116,12 @@ std::string WithChunk(const std::string& file, const char (&id)[5], const std::s
 void TestCordFormat(const std::wstring& root, const std::wstring& scratch) {
     const std::wstring path = scratch + L"\\cord-test.cord";
 
+    // Each batch reports one check over the assertions it holds, so a scenario fails as a whole
+    // while every case still logs its own message and location.
+    testlog::Batch batch;
+    batch.Next(L"cord round trips every bit depth, channel count and speaker mask, lengths around frame "
+               L"and block edges, full-scale noise, and every cascade encoded on several threads");
+
     // Round trips: every bit depth, the channel counts, and lengths around frame and block edges.
     std::wstring failed;
     for (unsigned bits : {1u, 4u, 8u, 12u, 16u, 20u, 24u, 31u, 32u})
@@ -170,6 +176,9 @@ void TestCordFormat(const std::wstring& root, const std::wstring& scratch) {
     for (size_t i = 0; i < noise.size(); ++i) noise16[i] = noise[i] >> 16;
     Check(RoundTrip(path, noise, 2, 32) && RoundTrip(path, noise16, 2, 16), L"cord round trips full-scale 16- and 32-bit noise");
 
+    batch.Next(L"sine.flac converts to cord with every sample intact, in fewer bytes, and reads back "
+               L"its technical tags and audio hash");
+
     // A FLAC fixture through the exact reader: the same samples, a smaller file, and the same
     // audio hash, since both keep the MD5 of the samples in FLAC's layout.
     const std::wstring flac = root + L"\\media\\sine.flac", copy = scratch + L"\\cord-sine.cord";
@@ -194,6 +203,9 @@ void TestCordFormat(const std::wstring& root, const std::wstring& scratch) {
               cordTags.sampleRate == 44100 && cordTags.channels == 2 && std::fabs(cordTags.duration - 8.0) < 1e-9 &&
               std::wstring(CodecName(Codec::Cord)) == L"Cord",
           L"cord's technical tags read back, with the same audio hash as the FLAC it came from");
+
+    batch.Next(L"cord playback: float output is the integers scaled, seeks land on the exact frame and refuse "
+               L"non-finite positions, and six channels play through the shared stereo downmix");
 
     // Playback: float output is the integers scaled, seeks land on the exact frame, and the
     // decoder refuses non-finite seeks and reads nothing past the end.
@@ -243,6 +255,10 @@ void TestCordFormat(const std::wstring& root, const std::wstring& scratch) {
     }
     Check(mixed, L"cord plays 6 channels through the shared stereo downmix");
 
+    batch.Next(L"cord refuses a bad index, a cut end, version 0 or 2 and the retired codec, reads "
+               L"damaged blocks and a wrong MD5 as damaged, and reads a later minor version and an "
+               L"unknown chunk");
+
     // Damage: a flipped bit in a block, a wrong INDX entry, a cut-short file, a wrong stored MD5,
     // a frozen-format version, a retired codec. An unknown chunk is skipped.
     const std::string good = ReadTestBytes(copy);
@@ -291,7 +307,12 @@ void TestCordFormat(const std::wstring& root, const std::wstring& scratch) {
     const std::wstring tagged = scratch + L"\\cord-tags.cord";
     DeleteFileW(tagged.c_str());
     CopyFileW(copy.c_str(), tagged.c_str(), FALSE);
+    // TestTagWriterFiles reports its own checks, so no batch may be active across the call.
+    batch.End();
     TestTagWriterFiles({tagged}, g_log, L"tag writing: cordinal format");
+    batch.Next(L"cord keeps free-form entries, unknown fields and chunks through an edit, stores "
+               L"ReplayGain as numbers, and a failing edit leaves the file byte-identical with its "
+               L"samples intact");
     // Free-form entries carry what cordinal has no field for, and survive an edit; an unknown
     // typed field and an unknown chunk are kept too. ReplayGain is stored as numbers.
     std::string meta;
@@ -325,6 +346,8 @@ void TestCordFormat(const std::wstring& root, const std::wstring& scratch) {
           L"a cord edit that fails leaves the file byte-identical");
     const Exact retagged = ReadAll(tagged);
     Check(!retagged.damaged && retagged.samples == original.samples, L"cord tag edits leave the samples bit-identical");
+
+    batch.Next(L"cord files are library audio, and encoding never overwrites an existing file");
 
     // The library sees .cord files, and the encoder never replaces an existing one.
     MemoryPcm again(noise16, 2, 16);
@@ -364,6 +387,10 @@ void TestCordConversion(const std::wstring& root, const std::wstring& scratch) {
     std::wstring error;
     const bool covered = WriteTags(tagged, edit, error);
 
+    testlog::Batch batch;
+    batch.Next(L"conversion plans FLAC and WAV only, converts the readable files with their samples and "
+               L"every tag, leaves nothing for a damaged one, and keeps originals when asked");
+
     const auto plan = PlanConvert({{1, tagged}, {2, gains}, {3, wave}, {4, broken}, {5, lossy}, {6, dir + L"\\x.cord"},
                                    {7, dir + L"\\cue.flac|2"}});
     Check(plan.size() == 7 && plan[0].skip.empty() && plan[0].to == dir + L"\\tagged.cord" && plan[1].skip.empty() &&
@@ -401,6 +428,10 @@ void TestCordConversion(const std::wstring& root, const std::wstring& scratch) {
               std::fabs(d.rgTrackGain - c.rgTrackGain) < 1e-4f && std::fabs(d.rgAlbumPeak - c.rgAlbumPeak) < 1e-6f &&
               (!hasEncoder || cordBytes.find("ENCODER") != std::string::npos) && b.audioHash == a.audioHash,
           L"conversion carries every tag over: fields, ReplayGain, lyrics, the cover and comments it has no field for");
+
+    batch.Next(L"conversion undo returns the originals and forgets its log; a cancelled run or an "
+               L"unwritable log converts nothing and keeps the original, none replaces an existing "
+               L".cord, and old logs are forgotten");
 
     // Undo without the Recycle Bin: the originals were kept, so the log is done with at once.
     const auto undone = UndoLastConvert(logDir, false, error);
@@ -446,10 +477,15 @@ void TestCordConversion(const std::wstring& root, const std::wstring& scratch) {
     PruneConvertLogs(logDir, 49);
     Check(remembered && !CanUndoConvert(logDir), L"conversion logs older than the undo memory are forgotten");
 
+    batch.End();
+
     // The FLAC escape route has only the .cord files: no originals, no journal, even when the
     // conversion preference would normally recycle originals. These exports always keep them.
     if (!Ready(DeleteFileW(tagged.c_str()) && DeleteFileW(gains.c_str()) && DeleteFileW(wave.c_str()),
                L"remove scratch originals before exporting .cord")) return;
+    batch.Next(L"FLAC export restores audio, tags, covers and ReplayGain from the .cord files without "
+               L"originals or undo history, and keeps lossless precision and tags across rates, "
+               L"channels and final blocks");
     cancel = false;
     settings.recycle = true;
     const auto exports = PlanConvert({{1, cord}, {2, dir + L"\\gains.cord"}, {3, dir + L"\\plain.cord"}}, CordExport::Flac);
@@ -525,6 +561,9 @@ void TestCordConversion(const std::wstring& root, const std::wstring& scratch) {
     }
     Check(formats.Passed(), L"exports preserve lossless precision and tags across rates, channels, transients and final blocks%ls", formats.failed.c_str());
 
+    batch.Next(L"WAV, MP3 and AAC copies keep tags, lyrics and covers, decode completely and never "
+               L"overwrite files");
+
     testlog::Cases copies;
     for (const auto target : {CordExport::Wav, CordExport::Mp3_192, CordExport::Mp3_320, CordExport::Aac128, CordExport::Aac192}) {
         const auto& info = kCordExports[(unsigned)target];
@@ -552,6 +591,9 @@ void TestCordConversion(const std::wstring& root, const std::wstring& scratch) {
                    std::wstring(info.label) + L" cancellation and collision");
     }
     Check(copies.Passed(), L"WAV, MP3 and AAC copies keep tags, lyrics and covers, decode completely and never overwrite files%ls", copies.failed.c_str());
+
+    batch.Next(L"FLAC export leaves sources and existing files intact, and removes cancelled or damaged "
+               L"exports");
 
     const std::wstring safe = dir + L"\\safe.flac", damaged = dir + L"\\damaged.cord";
     const std::string preserved = ReadTestBytes(cord), existing = ReadTestBytes(tagged);

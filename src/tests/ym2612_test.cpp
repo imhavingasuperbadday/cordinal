@@ -29,6 +29,8 @@ double Energy(Ym2612& chip,unsigned count) {
 // sine at the same phase, so both the oscillator and the 16-bit scaling are pinned.
 void TestYm2612() {
     Ym2612 chip;
+    testlog::Batch batch;
+    batch.Next(L"YM2612 sine carrier: exact pitch and sine, total level, attack, pan and key-off");
     Tone(chip);
     unsigned crossings=0; float previous=0; bool finite=true,stereo=true; double error=0;
     constexpr unsigned n=12800;
@@ -50,17 +52,20 @@ void TestYm2612() {
     testlog::Check(pan && Energy(chip,1024)>0.001,L"YM2612 left pan has sound only on the selected output");
     chip.Write(0,0x28,0); Energy(chip,4096);
     testlog::Check(Energy(chip,4096)==0,L"YM2612 key-off releases to silence");
+    batch.Next(L"YM2612 channel 6 DAC replaces FM, follows pan and holds silence at the unsigned midpoint");
     chip.Reset(); chip.Write(1,0xB6,0x40); chip.Write(0,0x2A,255); chip.Write(0,0x2B,128);
     float left,right; chip.Sample(left,right);
     testlog::Check(left==0 && right==8128.0f/65536,L"YM2612 channel 6 DAC replaces FM and follows stereo routing");
     chip.Write(0,0x2A,128); chip.Sample(left,right);
     testlog::Check(left==0 && right==0,L"YM2612 unsigned DAC midpoint is silent");
+    batch.Next(L"YM2612 timer A and timer B overflow, enable and reset at their documented rates");
     chip.Reset(); chip.Write(0,0x24,255); chip.Write(0,0x25,3); chip.Write(0,0x27,5); chip.Sample(left,right);
     bool timerA=chip.Status()==1; chip.Write(0,0x27,16);
     testlog::Check(timerA && chip.Status()==0,L"YM2612 timer A overflow, enable and reset");
     chip.Reset(); chip.Write(0,0x26,255); chip.Write(0,0x27,10); Energy(chip,15);
     bool before=chip.Status()==0; chip.Sample(left,right);
     testlog::Check(before && chip.Status()==2,L"YM2612 timer B uses sixteen sample ticks");
+    batch.Next(L"YM2612 SSG hold shapes and all eight FM algorithms produce finite, documented output");
     bool ssgShapes=true;
     for (unsigned shape:{9u,11u,13u,15u}) {
         Tone(chip); chip.Write(0,0x60,31); chip.Write(0,0x70,31); chip.Write(0,0x90,(uint8_t)shape);
@@ -86,6 +91,7 @@ void TestYm2612() {
     for (unsigned a=0;a<8;++a) for (unsigned b=0;b<a;++b) distinct&=algorithms[a]!=algorithms[b];
     testlog::Check(algorithmsOk && distinct,L"YM2612 eight algorithms produce finite, distinct modulation topologies");
     // Register fuzz also checks unused channel addresses and timer/SSG transitions.
+    batch.Next(L"YM2612 malformed register logs remain bounded and finite");
     chip.Reset(); uint32_t random=0x734819;
     bool robust=true;
     for (unsigned i=0;i<100000;++i) {

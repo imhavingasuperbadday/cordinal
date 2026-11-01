@@ -8,21 +8,33 @@ void TestHarness(const std::wstring& scratch) {
     auto& state = testlog::state();
     auto previous = std::move(state);
     state = {};
-    const unsigned line = __LINE__ + 3;
+    const unsigned line = __LINE__ + 4;
+    const unsigned batchLine = __LINE__ + 6, secondCaseLine = __LINE__ + 8;
     {
         testlog::Group outer(L"outer");
         Check(false, L"intentional failure <雪> & \"quote\"\nnext line");
         { testlog::Group inner(L"inner"); Check(true, L"inner passes"); Check(false, L"inner fails"); }
+        {
+            testlog::Batch batch(L"batched behaviour");
+            Check(true, L"first case");
+            Check(false, L"second case fails");
+            Check(false, L"third case fails");
+        }
         testlog::Skip(L"unavailable hardware");
         Check(true, L"outer passes");
     }
     auto captured = std::move(state);
     state = std::move(previous);
-    Check(captured.checks == 4 && captured.failures == 2 && captured.details.size() == 2 && captured.stack.empty(),
-        L"nested groups count every assertion and failure exactly once");
+    Check(captured.checks == 5 && captured.failures == 3 && captured.details.size() == 5 && captured.stack.empty() &&
+        captured.batches.empty(),
+        L"nested groups and batches count every assertion and failure exactly once");
+    Check(captured.details.size() == 5 && captured.details[2].line == secondCaseLine &&
+        captured.details[2].message == L"second case fails" && captured.details[4].line == batchLine &&
+        captured.details[4].message.find(L"2 of 3 cases failed") != std::wstring::npos,
+        L"a failed batch keeps each case's source line and names them in its one failed check");
     Check(captured.skipped == 1 && captured.skips == std::vector<std::wstring>{L"unavailable hardware"},
         L"skipped checks are separate from passes and failures");
-    Check(captured.details.size() == 2 && captured.details[0].line == line &&
+    Check(captured.details.size() == 5 && captured.details[0].line == line &&
         captured.details[0].file.find("selftest_harness.cpp") != std::string::npos,
         L"failure diagnostics retain the assertion's original source file and line");
     TestReport report;

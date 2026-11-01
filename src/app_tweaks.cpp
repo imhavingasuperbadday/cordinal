@@ -6,6 +6,7 @@
 #include "app.h"
 
 #include "musicbrainz.h"
+#include "listenbrainz.h"
 
 namespace app {
 
@@ -94,9 +95,13 @@ const Tweak kTweaks[] = {
     {"effects.night_mode", L"Effects", L"NightMode", L"Night mode",
      L"Slowly lifts quiet passages and softens loud ones, for listening at night.", TweakType::Bool, 0, 1, 0,
      [] { return (double)g.nightMode; }, [](double v) { g.nightMode = v != 0; }, IDM_NIGHT_MODE},
+    {"view.waveform", L"Window", L"Waveform", L"Waveform playback bar",
+     L"Turn off to use a regular progress bar. This overrides live waveform and fountain settings without changing them.",
+     TweakType::Bool, 0, 1, 1, [] { return (double)g.waveform; }, [](double v) { g.waveform = v != 0; }, 0,
+     [] { WaveformTrackChanged(true); WaveformTick(); }},
     {"view.live_waveform", L"Window", L"LiveWaveform", L"Live waveform for songs",
      L"Show a moving waveform of the audio being heard instead of the whole-song overview. Seeking still works. "
-     L"Radio always uses the live waveform.", TweakType::Bool, 0, 1, 0,
+     L"Radio also uses it while Waveform playback bar is on.", TweakType::Bool, 0, 1, 0,
      [] { return (double)g.liveWaveform; }, [](double v) { g.liveWaveform = v != 0; }, 0,
      [] { WaveformTrackChanged(true); WaveformTick(); }},
     {"view.live_fountain", L"Window", L"LiveFountain", L"Live audio for Dark Fountain",
@@ -130,6 +135,14 @@ const Tweak kTweaks[] = {
          }
          if (g.eqWnd) RedrawWindow(g.eqWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
      }},
+    {"view.gpu_drawing", L"Window", L"GpuDrawing", L"Draw with the graphics card",
+     L"Draws the library with the graphics card instead of the processor. Off uses less memory; turn it on "
+     L"if scrolling is slow on a large, high-resolution screen.", TweakType::Bool, 0, 1, 0,
+     [] { return (double)g.gpuDrawing; }, [](double v) { g.gpuDrawing = v != 0; }, 0,
+     [] {
+         UpdateViewMemory();  // the next paint creates the other kind of target
+         if (g.hwnd) RedrawWindow(g.hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+     }},
     {"view.always_on_top", L"Window", L"AlwaysOnTop", L"Always on top",
      L"Keeps cordinal's window above other windows.", TweakType::Bool, 0, 1, 0, [] { return (double)g.alwaysOnTop; },
      [](double v) { g.alwaysOnTop = v != 0; }, IDM_ALWAYS_ON_TOP},
@@ -161,6 +174,16 @@ const Tweak kTweaks[] = {
      L"How long cordinal remembers a conversion so it can put the originals back.", TweakType::Choice, 0, 3, 3,
      [] { return (double)g.convertMemory; }, [](double v) { g.convertMemory = (uint8_t)v; }, IDM_CONVERT_MEMORY_BASE,
      nullptr, kUndoNames, nullptr, kTweakRadio},
+    {"scrobbling.paused", L"Scrobbling", L"Paused", L"Pause scrobbling",
+     L"Stops collecting and sending listens to Last.fm, ListenBrainz and Libre.fm, keeping connections and queued listens.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)listenbrainz::Paused(); },
+     [](double v) { listenbrainz::SetPaused(v != 0); }, 0,
+     [] { ShowMessage(listenbrainz::Paused() ? L"Scrobbling is paused." : L"Scrobbling can send to connected services."); }},
+    {"scrobbling.now_playing", L"Scrobbling", L"NowPlaying", L"Send now-playing updates",
+     L"Shows the current song on connected services. Turning this off still submits completed listens.",
+     TweakType::Bool, 0, 1, 1, [] { return (double)listenbrainz::SendNowPlaying(); },
+     [](double v) { listenbrainz::SetSendNowPlaying(v != 0); }, 0,
+     [] { ShowMessage(listenbrainz::SendNowPlaying() ? L"Now-playing updates are on." : L"Now-playing updates are off."); }},
     {"library.new_music", L"Library", L"Inbox", L"New music from library folders",
      L"Add music automatically or send it to the Inbox; existing Inbox tracks stay.",
      TweakType::Choice, 0, 1, 0, [] { return (double)g.inboxEnabled; }, [](double v) { g.inboxEnabled = v != 0; },
@@ -202,9 +225,9 @@ const Page kPages[] = {
     {"view.", L"View", {{IDM_FORMAT, L"Title &formatting..."}}},
     {"startup.", L"Startup", {{IDM_STARTUP_DEFAULTS, L"&Startup defaults..."}}},
     {"convert.", L"Conversion", {}},
+    {"scrobbling.", L"Scrobbling", {{IDM_LISTENBRAINZ, L"&Scrobbling..."}}},
     {"library.", L"Library",
-     {{IDM_LIBRARY_FOLDERS, L"Library &folders..."}, {IDM_WEB_SERVER, L"&Web server..."},
-      {IDM_LISTENBRAINZ, L"&ListenBrainz scrobbling..."}}},
+     {{IDM_LIBRARY_FOLDERS, L"Library &folders..."}, {IDM_WEB_SERVER, L"&Web server..."}}},
 };
 constexpr int kLinks = (int)std::size(kPages[0].links);
 

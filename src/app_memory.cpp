@@ -11,6 +11,10 @@ namespace app {
 
 bool ReducedMemoryMode() { return g.size == ViewSize::Compact || MiniPlayerWindow(); }
 
+// A hardware target loads the GPU driver, which commits tens of MB and starts its own threads
+// (docs/memory.md). Software draws a full grid within a frame, so the GPU is only an option.
+bool GpuDrawing() { return g.gpuDrawing && !ReducedMemoryMode(); }
+
 size_t ViewMemoryBudget(size_t normal) { return ReducedMemoryMode() ? normal / 2 : normal; }
 
 // Only disposable UI resources change with window size. Track ids, library data and the audio

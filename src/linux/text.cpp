@@ -1,3 +1,4 @@
+// Theme fonts, private pack fonts and script fallbacks, with cached SDL_ttf text for redraws.
 #include "text.h"
 
 #include "app.h"
@@ -20,6 +21,14 @@ TTF_TextEngine* g_engine = nullptr;
 TTF_Font* g_fonts[(int)Font::Count] = {};
 std::vector<TTF_Font*> g_fallbacks;
 float g_lineHeight[(int)Font::Count] = {};
+bool g_usesPackFont[(int)Font::Count] = {};
+
+struct MemoryFont {
+    std::string bytes;
+    std::wstring family;
+    TTF_FontStyleFlags style;
+};
+std::vector<MemoryFont> g_packFonts;
 
 struct Key {
     int font;
@@ -99,11 +108,53 @@ std::string Family(const wchar_t* face) {
     if (f == "Georgia") return "Georgia,Gelasio,DejaVu Serif,serif";
     if (f == "Bahnschrift") return "Bahnschrift,DIN Alternate,Barlow Semi Condensed,DejaVu Sans Condensed,sans-serif";
     if (f == "Consolas") return "Consolas,Inconsolata,DejaVu Sans Mono,monospace";
+    if (!f.empty()) {
+        std::string escaped;
+        for (char c : f) {
+            if (c == '\\' || c == '-' || c == ',' || c == ':') escaped += '\\';
+            escaped += c;
+        }
+        return escaped + ",sans-serif";
+    }
     // The Windows UI font, Segoe UI, then Selawik (its open metric match) and the desktop's sans.
     return "Segoe UI,Selawik,Noto Sans,sans-serif";
 }
 
+const MemoryFont* FindPackFont(const wchar_t* family, bool bold) {
+    if (!family || !*family) return nullptr;
+    const MemoryFont* best = nullptr;
+    int score = 4;
+    for (const auto& font : g_packFonts) {
+        if (_wcsicmp(font.family.c_str(), family)) continue;
+        int next = ((font.style & TTF_STYLE_BOLD) != 0) != bold;
+        if (font.style & TTF_STYLE_ITALIC) next += 2;
+        if (next <= score) {  // the later enabled pack wins when both have the same face
+            score = next;
+            best = &font;
+        }
+    }
+    return best;
+}
+
 }  // namespace
+
+void ResetPackFonts() {
+    ShutdownText();
+    g_packFonts.clear();
+}
+
+bool AddPackFont(const std::string& bytes) {
+    if (bytes.empty() || (!TTF_WasInit() && !TTF_Init())) return false;
+    TTF_Font* probe = TTF_OpenFontIO(SDL_IOFromConstMem(bytes.data(), bytes.size()), true, 12);
+    if (!probe) return false;
+    const char* family = TTF_GetFontFamilyName(probe);
+    bool valid = family && *family;
+    if (valid) g_packFonts.push_back({bytes, compat::Widen(family), TTF_GetFontStyle(probe)});
+    TTF_CloseFont(probe);
+    return valid;
+}
+
+bool UsesPackFont(Font font) { return g_usesPackFont[(int)font]; }
 
 bool InitText(SDL_Renderer* renderer, float scale, const Theme& theme) {
     ShutdownText();
@@ -128,13 +179,19 @@ bool InitText(SDL_Renderer* renderer, float scale, const Theme& theme) {
                  {Font::Title, &bold, std::round(15 * scale), false}, {Font::Menu, &menu, std::round(12 * scale), false}};
     for (auto& s : specs) {
         TTF_Font* f = nullptr;
+        bool heading = s.font == Font::Bold || s.font == Font::Title;
         if (s.pixel) {
             size_t size = 0;
             const unsigned char* data = DeltaruneFont(&size);
             f = TTF_OpenFontIO(SDL_IOFromConstMem(data, size), true, s.px);
-        } else {
-            f = TTF_OpenFont(s.file->c_str(), s.px);
+        } else if (s.font != Font::Menu) {
+            if (const MemoryFont* pack = FindPackFont(theme.font, heading)) {
+                f = TTF_OpenFontIO(SDL_IOFromConstMem(pack->bytes.data(), pack->bytes.size()), true, s.px);
+                g_usesPackFont[(int)s.font] = f != nullptr;
+                if (f && heading) TTF_SetFontStyle(f, TTF_STYLE_BOLD);
+            }
         }
+        if (!f && !s.pixel) f = TTF_OpenFont(s.file->c_str(), s.px);
         if (!f) return false;
         if (s.pixel && s.font == Font::Bold) TTF_SetFontStyle(f, TTF_STYLE_BOLD);
         TTF_SetFontHinting(f, s.pixel ? TTF_HINTING_MONO : TTF_HINTING_LIGHT_SUBPIXEL);
@@ -176,6 +233,7 @@ void ClearTextCache() {
 
 void ShutdownText() {
     ClearTextCache();
+    std::fill(std::begin(g_usesPackFont), std::end(g_usesPackFont), false);
     for (auto& f : g_fonts) {
         if (f) TTF_CloseFont(f);
         f = nullptr;

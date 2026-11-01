@@ -19,6 +19,7 @@ struct LibraryScope {
 }
 
 void TestSortingProperties() {
+    testlog::Batch batch;
     struct Owned { unsigned key, serial; std::unique_ptr<std::string> text; };
     Random random;
     testlog::Cases owning, records, albumKeys;
@@ -57,11 +58,13 @@ void TestSortingProperties() {
         albumKeys.Add((a <=> b) == (fieldsA <=> fieldsB) && (a < b) == (fieldsA < fieldsB) &&
                       (a == b) == (fieldsA == fieldsB), name);
     }
+    batch.Next(L"seeded sorting primitives match their references");
     Check(owning.Passed(), L"owning stable sort matches the reference and retains payloads in 120 seeded cases: seed=%u%ls",
         TestSeed(), owning.failed.c_str());
     Check(records.Passed(), L"record sort preserves all values in 120 seeded cases: seed=%u%ls", TestSeed(), records.failed.c_str());
     Check(albumKeys.Passed(), L"album keys preserve tuple ordering and equality in 120 seeded cases: seed=%u%ls",
           TestSeed(), albumKeys.failed.c_str());
+    batch.Next(L"nested comparators keep their context and partial sorts leave neighbours alone");
     std::vector<std::wstring> words{L"sentinel-first", L"c", L"a", L"b", L"sentinel-last"};
     bool nested = false;
     SortObjects(words.begin() + 1, words.end() - 1, [&](const auto& a, const auto& b) {
@@ -75,6 +78,7 @@ void TestSortingProperties() {
     Check(nested && words == std::vector<std::wstring>{L"sentinel-first", L"a", L"b", L"c", L"sentinel-last"},
         L"nested comparators keep their context and partial sorts leave surrounding objects untouched");
 
+    batch.Next(L"string ranks preserve natural Unicode order, empty-last values, repeats and large tags");
     LibraryScope scope;
     std::vector<StringPool::Handle> handles{0};
     for (unsigned i = 0; i < 400; ++i) {
@@ -103,6 +107,7 @@ void TestSortingProperties() {
         t.trackNo = i == 2 || i == 6 ? 2 : 1;
         if (i >= 5) t.album = t.albumArtist = t.artist = t.date = 0;
     }
+    batch.Next(L"album shuffle keeps compilations, dates, artists, discs, folders and duplicate slots intact");
     const std::vector<TrackId> items{0, 4, 2, 3, 1, 2, 5, 7, 6};
     const std::vector<std::vector<uint32_t>> albums{{4, 2, 5, 0}, {3}, {1}, {6}, {7, 8}};
     testlog::Cases albumShuffle;
@@ -141,6 +146,7 @@ void TestSortingProperties() {
 }
 
 void TestSearchProperties() {
+    testlog::Batch batch(L"cached search matches independent lookup and notices edits");
     Random random;
     Library library;
     const char* vocabulary[] = {"Quiet", "LOUD", "Björk", "雪", "Two Words", "Live 2026", "", "café"};
@@ -177,16 +183,19 @@ void TestSearchProperties() {
 }
 
 void TestPlaylistFiles(const std::wstring& scratch) {
+    testlog::Batch batch;
     LibraryScope restore;
     TrackId a = g_lib.Add(scratch + L"\\雪 and spaces.flac"), b = g_lib.Add(scratch + L"\\second.mp3");
     TagData tags; tags.title = "Title\n#not another entry"; tags.artist = "Björk\r\nArtist"; tags.duration = 2;
     g_lib.ApplyTags(a, tags);
     Playlist playlist{L"Mixed", {a, b, a}};
     const auto file = scratch + L"\\export.m3u8";
+    batch.Next(L"M3U export and import preserve order, duplicates and Unicode");
     Check(ExportM3U(file, playlist), L"Unicode playlist with duplicate occurrences exports successfully");
     std::vector<std::wstring> paths{L"existing"};
     Check(ImportM3U(file, paths) && paths == std::vector<std::wstring>{L"existing", g_lib.Path(a), g_lib.Path(b), g_lib.Path(a)},
         L"M3U round trip preserves order, duplicates and Unicode; metadata cannot insert entries");
+    batch.Next(L"failed playlist replacement preserves bytes, cleans temp and recovers after unlock");
     const std::string original = ReadTestBytes(file);
     playlist.items.push_back(kInvalidTrack);
     Check(!ExportM3U(file, playlist) && ReadTestBytes(file) == original,
@@ -201,6 +210,7 @@ void TestPlaylistFiles(const std::wstring& scratch) {
     Check(temporary == INVALID_HANDLE_VALUE, L"failed playlist replacement cleans its temporary output");
     if (temporary != INVALID_HANDLE_VALUE) FindClose(temporary);
     Check(ExportM3U(file, playlist), L"playlist export succeeds after the lock is released");
+    batch.Next(L"captured, relative and malformed playlist imports keep faithful results");
     std::vector<M3UExportEntry> snapshot;
     Playlist changed = playlist;
     const auto captured = scratch + L"\\captured.m3u8";
@@ -239,6 +249,7 @@ void TestImportedFolders(const std::wstring& scratch) {
 }
 
 void TestLibraryWorkflow(const std::wstring& scratch) {
+    testlog::Batch batch;
     LibraryScope restore;
     const std::wstring db = scratch + L"\\workflow.cdb", exported = scratch + L"\\favorites.m3u8";
     // An unreferenced track forces the save to compact IDs. Comparisons below use paths.
@@ -261,12 +272,14 @@ void TestLibraryWorkflow(const std::wstring& scratch) {
         {L"Favorites", {}, PlaylistKind::Auto}};
     playlists[2].rules = SerializeAutoPlaylist(favorites);
     playlists[1].position.selected = {2}; playlists[1].position.focus = 2;
+    batch.Next(L"library saves rated tracks, duplicate occurrences and automatic rules together");
     Check(before.size() == expected.size() && SaveLibrary(db, playlists),
         L"rated library, static duplicate occurrences and automatic rules save together");
     g_lib = Library(); playlists.clear();
     if (!LoadLibrary(db, playlists) || playlists.size() != 3) {
         Check(false, L"saved workflow reopens all three playlists"); return;
     }
+    batch.Next(L"track-ID compaction preserves automatic results, occurrences and selection");
     AutoPlaylist loaded;
     bool parsed = ParseAutoPlaylist(playlists[2].rules, loaded);
     std::vector<TrackId> after;
@@ -279,6 +292,7 @@ void TestLibraryWorkflow(const std::wstring& scratch) {
         g_lib.Path(playlists[1].items[1]) == scratch + L"\\曲 1.flac" &&
         playlists[1].position.selected == std::vector<TrackId>{2} && playlists[1].position.focus == 2,
         L"duplicate occurrence selection survives compaction and reopening");
+    batch.Next(L"rating edits rebuild automatic results and export only the current matches");
     TrackId edited = g_lib.Find(expected.front());
     g_lib[edited].rating = 0; g_lib[edited].playCount += 9; g_lib.Touch();
     EvaluateAutoPlaylist(loaded, after, TestSeed());
@@ -287,6 +301,7 @@ void TestLibraryWorkflow(const std::wstring& scratch) {
     Check(after.size() + 1 == expected.size() && ExportM3U(exported, exportList) && ImportM3U(exported, imported) &&
         imported.size() == after.size() && std::find(imported.begin(), imported.end(), expected.front()) == imported.end(),
         L"rating edits rebuild automatic results and export only the current matching tracks");
+    batch.Next(L"rating and listening edits survive a second close and reopen");
     Check(SaveLibrary(db, playlists), L"edited workflow saves a second time");
     g_lib = Library(); playlists.clear();
     bool reopened = LoadLibrary(db, playlists);

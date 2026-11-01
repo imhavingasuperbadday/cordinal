@@ -5,6 +5,30 @@
 #include <atomic>
 #include <string>
 #include <vector>
+#include <utility>
+#include "tags.h"
+
+class Library;
+// Copied on the UI thread; discovery never reads the live library.
+struct SteamSong {
+    std::wstring path;
+    std::string key;
+    uint64_t audioHash = 0;
+    uint32_t durationMs = 0;
+    Codec codec = Codec::Unknown;
+    std::string pathKey;
+};
+using SteamDuplicates = std::vector<std::pair<std::wstring, std::wstring>>;  // skipped path, kept path
+struct SteamImport {
+    std::vector<std::wstring> folders;
+    SteamDuplicates oneCopy, eachFormat;
+    bool multipleFormats = false;
+};
+std::vector<SteamSong> SnapshotSteamSongs(const Library& library);
+bool PrepareSteamImport(SteamImport& result, std::vector<SteamSong> known,
+                        const std::atomic<bool>* cancel = nullptr);
+// Leaves files, playlists and listening history intact; excluded copies stay out on rescans.
+size_t SkipSteamDuplicates(Library& library, const SteamImport& imported, bool eachFormat);
 
 // Every Steam library's soundtrack folders: <library>\steamapps\music when it holds files, plus
 // soundtrack-looking folders found inside game installs (<library>\steamapps\common\<Game>\...).

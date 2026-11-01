@@ -143,6 +143,7 @@ std::string Aiff(const std::string& data, unsigned channels, unsigned bits, size
 }  // namespace
 
 void TestMd5() {
+    testlog::Batch batch;
     // RFC 1321, appendix A.5.
     const struct {
         const char* text;
@@ -159,6 +160,7 @@ void TestMd5() {
     testlog::Cases vectors;
     for (const auto& t : suite)
         vectors.Add(Hex(Md5Of(t.text)) == t.digest, L"string " + std::to_wstring(&t - suite + 1));
+    batch.Next(L"MD5 reproduces RFC 1321's seven test strings and a million 'a's fed in uneven pieces");
     Check(vectors.Passed(), L"MD5 of RFC 1321's seven test strings%ls", vectors.failed.c_str());
     // A million 'a's in uneven pieces, so buffered and whole blocks meet at every offset.
     Md5 pieces;
@@ -170,6 +172,7 @@ void TestMd5() {
     }
     Check(Hex(pieces.Finish()) == "7707d6ae4e027c70eea2a935c2296f21", L"MD5 of a million 'a's fed in uneven pieces");
     // FLAC's layout: each sample little-endian in ceil(bits / 8) bytes.
+    batch.Next(L"MD5 hashes 8- to 32-bit samples in ceil(bits / 8) little-endian bytes, as FLAC does");
     const int32_t samples[] = {1, -2, 0x7f, -0x80};
     const struct {
         unsigned bits;
@@ -190,7 +193,10 @@ void TestMd5() {
 }
 
 void TestExactPcm(const std::wstring& root, const std::wstring& scratch) {
+    testlog::Batch batch;
     // FFmpeg's FLAC encoder stored the MD5 of each fixture's samples; reading to the end checks it.
+    batch.Next(L"every FLAC fixture reads exactly to the MD5 its encoder stored, rejoins its halves and "
+               L"scales floats");
     testlog::Cases stored;
     for (const wchar_t* name : {L"media\\sine.flac", L"gap2\\a.flac", L"gap2\\b.flac", L"rg\\rg.flac", L"tags2\\full.flac"}) {
         const Exact e = ReadAll(root + L"\\" + name);
@@ -230,6 +236,8 @@ void TestExactPcm(const std::wstring& root, const std::wstring& scratch) {
     const std::wstring copy = scratch + L"\\exact-damaged.flac";
     const std::pair<const std::string*, const wchar_t*> damaged[] = {
         {&cut, L"a file cut short"}, {&flipped, L"a flipped bit"}, {&md5, L"a wrong stored MD5"}};
+    batch.Next(L"exact reading reports damaged FLAC, reads WAV, AIFF and AIFC widths exactly and refuses "
+               L"floats and lossy input");
     testlog::Cases reported;
     for (const auto& [bytes, what] : damaged) {
         const Exact e = WriteTestBytes(copy, *bytes) ? ReadAll(copy) : Exact{};

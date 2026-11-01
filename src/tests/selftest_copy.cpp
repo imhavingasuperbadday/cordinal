@@ -55,6 +55,8 @@ int BestLag(const std::vector<float>& want, const std::vector<float>& got, doubl
 }  // namespace
 
 void TestDeviceCopy(const std::wstring& media, const std::wstring& scratch) {
+    testlog::Batch batch;
+    batch.Next(L"COPY manifest round trip and containment");
     std::vector<CopyRecord> parsed;
     const std::vector<CopyRecord> records = {{L"A\\one.m4a", L"C:\\Music\\one.flac", 12, 34, 192, {L"Mix", L"*"}},
                                              {L"cover.jpg", L"C:\\Music\\cover.jpg", 5, 6, 0, {L"Mix"}}};
@@ -72,6 +74,7 @@ void TestDeviceCopy(const std::wstring& media, const std::wstring& scratch) {
     std::wstring error;
 
     // The writer: exact length through the edit list, and the encoder's priming skipped.
+    batch.Next(L"COPY AAC .m4a writer keeps every source frame and its timing");
     const std::wstring sweep = in + L"\\sweep.wav", m4a = root + L"\\sweep.m4a";
     WriteTestBytes(sweep, SweepWave(96000));
     if (!EncodeM4a(sweep, m4a, 192, cancel, error)) {
@@ -107,6 +110,7 @@ void TestDeviceCopy(const std::wstring& media, const std::wstring& scratch) {
     const std::string flacBefore = ReadTestBytes(in + L"\\A\\one.flac"), mp3Before = ReadTestBytes(in + L"\\B\\two.mp3");
 
     // A file cordinal didn't put there keeps its name: the copy takes " (2)".
+    batch.Next(L"COPY planning converts lossless, keeps lossy and steps around other files");
     const std::wstring album = L"Test Artist\\Test Album\\", name = L"07 Sine \x00DCn\x00EF" L"code";
     SHCreateDirectoryExW(nullptr, (out + L"\\Test Artist\\Other Album").c_str(), nullptr);
     WriteTestBytes(out + L"\\Test Artist\\Other Album\\" + name + L".mp3", "the user's own file");
@@ -118,6 +122,7 @@ void TestDeviceCopy(const std::wstring& media, const std::wstring& scratch) {
           plan.size() > 0 ? plan[0].rel.c_str() : L"", plan.size() > 1 ? plan[1].rel.c_str() : L"");
 
     // Cancelled before the first file: nothing arrives, nothing half-written.
+    batch.Next(L"COPY a cancelled run leaves no copies, parts or staging folder");
     CopySettings settings;
     settings.dest = out;
     settings.staging = root + L"\\staging";
@@ -129,6 +134,7 @@ void TestDeviceCopy(const std::wstring& media, const std::wstring& scratch) {
           L"COPY cancelled leaves no copies, no .part files and no staging folder");
     cancel = false;
 
+    batch.Next(L"COPY a run writes tagged copies, a relative playlist and a manifest the next run trusts");
     std::string text = M3UText({{ids[0], ToUtf8(album + name + L".m4a")}, {ids[1], "x/y.mp3"}});
     std::replace(text.begin(), text.end(), '\\', '/');
     settings.playlistName = L"Mix";
@@ -160,6 +166,7 @@ void TestDeviceCopy(const std::wstring& media, const std::wstring& scratch) {
 
     // Dropping the FLAC from "Mix": its copy and its folder's cover go, the user's file and a
     // selection's copy stay.
+    batch.Next(L"COPY removes only its own copies that the playlist no longer holds");
     std::vector<CopyRecord> withSelection = manifest;
     for (CopyRecord& rec : withSelection)
         if (rec.rel.find(L"(2)") != std::wstring::npos) rec.sets = {L"Mix", kCopySelectionSet};

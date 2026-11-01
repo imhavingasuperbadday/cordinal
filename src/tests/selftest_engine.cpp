@@ -65,6 +65,7 @@ LRESULT CALLBACK EventProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 
 // Exclusive output's sample conversion must give back exactly the integers the decoders read.
 void TestSampleConversion() {
+    testlog::Batch batch;
     std::vector<float> clipInput;
     for (uint32_t bits:{0u,0x80000000u,0x7F800000u,0xFF800000u,0x7FC12345u,0xFF812345u,
                        1u,0x80000001u,0x3F800001u,0xBF800001u,0x3F7FFFFFu,0xBF7FFFFFu})
@@ -120,6 +121,8 @@ void TestSampleConversion() {
         _mm_setcsr(csr);
     });
     conversion.join();
+    batch.Next(L"OUTPUT 16-bit blocks retain scalar rounding, denormal handling, dither and clipping in "
+               L"every rounding mode");
     Check(rounded16.Passed(), L"OUTPUT 16-bit blocks retain scalar rounding, denormal handling, dither sequence and guards%ls",
           rounded16.failed.c_str());
     bool exactClip=true;
@@ -130,6 +133,8 @@ void TestSampleConversion() {
         exactClip&=memcmp(expected.data(),actual.data(),actual.size()*sizeof(float))==0;
     }
     Check(exactClip,L"OUTPUT clipping preserves all float bits against std::clamp, including NaNs, zeros, infinities, tails and unaligned spans");
+    batch.Next(L"OUTPUT integer formats, 24-bit packing and TPDF dither preserve exact samples and step "
+               L"averages");
     bool exactInteger = true;
     const int rounding = std::fegetround();
     for (int mode : {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
@@ -186,6 +191,7 @@ void TestSampleConversion() {
 // Exclusive output opens the device at each track's own rate. It takes the audio device away
 // from other programs for a moment, so it only runs when CORDINAL_TEST_EXCLUSIVE is set.
 void TestExclusive(const std::wstring& root, HWND hwnd) {
+    testlog::Batch batch;
     if (!GetEnvironmentVariableW(L"CORDINAL_TEST_EXCLUSIVE", nullptr, 0)) {
         testlog::Skip(L"exclusive output: set CORDINAL_TEST_EXCLUSIVE=1 to take the audio device");
         return;
@@ -212,6 +218,7 @@ void TestExclusive(const std::wstring& root, HWND hwnd) {
     auto o2 = engine.Output();
     bool flacOk = o1.exclusive && (o1.rate == 44100 || o1.problem.find(L"44100") != std::wstring::npos);
     bool opusOk = o2.exclusive && (o2.rate == 48000 || o2.problem.find(L"48000") != std::wstring::npos);
+    batch.Next(L"OUTPUT exclusive follows each track's rate and comes back exclusive after the idle release");
     Check(flacOk && opusOk, L"OUTPUT exclusive follows the track rate: FLAC %u Hz%ls%ls, Opus %u Hz, %d-bit%ls", o1.rate,
           o1.problem.empty() ? L"" : L" (", o1.problem.empty() ? L"" : (o1.problem + L")").c_str(), o2.rate, o2.bits,
           o2.floatFormat ? L" float" : L"");
@@ -235,6 +242,7 @@ void TestExclusive(const std::wstring& root, HWND hwnd) {
 // program from rendering for the rest of the session: a browser tab reported an audio renderer
 // error until the player was closed.
 void TestOutputIdleRelease() {
+    testlog::Batch batch;
     AudioOutput out;
     std::wstring error;
     std::atomic<unsigned long long> rendered{0};
@@ -248,6 +256,7 @@ void TestOutputIdleRelease() {
         testlog::Skip((L"output idle release: no audio output (" + error + L")").c_str());
         return;
     }
+    batch.Next(L"OUTPUT a paused output lets the endpoint go and resuming takes it back; Stop releases it");
     Check(out.HoldingDevice(), L"OUTPUT holds the device while it is playing");
     out.SetPaused(true);
     Pump(4000, [&] { return !out.HoldingDevice(); });
@@ -270,6 +279,7 @@ void TestOutputIdleRelease() {
 // Render headlessly isn't possible from here, so the fade step itself is checked: its length, its
 // largest step, and that it is exact at unity.
 void TestFadeRamp() {
+    testlog::Batch batch;
     const float step = (float)(1.0 / (0.012 * 48000));
     float g = 1.0f, maxStep = 0;
     int down = 0;
@@ -287,6 +297,8 @@ void TestFadeRamp() {
         h = next;
         ++up;
     }
+    batch.Next(L"FADE 12 ms at 48 kHz reaches silence and unity in 576 frames without a jump, and holds "
+               L"exact unity");
     Check(down >= 575 && down <= 577 && g == 0 && maxStep <= step * 1.001f && up >= 575 && up <= 577 && h == 1 &&
               maxRise <= step * 1.001f,
           L"FADE 12 ms at 48 kHz: out in %d frames, in in %d frames, largest step %.2e (limit %.2e)", down, up,
@@ -298,6 +310,7 @@ void TestFadeRamp() {
 // Headless engine (muted, real device): gapless track switch timing, seek, pause holding position,
 // a CUE-style range playing as one track, and the three CUE tracks of Ramp.wav as a gapless run.
 void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const std::wstring& media) {
+    testlog::Batch batch;
     WNDCLASSW wc{};
     wc.lpfnWndProc = EventProc;
     wc.lpszClassName = L"CordinalSelfTest";
@@ -310,6 +323,7 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
     g_events = &ev;
     std::wstring error;
     bool ok = engine.Init(hwnd, error);
+    batch.Next(L"ENGINE opens a muted hidden output at the device rate");
     Check(ok, L"ENGINE init rate=%u %ls", engine.Rate(), error.c_str());
     if (!ok) { g_events = nullptr; DestroyWindow(hwnd); return; }
     engine.SetVolume(0);  // silent test
@@ -321,6 +335,8 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
         std::array<uint8_t, 256> peaks{};
         bool audible = engine.WaveformPeaks(peaks.data(), peaks.size()) &&
             *std::max_element(peaks.begin(), peaks.end()) > 8 && engine.Duration() == 0;
+        batch.Next(L"radio playback feeds an audible waveform at zero volume, holds it on pause and clears "
+                   L"it on stop");
         Check(audible, L"radio waveform uses audible PCM even at zero volume and with no seekable duration");
         engine.SetPaused(true); Pump(180);
         engine.WaveformPeaks(peaks.data(), peaks.size());
@@ -383,6 +399,8 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
             waves += curve != previousCurve;
             previousCurve = std::move(curve);
         }
+        batch.Next(L"VIS muted live playback advances both plots and holds and follows them on pause, "
+                   L"resume and seek");
         Check(maximum > 0.3f && retained > 0.3f && bars >= 14 && waves >= 14 && advancing >= 14,
               L"VIS muted live playback advances both complete plots (spectrum %d/18, scope %d/18, clock %d/18, past/future %.3f)",
               bars, waves, advancing, retained);
@@ -454,6 +472,8 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
         return -1;
     };
     double s1 = at(EngineEvent::TrackStarted, 1), s2 = at(EngineEvent::TrackStarted, 2), end = at(EngineEvent::Ended, 0);
+    batch.Next(L"ENGINE gapless joins keep their timing, Ended is not restarted, and replacing "
+               L"decoded-ahead audio is seamless");
     Check(s1 >= 0 && s2 > 0 && end > 0 && std::fabs((s2 - s1) - 1.5) < 0.15 && std::fabs((end - s1) - 4.0) < 0.2,
           L"ENGINE gapless a.flac -> b.flac: started %.2fs, switched after %.2fs (expect 1.50), ended after %.2fs (expect 4.00)",
           s1, s2 - s1, end - s1);
@@ -527,6 +547,8 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
     engine.Seek(2.0);
     Pump(400);
     double pos = engine.Position();
+    batch.Next(L"ENGINE seeks land where asked, a seek bound to the old track cannot move its replacement, "
+               L"and pause holds");
     Check(pos > 2.0 && pos < 2.6, L"ENGINE seek to 2.0 s -> position %.2f s", pos);
     PlayItem replaced{5, gapDir + L"\\b.mp3"};
     engine.Play(PlayItem{6, gapDir + L"\\b.mp3"});
@@ -557,6 +579,8 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
         return -1;
     };
     double rs = rangeAt(EngineEvent::TrackStarted), re = rangeAt(EngineEvent::Ended);
+    batch.Next(L"ENGINE plays a ranged file as one track and the three CUE tracks of Ramp.wav as one "
+               L"gapless run");
     Check(std::fabs(rangeDuration - 1.0) < 0.001 && rs > 0 && re > rs && std::fabs((re - rs) - 1.0) < 0.15,
           L"ENGINE range 0.5-1.5 s: duration %.3f s (expect 1.000), played %.2f s", rangeDuration, re - rs);
     engine.Stop();
@@ -607,6 +631,8 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
     sectionOk &= std::none_of(ev.list.begin(), ev.list.end(), [](const auto& e) { return e.first == EngineEvent::Ended; });
     engine.Seek(1.2);
     Pump(100);
+    batch.Next(L"ENGINE sections repeat and re-arm within their marks, 2x speed and tempo double the rate, "
+               L"an empty range ends silently");
     Check(sectionOk && engine.Position() >= 0.5 && engine.Position() < 0.75,
           L"ENGINE section repeats without ending and keeps the playhead and seeks within its marks");
     engine.SetPaused(true);
@@ -709,6 +735,8 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
     engine.Play(PlayItem{403, damaged}, badSeek);
     Pump(2000, ended);
     const std::wstring seekProblem = engine.TakeError(403);
+    batch.Next(L"ENGINE keeps separate problems for damaged tracks, continues to good audio and estimates "
+               L"loudness once");
     Check(continued && badSeek > 0 && ended() &&
               std::count(ev.list.begin(), ev.list.end(), std::pair{EngineEvent::Error, 403ull}) == 1 &&
               seekProblem.find(L"Couldn't seek") != std::wstring::npos,
@@ -828,6 +856,8 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
                                  L" (level " + std::to_wstring(beforeLevel) + L" -> " + std::to_wstring(afterLevel) +
                                  L", advanced " + std::to_wstring(advanced) + L" in " + std::to_wstring(elapsed) + L" s)");
             }
+            batch.Next(L"SHUFFLE, REPEAT, skip-aware shuffle and radio leave the playing audio unchanged at "
+                       L"both gain modes");
             Check(controls.Passed(), L"SHUFFLE, REPEAT, skip-aware shuffle and radio leave the playing audio unchanged%ls",
                   controls.failed.c_str());
             // Preferences: cordinal can open with the last session's song loaded, paused where it
@@ -931,6 +961,8 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
                         motion.Add(changed >= 8, std::wstring(fountain ? L"fountain" : L"bars") + L"/" +
                             std::to_wstring((int)dock) + L" (" + std::to_wstring(changed) + L"/11 frames)");
                     }
+                    batch.Next(L"quiet live bars and the Dark Fountain animate in both 26 px bands with "
+                               L"fixed progress");
                     Check(motion.Passed(), L"quiet live bars and Dark Fountain animate in both 26 px bands with fixed progress%ls",
                           motion.failed.c_str());
                 }
@@ -974,10 +1006,13 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
         const bool stayedIdle = initialized && !deferred.Output().ready;
         deferred.Play(PlayItem{901, gapDir + L"\\a.flac"});
         Pump(2000, [&] { return deferred.Position() > 0.1; });
+        batch.Next(L"ENGINE a deferred device stays idle until the first Play, then opens and produces "
+                   L"audible progress");
         Check(stayedIdle && deferred.Output().ready && deferred.Position() > 0.1,
               L"ENGINE deferred device opens on first Play and produces audible-position progress");
         deferred.Stop(); Pump(350); deferred.Shutdown(); g_events = nullptr;
     }
+    batch.End();
     TestOutputIdleRelease();
     TestExclusive(DirectoryOf(gapDir), hwnd);
     DestroyWindow(hwnd);

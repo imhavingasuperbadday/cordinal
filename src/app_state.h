@@ -85,6 +85,7 @@ constexpr UINT WM_APP_STARTUP = WM_APP + 65;       // first frame is up: finish 
 constexpr UINT WM_APP_WEB = WM_APP + 66;           // server status/listening events are ready
 constexpr UINT WM_APP_BACKUP = WM_APP + 67;        // lParam owns a backup worker result
 constexpr UINT WM_APP_HELPER = WM_APP + 68;        // a helper tool's progress (wParam 0), or its result (1: lParam owns it)
+constexpr UINT WM_APP_STEAM = WM_APP + 69;         // lParam owns discovered soundtrack folders
 constexpr UINT_PTR kSearchTimer = 3;
 constexpr UINT_PTR kUiTimer = 1;
 constexpr UINT_PTR kBusyTimer = 5;  // animates the busy spinners (app_badges.cpp)
@@ -148,7 +149,7 @@ enum : int {
     IDM_BACKUP, IDM_RESTORE_BACKUP, IDM_IMPORT_STATISTICS,
     IDM_CANCEL_BACKUP, IDM_OPEN_RADIO, IDM_WRITE_STATISTICS,
     IDM_DUPLICATE_PL = 4000, IDM_REOPEN_PL, IDM_MOVE_PL_LEFT, IDM_MOVE_PL_RIGHT, IDM_PLAYING_PL,
-    IDM_RELOAD_TAGS, IDM_CANCEL_IMPORT, IDM_WATCH_IMPORTED, IDM_SELECT_PL_BASE = 4020,
+    IDM_RELOAD_TAGS, IDM_CANCEL_IMPORT, IDM_WATCH_IMPORTED, IDM_CANCEL_STEAM, IDM_SELECT_PL_BASE = 4020,
     // Album editions (album_editions.h): manual grouping, preferred choice and comparison.
     IDM_EDITION_GROUP = 4100, IDM_EDITION_MANAGER, IDM_EDITION_PREFERRED, IDM_EDITION_REMOVE,
     IDM_EDITION_SPLIT, IDM_EDITION_COMPARE, IDM_EDITION_VERSIONS, IDM_EDITION_ART, IDM_EDITION_CLEAR_ART,
@@ -323,6 +324,7 @@ struct App {
          speaker = nullptr, tips = nullptr, rename = nullptr, eqWnd = nullptr, headphonesWnd = nullptr, foldersWnd = nullptr,
          elapsed = nullptr;  // left of the seek bar; `time` on its right shows the time left or the length
     bool timeRemaining = true;  // click the time right of the seek bar to switch
+    bool waveform = true;      // off uses a regular seek bar, overriding live waveform and fountain settings
     bool liveWaveform = false;  // animate the audio being heard instead of the whole-song overview
     bool liveFountain = false;  // let the DELTARUNE fountain follow audible audio, including radio
     bool fullLiveWaveform = true;  // light the whole live display instead of splitting it at the song position
@@ -381,6 +383,9 @@ struct App {
     bool soundEffects = false;
     bool taskbarProgress = true;
     bool showFocusBoxes = false;
+    // The library view draws through the graphics card. Off draws in software, which avoids the
+    // driver's memory and threads; Compact and the mini player always draw in software.
+    bool gpuDrawing = false;
     // Converting to .cord: verified originals go to the Recycle Bin, or are kept and, unless shown,
     // left out of the library; conversions stay undoable for kConvertMemoryDays[convertMemory].
     bool convertRecycle = true, convertShowOriginals = false;

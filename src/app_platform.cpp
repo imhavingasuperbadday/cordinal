@@ -16,8 +16,34 @@ namespace {
 
 bool g_smtc = false;       // the system media controls work; otherwise media keys are hotkeys
 TrackId g_smtcTrack = kNone;
+unsigned long long g_scrobbleToken = 0;
+uint32_t g_scrobbleStarted = 0;
 smtc::State g_smtcState = smtc::State::Closed;
 ULONGLONG g_smtcTimeline = 0;
+std::thread g_steamWorker;
+std::atomic<bool> g_steamCancel{false};  // shared only with the discovery worker
+bool g_steamAdding = false;            // UI thread: a manual request can adopt an offer in flight
+
+void StartSteamDiscovery(bool offer) {
+    if (g.closing) return;
+    if (!offer) g_steamAdding = true;
+    if (g_steamWorker.joinable()) return;
+    g_steamAdding = !offer;
+    g_steamCancel = false;
+    const HWND hwnd = g.hwnd;
+    auto known = offer ? std::vector<SteamSong>() : SnapshotSteamSongs(g_lib);
+    g_steamWorker = std::thread([hwnd, offer, known = std::move(known)]() mutable {
+        auto result = std::make_unique<SteamImport>();
+        WPARAM state = offer ? 1 : 0;
+        try {
+            result->folders = FindSteamMusicFolders(&g_steamCancel);
+            if (!offer && !PrepareSteamImport(*result, std::move(known), &g_steamCancel)) state |= 2;
+        } catch (...) {
+            state |= 2;
+        }
+        if (PostMessageW(hwnd, WM_APP_STEAM, state, (LPARAM)result.get())) result.release();
+    });
+}
 
 // On Linux (Wine) the launcher sets CORDINAL_NOWPLAYING: what is playing is written there for its
 // MPRIS bridge (media keys, playerctl, the bar's media widget), with the cover as <file>.cover.
@@ -132,103 +158,120 @@ listenbrainz::Listen MakeListen(TrackId id) {
 // ---------------------------------------------------------------------------
 // ListenBrainz window
 
-// The single ListenBrainz dialog, created on demand and destroyed by closing it. `checking` is
-// true while a token validation is in flight.
+// One setup window serves every service; credentials are committed after server validation.
 struct LbWindow {
-    HWND hwnd = nullptr, intro = nullptr, token = nullptr, status = nullptr, connect = nullptr, disconnect = nullptr,
-         close = nullptr;
-    std::wstring pendingToken;  // the submitted token, not whatever the edit box holds when the reply arrives
+    HWND hwnd = nullptr, service = nullptr, intro = nullptr, token = nullptr, key = nullptr, secret = nullptr,
+         keyLabel = nullptr, secretLabel = nullptr, status = nullptr, connect = nullptr, disconnect = nullptr,
+         account = nullptr, close = nullptr;
+    listenbrainz::Service selected = listenbrainz::Service::ListenBrainz;
+    std::wstring pendingToken, authKey, authSecret, authToken, message;
     bool checking = false;
 } lb;
 
-// Refreshes the status line and the Turn off button from the current scrobbling state.
 void LbStatus() {
     if (!lb.hwnd) return;
-    auto s = listenbrainz::GetStatus();
-    std::wstring text;
-    if (lb.checking) {
-        text = L"Checking the token\x2026";
-    } else if (listenbrainz::Enabled()) {
-        text = s.user.empty() ? L"Scrobbling is on." : L"Scrobbling as " + s.user + L".";
-        if (s.queued) text += L"  " + std::to_wstring(s.queued) + (s.queued == 1 ? L" listen waits to be sent." : L" listens wait to be sent.");
-        if (!s.lastError.empty()) text += L"  Last problem: " + s.lastError + L".";
-    } else {
-        text = L"Scrobbling is off.";
+    auto s = listenbrainz::GetStatus(lb.selected);
+    std::wstring text = lb.checking ? L"Contacting the service..." : lb.message;
+    if (text.empty()) {
+        text = listenbrainz::Enabled(lb.selected) ? (s.user.empty() ? L"Connected." : L"Connected as " + s.user + L".") :
+               L"Not connected. Scrobbling is off.";
+        if (listenbrainz::Paused()) text += L" Scrobbling is paused in Preferences.";
+        if (s.queued) text += L" " + std::to_wstring(s.queued) + L" listens waiting.";
+        if (!s.lastError.empty()) text += L" " + s.lastError + L".";
     }
     SetWindowTextW(lb.status, text.c_str());
-    EnableWindow(lb.disconnect, listenbrainz::Enabled());
+    SetWindowTextW(lb.connect, lb.authToken.empty() ? L"&Connect" : L"&Finish sign-in");
+    for (HWND c : {lb.connect, lb.token, lb.key, lb.secret}) EnableWindow(c, !lb.checking);
+    EnableWindow(lb.disconnect, listenbrainz::Enabled(lb.selected) || lb.checking || !lb.authToken.empty());
 }
-
-// Window procedure of the ListenBrainz dialog; lays out the controls on WM_CREATE and clears the
-// singleton on WM_NCDESTROY.
+void LbService() {
+    bool brainz = lb.selected == listenbrainz::Service::ListenBrainz;
+    SetWindowTextW(lb.intro, brainz ?
+        L"ListenBrainz keeps your listening history online. Paste your user token from its settings. "
+        L"Songs are sent after half their duration or four minutes of listening." :
+        L"Enter this service's application API key and secret, then Connect. Approve cordinal in your browser "
+        L"and return here to Finish sign-in. Tracks must be longer than 30 seconds.");
+    for (HWND c : {lb.key, lb.secret, lb.keyLabel, lb.secretLabel}) ShowWindow(c, brainz ? SW_HIDE : SW_SHOW);
+    ShowWindow(lb.token, brainz ? SW_SHOW : SW_HIDE);
+    SetWindowTextW(lb.account, brainz ? L"&Get user token" : L"&Get API key");
+    LbStatus();
+}
+std::wstring LbText(HWND field) {
+    wchar_t text[1024]{}; GetWindowTextW(field, text, (int)std::size(text));
+    return text;
+}
 LRESULT CALLBACK LbProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_CREATE: {
             lb.hwnd = h;
-            auto make = [&](DWORD ex, const wchar_t* cls, const wchar_t* text, DWORD style, int id) {
-                HWND c = CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 0, 0, h, (HMENU)(INT_PTR)id, g.inst, nullptr);
+            auto make = [&](const wchar_t* cls, const wchar_t* text, DWORD style, int id, int x, int y, int w, int ht) {
+                HWND c = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style,
+                    S(x), S(y), S(w), S(ht), h, (HMENU)(INT_PTR)id, g.inst, nullptr);
                 SendMessageW(c, WM_SETFONT, (WPARAM)g.font, TRUE);
+                ApplyControlTheme(c, g.dark);
                 return c;
             };
-            int pad = S(14), w = S(460) - pad * 2;
-            lb.intro = make(0, WC_STATICW,
-                            L"ListenBrainz keeps a public history of what you listen to. cordinal sends a song when it counts as "
-                            L"played (half of it, or 4 minutes). Paste your user token from listenbrainz.org/settings:",
-                            SS_LEFT | SS_NOPREFIX, 0);
-            lb.token = make(WS_EX_CLIENTEDGE, WC_EDITW, L"", ES_AUTOHSCROLL | ES_PASSWORD | WS_TABSTOP, 100);
-            lb.status = make(0, WC_STATICW, L"", SS_LEFT | SS_NOPREFIX, 0);
-            lb.connect = make(0, WC_BUTTONW, L"&Connect", BS_DEFPUSHBUTTON | WS_TABSTOP, IDOK);
-            lb.disconnect = make(0, WC_BUTTONW, L"&Turn off", BS_PUSHBUTTON | WS_TABSTOP, 101);
-            lb.close = make(0, WC_BUTTONW, L"Close", BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL);
-            MoveWindow(lb.intro, pad, pad, w, S(52), TRUE);
-            MoveWindow(lb.token, pad, pad + S(58), w, S(24), TRUE);
-            MoveWindow(lb.status, pad, pad + S(92), w, S(36), TRUE);
-            int by = pad + S(136);
-            MoveWindow(lb.connect, pad, by, S(90), S(26), TRUE);
-            MoveWindow(lb.disconnect, pad + S(98), by, S(90), S(26), TRUE);
-            MoveWindow(lb.close, pad + w - S(90), by, S(90), S(26), TRUE);
-            SetWindowTheme(lb.token, g.dark ? L"DarkMode_CFD" : L"Explorer", nullptr);
-            for (HWND c : {lb.connect, lb.disconnect, lb.close}) ApplyControlTheme(c, g.dark);
-            ApplyWindowTheme(h, P());
-            LbStatus();
-            return 0;
+            make(WC_STATICW, L"&Service", SS_LEFT, 0, 14, 18, 74, 22);
+            lb.service = make(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, 102, 92, 14, 374, 160);
+            for (auto name : {L"ListenBrainz", L"Last.fm", L"Libre.fm"}) SendMessageW(lb.service, CB_ADDSTRING, 0, (LPARAM)name);
+            SendMessageW(lb.service, CB_SETCURSEL, 0, 0);
+            lb.intro = make(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX, 0, 14, 52, 452, 64);
+            lb.token = make(WC_EDITW, L"", ES_AUTOHSCROLL | ES_PASSWORD | WS_BORDER | WS_TABSTOP, 100, 14, 124, 452, 26);
+            lb.keyLabel = make(WC_STATICW, L"API &key", SS_LEFT, 0, 14, 126, 86, 22);
+            lb.key = make(WC_EDITW, L"", ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 103, 104, 122, 362, 26);
+            lb.secretLabel = make(WC_STATICW, L"API &secret", SS_LEFT, 0, 14, 160, 86, 22);
+            lb.secret = make(WC_EDITW, L"", ES_AUTOHSCROLL | ES_PASSWORD | WS_BORDER | WS_TABSTOP, 104, 104, 156, 362, 26);
+            lb.account = make(WC_BUTTONW, L"", BS_PUSHBUTTON | WS_TABSTOP, 105, 14, 194, 132, 26);
+            lb.status = make(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX, 0, 14, 234, 452, 64);
+            lb.connect = make(WC_BUTTONW, L"&Connect", BS_DEFPUSHBUTTON | WS_TABSTOP, IDOK, 14, 310, 124, 28);
+            lb.disconnect = make(WC_BUTTONW, L"&Disconnect", BS_PUSHBUTTON | WS_TABSTOP, 101, 146, 310, 116, 28);
+            lb.close = make(WC_BUTTONW, L"Close", BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL, 376, 310, 90, 28);
+            ApplyWindowTheme(h, P()); LbService(); return 0;
         }
         case WM_ERASEBKGND: {
-            RECT rc;
-            GetClientRect(h, &rc);
-            FillRect((HDC)wp, &rc, g.surfaceBrush);
-            return 1;
+            RECT rc; GetClientRect(h, &rc); FillRect((HDC)wp, &rc, g.surfaceBrush); return 1;
         }
-        case WM_CTLCOLORSTATIC:
-            return SurfaceControlColor((HDC)wp, (HWND)lp == lb.status ? SubColor() : TextColor());
-        case WM_CTLCOLOREDIT:
-            return FieldControlColor((HDC)wp);
+        case WM_CTLCOLORSTATIC: return SurfaceControlColor((HDC)wp, (HWND)lp == lb.status ? SubColor() : TextColor());
+        case WM_CTLCOLOREDIT: return FieldControlColor((HDC)wp);
         case WM_COMMAND:
-            if (LOWORD(wp) == IDOK) {
-                if (lb.checking) return 0;
-                wchar_t token[256];
-                GetWindowTextW(lb.token, token, 256);
-                std::wstring t = token;
-                std::erase_if(t, iswspace);
-                if (t.empty()) return 0;
-                lb.checking = true;
-                lb.pendingToken = t;
-                listenbrainz::Validate(t);
+            if (LOWORD(wp) == 102 && HIWORD(wp) == CBN_SELCHANGE) {
+                listenbrainz::CancelAuthorization(lb.selected);
+                lb.selected = (listenbrainz::Service)SendMessageW(lb.service, CB_GETCURSEL, 0, 0);
+                lb.checking = false; lb.pendingToken.clear(); lb.authKey.clear(); lb.authSecret.clear();
+                lb.authToken.clear(); lb.message.clear();
+                for (HWND c : {lb.token, lb.key, lb.secret}) SetWindowTextW(c, L"");
+                LbService();
+            } else if (LOWORD(wp) == IDOK && !lb.checking) {
+                lb.message.clear();
+                if (lb.selected == listenbrainz::Service::ListenBrainz) {
+                    lb.pendingToken = LbText(lb.token);
+                    if (lb.pendingToken.empty()) { SetFocus(lb.token); return 0; }
+                    lb.checking = true; listenbrainz::Validate(lb.pendingToken);
+                } else {
+                    if (lb.authToken.empty()) { lb.authKey = LbText(lb.key); lb.authSecret = LbText(lb.secret); }
+                    if (lb.authKey.empty() || lb.authSecret.empty()) {
+                        lb.message = L"Enter the API key and secret from this service first."; LbStatus(); return 0;
+                    }
+                    lb.checking = true;
+                    listenbrainz::Authorize(lb.selected, lb.authKey, lb.authSecret, lb.authToken);
+                }
                 LbStatus();
             } else if (LOWORD(wp) == 101) {
-                listenbrainz::SetToken(L"");
-                lb.pendingToken.clear();
+                listenbrainz::CancelAuthorization(lb.selected);
+                bool saved = listenbrainz::SetToken(L"", lb.selected);
+                lb.checking = false; lb.pendingToken.clear(); lb.authToken.clear(); lb.authKey.clear(); lb.authSecret.clear();
+                for (HWND c : {lb.token, lb.key, lb.secret}) SetWindowTextW(c, L"");
+                lb.message = saved ? L"Disconnected. Scrobbling is off." : L"Could not remove the saved connection.";
                 LbStatus();
-            } else if (LOWORD(wp) == IDCANCEL) {
-                DestroyWindow(h);
-            }
+            } else if (LOWORD(wp) == 105) {
+                const wchar_t* url = lb.selected == listenbrainz::Service::ListenBrainz ? L"https://listenbrainz.org/settings/" :
+                    lb.selected == listenbrainz::Service::LastFm ? L"https://www.last.fm/api/account/create" : L"https://libre.fm/api-keys.php";
+                ShellExecuteW(h, L"open", url, nullptr, nullptr, SW_SHOWNORMAL);
+            } else if (LOWORD(wp) == IDCANCEL) DestroyWindow(h);
             return 0;
-        case WM_CLOSE:
-            DestroyWindow(h);
-            return 0;
+        case WM_CLOSE: DestroyWindow(h); return 0;
         case WM_NCDESTROY:
-            lb = LbWindow{};
-            return 0;
+            listenbrainz::CancelAuthorization(lb.selected); lb = LbWindow{}; return 0;
     }
     return DefWindowProcW(h, msg, wp, lp);
 }
@@ -243,12 +286,12 @@ void ShowListenBrainz() {
         return;
     }
     RegisterAppClass(L"CordinalListenBrainz", LbProc);
-    RECT r{0, 0, S(460), S(192)};
+    RECT r{0, 0, S(480), S(352)};
     AdjustWindowRectExForDpi(&r, WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME, g.dpi);
     RECT owner;
     GetWindowRect(g.hwnd, &owner);
     int w = r.right - r.left, hgt = r.bottom - r.top;
-    CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT, L"CordinalListenBrainz", L"ListenBrainz scrobbling",
+    CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT, L"CordinalListenBrainz", L"Scrobbling",
                     WS_CAPTION | WS_SYSMENU, owner.left + (owner.right - owner.left - w) / 2, owner.top + S(100), w, hgt, g.hwnd,
                     nullptr, g.inst, nullptr);
     ShowWindow(lb.hwnd, SW_SHOW);
@@ -398,14 +441,7 @@ void InitPlatform(HWND hwnd) {
         ShowMessage(L"cordinal closed unexpectedly last time. A crash report was saved in " + DirectoryOf(dump) + L".");
     } else if (!IniInt(L"Library", L"SteamOffered", 0)) {
         // Once: point out bought soundtracks that Steam keeps outside the music folder.
-        auto steam = FindSteamMusicFolders();
-        std::erase_if(steam, [](const std::wstring& f) {
-            return std::any_of(g.libraryFolders.begin(), g.libraryFolders.end(), [&](const std::wstring& l) { return PathIsUnder(f, l) || _wcsicmp(f.c_str(), l.c_str()) == 0; });
-        });
-        if (!steam.empty()) {
-            ShowMessage(L"Found Steam soundtracks: Library \x25B8 Add Steam soundtracks adds them to your library.");
-            IniWrite(L"Library", L"SteamOffered", L"1");
-        }
+        StartSteamDiscovery(true);
     }
 }
 
@@ -424,24 +460,83 @@ void ShutdownPlatform() {
 
 // Library > Add Steam soundtracks: appends every uncovered Steam soundtrack folder, then rescans.
 void AddSteamSoundtracks() {
-    int added = 0;
-    for (const std::wstring& f : FindSteamMusicFolders()) {
-        bool covered = std::any_of(g.libraryFolders.begin(), g.libraryFolders.end(), [&](const std::wstring& l) {
+    StartSteamDiscovery(false);
+    if (!g.closing) ShowMessage(L"Looking for Steam soundtracks...");
+}
+
+bool SteamDiscoveryRunning() { return g_steamWorker.joinable(); }
+
+void CancelSteamDiscovery() {
+    if (!SteamDiscoveryRunning()) return;
+    g_steamCancel = true;
+    ShowMessage(L"Cancelling the soundtrack search...");
+}
+
+// Apply the result on the UI thread, comparing with the current watched folders in case the
+// user edited them while discovery was running. A cancelled search never saves partial roots.
+void OnSteamDiscovery(WPARAM state, LPARAM lp) {
+    std::unique_ptr<SteamImport> result(reinterpret_cast<SteamImport*>(lp));
+    if (g_steamWorker.joinable()) g_steamWorker.join();
+    const bool adding = g_steamAdding;
+    g_steamAdding = false;
+    if (!result || g.closing) return;
+    if (g_steamCancel || (state & 2)) {
+        if (adding) ShowMessage(g_steamCancel ? L"Soundtrack search cancelled." : L"Couldn't search for Steam soundtracks.");
+        return;
+    }
+    if (adding && (state & 1)) { StartSteamDiscovery(false); return; }
+    auto folders = result->folders;
+    std::erase_if(folders, [](const std::wstring& f) {
+        return std::any_of(g.libraryFolders.begin(), g.libraryFolders.end(), [&](const std::wstring& l) {
             return PathIsUnder(f, l) || _wcsicmp(f.c_str(), l.c_str()) == 0;
         });
-        if (covered) continue;
+    });
+    if (!adding) {
+        if (!folders.empty()) {
+            ShowMessage(L"Found Steam soundtracks: Library \x25B8 Add Steam soundtracks adds them to your library.");
+            IniWrite(L"Library", L"SteamOffered", L"1");
+        }
+        return;
+    }
+    int formats = IDNO;
+    if (result->multipleFormats) {
+        formats = MessageBoxW(g.hwnd,
+            L"Steam soundtracks include more than one audio format.\n\n"
+            L"Keep a copy of each song in every format?\n\n"
+            L"Yes keeps each format. No keeps one copy, preferring songs already in your Library.\n"
+            L"Cancel leaves the Library unchanged.", L"Add Steam soundtracks",
+            MB_YESNOCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2);
+        if (formats != IDYES && formats != IDNO) return;
+    }
+    const size_t skipped = SkipSteamDuplicates(g_lib, *result, formats == IDYES);
+    g.dirty = true;
+    g.compactPending = true;
+    RebuildView(true);
+    int added = 0;
+    for (const std::wstring& f : folders) {
         g.libraryFolders.push_back(f);
         ++added;
     }
     IniWrite(L"Library", L"SteamOffered", L"1");
     if (!added) {
-        ShowMessage(L"No Steam soundtracks found that aren't in the library already.");
+        StartScanner();
+        ShowMessage(skipped ? L"Skipped " + std::to_wstring(skipped) + L" duplicate Steam tracks."
+                            : L"No Steam soundtracks found that aren't in the library already.");
         return;
     }
     SaveLibrarySettings();
     StartScanner();
     ShowMessage(L"Added " + std::to_wstring(added) + (added == 1 ? L" Steam soundtrack folder" : L" Steam soundtrack folders") +
-                L" to the library.");
+                L" to the library. Skipped " + std::to_wstring(skipped) + L" duplicate tracks.");
+}
+
+void StopSteamDiscovery() {
+    g_steamCancel = true;
+    if (g_steamWorker.joinable()) g_steamWorker.join();
+    g_steamAdding = false;
+    MSG pending;
+    while (PeekMessageW(&pending, g.hwnd, WM_APP_STEAM, WM_APP_STEAM, PM_REMOVE))
+        delete reinterpret_cast<SteamImport*>(pending.lParam);
 }
 
 // Player > Loop: 0-3 repeats of the current track, applied with an 8 s crossfade.
@@ -463,14 +558,16 @@ void PlatformTrackChanged() {
         g_smtcTrack = kNone - 1;
         return;
     }
-    if (g.playing == g_smtcTrack) return;
+    if (g.playing == g_smtcTrack && g.playingToken == g_scrobbleToken) return;
+    g_scrobbleToken = g.playingToken;
+    g_scrobbleStarted = g.playing == kNone ? 0 : UnixNow();
     g_smtcTrack = g.playing;
     if (g.playing == kNone) return;
     const Track& t = g_lib[g.playing];
     if (g_smtc)
         smtc::SetMetadata(t.title ? g_lib.Str(t.title) : StemOf(g_lib.Str(t.file)), g_lib.Str(t.artist ? t.artist : t.albumArtist),
                           g_lib.Str(t.album), CoverBytes(g.playing));
-    if (listenbrainz::Enabled()) listenbrainz::PlayingNow(MakeListen(g.playing));
+    listenbrainz::PlayingNow(MakeListen(g.playing));
 }
 
 // With every status update: play state at once, the timeline once a second.
@@ -490,11 +587,12 @@ void PlatformTick() {
     }
 }
 
-// A play that crossed the scrobbling threshold: submit it with the current time.
-void PlatformCountedPlay(TrackId id, uint32_t when) {
-    if (!listenbrainz::Enabled() || id >= g_lib.Count()) return;
+// A counted play carries its start time; a paired browser supplies its own credited interval.
+void PlatformCountedPlay(TrackId id, uint32_t when, double seconds, bool local) {
+    if (id >= g_lib.Count()) return;
     listenbrainz::Listen l = MakeListen(id);
-    l.listenedAt = when;  // ListenBrainz takes past listens at their own time
+    l.listenedAt = local && g_smtcTrack == id && g_scrobbleStarted ? g_scrobbleStarted :
+        when > seconds ? when - (uint32_t)seconds : 1;
     listenbrainz::Submit(l);
 }
 
@@ -540,19 +638,28 @@ bool OnPlatformMessage(UINT msg, WPARAM wp, LPARAM lp) {
         return true;
     }
     if (msg == WM_APP_LISTENBRAINZ) {
-        if (wp == 0 || wp == 1 || wp == 2) {  // a Validate result
-            std::unique_ptr<std::wstring> user(reinterpret_cast<std::wstring*>(lp));
+        auto service = (listenbrainz::Service)((wp >> 4) & 3);
+        unsigned result = (unsigned)wp % 16;
+        std::unique_ptr<std::wstring> value(reinterpret_cast<std::wstring*>(lp));
+        if (result == listenbrainz::kStatusChanged && lb.selected == service) lb.message.clear();
+        if (listenbrainz::CurrentResult(wp) && lb.hwnd && lb.selected == service && result != listenbrainz::kStatusChanged && lb.checking) {
             lb.checking = false;
-            if (wp == 1 && lb.hwnd && !lb.pendingToken.empty()) {
-                listenbrainz::SetToken(lb.pendingToken);
-                SetWindowTextW(lb.token, L"");
-                ShowMessage(L"ListenBrainz: scrobbling as " + (user ? *user : std::wstring(L"you")) + L".");
-            } else if (wp == 0) {
-                ShowMessage(L"ListenBrainz didn't accept that token.");
-            } else if (wp == 2) {
-                ShowMessage(L"Couldn't reach ListenBrainz. Check the connection and try again.");
+            if (result == 4 && value) {
+                lb.authToken = *value;
+                auto url = listenbrainz::AuthorizationUrl(service, lb.authKey, lb.authToken);
+                ShellExecuteW(lb.hwnd, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                lb.message = L"Approve access in your browser, then choose Finish sign-in.";
+            } else if ((result == 1 || result == 5) && value) {
+                bool saved = listenbrainz::SetToken(result == 1 ? lb.pendingToken : *value, service);
+                lb.message = saved ? L"Connected. Scrobbling is on." : L"Could not save the connection.";
+                if (saved) {
+                    for (HWND c : {lb.token, lb.key, lb.secret}) SetWindowTextW(c, L"");
+                    lb.authToken.clear(); lb.authKey.clear(); lb.authSecret.clear(); lb.pendingToken.clear();
+                }
+            } else {
+                lb.message = result == 2 ? L"Couldn't reach the service. Check your connection and try again." :
+                    L"Sign-in wasn't accepted. Check the credentials and browser approval, then retry.";
             }
-            lb.pendingToken.clear();
         }
         LbStatus();
         return true;

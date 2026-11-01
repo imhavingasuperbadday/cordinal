@@ -44,9 +44,10 @@ AI-written code is welcome. You are responsible for it as if you had typed it yo
 
 ## Contributor licence agreement
 
-Before your first pull request is merged, you sign the [CLA](CLA.md) once. A bot comments with
-a link. You keep the copyright to your work; the CLA lets the project ship cordinal under
-GPL-3.0-or-later and also in app stores whose terms conflict with the GPL.
+Before your first pull request is merged, sign the [CLA](CLA.md) once using the instructions
+there. You keep any copyright you own in your work; the CLA lets the project ship your
+contribution under GPL-3.0-or-later and also under other terms. Third-party material must have
+the necessary permissions for those terms; GPL compatibility alone is not enough.
 
 ## Conduct
 

@@ -229,6 +229,7 @@ void OnCommand(int id, int code, HWND ctl) {
         {IDM_REVIEW, ShowReview},
         {IDM_LISTENBRAINZ, ShowListenBrainz},
         {IDM_STEAM, AddSteamSoundtracks},
+        {IDM_CANCEL_STEAM, CancelSteamDiscovery},
         {IDM_WATCH_IMPORTED, WatchImportedFolders},
         {IDM_DUPLICATES, FindDuplicateAudioPlaylist},
         {IDM_GAME_WHICH_CAME_FIRST, [] { ShowGames(1); }},

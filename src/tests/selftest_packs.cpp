@@ -87,6 +87,7 @@ std::wstring Format(const wchar_t* pattern, std::initializer_list<std::pair<cons
 
 void TestPacks(const std::wstring& scratch) {
     testlog::Group group(L"packs");
+    testlog::Batch batch;
 
     {
         namespace files = app::packfiles;
@@ -95,6 +96,8 @@ void TestPacks(const std::wstring& scratch) {
         if (!Ready(files::Remove(root) == 0 && files::CreateDirectories(from + L"\\\x96EA\\empty") == 0 &&
                    WriteTestBytes(from + L"\\\x96EA\\bytes.bin", std::string("a\0b\xff", 4)), L"make pack file fixtures")) return;
         SetFileAttributesW((from + L"\\\x96EA\\bytes.bin").c_str(), FILE_ATTRIBUTE_READONLY);
+        batch.Next(L"pack staging lists, copies and removes trees, retaining names, bytes and attributes "
+                   L"without overwriting");
         Check(files::CreateDirectories(from) == 0 && files::Exists(from) &&
                   !files::Exists(from + L"\\missing") && files::Remove(from + L"\\missing") == 0 &&
                   files::CreateDirectories(from + L"\\\x96EA\\bytes.bin\\child") != 0,
@@ -123,6 +126,7 @@ void TestPacks(const std::wstring& scratch) {
         SetFileAttributesW(original.c_str(), FILE_ATTRIBUTE_READONLY);
         Check(files::Remove(to) == 0 && !files::Exists(to),
               L"pack cleanup removes read-only files and the enclosing tree");
+        batch.Next(L"pack staging preserves extended-length Unicode paths, follows links and publishes by rename");
         std::wstring longDir = L"\\\\?\\" + root;
         for (int i = 0; i < 22; ++i) longDir += L"\\long-directory";
         const std::wstring longCopy = longDir + L"-copy";
@@ -156,6 +160,8 @@ void TestPacks(const std::wstring& scratch) {
     auto functions = ParseTitleFunctions(
         L"// stars for a 0-100 rating\n$define(stars, n, $repeat(*, $div(%n%, 20)))\n$define(twice, x, %x%%x%)\n"
         L"$define(if, a, b)\n$define(loop, x, $loop(%x%)x)\n$define(open, x", errors);
+    batch.Next(L"pack functions keep their good definitions, bind arguments, bound recursion and never replace "
+               L"built-ins");
     Check(functions.size() == 3 && errors.size() == 2 && errors[0].find(L"built-in $if") != std::wstring::npos &&
               errors[1].find(L"closing") != std::wstring::npos,
           L"functions.tf keeps good definitions and names the line of each bad one (%zu kept, %zu refused)", functions.size(),
@@ -173,6 +179,7 @@ void TestPacks(const std::wstring& scratch) {
     std::wstring wide = L"; comment\r\n[Theme]\r\nPlaying Mark = \"> \"\r\n# also a comment\r\nname=Sea\r\n";
     std::string utf16 = "\xFF\xFE" + std::string((const char*)wide.data(), wide.size() * 2);
     auto ini = ParseIni(utf16);
+    batch.Next(L"ini files read as UTF-16, keep quoted spaces and lowercase their section names");
     Check(ini.size() == 1 && ini[0].name == L"theme" && ini[0].Get(L"playing_mark") && *ini[0].Get(L"playing_mark") == L"> " &&
               ini[0].Get(L"name") && *ini[0].Get(L"name") == L"Sea",
           L"ini files read as UTF-16, keep quoted spaces and lowercase their names");
@@ -180,6 +187,7 @@ void TestPacks(const std::wstring& scratch) {
     // .cordpack: stored and deflated entries read back with their checksums; anything else is refused.
     std::vector<PackEntry> entries;
     std::wstring error;
+    batch.Next(L"a .cordpack lists stored and deflated entries with their checksums and refuses anything else");
     Check(ReadPackZip(MakeZip({{"Theme.ini", "[theme]\nname=A\n"}, {"fonts/", ""}}), entries, error) && entries.size() == 1 &&
               entries[0].path == L"theme.ini" && entries[0].bytes == "[theme]\nname=A\n",
           L"a stored .cordpack lists its files, lowercase, without folders");
@@ -210,6 +218,7 @@ void TestPacks(const std::wstring& scratch) {
     auto loudWarned = [&](const wchar_t* text) {
         return std::any_of(loud.warnings.begin(), loud.warnings.end(), [&](auto& w) { return w.find(text) != std::wstring::npos; });
     };
+    batch.Next(L"a theme's sounds come from [sounds] or sounds/<name>.wav, and its WAV decodes to stereo samples");
     Check(has(Sfx::Rate) && has(Sfx::Oops) && loud.themes[0].sounds.size() == 2 && loudWarned(L"no sound effect called boom") &&
               loudWarned(L"gone.wav isn't in the pack"),
           L"a theme's sounds come from [sounds] or sounds/<name>.wav, and mistakes are named");
@@ -219,6 +228,7 @@ void TestPacks(const std::wstring& scratch) {
               std::any_of(stereo.begin(), stereo.end(), [](float v) { return std::fabs(v) > 0.1f; }) &&
               !DecodePackWav("RIFF....WAVEjunk", rate, stereo),
           L"a WAV sound decodes to stereo samples; anything else doesn't");
+    batch.Next(L"auto-playlists are read in cordinal's own rule format, and a pack says what it holds");
     AutoPlaylist rules;
     Check(loud.autoPlaylists.size() == 1 && loud.autoPlaylists[0].name == L"Rainy day" &&
               ParseAutoPlaylist(loud.autoPlaylists[0].rules, rules) && rules.limit == 20 && rules.root.rules.size() == 1 &&
@@ -238,15 +248,18 @@ void TestPacks(const std::wstring& scratch) {
     auto extraWarned = [&](const wchar_t* text) {
         return std::any_of(extra.warnings.begin(), extra.warnings.end(), [&](auto& w) { return w.find(text) != std::wstring::npos; });
     };
+    batch.Next(L"fields.ini names fields by their format, and a column set lists column names in its own order");
     Check(extra.fields.size() == 1 && extra.fields[0].first == L"decade" && extra.fields[0].second == L"$div(%year%,10)0s",
           L"fields.ini names fields by their format; an empty one is left out");
     Check(extra.columnSets.size() == 1 && extra.columnSets[0].name == L"Classical" &&
               extra.columnSets[0].show == std::vector<std::wstring>{L"#", L"Title", L"Composer", L"Duration"} &&
               extra.columns.empty() && extraWarned(L"[set.none] shows no columns"),
           L"a column set lists column names, and isn't a column itself");
+    batch.Next(L"global keys and the tray tip are read apart from the window's own keys and formats");
     Check(extra.globalKeys.size() == 1 && extra.keys.empty() && extra.globalKeys[0].command == L"Next" &&
               extra.formats[kPackTray] == L"%title%!",
           L"global keys and the tray tip are read apart from the window's keys and formats");
+    batch.Next(L"a theme draws ratings with its own mark and the waveform in its own colours, held to 3:1");
     Check(extra.themes.size() == 2 && extra.themes[0].ratingMark == L"\x2665" && extra.themes[0].wavePlayed == 0xC8303A &&
               extra.themes[0].waveRest == kNoRgb && extra.themes[0].legibility.empty() &&
               extra.themes[1].legibility.find(L"waveform unplayed on surface") == 0,
@@ -271,6 +284,8 @@ void TestPacks(const std::wstring& scratch) {
     auto warned = [&](const wchar_t* text) {
         return std::any_of(pack.warnings.begin(), pack.warnings.end(), [&](auto& w) { return w.find(text) != std::wstring::npos; });
     };
+    batch.Next(L"pack.ini names the pack, and a theme takes its colours from the pack over its base, naming "
+               L"bad ones");
     Check(pack.error.empty() && pack.name == L"Sea" && pack.version == L"1.0", L"pack.ini names the pack");
     Check(pack.themes.size() == 2 && pack.themes[0].name == L"Sea" && pack.themes[0].palette.dark &&
               pack.themes[0].palette.bg == 0x0B1D2A && pack.themes[0].palette.surface == 0x10283A &&
@@ -280,6 +295,7 @@ void TestPacks(const std::wstring& scratch) {
           L"an unknown colour role and a bad colour are named in the warnings");
     Check(pack.themes[1].legibility.find(L"text on bg") == 0,
           L"a theme that breaks the contrast rules names the pair: %ls", pack.themes[1].legibility.c_str());
+    batch.Next(L"columns, group headers and formats are read as format strings");
     Check(pack.columns.size() == 1 && pack.columns[0].key == L"bitrate" && pack.columns[0].title == L"kbps" &&
               pack.columns[0].sort == L"[%bitrate%]" && pack.columns[0].right && pack.columns[0].width == 60 &&
               warned(L"[broken] has no format"),
@@ -288,6 +304,7 @@ void TestPacks(const std::wstring& scratch) {
     Check(pack.formats[kPackWindow] == L"%title% - Sea" && pack.formats[kPackStatus] == L" %codec% " &&
               pack.formats[kPackNowPlaying].empty(),
           L"formats set the window title and status bar, and leave the rest alone");
+    batch.Next(L"a key map pairs keys with command names, and EQ and layout presets keep their values");
     Check(pack.keys.size() == 1 && pack.keys[0].keys == L"ctrl+alt+n" && pack.keys[0].command == L"Playback > Next",
           L"a key map pairs keys with command names");
     Check(pack.presets.size() == 1 && pack.presets[0].name == L"warm" && pack.presets[0].gains[0] == 3 &&
@@ -295,12 +312,25 @@ void TestPacks(const std::wstring& scratch) {
           L"EQ presets are clamped to the equalizer's range");
     Check(pack.layouts.size() == 1 && pack.layouts[0].name == L"Sea side" && pack.layouts[0].values.Get(L"player"),
           L"a layout preset keeps its values for Customize layout");
+    batch.Next(L"files for a later pack format and unknown ini files are named, and an unusable pack says so");
     Check(warned(L"later.ini needs a later cordinal") && warned(L"notes.ini is not a file packs use") && !warned(L"readme"),
           L"a file for a later pack format and an unknown ini are named; other files are ignored");
     Pack future = ParsePack(L"future", Files({{L"pack.ini", "[pack]\nformat = 2\n"}, {L"theme.ini", "[theme]\nname=x\n"}}));
     Check(!future.error.empty() && future.themes.empty(), L"a pack for a later pack format is refused whole");
     Pack empty = ParsePack(L"empty", Files({{L"readme.txt", "hi"}}));
     Check(!empty.error.empty(), L"a pack with nothing to use says so");
+
+    batch.Next(L"pack fonts retain binary bytes and accept only bounded TTF and OTF files in fonts");
+    const std::string fontBytes("OTTO\0binary\xff", 12);
+    Pack fonts = ParsePack(L"fonts", Files({
+        {L"fonts/regular.ttf", fontBytes}, {L"fonts/bold.otf", fontBytes},
+        {L"fonts/large.ttf", std::string((8u << 20) + 1, 'x')},
+        {L"fonts/ignored.woff", fontBytes}, {L"outside.ttf", fontBytes},
+    }));
+    Check(fonts.error.empty() && fonts.fonts.size() == 2 && fonts.fonts[0].file == L"fonts/regular.ttf" &&
+              fonts.fonts[1].file == L"fonts/bold.otf" && fonts.fonts[0].bytes == fontBytes &&
+              fonts.fonts[1].bytes == fontBytes,
+          L"only TTF and OTF files under fonts within the size limit reach the private font loader");
 }
 
 // In the window: a pack found in the folder stays off until turned on; on, it adds its theme, column,
@@ -308,6 +338,7 @@ void TestPacks(const std::wstring& scratch) {
 void TestPackIntegration(const std::wstring& scratch) {
     using namespace app;
     testlog::Group group(L"packs in the window");
+    testlog::Batch batch;
     const std::wstring dataDir = g.dataDir, dir = scratch + L"\\packs\\sea";
     const ThemeMode original = g.themeMode, originalDefault = g.defaultTheme;
     g.dataDir = scratch;
@@ -330,6 +361,7 @@ void TestPackIntegration(const std::wstring& scratch) {
 
     LoadPacks(false);
     const std::wstring ownWindow = g.fmtWindow;  // settings.ini's own, which packs may cover but never change
+    batch.Next(L"a new pack changes nothing until it is turned on, then adds its theme, column and window title");
     Check(ThemeTotal() == (int)ThemeMode::Count && ColumnTotal() == kColumnCount && ownWindow != L"Sea: %title%" &&
               IniRead(L"Packs", L"On", L"").empty() && IniRead(L"Packs", L"Known", L"") == L"sea",
           L"a new pack changes nothing until it is turned on");
@@ -337,6 +369,7 @@ void TestPackIntegration(const std::wstring& scratch) {
     Check(ThemeTotal() == (int)ThemeMode::Count + 1 && ColumnTotal() == kColumnCount + 1 && g.fmtWindow == L"Sea: %title%" &&
               IniRead(L"Packs", L"On", L"") == L"sea",
           L"turning a pack on adds its theme, its column and its window title, and is remembered");
+    batch.Next(L"its $define functions reach every title format, and its keys reach the menu command they name");
     Check(Format(L"$twice(ab)", {}) == L"abab", L"its $define functions reach every title format");
     ACCEL keys[256];
     int count = CopyAcceleratorTableW(g.accel, keys, (int)std::size(keys));
@@ -350,12 +383,15 @@ void TestPackIntegration(const std::wstring& scratch) {
     OnCommand(IDM_PACK_THEME_BASE, 0, nullptr);
     g.defaultTheme = g.themeMode;  // as if the startup-default review had kept it
     SavePreferences();
+    batch.Next(L"a pack theme applies its palette, sound, rating mark and waveform, and is saved by name");
     Check(PackThemeMode(g.themeMode) && P().bg == 0x0B1D2A && IniRead(L"Window", L"PackTheme", L"") == L"sea/Sea" &&
               IniInt(L"Window", L"Theme", -1) == (int)ThemeMode::Dark,
           L"a pack theme applies, and is saved by name beside its built-in fallback");
     Check(PackThemeHasSound(Sfx::Rate) && !PackThemeHasSound(Sfx::Dice), L"the pack theme brings its own sound for the effects it names");
     Check(std::wstring(ThemeInfo(g.themeMode).ratingMark) == L"\x2665" && WaveformPlayedColor() == Ref(0x5CC8FF),
           L"the pack theme's rating mark and waveform colour are the ones in use");
+    batch.Next(L"a pack's field works in every format without replacing cordinal's, and its global key runs "
+               L"its command");
     TrackId first = g_lib.Count() ? 0 : kNone;
     std::wstring title;
     if (first != kNone) LookupField(first, L"title", title);
@@ -365,6 +401,8 @@ void TestPackIntegration(const std::wstring& scratch) {
     Check(PackHotkey(0x5000) && g.shuffle != shuffle, L"a pack's global key runs the command it names");
     OnCommand(IDM_SHUFFLE, 0, nullptr);
     OnCommand(IDM_PACK_COLSET_BASE, 0, nullptr);
+    batch.Next(L"a column set shows its columns by name, a pack's auto-playlist is added, and a shown "
+               L"column is saved");
     Check(g.columns == std::vector<int>{0, 2, kColumnCount}, L"a column set shows its columns by name, in its order");
     OnCommand(IDM_COLUMN_BASE + kColumnCount, 0, nullptr);  // hidden again, for the check below
     const size_t lists = g.playlists.size();
@@ -376,6 +414,7 @@ void TestPackIntegration(const std::wstring& scratch) {
     Check(SubitemOf(kColumnCount) >= 0 && IniRead(L"Columns", L"PackColumns", L"") == L"sea/mood",
           L"a pack column can be shown, and is saved by name");
 
+    batch.Next(L"turning it off leaves the built-in theme under it, and safe mode starts without packs");
     OnCommand(IDM_PACK_BASE, 0, nullptr);
     Check(g.themeMode == ThemeMode::Dark && ThemeTotal() == (int)ThemeMode::Count && SubitemOf(kColumnCount) < 0 &&
               g.fmtWindow == ownWindow && Format(L"$twice(ab)", {}) == L"[UNKNOWN FUNCTION]",
@@ -398,6 +437,7 @@ void TestPackIntegration(const std::wstring& scratch) {
     WriteTestBytes(outside + L"\\pack.ini", "[pack]\nname = Night\n");
     WriteTestBytes(outside + L"\\theme.ini", "[theme]\nname = Night\nbase = dark\n");
     WriteTestBytes(scratch + L"\\downloads\\song.wav", MakeSineWav(0.05, 1));
+    batch.Next(L"music and a plain folder are not packs, and a dropped pack installs whole or leaves the old bytes");
     Check(!InstallPack(scratch + L"\\downloads\\song.wav", false) && !InstallPack(scratch + L"\\downloads", false),
           L"music, and a folder without a pack.ini, are not packs");
     Check(InstallPack(outside, false) && GetFileAttributesW((scratch + L"\\packs\\Night\\theme.ini").c_str()) != INVALID_FILE_ATTRIBUTES &&
@@ -419,6 +459,7 @@ void TestPackIntegration(const std::wstring& scratch) {
             app::packfiles::Remove(outside + L"\\one");
         }
     }
+    batch.Next(L"a zipped pack of the same name replaces the installed one, and a failed rename restores it");
     WriteTestBytes(scratch + L"\\downloads\\Night.zip", MakeZip({{"pack.ini", "[pack]\nname = Night 2\n"}, {"theme.ini", "[theme]\nname = Night\n"}}, 8));
     Check(InstallPack(scratch + L"\\downloads\\Night.zip", false) &&
               GetFileAttributesW((scratch + L"\\packs\\Night.cordpack").c_str()) != INVALID_FILE_ATTRIBUTES &&
@@ -454,6 +495,7 @@ void TestPackIntegration(const std::wstring& scratch) {
         }
         mine = ParsePack(L"mine", files);
     }
+    batch.Next(L"Make a pack writes the current theme, formats, layout and EQ as a pack that reads back the same");
     const Palette& now = P();
     Check(!made.empty() && mine.error.empty() && mine.themes.size() == 1 && mine.themes[0].palette.bg == now.bg &&
               mine.themes[0].palette.selectText == now.selectText && mine.themes[0].palette.dark == now.dark &&

@@ -17,6 +17,7 @@ std::string& File(std::vector<migration::File>& files, const wchar_t* name) {
 
 void TestMigration(const std::wstring& scratch) {
     namespace fs = std::filesystem;
+    testlog::Batch batch;
     fs::create_directories(scratch);
     LibraryArchive source;
     auto a = source.library.Add(L"D:\\Music\\Bj\x00F6rk\\One.flac");
@@ -73,6 +74,8 @@ void TestMigration(const std::wstring& scratch) {
     bool same = files.size() == roundtrip.size();
     for (size_t i = 0; same && i < files.size(); ++i)
         same = files[i].path == roundtrip[i].path && files[i].bytes == roundtrip[i].bytes;
+    batch.Next(L"CSV round trip preserves all track fields, playlists, views, history, points and loudness, "
+               L"and malformed input leaves the destination unchanged");
     Check(same, L"CSV round trip preserves all track fields, duplicate/empty/auto playlists, views, history, "
                 L"points and loudness");
 
@@ -96,6 +99,7 @@ void TestMigration(const std::wstring& scratch) {
     Check(invalid.Passed(),
           L"malformed CSV, unsupported versions and bad references leave the destination unchanged: %ls",
           invalid.failed.c_str());
+    batch.Next(L"folder remapping uses the longest complete prefix and rejects colliding maps");
     std::vector<migration::PathMap> maps{{L"D:\\Music", L"F:\\Audio"},
                                          {L"D:\\Music\\Bj\x00F6rk", L"G:\\Bj\x00F6rk"},
                                          {L"E:\\Other", L"H:\\Lost"}};
@@ -116,6 +120,7 @@ void TestMigration(const std::wstring& scratch) {
                              L"\\Music\\Two.flac|2\r\nVolume=73\r\n");
     auto remappedIni = backup::RemapSettings(settings, maps);
 
+    batch.Next(L"statistics import is idempotent, keeps existing ratings and becomes FMPS tags");
     std::vector<migration::Statistics> stats;
     if (!Ready(migration::ReadStatisticsCsv(migration::StatisticsCsv(source.library), stats, error),
                L"statistics CSV read for import"))
@@ -140,6 +145,7 @@ void TestMigration(const std::wstring& scratch) {
     Check(tags.rating == "0.9" && tags.playCount == "7" && migration::StatisticsTags(unrated).Empty(),
           L"statistics become FMPS tags, and a track without them leaves the file's own alone");
 
+    batch.Next(L"foo_playcount XML imports real dates and rejects invalid, truncated or external-entity XML");
     const auto xml = scratch + L"\\foobar.xml";
     const std::string body =
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?><PlaybackStatistics Version=\"3.0\" Mapping=\"opaque\">"
@@ -171,6 +177,8 @@ void TestMigration(const std::wstring& scratch) {
           L"invalid and truncated XML and external entities never import partial statistics: %ls",
           xmlBad.failed.c_str());
 
+    batch.Next(L"a staged restore switches the whole profile, recovers an interrupted swap and rejects "
+               L"a corrupt backup");
     const auto profile = scratch + L"\\profile", folder = scratch + L"\\backup";
     fs::create_directories(profile + L"\\packs\\mine");
     Ready(WriteTestBytes(profile + L"\\packs\\mine\\pack.ini", "[pack]\nformat=1\nname=Mine\n") &&

@@ -7,7 +7,7 @@ program of about 1.5 MB: no installer, no runtime, nothing else to install. It p
 audio file with its own decoders, keeps your ratings and listening history, and leaves your music
 where it is.
 
-Current release: **0.1.1**. Download `cordinal.exe` from
+Current release: **0.1.2**. Download `cordinal.exe` from
 [Releases](https://github.com/imhavingasuperbadday/cordinal/releases/latest) and run it.
 
 ## What it does
@@ -17,6 +17,11 @@ Current release: **0.1.1**. Download `cordinal.exe` from
   own, moved files keep their history, and an unplugged drive loses nothing. Nothing is scanned
   automatically until you add a folder. New music can wait in an Inbox for review instead
   (Preferences ▸ Library).
+  Library ▸ Add Steam soundtracks finds installed albums and in-game soundtrack folders on Windows
+  and Linux. The search runs in the background and can be cancelled from the Library menu; empty
+  audio placeholders and effects folders are ignored.
+  If Steam has several audio formats, you choose whether to keep one copy per song or a copy in
+  each format. Duplicate files are skipped; existing Library copies, files and history are kept.
 - **Several ways to look at it.** A track list grouped by album, a cover grid, albums with their
   tracks, and artists, with a column browser (genre, artist, album, folder...) above them.
 - **One album, many editions.** Original, remaster, deluxe, regional and instrumental releases can
@@ -39,18 +44,32 @@ Current release: **0.1.1**. Download `cordinal.exe` from
   write is atomic, so a failure leaves the file as it was, and Ctrl+Z undoes the last ten edits.
   Organize files renames and moves music from its tags, with a preview and undo.
 - **Listening history.** Half-star ratings, play and skip counts, a play log, a year in review,
-  ListenBrainz scrobbling, and points for listening if you like that sort of thing.
+  native Last.fm, ListenBrainz and Libre.fm scrobbling, and points for listening if you like that sort of thing.
+
+  Open **File ▸ Scrobbling...** in the top menu, or **Preferences ▸ Scrobbling ▸ Scrobbling...**.
+  Connect any combination of the three services. ListenBrainz uses your user token; Last.fm and
+  Libre.fm use their own application API key and secret (the **Get API key** button opens the
+  service's registration page), followed by browser approval and **Finish sign-in**. No helper or
+  external scrobbler is needed. Credentials are protected with Windows account encryption, or an
+  owner-only file on Linux. Each service keeps its own queue across restarts and retries offline
+  listens. Preferences can pause all scrobbling or disable now-playing updates while still sending
+  completed listens. Scrobbling is off until you connect a service; disconnecting stops it and
+  removes its saved credentials. Waiting listens stay with their account.
+  A song counts after half its duration or four minutes of actual listening; Last.fm and Libre.fm
+  also require it to be longer than 30 seconds.
 - **Beyond the library.** Internet radio, a browser player for your phone, and Copy to folder or
   device for SD cards, music players and phones.
 - **Make it yours.** Light, dark or follow Windows; window sizes from a big player down to a mini
   player; columns and title formats; a command palette (Ctrl+Shift+P) that finds any command or
   setting. Every setting lives in Preferences (Ctrl+,).
+  **Preferences ▸ View ▸ Waveform playback bar** switches between a waveform and a regular progress
+  bar. Turn it off to use the regular bar even when live waveform is enabled; the live setting is kept.
 
 ## Your data
 
 Everything cordinal keeps is in `%APPDATA%\cordinal` (`$XDG_DATA_HOME/cordinal` on Linux): the
 library, playlists, statistics and settings. Cover and waveform caches are in
-`%LOCALAPPDATA%\cordinal`. cordinal only goes online when you use Radio, ListenBrainz or the
+`%LOCALAPPDATA%\cordinal`. cordinal only goes online when you enable online features such as Radio, scrobbling or the
 browser player.
 
 **File ▸ Back up library and settings** saves everything in a folder you can read, copy or zip;
@@ -101,6 +120,10 @@ curl -fsSL https://github.com/imhavingasuperbadday/cordinal/releases/latest/down
 ```
 
 Run it again to update; `sh -s -- --uninstall` in place of `sh` removes it (your library stays).
+
+Linux themes can use installed fonts or TTF/OTF files in an enabled pack's `fonts/` folder
+(View ▸ Packs). Set the theme's `font` to the font's family name. Pack fonts take effect immediately,
+stay private to cordinal and are released when the pack is turned off; menus keep the system font.
 
 ## Building
 

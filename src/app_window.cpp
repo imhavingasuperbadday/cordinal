@@ -265,6 +265,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP_STARTUP: FinishStartup(hwnd); return 0;
         case WM_APP_BACKUP: OnBackupMessage(lp); return 0;
         case WM_APP_HELPER: OnHelperMessage(wp, lp); return 0;
+        case WM_APP_STEAM: OnSteamDiscovery(wp, lp); return 0;
         case WM_APP_WEB: if (wp == 1) OpenWebPlayer(); else WebTick(); return 0;
         case WM_APP_IMPORT: OnImportResult(lp); return 0;
         case WM_APP_ART: OnArtResult(lp); return 0;

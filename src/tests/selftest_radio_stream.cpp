@@ -76,6 +76,7 @@ void ServeHls(SOCKET server) {
 }  // namespace
 
 void TestRadioStream() {
+    testlog::Batch batch;
     WSADATA wsa{};
     if (!Ready(WSAStartup(MAKEWORD(2, 2), &wsa) == 0, L"loopback radio sockets")) return;
     unsigned short port = 0;
@@ -86,6 +87,8 @@ void TestRadioStream() {
     uint8_t bytes[8]{};
     bool received = ReadLiveBytes(*stream, bytes, sizeof(bytes));
     server.join();
+    batch.Next(L"a station's fragmented chunked audio arrives with its ICY metadata removed and its title "
+               L"reported");
     Check(received && !memcmp(bytes, "abcdefgh", sizeof(bytes)) && stream->Title() == "Example - Song",
           L"radio removes ICY metadata from fragmented chunked audio and reports the title");
     stream->Abort();
@@ -108,6 +111,7 @@ void TestRadioStream() {
     SetEvent(release);
     reader.join(); stalled.join();
     CloseHandle(release);
+    batch.Next(L"aborting a stream whose station has stalled unblocks its blocked reader promptly");
     Check(connected && prompt, L"stopping a stalled station promptly unblocks the decoder");
     listener = Listener(port);
     if (Ready(listener != INVALID_SOCKET, L"HLS loopback station")) {
@@ -117,6 +121,8 @@ void TestRadioStream() {
         bool played = ReadLiveBytes(*hls, audio, sizeof(audio));
         hls->Abort(); hlsServer.join();
         constexpr uint8_t wanted[] = {255,251,144,100,'a','b','c','d'};
+        batch.Next(L"HLS follows redirects and relative playlists, decrypts AES-128 with its sequence IV "
+                   L"and strips ID3 from the audio");
         Check(played && !memcmp(audio, wanted, sizeof(wanted)),
               L"HLS follows redirects and relative playlists, decrypts AES-128 with its sequence IV and strips ID3");
     }

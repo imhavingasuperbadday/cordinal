@@ -262,7 +262,7 @@ bool Create(const std::wstring& folder, const std::wstring& profile, const std::
             "formats.\r\n"
             "Settings, packs, soundfonts and file-edit undo journals are included. Browser devices must "
             "pair\r\n"
-            "again, and ListenBrainz must reconnect on the new computer. Caches and credentials are "
+            "again, and scrobbling services must reconnect on the new computer. Caches and credentials are "
             "omitted.\r\n"
             "A restore retains your previous profile in a sibling .before-restore folder.\r\n";
         Require(WriteBytes(Child(stage, L"README.txt"), help), "Couldn't write backup instructions.");

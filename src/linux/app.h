@@ -125,11 +125,13 @@ struct Settings {
     bool lyricsPanel = false;    // the lyrics panel beside the track list (lyrics.cpp)
     bool pointsChip = false;     // the level and points chip in the now-playing strip (level-ups are announced while it is shown)
     bool timeRemaining = true;   // the time beside the seek bar counts down instead of showing the length
+    bool waveform = true;       // off uses a regular seek bar, overriding the saved live display settings
     bool liveWaveform = false;   // animate the audio being heard instead of the whole-song overview
     bool liveFountain = false;   // the DELTARUNE fountain follows audible audio, including radio
     bool fullLiveWaveform = true; // light the whole live display instead of splitting it at the song position
     int bandWaveSize = 0;        // normal top waveform height; 0 follows the layout size
     bool alwaysOnTop = false;
+    bool gpuDrawing = false;     // draw through the graphics card; off keeps its driver out (applies at start)
     // The games (games.cpp), as the Windows build's [Games] keys: Name That Track's rounds solved at each clip
     // length and then missed, and both games' current and best streaks.
     std::vector<int> nttGuesses;
@@ -439,7 +441,7 @@ void ToggleStartOnLogin();
 void InitScrobble();
 void StopScrobble();
 void ScrobbleTrackStarted(unsigned long long token, TrackId id);
-void ScrobbleCounted(TrackId id, uint32_t when);
+void ScrobbleCounted(TrackId id, uint32_t when, double seconds, bool local);
 // A title-format pattern (titleformat.h) filled in from `id`, with the time fields of playback if asked.
 std::wstring FormatForTrack(const std::wstring& pattern, TrackId id, bool withPlayback);
 void UpdateWindowTitle();

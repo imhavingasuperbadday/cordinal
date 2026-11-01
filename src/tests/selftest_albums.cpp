@@ -48,16 +48,6 @@ const AlbumGroup* GroupOf(const std::vector<TrackId>& tracks) {
     return nullptr;
 }
 
-bool SamePaths(const std::vector<TrackId>& a, const std::vector<TrackId>& b) {
-    if (a.size() != b.size()) return false;
-    std::vector<std::wstring> x, y;
-    for (TrackId id : a) if (g_lib.Contains(id)) x.push_back(g_lib.Path(id));
-    for (TrackId id : b) if (g_lib.Contains(id)) y.push_back(g_lib.Path(id));
-    std::sort(x.begin(), x.end());
-    std::sort(y.begin(), y.end());
-    return x == y;
-}
-
 AlbumSelection SelectionFor(const std::vector<TrackId>& tracks) {
     AlbumSelection selection;
     if (tracks.empty()) return selection;
@@ -118,9 +108,11 @@ std::string LegacyLibrary() {
 }  // namespace
 
 void TestAlbumEditions(const std::wstring& scratch) {
+    testlog::Batch batch;
     ResetLibrary();
 
     // --- Edition title parsing --------------------------------------------------------------
+    batch.Next(L"EDITIONS title parsing and heuristic grouping find original, remaster and deluxe editions");
     {
         struct Case { const char* title; const char* base; EditionKind kind; };
         const Case cases[] = {
@@ -183,6 +175,7 @@ void TestAlbumEditions(const std::wstring& scratch) {
               L"EDITIONS automatic labels name the release kind");
     }
 
+    batch.Next(L"EDITIONS MusicBrainz identifiers group and provider lookups stay conservative");
     // --- MusicBrainz identifiers are authoritative; missing ids do not group -----------------
     ResetLibrary();
     std::vector<TrackId> mbA = {
@@ -236,6 +229,7 @@ void TestAlbumEditions(const std::wstring& scratch) {
     Check(providerOk,
           L"EDITIONS MusicBrainz candidates, conservative search parsing and provider ids group without overriding tags");
 
+    batch.Next(L"EDITIONS retagging refreshes the album key and exposes the edition label");
     // --- Retagging an album refreshes its identity without losing editions -------------------
     const AlbumGroup* retagGroup = lookupGroup;
     for (TrackId id : lookupA) {
@@ -264,6 +258,7 @@ void TestAlbumEditions(const std::wstring& scratch) {
     Check(retagged && editionLabel,
           L"EDITIONS retagging refreshes the album key, joins new tracks, and exposes the edition label");
 
+    batch.Next(L"EDITIONS manual grouping, removal and split survive repeated rescan passes");
     // --- Manual grouping, labels and rescan safety ------------------------------------------
     ResetLibrary();
     std::vector<TrackId> manualA = {AddTrack(scratch + L"\\editions\\manualA.flac", "Band", "First Record", "A", "1990")};
@@ -312,6 +307,7 @@ void TestAlbumEditions(const std::wstring& scratch) {
               splitA->id != splitB->id && splitA->editions.size() == 1 && splitB->editions.size() == 1,
           L"EDITIONS rescans join new files, removal makes a separate album and split is not silently undone");
 
+    batch.Next(L"EDITIONS track comparison, manual matches and preferred versions are explicit");
     // --- Track correspondence ---------------------------------------------------------------
     ResetLibrary();
     std::vector<TrackId> core = {
@@ -369,6 +365,7 @@ void TestAlbumEditions(const std::wstring& scratch) {
               rejected && rejectedGone,
           L"EDITIONS manual confirm/reject and preferred track versions are explicit and take effect");
 
+    batch.Next(L"EDITIONS search finds an edition label and the canonical album title");
     // --- Search -----------------------------------------------------------------------------
     ResetLibrary();
     std::vector<TrackId> searchOriginal = {
@@ -386,6 +383,7 @@ void TestAlbumEditions(const std::wstring& scratch) {
     Check(deluxeMatches && titleMatcher.Matches(searchOriginal[0]) && titleMatcher.Matches(searchDeluxe[0]),
           L"EDITIONS search finds an edition label and the canonical album title without duplicate-looking results");
 
+    batch.Next(L"EDITIONS save, archive copy and a repeated load keep groups, labels, covers and matches");
     // --- Persistence, playlists and migration ------------------------------------------------
     ResetLibrary();
     std::vector<TrackId> saveA = {
@@ -453,6 +451,7 @@ void TestAlbumEditions(const std::wstring& scratch) {
           L"EDITIONS rescan and a repeated save/load do not duplicate groups or editions");
     DeleteDatabase(file);
 
+    batch.Next(L"EDITIONS version-1 migration, compaction and degenerate metadata keep groups honest");
     // A version-1 file predates the section; loading migrates it into editions without losing tracks.
     ResetLibrary();
     const std::wstring legacy = TempFile(scratch, L"legacy");

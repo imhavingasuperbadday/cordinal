@@ -10,12 +10,95 @@ namespace app { bool LyricsReadyFor(TrackId id, const std::wstring& line); }
 namespace {
 constexpr int kUiWidth = 1163, kUiHeight = 752;
 
+void TestPlayerSliders() {
+    using namespace app;
+    testlog::Batch batch;
+    const UINT savedDpi = g.dpi;
+    const int savedBandSize = g.bandWaveSize;
+    const auto savedTheme = g.themeMode;
+    const auto savedPalette = g.pal;
+    const auto savedLayout = g.layout;
+    const auto savedSize = g.size;
+    const int savedSeek = (int)SendMessageW(g.seek, TBM_GETPOS, 0, 0);
+    const int savedVolume = (int)SendMessageW(g.volume, TBM_GETPOS, 0, 0);
+    const bool enabled = IsWindowEnabled(g.seek) != 0;
+    EnableWindow(g.seek, TRUE);
+    g.layout = MainLayout{};
+    g.size = ViewSize::Normal;
+    testlog::Cases aligned, positions, input;
+    for (UINT dpi : {96u, 144u, 192u, 288u}) {
+        g.dpi = dpi;
+        SetWindowPos(g.hwnd, nullptr, 0, 0, S(kUiWidth), S(kUiHeight), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        for (ThemeMode theme : {ThemeMode::Light, ThemeMode::Dark}) {
+            g.themeMode = theme; g.pal = &ThemePalette(theme);
+            for (int band : {1, 2, 3, 5}) {
+                g.bandWaveSize = band; Layout();
+                RECT play{}; GetWindowRect(g.buttons[1], &play);
+                for (HWND bar : {g.seek, g.volume}) {
+                    RECT client{}, window{};
+                    GetClientRect(bar, &client); GetWindowRect(bar, &window);
+                    const std::wstring name = (bar == g.seek ? L"seek " : L"volume ") + std::to_wstring(dpi) +
+                        L"/" + std::to_wstring((int)theme) + L"/" + std::to_wstring(band);
+                    aligned.Add(std::abs((window.top + window.bottom) / 2 - (play.top + play.bottom) / 2) <= 1, name);
+                    HDC dc = CreateCompatibleDC(nullptr);
+                    BITMAPINFO info{};
+                    info.bmiHeader = {sizeof(BITMAPINFOHEADER), client.right, -client.bottom, 1, 32, BI_RGB};
+                    void* pixels = nullptr;
+                    HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+                    HGDIOBJ old = bitmap ? SelectObject(dc, bitmap) : nullptr;
+                    bool drawn = dc && bitmap;
+                    const int hi = (int)SendMessageW(bar, TBM_GETRANGEMAX, 0, 0), cy = client.bottom / 2;
+                    const int left = S(ui::kSliderInset), right = client.right - left;
+                    for (int percent : {0, 25, 50, 75, 100}) {
+                        // FALSE used to leave the native thumb rectangle at an earlier position.
+                        SendMessageW(bar, TBM_SETPOS, FALSE, hi * percent / 100);
+                        if (!drawn) continue;
+                        SendMessageW(bar, WM_PRINTCLIENT, (WPARAM)dc, PRF_CLIENT);
+                        const int cx = left + (int)std::lround((right - left) * percent / 100.0);
+                        const int y = cy - S(ui::kSliderThumbHeight) / 2, w = std::max(2, S(ui::kSliderThumbWidth));
+                        int first = client.right, last = -1;
+                        for (int x = 0; x < client.right; ++x)
+                            if (GetPixel(dc, x, y) != SurfaceColor()) { first = std::min(first, x); last = x; }
+                        bool fill = percent == 0 || GetPixel(dc, cx - w, cy) == Ref(P().accent);
+                        bool rest = percent == 100 || GetPixel(dc, cx + w, cy) == Ref(P().border);
+                        positions.Add(first == cx - w / 2 && last == first + w - 1 && fill && rest &&
+                                          std::fabs(BarFracAt(bar, {cx, cy}) - percent / 100.0) <= 1.0 / (right - left),
+                                      name + L" at " + std::to_wstring(percent));
+                    }
+                    positions.Add(drawn, name + L" drawing setup");
+                    if (old) SelectObject(dc, old);
+                    if (bitmap) DeleteObject(bitmap);
+                    if (dc) DeleteDC(dc);
+                    SendMessageW(bar, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(left, cy));
+                    SendMessageW(bar, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(right, cy));
+                    SendMessageW(bar, WM_LBUTTONUP, 0, MAKELPARAM(right, cy));
+                    bool dragged = SendMessageW(bar, TBM_GETPOS, 0, 0) == hi && GetCapture() != bar;
+                    SendMessageW(bar, WM_KEYDOWN, VK_HOME, 0);
+                    input.Add(dragged && SendMessageW(bar, TBM_GETPOS, 0, 0) == 0, name);
+                }
+            }
+        }
+    }
+    batch.Next(L"UI: seek and volume tracks and handles stay aligned at every band height and DPI");
+    Check(aligned.Passed() && positions.Passed(), L"UI: slider drawing stays centred and follows progress%ls%ls",
+          aligned.failed.c_str(), positions.failed.c_str());
+    Check(input.Passed(), L"UI: centred slider handles drag to the end and retain keyboard control%ls", input.failed.c_str());
+    g.dpi = savedDpi; g.bandWaveSize = savedBandSize; g.layout = savedLayout; g.size = savedSize;
+    g.themeMode = savedTheme; g.pal = savedPalette;
+    SetWindowPos(g.hwnd, nullptr, 0, 0, S(kUiWidth), S(kUiHeight), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    EnableWindow(g.seek, enabled);
+    SendMessageW(g.seek, TBM_SETPOS, TRUE, savedSeek);
+    SendMessageW(g.volume, TBM_SETPOS, TRUE, savedVolume);
+    Layout();
+}
+
 // Real scanner results survive saving and reopening, including silence (no usable LUFS),
 // older measurements that predate rgHigh, and a measured album's gain. No user library or
 // settings are opened.
 void TestReplayGainRestart(const std::wstring& scratch) {
     using namespace app;
     testlog::Group group(L"ReplayGain across restarts");
+    testlog::Batch batch;
     const std::wstring sine = scratch + L"\\rg-restart-sine.wav", silent = scratch + L"\\rg-restart-silent.wav";
     const std::wstring albumA = scratch + L"\\rg-restart-album-a.wav", albumB = scratch + L"\\rg-restart-album-b.wav";
     const std::wstring albumC = scratch + L"\\rg-restart-album-c.wav";
@@ -67,6 +150,7 @@ void TestReplayGainRestart(const std::wstring& scratch) {
     ScanReplayGain({measured, failed, a, b});
     const bool scanned = finish();
     auto stored = g_albumMeasurements.find(AlbumKeyOf(g_lib[a]));
+    batch.Next(L"RG measurements save, including unusable files, and survive reopening with renumbered IDs");
     Check(scanned && g_lib[measured].rgHigh && (g_lib[measured].flags & Track::kRgScanned) &&
               (g_lib[failed].flags & Track::kRgScanFailed) && stored != g_albumMeasurements.end() &&
               stored->second.members.size() == 2 && g_lib[a].rgAlbumGain == g_lib[b].rgAlbumGain &&
@@ -102,6 +186,7 @@ void TestReplayGainRestart(const std::wstring& scratch) {
         g.rgNextAuto = 1;
         unsigned generation = g.rgGen;
         MaybeAutoMeasure(false);
+        batch.Next(L"RG startup keeps saved measurements instead of working them out again");
         Check(g.rgGen == generation && !g.rgRunning,
               L"RG startup does not rescan completed, older or unsuccessful measurements");
         // Make the saved album a lift, so its stored levelling decides the gain: a fresh
@@ -128,6 +213,7 @@ void TestReplayGainRestart(const std::wstring& scratch) {
         Check(g_lib[a].rgAlbumGain == 500 && (g_lib[a].flags & Track::kRgAlbumMeasured) && g_lib[c].rgAlbumGain == kNoGain,
               L"RG a measured album keeps its gain while a track added since is unmeasured");
         const float partialGain = RgGainFor(a);
+        batch.Next(L"RG an incomplete album restores its saved levelling after restart and compaction");
         saved = SaveLibrary(file, g.playlists);
         ForgetAlbumDynamics();
         loaded = LoadLibrary(file, g.playlists);
@@ -151,6 +237,7 @@ void TestReplayGainRestart(const std::wstring& scratch) {
         g.rgAutoScan = true;
         finish();
         ScanReplayGain({failed});
+        batch.Next(L"RG an explicit scan retries a saved failure and clearing forgets the attempt");
         Check(g.rgGen > generation && finish() && (g_lib[failed].flags & Track::kRgScanFailed),
               L"RG an explicit scan retries a saved failure");
         ClearReplayGain({failed});
@@ -158,6 +245,7 @@ void TestReplayGainRestart(const std::wstring& scratch) {
         g.rgNextAuto = 1;
         generation = g.rgGen;
         MaybeAutoMeasure(false);
+        batch.Next(L"RG unmeasured tracks still scan automatically");
         Check(g.rgGen > generation && finish(), L"RG unmeasured tracks still scan automatically");
     }
     ForgetAlbumDynamics();
@@ -173,6 +261,7 @@ void TestReplayGainRestart(const std::wstring& scratch) {
 void TestFolderBrowser() {
     using namespace app;
     testlog::Group group(L"Folder browser");
+    testlog::Batch batch;
     BrowserPane saved[3];
     const BrowseField fields[] = {BrowseField::Folder, BrowseField::Genre, BrowseField::Album};
     for (int i = 0; i < 3; ++i) {
@@ -203,6 +292,7 @@ void TestFolderBrowser() {
         paths.Add(values == std::vector<StringPool::Handle>{g_lib[id].dir} &&
                       g_lib.Str(values.front()) == DirectoryOf(g_lib.Path(id)), g_lib.Path(id));
     }
+    batch.Next(L"folders show full paths and counted rows, including Unicode, semicolons, CUE, roots and UNC");
     Check(paths.Passed(), L"folders use full paths, including Unicode, semicolons, CUE, drive roots and UNC%ls",
           paths.failed.c_str());
     auto items = source;
@@ -223,6 +313,7 @@ void TestFolderBrowser() {
     folder.selected = {g_lib[a].dir};
     items = source;
     FilterLibrary(items);
+    batch.Next(L"folder and tag selections filter the view, combine, drop absent folders and clear");
     Check(items == std::vector<TrackId>{a, b, cue} && g.panes[1].values.size() == 2 &&
               g.panes[2].counts == std::vector<uint32_t>{3},
           L"selecting a folder filters tracks and later panes without including subfolders");
@@ -252,6 +343,7 @@ void TestFolderBrowser() {
         const auto selectedFolder = g_lib[0].dir;
         SelectBrowserValue(BrowseField::Folder, selectedFolder);
         OnCommand(IDM_THEME_BASE + (int)ThemeMode::Foobar, 0, nullptr);
+        batch.Next(L"the foobar2000 layout keeps and restores the column browser's folder choice");
         Check(FoobarMode() && folder.field == BrowseField::Folder &&
                   folder.selected == std::vector<StringPool::Handle>{selectedFolder},
               L"the foobar2000 layout keeps the column browser's folder choice and selection");
@@ -268,6 +360,7 @@ void TestFolderBrowser() {
 void TestFoobarControls() {
     using namespace app;
     testlog::Group group(L"Foobar folders and transport controls");
+    testlog::Batch batch;
     if (!kExtraThemes) {
         testlog::Skip(L"the foobar2000 controls: this build leaves out the extra themes");
         return;
@@ -292,6 +385,7 @@ void TestFoobarControls() {
     SaveLibrarySettings();
     g.libraryFolders.clear();
     LoadLibrarySettings();
+    batch.Next(L"custom roots on other drives and a Linux share survive saving and expand in the native Album List");
     Check(g.libraryFolders.size() == 3 && g.libraryFolders[0] == L"D:\\Custom Music" &&
               g.libraryFolders[2] == L"\\\\wsl.localhost\\Linux\\home\\user\\Music",
           L"custom roots on other drives and a Linux share survive saving and loading");
@@ -324,6 +418,7 @@ void TestFoobarControls() {
     Check(first && TreeView_GetItemState(tree, first, TVIS_EXPANDED) != before && g.nextToken == token,
           L"double-clicking a folder expands or collapses it without starting playback");
     ShowLibraryFolders();
+    batch.Next(L"Library folders offers the system Music folder and a custom folder picker");
     Check(GetDlgItem(g.foldersWnd, IDC_FOLDERS_MUSIC) && GetDlgItem(g.foldersWnd, IDC_FOLDERS_ADD),
           L"Library folders offers the system Music folder and a custom folder picker in every theme");
     DestroyWindow(g.foldersWnd);
@@ -333,6 +428,7 @@ void TestFoobarControls() {
     const Dock dock = g.layout.player;
     g.layout.player = Dock::Left;
     Layout();
+    batch.Next(L"foobar2000 transport keeps horizontal sliders, fits every size and DPI and agrees on seek positions");
     Check(!SeekVertical(), L"foobar2000 keeps horizontal sliders when the standard layout is side-docked");
     bool enabled = IsWindowEnabled(g.seek) != 0;
     EnableWindow(g.seek, TRUE);
@@ -387,6 +483,7 @@ void TestFoobarControls() {
 // Real Win32 controls under a hidden test window: no player instance or user settings are touched.
 void TestUiControls(const std::wstring& scratch) {
     using namespace app;
+    testlog::Batch batch;
     INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_LISTVIEW_CLASSES | ICC_TREEVIEW_CLASSES | ICC_TAB_CLASSES | ICC_BAR_CLASSES};
     InitCommonControlsEx(&icc);
     g.inst = GetModuleHandleW(nullptr);
@@ -427,6 +524,7 @@ void TestUiControls(const std::wstring& scratch) {
             return 0;
         }
         if (msg == WM_APP_IMPORT) { OnImportResult(lp); return 0; }
+        if (msg == WM_APP_STEAM) { OnSteamDiscovery(wp, lp); return 0; }
         if (msg == WM_APP_ART) { OnArtResult(lp); return 0; }
         if (msg == WM_APP_META) { AcceptTagBatch(reinterpret_cast<std::vector<TagResult>*>(lp)); return 0; }
         if (msg == WM_APP_RG) { FinishReplayGain(wp, lp); return 0; }
@@ -446,6 +544,7 @@ void TestUiControls(const std::wstring& scratch) {
     ApplyFonts();
     RefreshTabs();
     Layout();
+    TestPlayerSliders();
     {
         SetWindowTextW(g.search, L"Track 1");
         FlushSearch();
@@ -455,6 +554,7 @@ void TestUiControls(const std::wstring& scratch) {
         SetWindowTextW(g.search, L"indie");
         bool separate = g.filter == L"Track 1";
         ActivatePlaylist(0);
+        batch.Next(L"UI: Radio has its own view and search without changing the library search");
         Check(shown && separate && !RadioActive() && WindowText(g.search) == L"Track 1",
               L"UI: Radio has its own view and search without changing the library search");
         SetWindowTextW(g.search, L""); FlushSearch();
@@ -472,6 +572,7 @@ void TestUiControls(const std::wstring& scratch) {
         bool closed = !RadioActive() && !RadioTabOpen() &&
             !(GetWindowLongPtrW(RadioTab(), GWL_STYLE) & WS_VISIBLE) && RadioPlaying();
         OnCommand(IDM_OPEN_RADIO, 0, nullptr);
+        batch.Next(L"UI: Radio's tab closes without interrupting playback, Ctrl+W leaves the playlist, and Play retries");
         Check(wave && closed && RadioActive() && RadioTabOpen() && RadioPlaying(),
               L"UI: Radio's close box hides its tab without interrupting live playback, and View reopens it");
         size_t playlists = g.playlists.size();
@@ -504,6 +605,7 @@ void TestUiControls(const std::wstring& scratch) {
         discovery.Add(savedButton != nullptr, L"My stations button");
         discovery.Add(cleared, L"Discover starts empty");
         discovery.Add(restored, L"My stations restore (" + std::to_wstring(after) + L")");
+        batch.Next(L"UI: Discover clears My stations, My stations restores them, and F removes a filtered favorite");
         Check(discovery.Passed(), L"UI: Discover clears My stations immediately while the directory loads%ls",
               discovery.failed.c_str());
         ActivatePlaylist(0);
@@ -552,6 +654,7 @@ void TestUiControls(const std::wstring& scratch) {
             while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&message);
             Sleep(1);
         }
+        batch.Next(L"UI: rapid song changes keep one lyric read in flight and load the newest lyrics");
         Check(lyricsFiles && results.size() == 1 && LyricsReadyFor(2, L"Latest lyric"),
               L"UI: rapid song changes keep one lyric read in flight and load the newest lyrics");
         g.playing = kNone;
@@ -574,6 +677,7 @@ void TestUiControls(const std::wstring& scratch) {
         msg.wParam = key;
         editorKeys.Add(!TranslateMainKey(&msg), L"Ctrl+" + std::to_wstring((unsigned)key));
     }
+    batch.Next(L"UI: Ctrl+Z, arrows and Ctrl+A stay in the search and inline-rename editors");
     Check(editorKeys.Passed(), L"UI: Ctrl+Z, Ctrl+Left/Right and Ctrl+Enter stay in the search editor%ls",
           editorKeys.failed.c_str());
     SetWindowTextW(g.search, L"test query"); FlushSearch();
@@ -600,6 +704,7 @@ void TestUiControls(const std::wstring& scratch) {
         SendMessageW(g.tabs, WM_LBUTTONDOWN, MK_LBUTTON, point);
         SendMessageW(g.tabs, WM_LBUTTONUP, 0, point);
         bool mouseFocus = (SendMessageW(g.tabs, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS) != 0;
+        batch.Next(L"UI: clicking a tab switches it without a focus box and leaves keyboard focus visible");
         Check(hasTab && keyboardFocus && mouseFocus && !g.rename && TabCtrl_GetCurSel(g.tabs) == 1,
               L"UI: clicking a tab switches it without a focus box; keyboard focus remains visible");
 
@@ -624,6 +729,7 @@ void TestUiControls(const std::wstring& scratch) {
         g.size = savedSize;
         g.pal = savedPalette;
         if (dc) ReleaseDC(g.hwnd, dc);
+        batch.Next(L"UI: double-click opens a borderless editor on the tab surface and Enter commits the rename");
         Check(borderless && surface && foobarSurface && first == 0 && last == 13,
               L"UI: double-click selects the name in a borderless editor matching the tab surface");
         if (g.rename) {
@@ -662,6 +768,7 @@ void TestUiControls(const std::wstring& scratch) {
                           std::to_wstring(width) + L" px at " + std::to_wstring(dpi) + L" DPI");
         }
     }
+    batch.Next(L"UI: tabs, search and views remain reachable at 640/1163 px and 96/144/192 DPI");
     Check(reachable.Passed(), L"UI: tabs, search and views remain reachable at 640/1163 px and 96/144/192 DPI%ls",
           reachable.failed.c_str());
     // Customized layouts (app_custom.cpp): wherever the player docks and however tall its waveform,
@@ -689,6 +796,7 @@ void TestUiControls(const std::wstring& scratch) {
                       (vertical ? seek.bottom - seek.top >= S(80) : seek.right - seek.left > seek.bottom - seek.top);
             if (!ok) layoutBad += L" " + std::to_wstring(dock) + L"/" + std::to_wstring(wave);
         }
+    batch.Next(L"UI: the player docks at every edge in every waveform size");
     Check(layoutBad.empty(), L"UI: the player docks at every edge in every waveform size%s", layoutBad.c_str());
     {
         const int savedBandSize = g.bandWaveSize;
@@ -716,6 +824,7 @@ void TestUiControls(const std::wstring& scratch) {
                                        std::to_wstring((int)dock) + L"/" + std::to_wstring(ownRow));
                     }
         }
+        batch.Next(L"UI: waveform height affects only normal top/bottom bars at 100% and 200% DPI");
         Check(sizing.Passed(), L"UI: waveform height affects only normal top/bottom bars at 100%% and 200%% DPI%ls",
               sizing.failed.c_str());
         g.bandWaveSize = savedBandSize; g.size = savedSize; g.dpi = savedDpi;
@@ -729,6 +838,7 @@ void TestUiControls(const std::wstring& scratch) {
     Layout();
     RECT seekClient{};
     GetClientRect(g.seek, &seekClient);
+    batch.Next(L"UI: a vertical waveform seeks from top to bottom and hidden layout parts give their room to the list");
     Check(BarFracAt(g.seek, {seekClient.right / 2, 0}) == 0.0 && BarFracAt(g.seek, {seekClient.right / 2, seekClient.bottom}) == 1.0 &&
               std::fabs(BarFracAt(g.seek, {0, seekClient.bottom / 2}) - 0.5) < 0.02,
           L"UI: a vertical waveform seeks from its top to its bottom");
@@ -758,6 +868,7 @@ void TestUiControls(const std::wstring& scratch) {
             note(selectBad, SelectedTracks().size() == 3);
         }
     }
+    batch.Next(L"UI: search explains no results, Escape restores results, Down selects the view and Select all works");
     Check(emptyBad.empty(), L"UI: search explains no results in every library view%s", emptyBad.c_str());
     Check(escapeBad.empty(), L"UI: Escape restores search results in every library view%s", escapeBad.c_str());
     Check(downBad.empty(), L"UI: Down from search selects the visible view%s", downBad.c_str());
@@ -765,6 +876,7 @@ void TestUiControls(const std::wstring& scratch) {
     // Albums & Tracks: the cover is the grid's 160 a quarter larger and the rows start under a 56 px
     // heading, so clicking the third row's middle picks that one track (the old layout had no row there).
     SetLibraryMode(LibraryMode::AlbumTracks);
+    batch.Next(L"UI: Albums & Tracks rows sit beside the larger cover, under the album heading");
     if (CanvasActive() && g.view.size() == 3) {
         LPARAM third = MAKELPARAM(S(18 + 200 + 20 + 60), S(8 + 56 + 2 * 26 + 13));
         SendMessageW(g.libView, WM_LBUTTONDOWN, MK_LBUTTON, third);
@@ -779,6 +891,7 @@ void TestUiControls(const std::wstring& scratch) {
     ActivatePlaylist(0);
     SetLibraryMode(LibraryMode::Tracks);
     SetWindowTextW(g.search, L""); FlushSearch();
+    batch.Next(L"UI: an album's tracks sit under a two-row header that selects them and holds their shared cells");
     Check(g.groups.size() == 1 && RowCount() == 5 && RowTrack(0) == kNone && RowTrack(1) == kNone && RowTrack(2) != kNone &&
               ViewPosOfRow(4) == 2 && RowOfViewPos(0) == 2 && ViewPosNear(0) == 0,
           L"UI: an album's tracks sit under a two-row header");
@@ -788,6 +901,7 @@ void TestUiControls(const std::wstring& scratch) {
           L"UI: grouped tracks leave the album and its artist to the header");
     g.groupAlbums = false;
     RebuildView();
+    batch.Next(L"UI: grouping by album can be turned off");
     Check(g.groups.empty() && RowCount() == 3 && RowTrack(0) != kNone, L"UI: grouping by album can be turned off");
     g.groupAlbums = true;
     RebuildView();
@@ -828,6 +942,8 @@ void TestUiControls(const std::wstring& scratch) {
             doubleClick({client.right - 1, (last.top + last.bottom) / 2});
             blank.Add(g.nextToken == before, grouped ? L"grouped" : L"ungrouped");
         }
+        batch.Next(L"UI: double-click starts the clicked track once in every column, grouped or not, and "
+                   L"blank space does nothing");
         Check(columns.Passed(), L"UI: double-click starts the clicked track once in every column, grouped or not%ls",
               columns.failed.c_str());
         Check(blank.Passed(), L"UI: double-clicking blank list space leaves playback alone%ls", blank.failed.c_str());
@@ -840,6 +956,7 @@ void TestUiControls(const std::wstring& scratch) {
         activation.ptAction = {title.left + S(4), (title.top + title.bottom) / 2};
         auto before = g.nextToken;
         OnListNotify(&activation.hdr);
+        batch.Next(L"UI: a double-click without a native item index still plays the clicked track");
         Check(g.nextToken == before + 1 && TokenIndex(g.decodingToken, 1) == 2,
               L"UI: a double-click without a native item index still plays the clicked track");
         g.engine.Stop();
@@ -884,6 +1001,7 @@ void TestUiControls(const std::wstring& scratch) {
                 off += buf;
             }
         }
+        batch.Next(L"UI: the window matches the layout the Linux port follows (ui_spec.h kLayout)");
         Check(off.empty(), L"UI: the window matches the layout the Linux port follows (ui_spec.h kLayout)%s", off.c_str());
         g.layout = savedLayout;
         Layout();
@@ -903,11 +1021,14 @@ void TestUiControls(const std::wstring& scratch) {
                         theme == ThemeMode::Foobar ? L"foobar2000" : L"Apollo");
         }
         OnCommand(IDM_THEME_BASE + (int)original, 0, nullptr);
+        batch.Next(L"UI: Radio opens from either alternate theme and restores its layout");
         Check(layouts.Passed(), L"UI: Radio opens from either alternate theme and restores its layout%ls",
               layouts.failed.c_str());
     }
+    batch.End();
     TestFolderBrowser();
     TestFoobarControls();
+    batch.Next(L"UI: the search box names the Library or the playlist it searches");
     wchar_t cue[128] = {};
     SendMessageW(g.search, EM_GETCUEBANNER, (WPARAM)cue, (LPARAM)std::size(cue));
     testlog::Cases cueNames;
@@ -922,6 +1043,7 @@ void TestUiControls(const std::wstring& scratch) {
     wchar_t left[32] = {}, right[32] = {};
     GetWindowTextW(g.elapsed, left, 32);
     GetWindowTextW(g.time, right, 32);
+    batch.Next(L"UI: the seek bar shows elapsed and remaining time and clicking the time shows the length");
     Check(wcscmp(left, L"1:12") == 0 && wcscmp(right, L"-2:07") == 0, L"UI: the seek bar shows elapsed and remaining time");
     OnCommand(IDC_TIME, STN_CLICKED, g.time);
     ShowPlaybackTime(72, 199);
@@ -931,6 +1053,7 @@ void TestUiControls(const std::wstring& scratch) {
     ActivatePlaylist(1);
     HMENU menu = BuildMenu();
     WndProc(g.hwnd, WM_INITMENUPOPUP, (WPARAM)GetSubMenu(menu, 1), 0);
+    batch.Next(L"UI: playlist commands that do not apply are disabled");
     Check((GetMenuState(GetSubMenu(menu, 1), IDM_CLEAR, MF_BYCOMMAND) & MF_GRAYED) != 0,
           L"UI: empty playlist cannot be cleared");
     ActivatePlaylist(0);
@@ -938,11 +1061,38 @@ void TestUiControls(const std::wstring& scratch) {
     Check((GetMenuState(GetSubMenu(menu, 3), IDM_RENAME_PL, MF_BYCOMMAND) & MF_GRAYED) != 0 &&
               (GetMenuState(GetSubMenu(menu, 3), IDM_REMOVE_PL, MF_BYCOMMAND) & MF_GRAYED) != 0,
           L"UI: Library cannot be renamed or removed");
+    const auto watchedBeforeSteam = g.libraryFolders;
+    AddSteamSoundtracks();
+    HMENU libraryMenu = GetSubMenu(menu, 4);
+    UpdateMainMenu(libraryMenu);
+    batch.Next(L"UI: Steam discovery runs off the UI thread, offers cancellation and restores the menu");
+    Check(SteamDiscoveryRunning() && (GetMenuState(libraryMenu, IDM_STEAM, MF_BYCOMMAND) & MF_GRAYED) &&
+              GetMenuState(libraryMenu, IDM_CANCEL_STEAM, MF_BYCOMMAND) != (UINT)-1,
+          L"UI: Steam discovery runs off the UI thread and offers cancellation in the menu");
+    CancelSteamDiscovery();
+    MSG steamResult;
+    bool completedSteam = false;
+    const ULONGLONG steamStarted = GetTickCount64();
+    while (GetTickCount64() - steamStarted < 5000) {
+        if (PeekMessageW(&steamResult, g.hwnd, WM_APP_STEAM, WM_APP_STEAM, PM_REMOVE)) {
+            DispatchMessageW(&steamResult);
+            completedSteam = true;
+            break;
+        }
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, 10, QS_POSTMESSAGE);
+    }
+    UpdateMainMenu(libraryMenu);
+    Check(completedSteam && !SteamDiscoveryRunning() && g.libraryFolders == watchedBeforeSteam &&
+              GetMenuState(libraryMenu, IDM_CANCEL_STEAM, MF_BYCOMMAND) == (UINT)-1 &&
+              !(GetMenuState(libraryMenu, IDM_STEAM, MF_BYCOMMAND) & MF_GRAYED),
+          L"UI: cancelling Steam discovery leaves watched folders unchanged and restores the menu");
+    StopSteamDiscovery();
     DestroyMenu(menu);
     ActivatePlaylist(1);
     NMLVEMPTYMARKUP empty{};
     empty.hdr.hwndFrom = g.list;
     empty.hdr.code = LVN_GETEMPTYMARKUP;
+    batch.Next(L"UI: empty playlists explain how to add music and empty auto-playlists explain their rules");
     Check(OnListNotify(&empty.hdr) == TRUE && std::wstring(empty.szMarkup).find(L"Ctrl+O") != std::wstring::npos,
           L"UI: empty playlist explains how to add music");
     ActivatePlaylist(2);
@@ -965,6 +1115,7 @@ void TestUiControls(const std::wstring& scratch) {
     ListView_EnsureVisible(g.list, 35, FALSE);
     const auto remembered = SelectedTracks();
     int top = ListView_GetTopIndex(g.list);
+    batch.Next(L"UI: visiting every library view keeps a playlist's search, selection, scroll and sort");
     Check(top > 0, L"UI: navigation test starts with a scrolled playlist");
     std::wstring restoreBad, rememberBad, refreshBad;
     for (LibraryMode mode : {LibraryMode::Tracks, LibraryMode::Albums, LibraryMode::AlbumTracks, LibraryMode::Artists}) {
@@ -993,6 +1144,7 @@ void TestUiControls(const std::wstring& scratch) {
     g.playing = remembered.front();
     g.playingPl = 1;
     OnCommand(IDC_NP_TITLE, STN_CLICKED, g.npTitle);
+    batch.Next(L"UI: clicking the playing title reveals and selects the track, and while stopped it does nothing");
     Check(g.active == 1 && g.filter.empty() && SelectedTracks() == remembered,
           L"UI: clicking the playing title reveals and selects the track through a search filter");
     g.playing = kNone;
@@ -1010,6 +1162,7 @@ void TestUiControls(const std::wstring& scratch) {
     GetWindowTextW(g.npSub, npText, (int)std::size(npText));
     stoppedStrip.Add(std::wstring(npText).find(L"1:12") != std::wstring::npos,
                      L"it shows where playback stopped");
+    batch.Next(L"UI: the stopped strip offers to continue the stopped track and shows where it stopped");
     Check(stoppedStrip.Passed(), L"UI: the stopped strip offers to continue the stopped track and shows where "
           L"it stopped%ls", stoppedStrip.failed.c_str());
     g.resumeTrack = kNone;
@@ -1027,6 +1180,7 @@ void TestUiControls(const std::wstring& scratch) {
     bool ended = CommandRegion(IDM_REGION_END, 40.0);
     bool armed = CommandRegion(IDM_REGION_LOOP, 20.0);
     Region loaded = CurrentRegion();
+    batch.Next(L"UI: a section marked on the waveform is 12.5 s to 40 s, loops and keeps the full timeline");
     Check(noSectionYet && started && ended && armed && loaded.on && loaded.start == 12.5 && loaded.end == 40.0,
           L"UI: a section marked on the waveform is 12.5 s to 40 s and loops");
     PlayItem marked = MakeItem(123, g.playing);
@@ -1047,6 +1201,7 @@ void TestUiControls(const std::wstring& scratch) {
     g.seek = nullptr;
     bool notSwallowed = !RegionMouse(MSG{});
     g.seek = realSeek;
+    batch.Next(L"UI: the section returns with its track, marks where the seek bar would seek, and clearing drops it");
     Check(notSwallowed && again.on && again.start == 12.5 && again.end == 40.0,
           L"UI: the section is kept for the file and comes back with the track");
     // The section follows the same x -> time mapping the seek bar seeks by, so it lands under the
@@ -1071,6 +1226,7 @@ void TestUiControls(const std::wstring& scratch) {
     RegionTrackChanged();
     g.playing = remembered.front();
     RegionTrackChanged();
+    batch.Next(L"UI: unfinished section edits survive a track change and a CUE sub-track keeps its own range");
     Check(!CurrentRegion().on && CurrentRegion().start == 8 && CurrentRegion().end == 18,
           L"UI: unfinished section edits survive a track change without enabling the loop");
     CommandRegion(IDM_REGION_CLEAR, 0);
@@ -1096,6 +1252,7 @@ void TestUiControls(const std::wstring& scratch) {
 
     SetVolumePercent(37);
     OnCommand(IDC_SPEAKER, STN_CLICKED, g.speaker);
+    batch.Next(L"UI: the speaker mutes and restores the volume, and the slider sets the next unmute level");
     Check(g.volumePercent == 0 && SendMessageW(g.volume, TBM_GETPOS, 0, 0) == 0,
           L"UI: clicking the speaker mutes and updates the volume slider");
     OnCommand(IDM_MUTE, 0, nullptr);
@@ -1113,6 +1270,7 @@ void TestUiControls(const std::wstring& scratch) {
     ListView_SetItemState(g.list, second, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
     ActivatePlaylist(0);
     ActivatePlaylist(1);
+    batch.Next(L"UI: returning to a playlist keeps the selected duplicate, and a Now Playing album groups under a header");
     Check(ListView_GetSelectedCount(g.list) == 1 && ListView_GetNextItem(g.list, -1, LVNI_FOCUSED) == second,
           L"UI: returning to a playlist keeps the selected occurrence of a duplicate track");
     // Album headers, and so their covers, are not a Library-only thing: any list groups an album
@@ -1126,10 +1284,12 @@ void TestUiControls(const std::wstring& scratch) {
               L"UI: a Now Playing album groups under a header like the Library (groups=%zu rows=%d)", g.groups.size(),
               RowCount());
     }
+    batch.End();
     TestPortedUi(scratch);
     TestReplayGainRestart(scratch);
     TestPersonalization(scratch);
     TestWebPreferences(scratch);
+    batch.Next(L"UI: shutdown joins every application worker before destroying the test window");
     StopAppWorkers(g.hwnd);
     Check(!g.rgWorker.joinable() && !g.tagWorker.joinable() && !g.importWorker.joinable() && !g.artWorker.joinable(),
           L"UI: shutdown joins every application worker before destroying the test window");

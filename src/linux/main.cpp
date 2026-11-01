@@ -198,7 +198,7 @@ int Run(int argc, char** argv) {
         if (!full.empty()) paths.push_back(full);
     }
 
-    SDL_SetAppMetadata("cordinal", "0.1.1", "cordinal");
+    SDL_SetAppMetadata("cordinal", "0.1.2", "cordinal");
     SDL_SetHint(SDL_HINT_VIDEO_WAYLAND_PREFER_LIBDECOR, "1");
     if (parity) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
@@ -235,7 +235,9 @@ int Run(int argc, char** argv) {
             SDL_DestroySurface(surface);
         }
     }
-    g.renderer = SDL_CreateRenderer(g.window, parity ? SDL_SOFTWARE_RENDERER : nullptr);
+    // Software keeps the GPU driver's memory and threads out of the process; a full redraw fits in a
+    // frame, and frames are drawn only when something changes. Preferences can choose the GPU instead.
+    g.renderer = SDL_CreateRenderer(g.window, parity || !s.gpuDrawing ? SDL_SOFTWARE_RENDERER : nullptr);
     if (!g.renderer) {
         fprintf(stderr, "cordinal: %s\n", SDL_GetError());
         return 1;
@@ -293,10 +295,11 @@ int Run(int argc, char** argv) {
     if (!paths.empty()) ExpandPaths(paths, Opening::Play);
     else if (!parity) ReopenLastTrack();  // the last session's song, paused or playing, as Preferences asks
     if (s.folders.empty() && paths.empty()) ShowMessage(L"Welcome! Add your music: Library \x25B8 Library folders...");
-    // The parity checks exit without saving anything.
+    // Diagnostics leave the user's profile untouched.
     if (checkLayout) {
         int off = CheckLayout();
-        printf(off ? "%d parts differ from the Windows layout (ui_spec.h kLayout)\n" : "The layout matches Windows.\n", off);
+        if (off) printf("%d layout or pack checks failed\n", off);
+        else printf("The layout matches Windows; pack checks passed.\n");
         fflush(stdout);
         _exit(off ? 1 : 0);
     }

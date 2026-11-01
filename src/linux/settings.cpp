@@ -2,6 +2,7 @@
 //   $XDG_DATA_HOME/cordinal/library.cdb      the library (the same format as on Windows)
 //   $XDG_CONFIG_HOME/cordinal/settings.ini   settings, as key=value lines
 #include "app.h"
+#include "listenbrainz.h"
 #include "backup.h"
 #include "points.h"
 
@@ -182,11 +183,13 @@ void LoadSettings() {
         if (key.starts_with("helper_trust.")) s.helperTrust[key.substr(13)] = value;
     s.hiddenParts = (unsigned)std::clamp(ToInt(v, "layout_hidden", 0), 0, 1023);
     s.timeRemaining = ToInt(v, "time_remaining", 1) != 0;
+    s.waveform = ToInt(v, "waveform", 1) != 0;
     s.liveWaveform = ToInt(v, "live_waveform", 0) != 0;
     s.liveFountain = ToInt(v, "live_fountain", 0) != 0;
     s.fullLiveWaveform = ToInt(v, "full_live_waveform", 1) != 0;
     s.bandWaveSize = std::clamp(ToInt(v, "band_wave_size", 0), 0, 5);
     s.alwaysOnTop = ToInt(v, "always_on_top", 0) != 0;
+    s.gpuDrawing = ToInt(v, "gpu_drawing", 0) != 0;
     for (auto [key, target] : {std::pair{"format_title", &s.fmtTitle}, std::pair{"format_subtitle", &s.fmtSub},
                                std::pair{"format_status", &s.fmtStatus}, std::pair{"format_window", &s.fmtWindow}})
         if (auto it = v.find(key); it != v.end() && !it->second.empty()) *target = compat::Widen(it->second.c_str());
@@ -255,6 +258,8 @@ void LoadSettings() {
     if (auto it = v.find("copy_folder"); it != v.end()) s.copyFolder = compat::Widen(it->second.c_str());
     if (auto it = v.find("copy_pattern"); it != v.end()) s.copyPattern = compat::Widen(it->second.c_str());
     s.copyFormat = (uint8_t)std::clamp(ToInt(v, "copy_format", 0), 0, (int)CopyFormat::Count - 1);
+    listenbrainz::SetPaused(ToInt(v, "scrobbling_paused", 0) != 0);
+    listenbrainz::SetSendNowPlaying(ToInt(v, "scrobbling_now_playing", 1) != 0);
     s.libraryMode = (LibraryMode)std::clamp(ToInt(v, "library_view", (int)LibraryMode::Albums), 0, (int)LibraryMode::Count - 1);
     s.browserVisible = ToInt(v, "library_browser", 1) != 0;
     // What the file holds is how cordinal opens: the approved startup defaults (a profile from before
@@ -356,7 +361,9 @@ void SaveSettings() {
     text += "\ngames_ntt_streak=" + std::to_string(s.nttStreak) + "\ngames_ntt_best=" + std::to_string(s.nttBest) +
             "\ngames_wcf_streak=" + std::to_string(s.wcfStreak) + "\ngames_wcf_best=" + std::to_string(s.wcfBest) + "\n";
     text += "time_remaining=" + std::to_string(s.timeRemaining) + "\nalways_on_top=" + std::to_string(s.alwaysOnTop) + "\n";
+    text += "gpu_drawing=" + std::to_string(s.gpuDrawing) + "\n";
     text += "live_waveform=" + std::to_string(s.liveWaveform) + "\n";
+    text += "waveform=" + std::to_string(s.waveform) + "\n";
     text += "live_fountain=" + std::to_string(s.liveFountain) + "\n";
     text += "full_live_waveform=" + std::to_string(s.fullLiveWaveform) + "\n";
     text += "band_wave_size=" + std::to_string(s.bandWaveSize) + "\n";
@@ -369,6 +376,8 @@ void SaveSettings() {
             compat::Narrow(s.organizePattern.c_str()) + "\n";
     text += "copy_folder=" + compat::Narrow(s.copyFolder.c_str()) + "\ncopy_pattern=" + compat::Narrow(s.copyPattern.c_str()) +
             "\ncopy_format=" + std::to_string(s.copyFormat) + "\n";
+    text += "scrobbling_paused=" + std::to_string(listenbrainz::Paused()) +
+            "\nscrobbling_now_playing=" + std::to_string(listenbrainz::SendNowPlaying()) + "\n";
     text += "library_view=" + std::to_string((int)s.defaultLibraryMode) + "\nlibrary_browser=" + std::to_string(s.defaultBrowserVisible) +
             "\nbrowser_fields=" + std::to_string(s.browserFields[0]) + "," + std::to_string(s.browserFields[1]) + "," +
             std::to_string(s.browserFields[2]) + "\nbrowser_height=" + std::to_string(s.browserHeight) +

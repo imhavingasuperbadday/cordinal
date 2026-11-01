@@ -172,6 +172,7 @@ int RunFakeHelper(const std::vector<std::wstring>& args) {
 void TestHelperIntegration(const std::wstring& scratch) {
     using namespace app;
     testlog::Group group(L"helpers in the window");
+    testlog::Batch batch;
     if (ProcessElevated()) {
         testlog::Skip(L"helpers stay off while the self-test runs as administrator");
         return;
@@ -192,6 +193,7 @@ void TestHelperIntegration(const std::wstring& scratch) {
         return found != (UINT)-1 && (found & state) == state;
     };
     LoadHelpers(false);
+    batch.Next(L"a new helper is listed in View > Helpers and stays off until the user turns it on");
     Check(!IsSupportedAudioFile(L"x.fake") && IniRead(L"Helpers", L"Known", L"") == L"fake" && IniRead(L"Helpers", L"On", L"").empty() &&
               inMenu(IDM_HELPER_BASE, 0) && !inMenu(IDM_HELPER_BASE, MF_CHECKED) && !inMenu(IDM_HELPER_TOOL_BASE, 0),
           L"a new helper is listed in View > Helpers and stays off until the user turns it on");
@@ -199,6 +201,7 @@ void TestHelperIntegration(const std::wstring& scratch) {
     IniWrite(L"Helpers", L"On", L"fake");
     IniWrite(L"Helpers", L"Trust.fake", MakeHelperTrust(dir));
     LoadHelpers(false);
+    batch.Next(L"a helper that is on plays its file types, and its tool runs on a worker thread and reports back");
     Check(IsSupportedAudioFile(L"x.fake") && inMenu(IDM_HELPER_BASE, MF_CHECKED) && inMenu(IDM_HELPER_TOOL_BASE, 0),
           L"a helper that is on plays its file types and puts its tool in Edit > Run");
     OnCommand(IDM_HELPER_TOOL_BASE, 0, nullptr);
@@ -208,6 +211,8 @@ void TestHelperIntegration(const std::wstring& scratch) {
           L"a tool runs on a worker thread and says when it is done: %ls", g.message.c_str());
     WriteTestBytes(dir + L"\\helper.ini", ini + "; edited\n");
     OnCommand(IDM_HELPERS_RELOAD, 0, nullptr);
+    batch.Next(L"a changed helper is turned off and told why, turning it off forgets its record, and safe "
+               L"mode starts none");
     Check(!IsSupportedAudioFile(L"x.fake") && IniRead(L"Helpers", L"On", L"").empty() &&
               g.message.find(L"Fake changed since you turned it on") != std::wstring::npos,
           L"a helper whose files changed is turned off, and the user is told");
@@ -234,10 +239,12 @@ void TestHelperIntegration(const std::wstring& scratch) {
 }
 
 void TestHelpers(const std::wstring& scratch) {
+    testlog::Batch batch;
     HRSRC manifest = FindResourceW(nullptr, MAKEINTRESOURCEW(1), RT_MANIFEST);
     HGLOBAL loaded = manifest ? LoadResource(nullptr, manifest) : nullptr;
     const char* bytes = loaded ? static_cast<const char*>(LockResource(loaded)) : nullptr;
     DWORD size = manifest ? SizeofResource(nullptr, manifest) : 0;
+    batch.Next(L"the shared executable manifest runs at the invoking privilege level");
     std::string xml = bytes ? std::string(bytes, size) : std::string();
     Check(xml.find("level=\"asInvoker\"") != std::string::npos,
           L"shared executable manifest runs at the invoking privilege level");
@@ -265,11 +272,14 @@ void TestHelpers(const std::wstring& scratch) {
                                "[tool.unknown]\nlabel = Unknown\ncommand = fake.exe {song}\n"
                                "[visualizer]\nlabel = Feed reader\ncommand = fake.exe --fake-helper feed {feed}\n"
                                "[visualizer.blind]\nlabel = Blind\ncommand = fake.exe --fake-helper feed\n");
+        batch.Next(L"a helper.ini names its helper and reads its file types without dots or stars");
         Check(h.error.empty() && h.name == L"Fake" && h.version == L"1.0", L"a helper.ini names its helper: %ls", h.error.c_str());
         Check(h.extensions == std::vector<std::wstring>{L"fake", L"fk2"}, L"file types are read without dots or stars, and lowercase");
         auto warned = [&](const wchar_t* part) {
             return std::any_of(h.warnings.begin(), h.warnings.end(), [&](auto& w) { return w.find(part) != std::wstring::npos; });
         };
+        batch.Next(L"a helper takes no file type cordinal plays, and runs only programs in its own folder with "
+                   L"known placeholders");
         Check(warned(L".flac files are cordinal's own") && warned(L".cue files are cordinal's own"),
               L"a helper can't take a file type cordinal plays itself, or a CUE sheet");
         Check(h.tools.size() == 1 && h.tools[0].label == L"Echo" && h.tools[0].perTrack && !h.tools[0].together &&
@@ -279,6 +289,7 @@ void TestHelpers(const std::wstring& scratch) {
         Check(h.visualizers.size() == 1 && warned(L"Blind is left out"), L"a visualizer must take the feed");
         Check(h.programs == std::vector<std::wstring>{L"fake.exe"} && HelperProgramList(h) == L"fake.exe",
               L"every program a helper runs is listed once");
+        batch.Next(L"a helper.ini that can't be used says why, and a summary says what the helper does");
         Check(HelperSummary(h) == L"plays .fake and .fk2 files and reads their tags, adds the tool Echo and shows the visualizer Feed reader",
               L"a helper's summary says what it does: %ls", HelperSummary(h).c_str());
         Check(parse("[helper]\nformat = 2\n").error.find(L"later cordinal") != std::wstring::npos &&
@@ -297,6 +308,7 @@ void TestHelpers(const std::wstring& scratch) {
               L"a placeholder is only filled in where it means something, and a command that uses one elsewhere never runs");
         std::filesystem::create_directories(scratch + L"\\helpers\\~staged", ec);
         std::filesystem::create_directories(scratch + L"\\helpers\\empty", ec);
+        batch.Next(L"every helper folder is listed in name order, and safe mode or elevation starts no helper program");
         auto all = ReadHelpers(scratch + L"\\helpers");
         Check(all.size() == 2 && all[0].id == L"empty" && all[0].error.find(L"no helper.ini") != std::wstring::npos && all[1].id == L"fake",
               L"every helper folder is listed in name order, one without a helper.ini with the reason");
@@ -316,6 +328,7 @@ void TestHelpers(const std::wstring& scratch) {
         bool complete = false;
         DWORD code = 0;
         auto lines = Lines(HelperText(ReadAllOf(h, HelperArguments(h.tools[0].command, v), error, complete, code)));
+        batch.Next(L"each command-line value reaches the program as one argument, and {files} gives each file its own");
         Check(complete && code == 0 && lines.size() >= 5 && lines[0] == file && lines[1] == title + L" - x" &&
                   lines[2] == L"--flag=" + file && lines[3].empty() && lines[4] == L"{literal}",
               L"each value reaches the program as one argument, whatever quotes and backslashes it holds");
@@ -330,6 +343,7 @@ void TestHelpers(const std::wstring& scratch) {
         auto helper = std::make_shared<Helper>(parse(head + "[decoder]\nextensions = fake\n"
                                                             "decode = fake.exe --fake-helper wav 2 44100 2 16 1 {start} {file}\n"
                                                             "info = fake.exe --fake-helper info {file}\n"));
+        batch.Next(L"a helper's file types are no audio until it is on, then join the scanner and the open dialog");
         Check(!IsSupportedAudioFile(song) && OpenFileFilterSpec().find(L"*.fake") == std::wstring::npos,
               L"a helper's file types are no audio until it is on");
         SetActiveHelpers({helper});
@@ -347,6 +361,8 @@ void TestHelpers(const std::wstring& scratch) {
             for (size_t n = 0; exact && n < 88200; ++n)
                 exact = got[n * 2] == Signal16(n, 0) / 32768.0f && got[n * 2 + 1] == Signal16(n, 1) / 32768.0f;
         }
+        batch.Next(L"a helper's WAV output plays sample for sample, seeks through {start} and otherwise reads "
+                   L"from the top");
         Check(exact, L"a helper's WAV output plays sample for sample, at its own rate and length: %ls", error.c_str());
         exact = d && d->Seek(1.25);
         float first[2]{};
@@ -367,6 +383,7 @@ void TestHelpers(const std::wstring& scratch) {
 
         SetActiveHelpers({helper});
         TagData tags;
+        batch.Next(L"a helper's info command gives tags in cordinal's names, and a tool's tags become a tag edit");
         Check(ReadTags(song, tags) && tags.title == "Fake Song" && tags.artist == "Someone" && tags.duration == 2.5 && tags.track == 3 &&
                   tags.trackTotal == 9 && tags.sampleRate == 44100 && tags.codec == Codec::Unknown,
               L"a helper's info command gives the file's tags, in cordinal's names or ffprobe's");
@@ -393,12 +410,15 @@ void TestHelpers(const std::wstring& scratch) {
         while (d)
             if (size_t n = d->Read(buffer.data(), 4096)) frames += n;
             else break;
+        batch.Next(L"a helper that stops plays what it wrote and names its last words; output that isn't WAV "
+                   L"never opens");
         Check(d && frames == 1000 && d->Failed() && d->Problem() == L"the Fake helper stopped: it broke at frame 1000",
               L"a helper that stops plays what it wrote, then fails with the last thing it printed: %ls", d ? d->Problem().c_str() : L"");
         run("bad");
         d = OpenDecoder(song, 48000, error);
         Check(!d && error == L"Couldn't play song.fake: the Fake helper stopped: unsupported codec.",
               L"a helper whose output isn't WAV fails to open with what it printed: %ls", error.c_str());
+        batch.Next(L"a helper that goes quiet is given up on after the patience, at open and mid-stream");
         SetHelperPatience(400);
         run("hang");
         d = OpenDecoder(song, 48000, error);
@@ -411,6 +431,8 @@ void TestHelpers(const std::wstring& scratch) {
         d = OpenDecoder(song, 48000, error);
         Check(!d && error == L"Couldn't play song.fake: the Fake helper didn't answer." && GetTickCount64() - started < 5000,
               L"a helper that never writes a header doesn't hold up the opening: %ls", error.c_str());
+        batch.Next(L"output ends with the helper though a program it started holds stdout, and Abort ends it "
+                   L"mid-stream");
         SetHelperPatience(15000);
         run("linger");
         started = GetTickCount64();
@@ -445,6 +467,7 @@ void TestHelpers(const std::wstring& scratch) {
         started = GetTickCount64();
         bool complete = startedSleeping && sleeper.ReadAll(out, 1024, &cancel);
         canceller.join();
+        batch.Next(L"a cancelled tool ends cleanly, and a program that can't start says why");
         Check(startedSleeping && !complete && GetTickCount64() - started < 2500 &&
                   WaitForSingleObject(sleeper.Process(), 2000) == WAIT_OBJECT_0,
               L"a tool that thinks quietly is waited for until it is cancelled, which ends it");
@@ -455,6 +478,7 @@ void TestHelpers(const std::wstring& scratch) {
 
     {
         testlog::Group group(L"helper visual feed");
+        batch.Next(L"the feed holds what cordinal published, and a visualizer maps it read-only through its handle");
         HelperFeedWriter writer;
         bool open = writer.Open();
         writer.Publish([](HelperFeed& f) {
@@ -485,6 +509,8 @@ void TestHelpers(const std::wstring& scratch) {
 
     {
         testlog::Group group(L"helper trust");
+        batch.Next(L"a helper's trust record follows its files: unchanged ones match, edited or new files and "
+                   L"programs do not");
         std::wstring record = MakeHelperTrust(dir), first = record;
         Check(!record.empty() && record.find(L"helper.ini") == std::wstring::npos && record.find(L"fake.exe*") != std::wstring::npos &&
                   CheckHelperTrust(dir, record) && record == first,

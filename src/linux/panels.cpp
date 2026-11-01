@@ -1026,9 +1026,13 @@ const Pref kPrefs[] = {
     {"night_mode", "Effects", "Night mode", "Slowly lifts quiet passages and softens loud ones, for listening at night.",
      PrefType::Bool, 0, 1, 0, 1, [] { return (double)Cfg().nightMode; },
      [](double v) { Cfg().nightMode = v != 0; ApplyEffects(); Saved(); }},
+    {"waveform", "View", "Waveform playback bar",
+     "Turn off to use a regular progress bar. This overrides live waveform and fountain settings without changing them.",
+     PrefType::Bool, 0, 1, 1, 1, [] { return (double)Cfg().waveform; },
+     [](double v) { Cfg().waveform = v != 0; Saved(); }},
     {"live_waveform", "View", "Live waveform for songs",
      "Show a moving waveform of the audio being heard instead of the whole-song overview. Seeking still works. "
-     "Radio always uses the live waveform.", PrefType::Bool, 0, 1, 0, 1,
+     "Radio also uses it while Waveform playback bar is on.", PrefType::Bool, 0, 1, 0, 1,
      [] { return (double)Cfg().liveWaveform; }, [](double v) { Cfg().liveWaveform = v != 0; Saved(); }},
     {"live_fountain", "View", "Live audio for Dark Fountain",
      "In the DELTARUNE theme, Dark Fountain follows the audio being heard, including Radio. "
@@ -1042,6 +1046,14 @@ const Pref kPrefs[] = {
      "Sets the waveform's height in the normal player bar. Other player modes keep their own sizes.",
      PrefType::Choice, 0, 5, 0, 1, [] { return (double)Cfg().bandWaveSize; },
      [](double v) { Cfg().bandWaveSize = (int)v; Saved(); }, kBandWaveSizes},
+    {"scrobbling_paused", "Scrobbling", "Pause scrobbling",
+     "Stops collecting and sending listens to Last.fm, ListenBrainz and Libre.fm, keeping connections and queued listens.",
+     PrefType::Bool, 0, 1, 0, 1, [] { return (double)listenbrainz::Paused(); },
+     [](double v) { listenbrainz::SetPaused(v != 0); Saved(); }},
+    {"scrobbling_now_playing", "Scrobbling", "Send now-playing updates",
+     "Shows the current song on connected services. Turning this off still submits completed listens.",
+     PrefType::Bool, 0, 1, 1, 1, [] { return (double)listenbrainz::SendNowPlaying(); },
+     [](double v) { listenbrainz::SetSendNowPlaying(v != 0); Saved(); }},
     {"musicbrainz_lookup", "Library", "Look up missing album editions online",
      "Asks MusicBrainz for a release-group id when two local albums share an artist and base title and their tags carry none. "
      "Results are cached; browsing and playback never wait for or require the network.", PrefType::Bool, 0, 1, 0, 1,
@@ -1062,6 +1074,10 @@ const Pref kPrefs[] = {
      [] { return (double)Cfg().timeRemaining; }, [](double v) { Cfg().timeRemaining = v != 0; Saved(); }},
     {"always_on_top", "View", "Always on top", "Keeps cordinal's window above other windows.", PrefType::Bool, 0, 1, 0, 1,
      [] { return (double)Cfg().alwaysOnTop; }, [](double v) { Cfg().alwaysOnTop = v != 0; SDL_SetWindowAlwaysOnTop(g.window, v != 0); Saved(); }},
+    {"gpu_drawing", "View", "Draw with the graphics card",
+     "Draws the window with the graphics card instead of the processor. Off uses less memory; turn it on if scrolling is slow on a "
+     "large, high-resolution screen. Takes effect the next time cordinal starts.", PrefType::Bool, 0, 1, 0, 1,
+     [] { return (double)Cfg().gpuDrawing; }, [](double v) { Cfg().gpuDrawing = v != 0; Saved(); }},
     {"sound_effects", "View", "Sound effects",
      "Small, quiet sounds for things that otherwise happen silently, such as saving tags or dropping files.", PrefType::Bool, 0, 1,
      0, 1, [] { return (double)Cfg().soundEffects; }, [](double v) { Cfg().soundEffects = v != 0; Saved(); }},
@@ -1109,8 +1125,8 @@ const PrefPage kPrefPages[] = {
     {"Effects", {{"Equalizer...", OpenEqualizer}}},
     {"View", {{"Title formatting...", OpenFormat}, {"Customize layout...", OpenLayout}}},
     {"Startup", {{"Startup defaults...", OpenStartupDefaults}}},
-    {"Library", {{"Library folders...", OpenLibraryFolders}, {"Web server...", OpenWebServer},
-                {"ListenBrainz scrobbling...", OpenListenBrainz}}},
+    {"Scrobbling", {{"Scrobbling...", OpenListenBrainz}}},
+    {"Library", {{"Library folders...", OpenLibraryFolders}, {"Web server...", OpenWebServer}}},
 };
 
 struct PrefRow {
@@ -3218,104 +3234,144 @@ void HelpersKey(const SDL_KeyboardEvent& e) {
 }
 
 // --- ListenBrainz ----------------------------------------------------------------------------------------
-// Preferences > Library > ListenBrainz scrobbling: the user token, checked with the server before it is
-// kept (listenbrainz.cpp), as the Windows dialog in app_platform.cpp does.
+// The shared scrobbling setup, with separate account connections for all three services.
 struct LbPanel {
-    TextField token;
+    TextField token, key, secret;
+    listenbrainz::Service selected = listenbrainz::Service::ListenBrainz;
     bool checking = false;
-    std::wstring pendingToken, message;
-    Rect panel, field, connect, disconnect, close;
+    int focus = 1;
+    std::wstring pendingToken, authKey, authSecret, authToken, message;
+    Rect panel, field, keyField, secretField, connect, disconnect, account, close, services[3];
 } g_lb;
 
-constexpr float kLbW = 620, kLbH = 330;
-
-std::wstring LbToken() {
-    std::wstring t = g_lb.token.text;
-    while (!t.empty() && iswspace(t.back())) t.pop_back();
-    size_t a = 0;
-    while (a < t.size() && iswspace(t[a])) ++a;
-    return t.substr(a);
+constexpr float kLbW = 620, kLbH = 440;
+bool LbBrainz() { return g_lb.selected == listenbrainz::Service::ListenBrainz; }
+TextField& LbEditor() { return LbBrainz() ? g_lb.token : g_lb.focus == 2 ? g_lb.secret : g_lb.key; }
+void LbSelect(int selected) {
+    listenbrainz::CancelAuthorization(g_lb.selected);
+    g_lb = LbPanel{};
+    g_lb.selected = (listenbrainz::Service)((selected + 3) % 3);
 }
-
 void DrawListenBrainz(const Palette& p) {
-    Rect panel = g_lb.panel = DrawFrame(p, S(kLbW), S(kLbH), "ListenBrainz scrobbling");
+    Rect panel = g_lb.panel = DrawFrame(p, S(kLbW), S(kLbH), "Scrobbling");
     const float pad = S(16), lh = LineHeight(Font::Normal);
-    auto lines = Wrap(Font::Normal,
-                      "ListenBrainz keeps a public history of what you listen to. cordinal sends a song when it counts as played "
-                      "(half of it, or 4 minutes). Paste your user token from listenbrainz.org/settings:",
-                      panel.w - 2 * pad);
-    float y = panel.y + S(52);
-    for (const std::string& line : lines) {
-        DrawText(Font::Normal, line, panel.x + pad, y, p.text, panel.w - 2 * pad);
-        y += lh;
+    const char* names[] = {"ListenBrainz", "Last.fm", "Libre.fm"};
+    for (int i = 0; i < 3; ++i) {
+        g_lb.services[i] = {panel.x + pad + S(190) * i, panel.y + S(48), S(180), S(28)};
+        DrawButton(g_lb.services[i], names[i], p, (int)g_lb.selected == i);
     }
-    g_lb.field = {panel.x + pad, y + S(10), panel.w - 2 * pad, S(28)};
-    DrawRulesEdit(g_lb.token, g_lb.field, true, !g_lb.checking, "Your user token", p);
-    const auto status = listenbrainz::GetStatus();
-    std::wstring text;
-    if (g_lb.checking) text = L"Checking the token...";
-    else if (!g_lb.message.empty()) text = g_lb.message;
-    else if (listenbrainz::Enabled()) {
-        text = status.user.empty() ? L"Scrobbling is on." : L"Scrobbling as " + status.user + L".";
-        if (status.queued) text += L" " + std::to_wstring(status.queued) + L" waiting to be sent.";
+    auto lines = Wrap(Font::Normal, LbBrainz() ?
+        "Paste your ListenBrainz user token from its settings. Songs are sent after half their duration or four minutes of listening." :
+        "Enter this service's application API key and secret, then Connect. Approve access in your browser and return to Finish sign-in. Tracks must be longer than 30 seconds.",
+        panel.w - 2 * pad);
+    float y = panel.y + S(90);
+    for (const auto& line : lines) {
+        DrawText(Font::Normal, line, panel.x + pad, y, p.text, panel.w - 2 * pad); y += lh;
+    }
+    auto field = [&](TextField& editor, Rect& rect, const char* label, int focus, bool secret) {
+        DrawText(Font::Normal, label, panel.x + pad, y + S(6), p.text, S(96));
+        rect = {panel.x + pad + S(100), y, panel.w - 2 * pad - S(100), S(28)};
+        TextField display = editor;
+        if (secret) display.text.assign(editor.text.size(), L'\x2022');
+        DrawRulesEdit(display, rect, g_lb.focus == focus, !g_lb.checking, nullptr, p);
+        y += S(38);
+    };
+    y = panel.y + S(170);
+    if (LbBrainz()) field(g_lb.token, g_lb.field, "User token", 1, true);
+    else {
+        field(g_lb.key, g_lb.keyField, "API key", 1, false);
+        field(g_lb.secret, g_lb.secretField, "API secret", 2, true);
+    }
+    g_lb.account = {panel.x + pad, panel.y + S(250), S(140), S(28)};
+    DrawButton(g_lb.account, LbBrainz() ? "Get user token" : "Get API key", p, g_lb.focus == 3);
+    const auto status = listenbrainz::GetStatus(g_lb.selected);
+    std::wstring text = g_lb.checking ? L"Contacting the service..." : g_lb.message;
+    if (text.empty()) {
+        text = listenbrainz::Enabled(g_lb.selected) ? (status.user.empty() ? L"Connected." : L"Connected as " + status.user + L".") :
+               L"Not connected. Scrobbling is off.";
+        if (listenbrainz::Paused()) text += L" Scrobbling is paused in Preferences.";
+        if (status.queued) text += L" " + std::to_wstring(status.queued) + L" listens waiting.";
         if (!status.lastError.empty()) text += L" " + status.lastError + L".";
-    } else text = L"Not connected. Scrobbling is off.";
-    auto statusLines = Wrap(Font::Normal, Utf8(text), panel.w - 2 * pad);
-    y = g_lb.field.B() + S(14);
-    for (const std::string& line : statusLines) {
-        DrawText(Font::Normal, line, panel.x + pad, y, p.sub, panel.w - 2 * pad);
-        y += lh;
     }
-    DrawText(Font::Small, "The token is kept in a file only you can read. Songs wait in a queue while offline.", panel.x + pad,
-             panel.B() - pad - S(28) - S(8) - LineHeight(Font::Small), p.faint, panel.w - 2 * pad);
+    y = panel.y + S(292);
+    for (const auto& line : Wrap(Font::Normal, Utf8(text), panel.w - 2 * pad)) {
+        DrawText(Font::Normal, line, panel.x + pad, y, p.sub, panel.w - 2 * pad); y += lh;
+    }
+    DrawText(Font::Small, "Credentials are readable only by you. Songs wait in separate queues while offline.",
+        panel.x + pad, panel.B() - S(76), p.faint, panel.w - 2 * pad);
     const float by = panel.B() - pad - S(28);
     g_lb.close = {panel.R() - pad - S(90), by, S(90), S(28)};
     g_lb.disconnect = {g_lb.close.x - S(8) - S(110), by, S(110), S(28)};
-    g_lb.connect = {g_lb.disconnect.x - S(8) - S(110), by, S(110), S(28)};
-    DrawButton(g_lb.connect, "Connect", p, true, !g_lb.checking && !LbToken().empty());
-    DrawButton(g_lb.disconnect, "Disconnect", p, false, listenbrainz::Enabled());
-    DrawButton(g_lb.close, "Close", p);
+    g_lb.connect = {panel.x + pad, by, S(140), S(28)};
+    DrawButton(g_lb.connect, g_lb.authToken.empty() ? "Connect" : "Finish sign-in", p, g_lb.focus == 4, !g_lb.checking);
+    DrawButton(g_lb.disconnect, "Disconnect", p, g_lb.focus == 5,
+        listenbrainz::Enabled(g_lb.selected) || g_lb.checking || !g_lb.authToken.empty());
+    DrawButton(g_lb.close, "Close", p, g_lb.focus == 6);
 }
-
 void LbConnect() {
-    if (g_lb.checking || LbToken().empty()) return;
-    g_lb.pendingToken = LbToken();
+    if (g_lb.checking) return;
     g_lb.message.clear();
-    g_lb.checking = true;
-    listenbrainz::Validate(g_lb.pendingToken);
-}
-
-void LbMouseDown(float x, float y) {
-    if (!g_lb.panel.In(x, y) || g_lb.close.In(x, y)) return ClosePanel();
-    if (g_lb.connect.In(x, y)) return LbConnect();
-    if (g_lb.disconnect.In(x, y) && listenbrainz::Enabled()) {
-        listenbrainz::SetToken(L"");
-        g_lb.message = L"Disconnected. Scrobbling is off.";
+    if (LbBrainz()) {
+        g_lb.pendingToken = g_lb.token.text;
+        if (g_lb.pendingToken.empty()) { g_lb.focus = 1; return; }
+        g_lb.checking = true;
+        listenbrainz::Validate(g_lb.pendingToken);
+    } else {
+        if (g_lb.authToken.empty()) { g_lb.authKey = g_lb.key.text; g_lb.authSecret = g_lb.secret.text; }
+        if (g_lb.authKey.empty() || g_lb.authSecret.empty()) {
+            g_lb.message = L"Enter the API key and secret from this service first."; return;
+        }
+        g_lb.checking = true;
+        listenbrainz::Authorize(g_lb.selected, g_lb.authKey, g_lb.authSecret, g_lb.authToken);
     }
 }
-
+void LbDisconnect() {
+    listenbrainz::CancelAuthorization(g_lb.selected);
+    bool saved = listenbrainz::SetToken(L"", g_lb.selected);
+    int selected = (int)g_lb.selected;
+    LbSelect(selected);
+    g_lb.message = saved ? L"Disconnected. Scrobbling is off." : L"Could not remove the saved connection.";
+}
+void LbAccount() {
+    SDL_OpenURL(LbBrainz() ? "https://listenbrainz.org/settings/" :
+        g_lb.selected == listenbrainz::Service::LastFm ? "https://www.last.fm/api/account/create" : "https://libre.fm/api-keys.php");
+}
+void LbMouseDown(float x, float y) {
+    if (!g_lb.panel.In(x, y) || g_lb.close.In(x, y)) return ClosePanel();
+    for (int i = 0; i < 3; ++i) if (g_lb.services[i].In(x, y)) return LbSelect(i);
+    if (g_lb.connect.In(x, y)) { g_lb.focus = 4; return LbConnect(); }
+    if (g_lb.disconnect.In(x, y)) return LbDisconnect();
+    if (g_lb.account.In(x, y)) { g_lb.focus = 3; return LbAccount(); }
+    if (LbBrainz() ? g_lb.field.In(x, y) : g_lb.keyField.In(x, y)) g_lb.focus = 1;
+    if (!LbBrainz() && g_lb.secretField.In(x, y)) g_lb.focus = 2;
+}
 void LbKey(const SDL_KeyboardEvent& e) {
     if (e.key == SDLK_ESCAPE) return ClosePanel();
-    if (e.key == SDLK_RETURN || e.key == SDLK_KP_ENTER) return LbConnect();
-    if (g_lb.checking) return;
-    if ((e.mod & SDL_KMOD_CTRL) && e.key == SDLK_V) {  // a token is pasted, not typed
+    if (e.key == SDLK_TAB) {
+        do { g_lb.focus = (g_lb.focus + ((e.mod & SDL_KMOD_SHIFT) ? 6 : 1)) % 7; }
+        while (LbBrainz() && g_lb.focus == 2);
+        return;
+    }
+    if (g_lb.focus == 0 && (e.key == SDLK_LEFT || e.key == SDLK_RIGHT)) {
+        LbSelect((int)g_lb.selected + (e.key == SDLK_LEFT ? -1 : 1)); g_lb.focus = 0; return;
+    }
+    if (e.key == SDLK_RETURN || e.key == SDLK_KP_ENTER) {
+        if (g_lb.focus == 3) return LbAccount();
+        if (g_lb.focus == 5) return LbDisconnect();
+        if (g_lb.focus == 6) return ClosePanel();
+        return LbConnect();
+    }
+    if (g_lb.checking || (g_lb.focus != 1 && g_lb.focus != 2)) return;
+    if ((e.mod & SDL_KMOD_CTRL) && e.key == SDLK_V) {
         if (char* clip = SDL_GetClipboardText()) {
-            std::wstring in;
-            for (wchar_t c : compat::Widen(clip))
-                if (c > 32) in += c;
-            SDL_free(clip);
-            LineFieldInsert(g_lb.token, in);
+            LineFieldInsert(LbEditor(), compat::Widen(clip)); SDL_free(clip);
         }
         return;
     }
-    LineFieldKey(g_lb.token, e);
+    LineFieldKey(LbEditor(), e);
 }
-
-void LbText(const std::wstring& s) {
-    std::wstring in;
-    for (wchar_t c : s)
-        if (c > 32) in += c;
-    if (!g_lb.checking) LineFieldInsert(g_lb.token, in);
+void LbText(const std::wstring& text) {
+    if (!g_lb.checking && (g_lb.focus == 1 || g_lb.focus == 2)) LineFieldInsert(LbEditor(), text);
 }
 
 }  // namespace
@@ -3527,6 +3583,7 @@ void OpenAlbumEditionComparison(uint32_t group, TrackId focusTrack) {
 }
 
 void OpenListenBrainz() {
+    ClosePanel();
     g_lb = LbPanel{};
     g_kind = Kind::ListenBrainz;
     SDL_StartTextInput(g.window);
@@ -3536,22 +3593,27 @@ void OpenListenBrainz() {
 // The answer to a token check (wParam 0 refused, 1 accepted, 2 unreachable; lParam the user name when
 // accepted) or a status change (3), on the UI thread.
 void OnListenBrainzMessage(WPARAM wp, LPARAM lp) {
-    std::unique_ptr<std::wstring> user(reinterpret_cast<std::wstring*>(lp));
-    if (wp <= 2) {
-        std::wstring message;
-        if (wp == 1 && !g_lb.pendingToken.empty()) {
-            listenbrainz::SetToken(g_lb.pendingToken);
-            g_lb.token = TextField{};
-            message = L"Scrobbling as " + (user ? *user : std::wstring(L"you")) + L".";
-        } else if (wp == 0) {
-            message = L"ListenBrainz didn't accept that token.";
-        } else if (wp == 2) {
-            message = L"Couldn't reach ListenBrainz. Check the connection (it needs curl installed) and try again.";
-        }
+    auto service = (listenbrainz::Service)((wp >> 4) & 3);
+    unsigned result = (unsigned)wp % 16;
+    std::unique_ptr<std::wstring> value(reinterpret_cast<std::wstring*>(lp));
+    if (result == listenbrainz::kStatusChanged && g_lb.selected == service) g_lb.message.clear();
+    if (listenbrainz::CurrentResult(wp) && g_kind == Kind::ListenBrainz && g_lb.selected == service && result != listenbrainz::kStatusChanged && g_lb.checking) {
         g_lb.checking = false;
-        g_lb.pendingToken.clear();
-        g_lb.message = message;
-        if (g_kind != Kind::ListenBrainz) ShowMessage(message);
+        if (result == 4 && value) {
+            g_lb.authToken = *value;
+            SDL_OpenURL(Utf8(listenbrainz::AuthorizationUrl(service, g_lb.authKey, g_lb.authToken)).c_str());
+            g_lb.message = L"Approve access in your browser, then choose Finish sign-in.";
+        } else if ((result == 1 || result == 5) && value) {
+            bool saved = listenbrainz::SetToken(result == 1 ? g_lb.pendingToken : *value, service);
+            g_lb.message = saved ? L"Connected. Scrobbling is on." : L"Could not save the connection.";
+            if (saved) {
+                g_lb.token = TextField{}; g_lb.key = TextField{}; g_lb.secret = TextField{};
+                g_lb.authToken.clear(); g_lb.authKey.clear(); g_lb.authSecret.clear(); g_lb.pendingToken.clear();
+            }
+        } else {
+            g_lb.message = result == 2 ? L"Couldn't reach the service. Check your connection and try again." :
+                L"Sign-in wasn't accepted. Check the credentials and browser approval, then retry.";
+        }
     }
     g.redraw = true;
 }
@@ -3577,7 +3639,7 @@ void ClosePanel() {
         g_kind == Kind::ListenBrainz || g_kind == Kind::Format || g_kind == Kind::Palette || g_kind == Kind::Games ||
         g_kind == Kind::Editions)
         SDL_StopTextInput(g.window);
-    if (g_kind == Kind::ListenBrainz) g_lb.token = TextField{};  // a token is not left lying in memory
+    if (g_kind == Kind::ListenBrainz) { listenbrainz::CancelAuthorization(g_lb.selected); g_lb = LbPanel{}; }  // a token is not left lying in memory
     g_kind = Kind::None;
     g_eq.drag = -1;
     g.redraw = true;
@@ -3742,7 +3804,8 @@ void PanelFileChosen(int purpose, const std::wstring& path) {
 }
 
 bool PanelWantsText(float x, float y) {
-    if (g_kind == Kind::ListenBrainz) return g_lb.field.In(x, y);
+    if (g_kind == Kind::ListenBrainz) return LbBrainz() ? g_lb.field.In(x, y) :
+        g_lb.keyField.In(x, y) || g_lb.secretField.In(x, y);
     if (g_kind == Kind::Editions) return EditionsWantsText(x, y);
     if (g_kind == Kind::Palette) return g_palette.field.In(x, y);
     if (g_kind == Kind::Games) return GamesWantsText(x, y);

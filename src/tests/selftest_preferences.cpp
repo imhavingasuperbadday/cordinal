@@ -12,6 +12,7 @@ bool Holds(HMENU menu, UINT id) {
 
 void TestWaveform(const std::wstring& scratch) {
     using namespace app;
+    testlog::Batch batch;
     const auto savedPlaying = g.playing;
     const auto savedLayout = g.layout;
     const auto savedTheme = g.themeMode;
@@ -29,6 +30,7 @@ void TestWaveform(const std::wstring& scratch) {
     TrackId ids[] = {g_lib.Add(plain), g_lib.Add(marked)};
     for (TrackId id : ids) g_lib[id].durationMs = 120000;
     g.playing = ids[1];
+    batch.Next(L"chapters keep the playing title and section navigation while loading works at both edges");
     Check(CurrentChapterText() == L"Chapter 1/1" && ChapterStartAfter(0) == 30,
           L"waveform chapters remain available for the playing title and section navigation");
     g.themeMode = ThemeMode::Dark;
@@ -59,6 +61,59 @@ void TestWaveform(const std::wstring& scratch) {
     SendMessageW(g.seek, TBM_SETPOS, FALSE, 625);
     g.liveWaveform = true; WaveformTrackChanged(true); WaveformTick();
     bool live = LiveWaveformShown() && WaveformShown() && SendMessageW(g.seek, TBM_GETPOS, 0, 0) == 625;
+    if (const Tweak* display = FindTweak("view.waveform")) {
+        const auto layout = g.layout;
+        RECT window{}; GetWindowRect(g.hwnd, &window);
+        SetWindowPos(g.hwnd, nullptr, 0, 0, S(ui::kLayoutWidth), S(ui::kLayoutHeight),
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        const bool enabled = IsWindowEnabled(g.seek) != 0;
+        EnableWindow(g.seek, TRUE);
+        SetTweak(*display, 0);
+        testlog::Cases regular;
+        for (ViewSize size : {ViewSize::Compact, ViewSize::Normal, ViewSize::Spotlight, ViewSize::Big})
+            for (Dock dock : {Dock::Top, Dock::Bottom, Dock::Left, Dock::Right}) {
+                g.size = size; g.layout.player = dock; Layout();
+                RECT client{}; GetClientRect(g.seek, &client);
+                HDC dc = CreateCompatibleDC(nullptr);
+                BITMAPINFO info{};
+                info.bmiHeader = {sizeof(BITMAPINFOHEADER), client.right, -client.bottom, 1, 32, BI_RGB};
+                void* pixels = nullptr;
+                HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+                HGDIOBJ old = bitmap ? SelectObject(dc, bitmap) : nullptr;
+                bool regularDrawn = dc && bitmap && !DrawWaveform(dc, client, client, 0.625);
+                if (regularDrawn) {
+                    SendMessageW(g.seek, WM_PRINTCLIENT, (WPARAM)dc, PRF_CLIENT);
+                    bool vertical = SeekVertical();
+                    int inset = S(vertical ? 4 : ui::kSliderInset);
+                    int length = vertical ? client.bottom : client.right, cross = vertical ? client.right : client.bottom;
+                    int along = inset + (int)std::lround((length - 2 * inset) * 0.625);
+                    int across = cross / 2 - S(ui::kSliderThumbHeight) / 2;
+                    regularDrawn = GetPixel(dc, vertical ? across : along, vertical ? along : across) != SurfaceColor();
+                }
+                regular.Add(regularDrawn && !LiveWaveformShown() && !WaveformShown() && !FountainShown() && g.liveWaveform &&
+                                SendMessageW(g.seek, TBM_GETPOS, 0, 0) == 625,
+                            std::to_wstring((int)size) + L"/" + std::to_wstring((int)dock));
+                if (old) SelectObject(dc, old);
+                if (bitmap) DeleteObject(bitmap);
+                if (dc) DeleteDC(dc);
+            }
+        SetWindowPos(g.hwnd, nullptr, 0, 0, window.right - window.left, window.bottom - window.top,
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        g.size = ViewSize::Normal; g.layout = layout; Layout();
+        SetTweak(*display, 1);
+        batch.Next(L"regular playback overrides the live waveform in every size and dock without moving the song");
+        Check(regular.Passed() && LiveWaveformShown() && WaveformShown() && g.liveWaveform &&
+                  SendMessageW(g.seek, TBM_GETPOS, 0, 0) == 625,
+              L"regular playback overrides live audio, draws a handle and restores the saved live choice%ls",
+              regular.failed.c_str());
+        g.liveWaveform = false;
+        SetTweak(*display, 0);
+        bool overviewHidden = !WaveformShown();
+        SetTweak(*display, 1);
+        Check(overviewHidden && WaveformShown(), L"the playback display choice also hides and restores whole-song peaks");
+        g.liveWaveform = true;
+        EnableWindow(g.seek, enabled);
+    } else Check(false, L"View preferences includes Waveform playback bar");
     const auto originalDuration = g_lib[ids[1]].durationMs;
     testlog::Cases lit;
     for (Dock dock : {Dock::Top, Dock::Bottom}) {
@@ -75,6 +130,7 @@ void TestWaveform(const std::wstring& scratch) {
             }
         }
     }
+    batch.Next(L"live waveforms switch full color at every position and never draw an upright playhead line");
     Check(lit.Passed(), L"full live color can switch off and on at every position in short and two-hour songs%ls",
           lit.failed.c_str());
     {
@@ -129,6 +185,7 @@ void TestWaveform(const std::wstring& scratch) {
             switches.Add(colored, std::wstring(ThemeInfo((ThemeMode)origin).name) + L" to " + ThemeInfo(target).name);
         }
     }
+    batch.Next(L"waveform keeps its played accent and position from every theme to Light and Dark at every edge");
     Check(switches.Passed(), L"waveform keeps its played accent and position from every theme to Light and Dark at every "
           L"edge%ls", switches.failed.c_str());
     g.layout.player = Dock::Top;
@@ -153,6 +210,7 @@ void TestWaveform(const std::wstring& scratch) {
         const bool columns = dc && bitmap && !LiveWaveformShown() &&
                              DrawWaveform(dc, {0, 0, 120, 26}, {4, 0, 116, 26}, 0.625) &&
                              GetPixel(dc, 4, 13) == WaveformPlayedColor() && GetPixel(dc, 4, 2) == SurfaceColor();
+        batch.Next(L"whole-track columns appear while an uncached song loads and refresh from completed cache data");
         Check(waiting && columns, L"whole-track waveform columns appear while an uncached song is loading");
         if (old) SelectObject(dc, old);
         if (bitmap) DeleteObject(bitmap);
@@ -187,6 +245,7 @@ void TestWaveform(const std::wstring& scratch) {
         }
         sizes.Add(states, L"view size " + std::to_wstring((int)size));
     }
+    batch.Next(L"waveform theme switches preserve progress, pause and warning colors in every view size");
     Check(sizes.Passed(), L"waveform theme switches preserve progress, pause and warning colors in every view size%ls",
           sizes.failed.c_str());
     // A play request starts the actual song's waveform before the engine announces playback.
@@ -204,6 +263,7 @@ void TestWaveform(const std::wstring& scratch) {
         const bool prepared = GetFileAttributesW(cached.c_str()) != INVALID_FILE_ATTRIBUTES;
         g.playing = id;
         WaveformTrackChanged();
+        batch.Next(L"a play request prepares the song's whole waveform before playback starts");
         Check(prepared && WaveformShown() && WaveformPeak(0.75, 0.8) > 0,
               L"a play request prepares the song's whole waveform before playback starts");
         DeleteFileW(early.c_str());
@@ -228,6 +288,7 @@ void TestWaveform(const std::wstring& scratch) {
 void TestTabOverflow() {
     using namespace app;
     testlog::Group group(L"playlist tab overflow");
+    testlog::Batch batch;
     size_t count = g.playlists.size();
     UINT dpi = g.dpi;
     for (int i = 0; i < 16; ++i) g.playlists.push_back({L"Long playlist for overflow " + std::to_wstring(i), {}});
@@ -267,6 +328,7 @@ void TestTabOverflow() {
             scrolls = scrolls && after.left < first.left;
         }
     }
+    batch.Next(L"themed overflow arrows sit clear of search and scroll the native tab strip");
     Check(clipped, L"tabs stop before the overflow arrows and the arrows stay clear of search");
     Check(scrolls, L"the themed overflow arrows still scroll the native tab strip");
     g.playlists.resize(count);
@@ -279,6 +341,7 @@ void TestTabOverflow() {
 void TestPreferenceSavingModes(const std::wstring& scratch) {
     using namespace app;
     testlog::Group group(L"preference saving modes");
+    testlog::Batch batch;
     const std::wstring original = g.iniPath, profile = scratch + L"\\preference-modes.ini";
     ViewSize originalSize = g.size;
     WriteTestBytes(profile, "\xFF\xFE");
@@ -287,6 +350,7 @@ void TestPreferenceSavingModes(const std::wstring& scratch) {
     reload();
     SetViewSize(ViewSize::Normal);
     ResetPreferenceSuggestions();
+    batch.Next(L"new profiles ask before adopting defaults without assuming a future policy");
     Check(g.preferenceSaving == PreferenceSaving::Ask && !g.preferenceSavingChosen,
           L"new profiles ask before adopting defaults without assuming a future policy decision");
     OnCommand(IDM_PREFERENCE_MANUAL, 0, nullptr);
@@ -294,6 +358,7 @@ void TestPreferenceSavingModes(const std::wstring& scratch) {
     g.libMode = LibraryMode::Tracks;
     ObservePreferenceChanges(GetTickCount64());
     FlushAutomaticPreferences();
+    batch.Next(L"manual mode disables questions and automatic saving, and survives a restart");
     Check(!PreferenceSuggestionsDue(GetTickCount64() + 300000) && g.defaultTheme == ThemeMode::Light &&
               g.defaultLibraryMode == LibraryMode::Albums,
           L"manual mode disables questions and automatic saving");
@@ -304,6 +369,7 @@ void TestPreferenceSavingModes(const std::wstring& scratch) {
     g.libMode = LibraryMode::Tracks;
     OnCommand(IDM_PREFERENCE_AUTO, 0, nullptr);
     FlushAutomaticPreferences();
+    batch.Next(L"automatic saving commits only categories changed after opt-in and survives a restart");
     Check(g.defaultTheme == ThemeMode::Light && g.defaultLibraryMode == LibraryMode::Albums,
           L"automatic opt-in does not approve existing unchecked choices");
     g.browserVisible = false;
@@ -319,6 +385,7 @@ void TestPreferenceSavingModes(const std::wstring& scratch) {
     g.themeMode = ThemeMode::Dark;
     FlushAutomaticPreferences();
     reload();
+    batch.Next(L"the exit flush saves, re-enabling questions restores batching and invalid policies ask");
     Check(g.themeMode == ThemeMode::Dark, L"the exit flush saves changes made before the next UI tick");
     OnCommand(IDM_PREFERENCE_ASK, 0, nullptr);
     g.themeMode = ThemeMode::Light;
@@ -334,6 +401,7 @@ void TestPreferenceSavingModes(const std::wstring& scratch) {
     bool refused = !IniWrite(L"Player", L"Volume", L"12") && g.message.find(L"Couldn't save settings") != std::wstring::npos;
     g.message.clear();
     IniWrite(L"Player", L"Shuffle", L"1");
+    batch.Next(L"a failed settings write is reported once and writes recover once the file is writable");
     Check(refused && g.message.empty(), L"a failed settings write is reported once, not once per key");
     SetFileAttributesW(profile.c_str(), FILE_ATTRIBUTE_NORMAL);
     Check(IniWrite(L"Player", L"Volume", L"12"), L"settings writes succeed again once the file is writable");
@@ -349,6 +417,7 @@ void TestPreferenceSavingModes(const std::wstring& scratch) {
 void TestTweaks(const std::wstring& scratch) {
     using namespace app;
     testlog::Group group(L"tweaks and command palette");
+    testlog::Batch batch;
     const std::wstring original = g.iniPath, profile = scratch + L"\\tweaks.ini";
     WriteTestBytes(profile, "\xFF\xFE");
     g.iniPath = profile;
@@ -362,8 +431,16 @@ void TestTweaks(const std::wstring& scratch) {
         // Start with Windows lives in Windows' Run key, not in the profile.
         defaults = defaults && ((t.flags & kTweakOutside) || !TweakChanged(t));
     }
+    batch.Next(L"tweak keys are unique and sane, every row has a default and an empty profile loads them all");
     Check(unique && sane && Tweaks().size() >= 20, L"tweak keys are unique and every row has a default in range and help");
     Check(defaults, L"an empty profile loads every tweak at its default");
+    if (const Tweak* display = FindTweak("view.waveform")) {
+        SetTweak(*display, 0); g.waveform = true; LoadPreferences();
+        bool regular = !g.waveform && IniRead(L"Window", L"Waveform", L"") == L"0";
+        SetTweak(*display, 1); g.waveform = false; LoadPreferences();
+        Check(regular && g.waveform && display->def == 1 && !wcscmp(TweakPage(*display), L"View"),
+              L"View preferences saves and reloads both playback displays and defaults to waveform");
+    } else Check(false, L"View preferences includes Waveform playback bar");
     testlog::Cases liveSettings;
     const struct { const char* key; const wchar_t* ini; bool* value; } liveRows[] = {
         {"view.live_waveform", L"LiveWaveform", &g.liveWaveform},
@@ -380,6 +457,7 @@ void TestTweaks(const std::wstring& scratch) {
         *row.value = true; LoadPreferences();
         liveSettings.Add(enabled && !*row.value && IniRead(L"Window", row.ini, L"") == L"0", FromUtf8(row.key));
     }
+    batch.Next(L"View preferences save and reload live waveform, fountain, full color and band size");
     Check(liveSettings.Passed(), L"View preferences saves and reloads live waveform, fountain and full color choices%ls",
           liveSettings.failed.c_str());
     if (const Tweak* size = FindTweak("view.band_wave_size")) {
@@ -389,6 +467,14 @@ void TestTweaks(const std::wstring& scratch) {
         Check(tall && g.bandWaveSize == 0 && IniRead(L"Window", L"BandWaveSize", L"") == L"0",
               L"top/bottom waveform size persists and can return to the layout's own size");
     } else Check(false, L"View preferences includes Top/bottom waveform size");
+    if (const Tweak* gpu = FindTweak("view.gpu_drawing")) {
+        const bool offByDefault = gpu->def == 0 && !wcscmp(TweakPage(*gpu), L"View");
+        SetTweak(*gpu, 1); g.gpuDrawing = false; LoadPreferences();
+        const bool kept = g.gpuDrawing && IniRead(L"Window", L"GpuDrawing", L"") == L"1";
+        SetTweak(*gpu, 0); g.gpuDrawing = true; LoadPreferences();
+        Check(offByDefault && kept && !g.gpuDrawing,
+              L"drawing with the graphics card starts off, and the choice persists both ways");
+    } else Check(false, L"View preferences includes Draw with the graphics card");
 
     const Tweak* resume = FindTweak("playback.resume");
     const Tweak* preamp = FindTweak("replaygain.preamp");
@@ -411,12 +497,14 @@ void TestTweaks(const std::wstring& scratch) {
     SetTweak(*newMusic, 0);
     g.inboxEnabled = true;
     LoadPreferences();
+    batch.Next(L"new music defaults to automatic and the Inbox choice stays compatible and persists");
     Check(automaticDefault && review && !g.inboxEnabled && IniRead(L"Library", L"Inbox", L"") == L"0",
           L"new music defaults to automatic, and the Inbox choice remains compatible and persists through Preferences");
     resume->put(0);
     preamp->put(2.5);
     loops->put(1);
     SavePreferences();
+    batch.Next(L"tweaks keep their ini sections and number formats, and come back on the next start");
     Check(IniRead(L"Player", L"ResumeOn", L"") == L"0" && IniRead(L"ReplayGain", L"Preamp", L"") == L"2.50" &&
               IniRead(L"Player", L"Loops", L"") == L"1",
           L"tweaks keep their settings.ini sections, keys and number formats");
@@ -450,12 +538,14 @@ void TestTweaks(const std::wstring& scratch) {
     WritePrivateProfileStringW(L"ReplayGain", L"Enabled", nullptr, g.iniPath.c_str());
     IniWrite(L"ReplayGain", L"Mode", L"0");
     LoadPreferences();
+    batch.Next(L"out-of-range and invalid values are clamped or ignored, and old profiles still load their mode");
     Check(g.loops == 3 && g.rgKeep == 0.9f && g.rgPreamp == 0, L"out-of-range and invalid values are clamped or ignored");
     Check(!g.rgOn, L"a profile from before the ReplayGain switch still loads its old mode");
 
     SetTweak(*albums, 0);
     SetTweak(*loops, 0);
     SetTweak(*amount, 5);
+    batch.Next(L"a live change runs the setting's command, is clamped, saved at once and described in words");
     Check(!g.groupAlbums && IniRead(L"Window", L"GroupAlbums", L"") == L"0" && g.loops == 0 && g.reverb.mix == 1 &&
               IniRead(L"Effects", L"ReverbAmount", L"") == L"1.00",
           L"a live change runs the setting's command, is clamped into range and is saved at once");
@@ -466,6 +556,7 @@ void TestTweaks(const std::wstring& scratch) {
     if (saving && robotic) {
         SetTweak(*saving, (double)PreferenceSaving::Manual);
         SetTweak(*robotic, 0);
+        batch.Next(L"Preference saving and robotic sounds are set from Preferences under their old settings keys");
         Check(g.preferenceSaving == PreferenceSaving::Manual && g.preferenceSavingChosen &&
                   IniRead(L"Suggestions", L"SavingMode", L"") == L"2" && !RoboticSounds() &&
                   IniRead(L"Window", L"RoboticSounds", L"") == L"0" && !wcscmp(TweakPage(*saving), L"Startup"),
@@ -475,6 +566,32 @@ void TestTweaks(const std::wstring& scratch) {
     } else {
         Check(false, L"Preferences lists Preference saving and robotic sounds");
     }
+
+    const Tweak* pauseScrobbling = FindTweak("scrobbling.paused");
+    const Tweak* nowPlaying = FindTweak("scrobbling.now_playing");
+    if (Ready(pauseScrobbling && nowPlaying, L"Preferences exposes scrobbling controls")) {
+        SetTweak(*pauseScrobbling, 1); SetTweak(*nowPlaying, 0);
+        listenbrainz::SetPaused(false); listenbrainz::SetSendNowPlaying(true); LoadPreferences();
+        batch.Next(L"Scrobbling choices persist and its setup window exposes all three services");
+        Check(listenbrainz::Paused() && !listenbrainz::SendNowPlaying() &&
+                  !wcscmp(TweakPage(*pauseScrobbling), L"Scrobbling"),
+              L"Scrobbling pause and now-playing choices persist on their own Preferences page");
+        SetTweak(*pauseScrobbling, 0); SetTweak(*nowPlaying, 1);
+    }
+    ShowListenBrainz();
+    HWND scrobbling = FindWindowW(L"CordinalListenBrainz", nullptr);
+    HWND services = GetDlgItem(scrobbling, 102);
+    bool serviceUi = services && SendMessageW(services, CB_GETCOUNT, 0, 0) == 3 &&
+        IsWindowVisible(GetDlgItem(scrobbling, 100)) && !IsWindowVisible(GetDlgItem(scrobbling, 103));
+    for (int i : {1, 2}) {
+        SendMessageW(services, CB_SETCURSEL, i, 0);
+        SendMessageW(scrobbling, WM_COMMAND, MAKEWPARAM(102, CBN_SELCHANGE), (LPARAM)services);
+        serviceUi = serviceUi && IsWindowVisible(GetDlgItem(scrobbling, 103)) &&
+            IsWindowVisible(GetDlgItem(scrobbling, 104)) && !IsWindowVisible(GetDlgItem(scrobbling, 100)) &&
+            (GetWindowLongW(GetDlgItem(scrobbling, 104), GWL_STYLE) & ES_PASSWORD);
+    }
+    Check(serviceUi, L"Scrobbling setup exposes all three services and switches between token and browser authentication");
+    if (scrobbling) DestroyWindow(scrobbling);
 
     int effects = 0, nightRow = -1;
     for (const Tweak& t : Tweaks())
@@ -491,6 +608,7 @@ void TestTweaks(const std::wstring& scratch) {
         SendMessageW(pages, LB_SETCURSEL, page, 0);
         SendMessageW(window, WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(pages), LBN_SELCHANGE), (LPARAM)pages);
     };
+    batch.Next(L"Preferences opens on the asked setting, lists every tweak and searches across all pages");
     Check(list && pages && ListView_GetItemCount(list) == effects &&
               ListView_GetNextItem(list, -1, LVNI_SELECTED) == nightRow,
           L"Preferences opens on the asked-for setting's page with that setting selected");
@@ -506,6 +624,7 @@ void TestTweaks(const std::wstring& scratch) {
     std::vector<std::wstring> texts = {L"Display mode", L"Play / Pause Playback", L"Repeat playlist Playback",
                                        L"Remove Edit"};
     const std::vector<std::wstring> ties{L"Replay", L"Play one", L"Can play", L"Display", L"PLAY two", L"More play"};
+    batch.Next(L"the palette ranks matches, lists the menu bar's commands and runs the chosen one");
     Check(RankMatches(texts, L"play") == std::vector<int>{1, 2, 0} && RankMatches(texts, L"re pl") == std::vector<int>{2} &&
               RankMatches(ties, L" PLAY ") == std::vector<int>{1, 4, 2, 5, 0, 3} &&
               RankMatches(ties, L"") == std::vector<int>{0, 1, 2, 3, 4, 5} && RankMatches(ties, L"absent").empty(),
@@ -533,7 +652,8 @@ void TestTweaks(const std::wstring& scratch) {
         if (edit) SetWindowTextW(edit, words);
         return items ? (int)SendMessageW(items, LB_GETCOUNT, 0, 0) : 0;
     };
-    Check(listed(L"skip-aware shuffle") == 1 && listed(L"listenbrainz scrobbling") == 1 &&
+    batch.Next(L"the palette still finds settings that moved to Preferences and keeps existing pack shortcuts");
+    Check(listed(L"skip-aware shuffle") == 1 && listed(L"File Scrobbling") == 1 &&
               listed(L"start with windows") == 1 && MenuCommandByName(L"Skip-aware shuffle") == IDM_SKIP_SHUFFLE &&
               MenuCommandByName(L"Web server") == IDM_WEB_SERVER,
           L"the palette still finds the settings and windows that moved from the menus to Preferences");
@@ -547,12 +667,13 @@ void TestTweaks(const std::wstring& scratch) {
     HMENU menus = BuildMenu(), view = GetSubMenu(menus, 5), extras = nullptr;
     for (int i = 0, n = GetMenuItemCount(view); i < n && !extras; ++i)
         if (HMENU sub = GetSubMenu(view, i); sub && Holds(sub, IDM_POINTS)) extras = sub;
+    batch.Next(L"menus hold actions while settings live in Preferences, each with a row or a window there");
     Check(GetMenuItemCount(menus) == (int)std::size(ui::kMenuBar) && extras && Holds(extras, IDM_GAME_NAME_THAT_TRACK) &&
               Holds(extras, IDM_GAME_WHICH_CAME_FIRST) && Holds(extras, IDM_REVIEW),
           L"no Games menu: the games, points and Year in review share one View submenu");
     Check(Holds(GetSubMenu(menus, 0), IDM_WEB_SERVER) && !Holds(GetSubMenu(menus, 4), IDM_WEB_SERVER) &&
-              !Holds(menus, IDM_LISTENBRAINZ),
-          L"Web server is in the File menu and ListenBrainz in Preferences, both out of the Library menu");
+              Holds(GetSubMenu(menus, 0), IDM_LISTENBRAINZ) && !Holds(GetSubMenu(menus, 4), IDM_LISTENBRAINZ),
+          L"Web server and Scrobbling are reachable from the File menu, not the Library menu");
     auto inPreferences = [](int command) {
         for (const Tweak& t : Tweaks())
             if (t.command == command) return true;
@@ -560,11 +681,12 @@ void TestTweaks(const std::wstring& scratch) {
             if (link.command == command) return true;
         return false;
     };
+    Check(inPreferences(IDM_LISTENBRAINZ), L"Scrobbling remains available in Preferences");
     bool moved = !Holds(menus, IDM_OUTPUT_EXCLUSIVE) && !Holds(menus, IDM_PREFERENCE_MANUAL);
     for (int id : {IDM_SKIP_SHUFFLE, IDM_RESUME, IDM_OUTPUT_SHARED, IDM_LOOPS_BASE, IDM_RG_AUTO_SCAN, IDM_RG_ESTIMATE,
                    IDM_LOUDNESS_COMP, IDM_SOUND_EFFECTS, IDM_TASKBAR_PROGRESS, IDM_START_WITH_WINDOWS, IDM_THEME_ROBOTIC,
                    IDM_PREFERENCE_ASK, IDM_STARTUP_DEFAULTS, IDM_FORMAT, IDM_CONVERT_RECYCLE, IDM_CONVERT_SHOW_ORIGINALS,
-                   IDM_CONVERT_MEMORY_BASE, IDM_LISTENBRAINZ})
+                   IDM_CONVERT_MEMORY_BASE})
         moved = moved && !Holds(menus, id) && inPreferences(id);
     Check(moved, L"settings left the menus for Preferences, each with a row or a window there");
     // Waits out any import or scan an earlier check started, then stands in for one.
@@ -589,6 +711,7 @@ void TestTweaks(const std::wstring& scratch) {
         UpdateMainMenu(menus);
         comesAndGoes = comesAndGoes && !Holds(menus, IDM_CANCEL_IMPORT) && !Holds(menus, IDM_RG_CANCEL);
     }
+    batch.Next(L"Cancel import and Cancel scan are in the menus only while an import or a scan runs");
     Check(comesAndGoes, L"Cancel import and Cancel scan are in the menus only while an import or a scan runs");
     DestroyMenu(menus);
     if (bar) {
@@ -609,6 +732,7 @@ void TestTweaks(const std::wstring& scratch) {
 void TestThemes() {
     using namespace app;
     testlog::Group group(L"themes");
+    testlog::Batch batch;
     std::wstring failures;
     for (int t = 0; t < (int)ThemeMode::Count; ++t) {
         const Theme& theme = ThemeInfo((ThemeMode)t);
@@ -617,6 +741,7 @@ void TestThemes() {
             if (!PaletteLegibility(*p).empty()) failures += std::wstring(failures.empty() ? L"" : L", ") + theme.name;
     }
     if (!failures.empty()) failures = L" (fails: " + failures + L")";
+    batch.Next(L"every theme palette and the accent keep text, selection and markers legible");
     Check(failures.empty(), L"every theme palette keeps text, selection and accents legible%ls", failures.c_str());
     Check(TextOn(0xFFFF00) == 0x000000 && TextOn(0xC8303A) == 0xFFFFFF && Contrast(0x000000, 0xFFFFFF) > 20.9,
           L"text on the accent is black on yellow and white on cardinal red");
@@ -644,6 +769,7 @@ void TestThemes() {
         fonts = fonts && g.themeMode == t && face() == ThemeInfo(t).font && g.pal == ThemeInfo(t).palette;
     }
     OnCommand(IDM_THEME_BASE + (int)ThemeMode::Dark, 0, nullptr);
+    batch.Next(L"Paper, Midnight and Terminal bring their own face and Dark restores the system one");
     Check(fonts && face() == system, L"Paper, Midnight and Terminal bring their own face and Dark restores the system one");
 
     // Apollo's window in the normal size: no menu bar, Apollo's columns under its own headings, no
@@ -660,6 +786,7 @@ void TestThemes() {
         bool apollo = ApolloMode() && !GetMenu(g.hwnd) && g.columns.size() == 8 && g.columns[1] == kColApolloTitle &&
                       std::wstring(heading) == L"No" && !GroupingActive() && !CanvasActive() && face() == L"Tahoma";
         OnCommand(IDM_THEME_BASE + (int)ThemeMode::Dark, 0, nullptr);
+        batch.Next(L"the Apollo theme arranges Apollo's window and leaving it restores Cordinal's");
         Check(apollo && !ApolloMode() && (GetMenu(g.hwnd) != nullptr) == hadMenu &&
                   (g.columns.size() < 2 || g.columns[1] != kColApolloTitle),
               L"the Apollo theme arranges Apollo's window and leaving it restores Cordinal's");
@@ -673,6 +800,7 @@ void TestThemes() {
 void TestPersonalization(const std::wstring& scratch) {
     using namespace app;
     testlog::Group group(L"personalization across restarts");
+    testlog::Batch batch;
     // A theme other than the default Light, among those this build has.
     const ThemeMode chosen = kExtraThemes ? ThemeMode::Deltarune : ThemeMode::System;
     const std::wstring original = g.iniPath;
@@ -689,6 +817,7 @@ void TestPersonalization(const std::wstring& scratch) {
     g.iniPath = profile;
     reload();
     ResetPreferenceSuggestions();
+    batch.Next(L"a new profile starts with the built-in personalization defaults");
     Check(g.layout == MainLayout{} && g.volumePercent == 80 && g.browserVisible &&
               g.libMode == LibraryMode::Albums && g.columns == kDefaultColumns &&
               g.defaultSize == ViewSize::Normal && !g.defaultMiniPlayer,
@@ -748,6 +877,7 @@ void TestPersonalization(const std::wstring& scratch) {
     SetViewSize(ViewSize::Compact);
     ULONGLONG changed = GetTickCount64();
     ObservePreferenceChanges(changed);
+    batch.Next(L"presentation changes collect into one review after five settled minutes");
     Check(PendingStartupDefaults() == kAllStartupDefaults && !PreferenceSuggestionsDue(changed + 20000) &&
               PreferenceSuggestionsDue(changed + 300000),
           L"presentation changes collect into one review after five settled minutes");
@@ -756,6 +886,7 @@ void TestPersonalization(const std::wstring& scratch) {
     SaveViewSize();
     SavePreferences();
     SaveBrowserSettings();
+    batch.Next(L"unchecked choices retain approved defaults through all session-save paths");
     Check(g.defaultSize == ViewSize::Normal && IniInt(L"Window", L"DefaultSize", -1) == (int)ViewSize::Normal &&
               IniInt(L"Window", L"Theme", -1) == (int)ThemeMode::Light &&
               IniInt(L"Library", L"View", -1) == (int)LibraryMode::Albums &&
@@ -763,11 +894,13 @@ void TestPersonalization(const std::wstring& scratch) {
           L"unchecked choices retain approved defaults through all session-save paths");
     g.browserVisible = true;
     ObservePreferenceChanges(changed + 200000);
+    batch.Next(L"later changes restart the settling delay and reverted choices leave the batch");
     Check(!PreferenceSuggestionsDue(changed + 300000) && PreferenceSuggestionsDue(changed + 500000) &&
               !(PendingStartupDefaults() & kDefaultBrowser),
           L"later changes restart the settling delay and reverted choices leave the batch");
     g.browserVisible = false;
     SaveStartupDefaults(choices, kDefaultWindowSize | kDefaultTheme);
+    batch.Next(L"saving from a review writes only checked defaults, keeps its snapshot and saves explicit preferences");
     Check(g.defaultSize == ViewSize::Compact && g.defaultTheme == chosen &&
               g.defaultLibraryMode == LibraryMode::Albums && g.defaultBrowserVisible && g.defaultLayout == MainLayout{} &&
               g.libMode == LibraryMode::Tracks && !g.browserVisible && g.layout == expected,
@@ -787,6 +920,7 @@ void TestPersonalization(const std::wstring& scratch) {
     // Discard the in-memory choices, then load the saved profile as a new launch does.
     g.iniPath = empty;
     reload();
+    batch.Next(L"missing settings use defaults rather than stale choices, and older profiles keep their size");
     Check(g.layout == MainLayout{} && !g.eq.enabled && g.eq.gains[2] == 0 && g.volumePercent == 80 && !g.shuffle &&
               !g.eq.crossfeed && !g.eq.parametric && !g.eq.filterCount && !g.skipAwareShuffle && !g.radio &&
               g.reverb == ReverbSettings{} && !g.loudnessComp && !g.nightMode && g.rgEstimate && g.convertRecycle &&
@@ -798,6 +932,8 @@ void TestPersonalization(const std::wstring& scratch) {
           L"an older profile keeps its saved size until a different default is approved");
     g.iniPath = profile;
     reload();
+    batch.Next(L"player position, layout, theme, playback, ReplayGain, equalizer, reverb and conversion "
+               L"choices survive reloading");
     Check(g.layout == expected && g.themeMode == chosen && g.shuffle == kShuffleAlbums && g.repeat == Repeat::One &&
               !g.timeRemaining && !g.groupAlbums && g.alwaysOnTop && !g.taskbarProgress && g.loops == 3,
           L"player position, layout parts, theme and playback/display choices survive reloading");
@@ -837,6 +973,7 @@ void TestPersonalization(const std::wstring& scratch) {
                 fits &= control.left >= 0 && control.top >= 0 && control.right <= client.right &&
                         control.bottom <= client.bottom && control.right > control.left && control.bottom > control.top;
             }
+            batch.Next(L"headphone EQ controls and instructions fit inside the native window at the active DPI");
             Check(fits, L"headphone EQ controls fit inside the native window");
             HWND hint = GetDlgItem(g.eqWnd, IDC_EQ_HINT);
             wchar_t hintText[512];
@@ -856,6 +993,7 @@ void TestPersonalization(const std::wstring& scratch) {
             const int hardwarePreset = g.headset.preset;
             SendDlgItemMessageW(g.eqWnd, IDC_EQ_HEADPHONE_PAGE, BM_CLICK, 0, 0);
             HWND embeddedPage = g.headphonesWnd;
+            batch.Next(L"Headphone EQ switches to embedded controls, keeps both drafts and switches back with Ctrl+Tab");
             Check(embeddedPage && GetParent(embeddedPage) == g.eqWnd &&
                   (GetWindowLongPtrW(embeddedPage, GWL_STYLE) & WS_VISIBLE) &&
                   !(GetWindowLongPtrW(editor, GWL_STYLE) & WS_VISIBLE),
@@ -888,6 +1026,7 @@ void TestPersonalization(const std::wstring& scratch) {
             }
             SelectEqPage(false);
             SendMessageW(g.eqWnd, WM_COMMAND, IDC_EQ_APPLY, 0);
+            batch.Next(L"Apply, crossfeed, Reset and the preamp slider drive the graphic and parametric settings");
             Check(g.eq.parametric && g.eq.preamp == -4 && g.eq.filterCount == 1 && g.eq.filters[0].frequency == 2500 &&
                       !IsWindowEnabled(GetDlgItem(g.eqWnd, IDC_EQ_SLIDER0 + 1)),
                   L"Apply profile updates actual settings and disables graphic band editing");
@@ -923,6 +1062,7 @@ void TestPersonalization(const std::wstring& scratch) {
             SendMessageW(graph, WM_MOUSEWHEEL, MAKEWPARAM(0, WHEEL_DELTA), 0);
             const bool narrowed = g.eq.filters[0].q > kGraphicQ;
             SendMessageW(graph, WM_KEYDOWN, VK_DELETE, 0);
+            batch.Next(L"the EQ curve sets bands and adds, reshapes and deletes filters; closing drops the headphone page");
             Check(bandSet && added && narrowed && g.eq.filterCount == 0,
                   L"the EQ curve sets graphic bands, and adds, reshapes and deletes parametric filters");
             DestroyWindow(g.eqWnd);
@@ -932,17 +1072,20 @@ void TestPersonalization(const std::wstring& scratch) {
         SaveEq();
         g.engine.SetEq({});
     }
+    batch.Next(L"a muted restart retains the previous audible volume and unmuting restores the chosen one");
     Check(g.volumePercent == 0 && g.lastAudibleVolume == 37, L"a muted restart retains the previous audible volume");
     ToggleMute();
     Check(g.volumePercent == 37, L"unmuting after a restart restores the chosen volume");
     std::vector<int> restoredOrder(g.columns.size());
     ListView_GetColumnOrderArray(g.list, (int)restoredOrder.size(), restoredOrder.data());
+    batch.Next(L"library view, browser fields/height and column visibility/width/order survive reloading");
     Check(g.libMode == LibraryMode::Tracks && !g.browserVisible && g.browserHeight == 213 &&
               g.panes[0].field == BrowseField::Composer && g.panes[1].field == BrowseField::Folder &&
               SubitemOf(kColRating) < 0 &&
               ListView_GetColumnWidth(g.list, SubitemOf(2)) == S(333) && restoredOrder == order,
           L"library view, browser fields/height and column visibility/width/order survive reloading");
     RestoreWindowPlacement(SW_HIDE);
+    batch.Next(L"the saved compact size and reduced memory policy are restored without a new suggestion");
     Check(g.size == ViewSize::Compact && ReducedMemoryMode(),
           L"the saved compact size and reduced memory policy are restored on launch");
     Check(!PreferenceSuggestionsDue(GetTickCount64() + 300000),
@@ -958,8 +1101,10 @@ void TestPersonalization(const std::wstring& scratch) {
         RestoreWindowPlacement(SW_HIDE);
         approved.Add(g.size == size && !g.defaultMiniPlayer, L"size " + std::to_wstring((int)size));
     }
+    batch.Next(L"each approved startup size survives temporary size changes and profile reloads");
     Check(approved.Passed(), L"each approved startup size survives temporary size changes and profile reloads%ls",
           approved.failed.c_str());
+    batch.End();
     TestPreferenceSavingModes(scratch);
     TestTweaks(scratch);
 
@@ -987,6 +1132,7 @@ void TestPersonalization(const std::wstring& scratch) {
                 themeScoped = themeScoped && IniInt(L"Waveform", L"Left", -1) == style;
             }
         }
+        batch.Next(L"fountain styles appear only in DELTARUNE at every edge and survive theme switches");
         Check(themeScoped, L"fountain styles appear only in DELTARUNE at every edge and survive theme switches");
         bool savedLiveWave = g.liveWaveform, savedLiveFountain = g.liveFountain;
         g.liveWaveform = true; g.liveFountain = false;
@@ -994,6 +1140,13 @@ void TestPersonalization(const std::wstring& scratch) {
         SendMessageW(g.seek, TBM_SETPOS, FALSE, 625);
         g.liveFountain = true; WaveformTick();
         bool fountain = FountainShown() && SendMessageW(g.seek, TBM_GETPOS, 0, 0) == 625;
+        if (const Tweak* display = FindTweak("view.waveform")) {
+            SetTweak(*display, 0);
+            bool regular = !FountainShown() && !LiveWaveformShown() && g.liveWaveform && g.liveFountain;
+            SetTweak(*display, 1);
+            Check(regular && FountainShown() && SendMessageW(g.seek, TBM_GETPOS, 0, 0) == 625,
+                  L"regular playback overrides the live fountain and restores it without changing the seek position");
+        }
         g.liveFountain = false; WaveformTick();
         Check(bars && fountain && !FountainShown(),
               L"the live fountain can replace live bars and be switched back without moving the song's seek position");
@@ -1001,9 +1154,11 @@ void TestPersonalization(const std::wstring& scratch) {
         g.playing = savedPlaying;
     }
     OnCommand(IDM_WAVE_STYLE_BASE, 0, nullptr);  // Bars remains an explicit choice at every edge
+    batch.Next(L"plain waveform style remains available and a hidden waveform does not run the fountain");
     Check(!FountainShown(), L"plain waveform style remains available");
     g.layout.wave = false;
     Check(!FountainShown(), L"a hidden waveform does not run the fountain");
+    batch.End();
     TestWaveform(scratch);
     TestTabOverflow();
     TestThemes();
@@ -1025,6 +1180,7 @@ void TestPersonalization(const std::wstring& scratch) {
         SaveEq();
         SaveOutputReplayGainHeadroom(6.5f);
         SyncOutputEq(L"test-headphones-b");
+        batch.Next(L"per-output EQ and ReplayGain headroom stay separate per endpoint, survive reload and never leak");
         Check(!g.rememberOutputEq && g.eq.preamp == originalEq.preamp && g.eq.crossfeed == originalEq.crossfeed,
               L"an unassigned output uses global sound, not the previous headphone curve");
         Check(g.rgHeadphoneHeadroom == 0, L"an output has no guessed ReplayGain headset reserve");
@@ -1072,6 +1228,7 @@ void TestPersonalization(const std::wstring& scratch) {
         g.eqWnd = CreateWindowW(kEqClass, L"EQ page test", WS_POPUP,
             0, 0, S(740), S(590), g.hwnd, nullptr, g.inst, nullptr);
         SelectEqPage(true);
+        batch.Next(L"the native headphone page shows supported hardware values and distinguishes saved from active curves");
         Check(g.headphonesWnd && GetParent(g.headphonesWnd) == g.eqWnd,
               L"the native headphone settings page creates inside the equalizer");
         if (g.headphonesWnd) {
@@ -1090,6 +1247,7 @@ void TestPersonalization(const std::wstring& scratch) {
                   curveRect.bottom <= pageRect.bottom,
                   L"headphone EQ distinguishes the saved Custom curve from the active factory preset");
             SendDlgItemMessageW(g.headphonesWnd, IDC_EQ_REMEMBER, BM_CLICK, 0, 0);
+            batch.Next(L"Remember needs an explicit checkbox choice, and unknown devices keep software controls usable");
             Check(g.rememberOutputEq && IniInt(section.c_str(), L"Remember", 0) == 1,
                   L"Remember requires an explicit checkbox choice and saves the current output only");
             g.headset.hardware = false;
@@ -1102,6 +1260,7 @@ void TestPersonalization(const std::wstring& scratch) {
                   L"unknown devices retain software profiles and ReplayGain reserve while unsupported hardware controls stay disabled");
             SetDlgItemTextW(g.headphonesWnd, IDC_EQ_RG_HEADROOM, L"4.5");
             SendDlgItemMessageW(g.headphonesWnd, IDC_EQ_HW_APPLY, BM_CLICK, 0, 0);
+            batch.Next(L"Apply saves a valid ReplayGain reserve, refuses invalid values and verifies the endpoint id");
             Check(g.rgHeadphoneHeadroom == 4.5f && IniFloat(section.c_str(), L"ReplayGainHeadroom", 0) == 4.5f,
                   L"the real headphone Apply button saves an explicit ReplayGain reserve without requiring native hardware");
             for (const wchar_t* bad : {L"-1", L"25", L"nan", L"6junk", L""}) {
@@ -1122,6 +1281,7 @@ void TestPersonalization(const std::wstring& scratch) {
         g.headset = originalHeadset;
         g.rgHeadphoneHeadroom = originalHeadroom;
         SaveEq();
+        batch.End();
     }
 
     g.iniPath = original;
@@ -1135,6 +1295,7 @@ void TestPersonalization(const std::wstring& scratch) {
 void TestWebPreferences(const std::wstring& scratch) {
     using namespace app;
     testlog::Group group(L"web server controls and shared listening");
+    testlog::Batch batch;
     const std::wstring original = g.iniPath, profile = scratch + L"\\web-preferences.ini";
     WriteTestBytes(profile, "\xFF\xFE"); g.iniPath = profile; LoadPreferences();
     StopWebServer(); InitWebServer(); ShowWebServer();
@@ -1145,6 +1306,7 @@ void TestWebPreferences(const std::wstring& scratch) {
     }
     auto text = [&](int id) { wchar_t value[128]{}; GetDlgItemTextW(dialog, id, value, 128); return std::wstring(value); };
     auto click = [&](int id) { SendDlgItemMessageW(dialog, id, BM_CLICK, 0, 0); };
+    batch.Next(L"a new profile defaults to port 8787, a new code, no startup and away-from-home listening off");
     Check(text(101) == L"8787" && SendDlgItemMessageW(dialog, 103, BM_GETCHECK, 0, 0) == BST_UNCHECKED &&
               text(112).empty() && !WebStartsWithCordinal(),
           L"a new profile defaults to port 8787, a new code each time and does not opt into startup");
@@ -1154,6 +1316,7 @@ void TestWebPreferences(const std::wstring& scratch) {
           L"away-from-home listening is off in a new profile, with nothing to copy or scan");
     SetWebPortForTest(0);  // what the checkbox starts listens on loopback only
     click(103);
+    batch.Next(L"explicit startup opt-in is saved and starts the server, and opting out leaves it running");
     Check(IniInt(L"Web", L"Start", 0) == 1 && WebStartsWithCordinal() && text(102) == L"Stop server",
           L"explicit startup opt-in is saved immediately and starts the server now");
     click(103);
@@ -1164,6 +1327,7 @@ void TestWebPreferences(const std::wstring& scratch) {
         SetDlgItemTextW(dialog, 112, weak); click(113);
         weakCodes.Add(IniRead(L"Web", L"Code", L"").empty() && text(114).find(L"(fixed)") == std::wstring::npos, weak);
     }
+    batch.Next(L"fixed codes are refused, normalised, kept across restarts and can go back to a new code each time");
     Check(weakCodes.Passed(), L"unusable fixed codes (too short, repeated, not digits) are refused and not saved%ls",
           weakCodes.failed.c_str());
     SetDlgItemTextW(dialog, 112, L"4829 1735"); click(113);
@@ -1180,6 +1344,7 @@ void TestWebPreferences(const std::wstring& scratch) {
     wchar_t port[16]{};
     SetDlgItemTextW(dialog, 101, L"70000"); SendDlgItemMessageW(dialog, 102, BM_CLICK, 0, 0);
     GetDlgItemTextW(dialog, 101, port, 16);
+    batch.Next(L"invalid edited or stored ports keep the edited value or fall back, and bad stored codes are unused");
     Check(wcscmp(port, L"70000") == 0 && IsWindowEnabled(GetDlgItem(dialog, 101)),
           L"invalid ports do not start a listener or change the edited value");
     DestroyWindow(dialog);
@@ -1197,6 +1362,7 @@ void TestWebPreferences(const std::wstring& scratch) {
     double desktopSeconds = g.listened;
     uint32_t plays = g_lib[id].playCount, skips = g_lib[id].skipCount;
     RecordListening(id, .6, true); RecordListening(id, 1.1, false);
+    batch.Next(L"browser listens use normal thresholds without changing the desktop playback session");
     Check(g_lib[id].playCount == plays + 1 && g_lib[id].skipCount == skips + 1 &&
           g.playing == playing && g.listened == desktopSeconds,
           L"browser listens use normal thresholds without changing the desktop playback session");

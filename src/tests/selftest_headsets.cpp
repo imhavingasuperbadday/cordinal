@@ -3,6 +3,9 @@
 #include "selftest_common.h"
 
 void TestHeadsets() {
+    testlog::Batch batch;
+    batch.Next(L"headphone recognition tolerates case, punctuation and connection suffixes without confusing "
+               L"generations or guessing a model, and output profile keys stay stable per endpoint");
     Check(RecognizeHeadphones(L"Speakers (RAZER BlackShark V2 Pro 2.4)") == L"Razer BlackShark V2 Pro" &&
           RecognizeHeadphones(L"Headphones (WH-1000XM5)") == L"Sony WH-1000XM5" &&
           RecognizeHeadphones(L"Headphones (Arctis Nova 7X)") == L"SteelSeries Arctis Nova 7 family" &&
@@ -14,6 +17,8 @@ void TestHeadsets() {
     Check(OutputProfileSection(L"endpoint-a") == OutputProfileSection(L"endpoint-a") &&
           OutputProfileSection(L"endpoint-a") != OutputProfileSection(L"endpoint-b"),
           L"output profile keys are stable and keep distinct endpoints separate");
+    batch.Next(L"the BlackShark wire format is exact: the battery query envelope, the handshake flag layout, "
+               L"setting payloads, complete matching ACK replies and ten-band EQ curves");
     auto report = BlackSharkReport(3, 0x21);
     Check(report[0] == 2 && report[1] == 0x80 && report[2] == 8 && report[5] == 'P' && report[6] == 'A' &&
           report[7] == 8 && report[9] == 3 && report[10] == 0x21 && report[12] == 0,
@@ -47,6 +52,8 @@ void TestHeadsets() {
     report[14] = 10;
     curve &= !BlackSharkReply(report.data(), 24, 0x15, bands.data(), bands.size()) && bands == originalBands;
     Check(curve, L"hardware EQ requires all ten signed bands; short replies cannot replace a complete curve");
+    batch.Next(L"hardware controls reject invalid sidetone, idle-time and preset values before any I/O, "
+               L"and writes require a discovered matching output");
     HeadsetChanges changes;
     changes.sidetone = 10; changes.idleMinutes = 15; changes.dnd = 1; changes.preset = 255;
     bool ranges = ValidHeadsetChanges(changes);
@@ -80,6 +87,8 @@ void TestHeadsets() {
     auto info = finish();
     fwprintf(g_log, L"LIVE headset: %ls, battery %d%%, sidetone %d, auto-off %d min, DND %d, preset %d\n",
         info.name.c_str(), info.battery, info.sidetone, info.idleMinutes, info.dnd, info.preset);
+    batch.Next(L"a live headset read reports its battery, a second hardware command cannot interleave with an "
+               L"in-flight change, and unchanged settings read back");
     Check(info.hardware && info.battery >= 0 && !info.busy, L"LIVE headset read: %ls, battery %d%%; %ls",
           info.name.c_str(), info.battery, info.status.c_str());
     if (info.hardware && info.battery >= 0 && !info.busy) {
@@ -103,6 +112,8 @@ void TestHeadsets() {
               (same.preset < 0 || after.preset == info.preset),
               L"LIVE unchanged settings read back: sidetone %d, auto-off %d, DND %d, preset %d; %ls",
               after.sidetone, after.idleMinutes, after.dnd, after.preset, after.status.c_str());
+        batch.Next(L"live presets switch within and across families with distinct readbacks, and the original "
+                   L"preset and all ten EQ bands are restored");
         if (info.eqKnown && ValidHeadsetChanges(HeadsetChanges{-1, -1, -1, info.preset}) && info.preset >= 0) {
             bool switched = true, distinct = false;
             auto previous = info.eqBands;

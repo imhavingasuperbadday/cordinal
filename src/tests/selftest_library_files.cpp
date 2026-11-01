@@ -5,6 +5,8 @@
 
 // Organize: planned paths, sanitizing, collisions, covers moving along, cleanup, and undo.
 void TestOrganize(const std::wstring& media, const std::wstring& scratch) {
+    testlog::Batch batch;
+    batch.Next(L"ORGANIZE plans safe paths and refuses without an undo log");
     Check(SafePathComponent(L"AC:DC? <live>") == L"AC_DC_ _live_" && SafePathComponent(L"CON") == L"CON_" &&
               SafePathComponent(L"nul.txt") == L"nul_.txt" && SafePathComponent(L"CON", 3) == L"CO_" &&
               SafePathComponent(L"Trailing dots... ") == L"Trailing dots",
@@ -43,6 +45,7 @@ void TestOrganize(const std::wstring& media, const std::wstring& scratch) {
     Check(planned, L"ORGANIZE plan: %ls | %ls | %ls", plan.size() > 0 ? plan[0].to.c_str() : L"", plan.size() > 1 ? plan[1].to.c_str() : L"",
           plan.size() > 2 ? plan[2].to.c_str() : L"");
     auto result = ExecuteOrganize(plan, logs, {in, out});
+    batch.Next(L"ORGANIZE move, undo and collision retry leave sources and logs consistent");
     bool moved = result.moved.size() == 3 && result.failed.empty() && GetFileAttributesW(plan[0].to.c_str()) != INVALID_FILE_ATTRIBUTES &&
                  GetFileAttributesW((in + L"\\A\\one.flac").c_str()) == INVALID_FILE_ATTRIBUTES;
     // A's audio went to two folders (AC-DC and Test Artist), so its cover stays; B moved whole.
@@ -76,6 +79,7 @@ void TestOrganize(const std::wstring& media, const std::wstring& scratch) {
               GetFileAttributesW(r2.log.c_str()) == INVALID_FILE_ATTRIBUTES,
           L"ORGANIZE a partial undo can be retried after resolving the collision");
     auto r3 = ExecuteOrganize(plan2, logs, {in, out});
+    batch.Next(L"ORGANIZE rapid successive runs preserve distinct undo logs");
     std::string firstLog = ReadTestBytes(r3.log);
     OrganizeMove nextMove{ids[0], plan2[0].to, out + L"\\again.flac", L""};
     auto r4 = ExecuteOrganize({nextMove}, logs, {in, out});
@@ -94,6 +98,8 @@ void TestOrganize(const std::wstring& media, const std::wstring& scratch) {
 // Folder scanner: the first listing, then watched changes (a new file, a deleted file and a
 // new subfolder) arriving as debounced re-lists of just the changed folders.
 void TestScanner(const std::wstring& media, const std::wstring& scratch) {
+    testlog::Batch batch;
+    batch.Next(L"SCANNER initial listing and watched changes arrive without duplicates");
     std::wstring root = scratch + L".scan";
     CreateDirectoryW(root.c_str(), nullptr);
     CreateDirectoryW((root + L"\\Album").c_str(), nullptr);
@@ -151,6 +157,7 @@ void TestScanner(const std::wstring& media, const std::wstring& scratch) {
 
     HANDLE blocked = CreateFileW((root + L"\\Album").c_str(), FILE_LIST_DIRECTORY, 0, nullptr,
                                  OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    batch.Next(L"SCANNER unreadable children and cancellation never produce partial results");
     if (Ready(blocked != INVALID_HANDLE_VALUE, L"a scratch child folder is locked against enumeration")) {
         std::vector<ScanFile> partial, recovered;
         bool incomplete = !ListAudioFiles(root, partial);
@@ -165,6 +172,7 @@ void TestScanner(const std::wstring& media, const std::wstring& scratch) {
     Check(!ListAudioFiles(root, cancelledFiles, &cancelled) && cancelledFiles.empty(), L"SCANNER cancelled listing stops");
 
     std::vector<std::wstring> roots;
+    batch.Next(L"SCANNER many watched folders, the 64-handle wait limit and manual rescan");
     for (int i = 0; i < 70; ++i) {
         roots.push_back(root + L"\\Watch" + std::to_wstring(i));
         CreateDirectoryW(roots.back().c_str(), nullptr);
@@ -202,6 +210,8 @@ void TestScanner(const std::wstring& media, const std::wstring& scratch) {
 // one of the scanner's audio types.
 void TestLibraryFolders(const std::wstring& scratch) {
     using namespace app;
+    testlog::Batch batch;
+    batch.Next(L"LIBRARY FOLDERS defaults, one-time cleanup and remembering choices");
     const std::wstring originalIni = g.iniPath;
     const auto originalFolders = g.libraryFolders;
     const std::wstring profile = scratch + L"\\folder-settings.ini";
@@ -237,6 +247,7 @@ void TestLibraryFolders(const std::wstring& scratch) {
     LoadLibrarySettings();
     Check(g.libraryFolders.empty(), L"LIBRARY FOLDERS removing every folder is remembered");
 
+    batch.Next(L"LIBRARY FOLDERS MP4 is an audio type and the open dialog offers it");
     Check(IsSupportedAudioFile(L"video.mp4") && OpenFileFilterSpec().find(L"*.mp4") != std::wstring::npos,
           L"LIBRARY FOLDERS MP4 audio is discovered, and the open dialog offers it");
 
@@ -248,6 +259,8 @@ void TestLibraryFolders(const std::wstring& scratch) {
 // must come back bit-identical and the tags must read as before.
 void TestTagUndo(const std::wstring& media, const std::wstring& scratch) {
     using namespace app;
+    testlog::Batch batch;
+    batch.Next(L"TAG UNDO journals edits, restores audio and keeps the newest 10 journals");
     const std::wstring dir = scratch + L"\\tagundo_test";
     DeleteTestFolder(dir);
     CreateDirectoryW(dir.c_str(), nullptr);
@@ -311,6 +324,7 @@ void TestTagUndo(const std::wstring& media, const std::wstring& scratch) {
 
     // A file the engine has open waits for playback, then is written during shutdown. This is the
     // path that used to drop the edit silently when cordinal closed while the song was playing.
+    batch.Next(L"TAG UNDO deferred and unsupported writes are handled");
     const std::wstring deferredCopy = scratch + L"\\deferred.flac";
     Ready(WriteTestBytes(deferredCopy, ReadTestBytes(media + L"\\sine.flac")), L"deferred tag fixture is written");
     const std::wstring savedDataDir = g.dataDir;
@@ -352,6 +366,7 @@ void TestTagUndo(const std::wstring& media, const std::wstring& scratch) {
 
 // Two copies of one FLAC with different tags share the audio MD5 in STREAMINFO, so they group.
 void TestAudioHash(const std::wstring& media, const std::wstring& scratch) {
+    testlog::Batch batch(L"DUPLICATES audio hashes group retagged copies but not WAV");
     const std::wstring a = scratch + L"\\hash_a.flac", b = scratch + L"\\hash_b.flac", w = scratch + L"\\hash_c.wav";
     WriteTestBytes(a, ReadTestBytes(media + L"\\sine.flac"));
     WriteTestBytes(b, ReadTestBytes(media + L"\\sine.flac"));
@@ -390,6 +405,8 @@ void TestAudioHash(const std::wstring& media, const std::wstring& scratch) {
 // first-scan fast path that does not defer new files.
 void TestScanMerge() {
     using namespace app;
+    testlog::Batch batch;
+    batch.Next(L"SCANMERGE folder membership and moves found across chunks");
     Check(!PathIsUnder(L"C:\\Music\\a.flac", L"") && PathIsUnder(L"C:\\Music\\a.flac", L"C:\\Music") &&
               !PathIsUnder(L"C:\\MusicOther\\a.flac", L"C:\\Music"),
           L"SCANMERGE folder membership rejects empty roots and partial folder names");
@@ -426,6 +443,7 @@ void TestScanMerge() {
 
     // A destination indexed by another root or import keeps its row; the stale row is hidden as
     // missing instead of remaining live beside it.
+    batch.Next(L"SCANMERGE indexed destinations and still-listed files are not treated as moves");
     reset();
     TrackId stale = add(L"C:\\ScanMerge\\Z\\Song.flac", 111, 222, 7);
     post(false, true, false, true, {{L"C:\\ScanMerge\\A\\Song.flac", 111, 222}});
@@ -446,6 +464,7 @@ void TestScanMerge() {
           L"SCANMERGE a still-listed file is not taken as moved (%zu tracks)", g_lib.Count());
 
     // Tracks gone from the scope are missing; tracks outside it are untouched.
+    batch.Next(L"SCANMERGE deletions, automatic additions and Inbox waits");
     reset();
     TrackId t4 = add(L"C:\\ScanMerge\\Album\\Gone.flac", 1, 2, 0);
     TrackId outside = add(L"C:\\Elsewhere\\Kept.flac", 1, 2, 0);
@@ -483,6 +502,7 @@ void TestScanMerge() {
           L"SCANMERGE a new file waits for the listing and joins the Inbox");
 
     // The first scan of an empty library adds files as their chunks arrive.
+    batch.Next(L"SCANMERGE first scans, malformed paths and unreachable roots");
     reset();
     post(true, true, false, true, {{L"C:\\ScanMerge\\A.flac", 1, 2}, {L"C:\\ScanMerge\\B.flac", 3, 4}});
     bool early = g_lib.Count() == 2;
@@ -505,6 +525,7 @@ void TestScanMerge() {
     post(false, true, true, false, {});
     Check(!(g_lib[t7].flags & Track::kMissing), L"SCANMERGE an unreachable root marks nothing missing");
 
+    batch.Next(L"SCANMERGE late incomplete chunks and ReplayGain retries");
     reset();
     TrackId locked = add(L"C:\\ScanMerge\\Locked\\Song.flac", 11, 22, 7);
     post(false, true, false, true, {{L"C:\\ScanMerge\\Other\\Song.flac", 11, 22}});

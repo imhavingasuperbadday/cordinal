@@ -50,6 +50,7 @@ LRESULT SurfaceControlColor(HDC dc, COLORREF text);
 void DoubleBufferedPaint(HWND hwnd, void (*draw)(HDC, RECT));
 void TrimMemory();
 bool ReducedMemoryMode();
+bool GpuDrawing();  // the library view draws through the graphics card
 size_t ViewMemoryBudget(size_t normal);
 void UpdateViewMemory();
 

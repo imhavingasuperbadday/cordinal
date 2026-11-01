@@ -4,8 +4,8 @@
 // a folder, and shown with what it holds and what was left out. While a pack is on, its window title, status
 // bar and now playing patterns replace the user's own (which stay saved), its title functions ($define ...)
 // and fields join the built-in ones, and its themes with their sounds, auto-playlists, key bindings and EQ
-// presets are offered. Columns, global keys, layouts and fonts are read and listed but not applied yet
-// (docs/linux-parity.md).
+// presets are offered. Fonts load privately while their pack is on. Columns, global keys and layouts
+// are read and listed but not applied yet (docs/linux-parity.md).
 #include "draw.h"
 #include "dsp.h"
 #include "packs.h"
@@ -29,6 +29,7 @@ struct Loaded {
     Pack pack;
     bool on = false;
     std::vector<TitleFunction> functions;
+    std::vector<std::wstring> fontWarnings;
 };
 std::vector<std::unique_ptr<Loaded>> g_packs;
 
@@ -143,9 +144,6 @@ std::wstring EscapeAmp(const std::wstring& text) {
     return out;
 }
 
-// What the packs that are on hold becomes current: their title functions, fields, themes and auto-playlists. The
-// theme in use, or the default one, stays chosen by name when a pack comes or goes; one whose pack went away
-// falls back to following the system.
 // A pack's key, as the Windows build reads keys.ini (app_packs.cpp): "Ctrl+Shift+N", "Alt+F4", "F5". A letter,
 // digit or other typed key needs Ctrl or Alt, so a pack can't take typing away.
 struct Binding {
@@ -257,6 +255,7 @@ void ApplyKeys() {
     }
 }
 
+// Apply enabled packs and retain the chosen themes by name; a removed theme follows the system.
 void ApplyAll() {
     std::wstring now = ThemeKeyOf(g.settings.theme), def = ThemeKeyOf(g.settings.defaultTheme);
     if (!g_themesApplied) {  // at start, the saved default is the theme in use too
@@ -270,8 +269,12 @@ void ApplyAll() {
     g_themes.clear();
     g_fields.clear();
     g_autoPlaylists.clear();
+    ResetPackFonts();
     for (auto& p : g_packs) {
+        p->fontWarnings.clear();
         if (!p->on) continue;
+        for (const PackFont& font : p->pack.fonts)
+            if (!AddPackFont(font.bytes)) p->fontWarnings.push_back(font.file + L": couldn't load this font");
         for (const PackAutoPlaylist& a : p->pack.autoPlaylists) g_autoPlaylists.push_back(&a);
         for (const auto& field : p->pack.fields) {
             std::erase_if(g_fields, [&](auto& f) { return f.first == field.first; });
@@ -421,6 +424,7 @@ PackRow PackAt(size_t index) {
     row.summary = l.pack.error.empty() ? PackSummary(l.pack) : L"";
     row.error = l.pack.error;
     row.warnings = l.pack.warnings;
+    row.warnings.insert(row.warnings.end(), l.fontWarnings.begin(), l.fontWarnings.end());
     for (const auto& [pack, warning] : g_keyWarnings)
         if (pack == &l) row.warnings.push_back(warning);
     row.on = l.on;

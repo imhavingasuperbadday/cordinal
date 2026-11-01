@@ -409,9 +409,12 @@ void TestWebAway(const std::wstring& scratch) {
     using web::JsonValue;
     using web::Server;
     using web::Config;
+    testlog::Batch batch;
     {
         testlog::Group group(L"away-from-home building blocks");
         JsonValue v;
+        batch.Next(L"the JSON reader takes nested values and escapes and refuses trailing junk, and base64url uses "
+                   L"the URL alphabet without padding");
         Check(web::ParseJson("{\"a\":[1,true,null,{\"b\":\"\\u00e9\\ud83c\\udfb5\\n\"}],\"c\":-2.5e3}", v) &&
               v["a"].items.size() == 4 && v["a"].items[1].kind == JsonValue::Kind::Bool &&
               v["a"].items[3].String("b") == "\xc3\xa9\xf0\x9f\x8e\xb5\n" && v["c"].text == "-2.5e3" &&
@@ -429,6 +432,8 @@ void TestWebAway(const std::wstring& scratch) {
             0xc0, 0x7d, 0x4c, 0x96};
         std::string address, other;
         uint8_t wrong[12] = {};
+        batch.Next(L"STUN replies give the public address and are matched to their own request, and private or "
+                   L"shared addresses are not taken for the internet address");
         Check(web::ParseStun({(const char*)reply, sizeof(reply)}, id, address) && address == "192.0.2.1" &&
               !web::ParseStun({(const char*)reply, sizeof(reply)}, wrong, other) &&
               !web::ParseStun({(const char*)reply, 30}, id, other),
@@ -436,6 +441,8 @@ void TestWebAway(const std::wstring& scratch) {
         Check(web::PublicIPv4("73.12.200.41") && !web::PublicIPv4("10.0.0.67") && !web::PublicIPv4("100.72.1.2") &&
               !web::PublicIPv4("192.168.1.1") && !web::PublicIPv4("172.20.0.1") && !web::PublicIPv4("not an address"),
               L"private and shared addresses are not taken for the internet address");
+        batch.Next(L"router discovery reads its description address, the connection service reports the internet "
+                   L"address, and a router that keeps only permanent mappings gets one that is removed again");
         Check(web::SsdpLocation("HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=120\r\nlocation: http://10.0.0.1:49152/rootDesc.xml\r\n"
                                 "ST: upnp:rootdevice\r\n\r\n") == "http://10.0.0.1:49152/rootDesc.xml",
               L"router discovery replies are read for their description address");
@@ -491,6 +498,8 @@ void TestWebAway(const std::wstring& scratch) {
         auto result = web::RequestCertificate(request);
         std::vector<std::string> names;
         uint64_t from = 0, until = 0;
+        batch.Next(L"a signed account, order and http-01 answer yield the certificate chain, and the answer is "
+                   L"withdrawn once the order is done");
         Check(result.chain.size() == 2 && web::CertificateInfo(result.chain[0], from, until, names) &&
               names == std::vector<std::string>{"127.0.0.1"} && until > from && ca.problem.empty() &&
               ca.identifiers == std::vector<std::string>{"ip:127.0.0.1"} && ca.profile == "shortlived",
@@ -502,6 +511,8 @@ void TestWebAway(const std::wstring& scratch) {
         away.identity = identity;
         away.url = "https://127.0.0.1:" + std::to_string(port) + "/";
         server.SetAway(away);
+        batch.Next(L"the issued chain serves HTTPS with the key it was requested for, and renewal signs with the "
+                   L"saved account key");
         Check(identity && Request(port, L"/", nullptr, {}, {}, false, true).status == 200,
               L"the issued chain serves HTTPS with the key it was requested for");
         auto again = web::RequestCertificate(request);
@@ -509,6 +520,7 @@ void TestWebAway(const std::wstring& scratch) {
               L"renewal signs with the saved account key and finds the same account");
         ca.unreachable = true;
         auto unreachable = web::RequestCertificate(request);
+        batch.Next(L"an address the authority cannot reach fails with its own reason");
         Check(unreachable.chain.empty() && unreachable.problem == "connection" &&
               unreachable.error.find("Timeout") != std::string::npos,
               L"an address the authority can't reach fails with its reason");
@@ -525,6 +537,8 @@ void TestWebAway(const std::wstring& scratch) {
         Pump(15000, [&] { return remote.GetStatus().state == web::RemoteStatus::State::Ready; });
         auto rs = remote.GetStatus();
         const std::string url = "https://203.0.113.7:" + std::to_string(rc.httpsPort) + "/";
+        batch.Next(L"the manager certifies the internet address, answers HTTPS on the outside port, closes its "
+                   L"ports when stopped and reuses a saved certificate");
         Check(rs.state == web::RemoteStatus::State::Ready && rs.url == url && server.GetStatus().away == url,
               L"the manager certifies the internet address and hands it to the server: %hs", rs.message.c_str());
         Pump(1000, [&] { return server.GetStatus().ports.size() == 3; });
@@ -560,6 +574,7 @@ void TestWeb(const std::wstring& scratch) {
     using web::Config;
     using web::Snapshot;
     std::atomic<bool> cancel{false};
+    testlog::Batch batch;
     {
         testlog::Group group(L"owned browser library snapshots");
         Library library;
@@ -586,6 +601,8 @@ void TestWeb(const std::wstring& scratch) {
             return s;
         };
         auto s = capture();
+        batch.Next(L"UI batches publish an owned capture that exposes only visible music, with saved order, "
+                   L"duplicates and automatic rules");
         Check(s && s->prepare, L"UI batches publish an owned capture for worker preparation");
         if (s && s->prepare) {
             library[visible].artist = library.Intern("Changed after capture");
@@ -603,6 +620,7 @@ void TestWeb(const std::wstring& scratch) {
             auto key = v != s->tracks.end() ? v->key : ""; builder.Reset();
             auto fresh = capture();
             if (fresh && fresh->prepare) fresh->prepare(*fresh);
+            batch.Next(L"replacement and compaction generations invalidate old opaque handles");
             Check(fresh && std::any_of(fresh->tracks.begin(), fresh->tracks.end(),
                     [&](const auto& t) { return t.id == visible && t.key != key; }),
                   L"replacement and compaction generations invalidate old opaque handles");
@@ -614,6 +632,8 @@ void TestWeb(const std::wstring& scratch) {
         catalog.playlists.push_back({"duplicates", "Duplicates", {"a", "b", "a", "b", "a"}});
         web::Request query; query.query = {{"playlist", "duplicates"}, {"offset", "4"}, {"limit", "1"}};
         auto page = web::Catalog(catalog, query);
+        batch.Next(L"duplicate-heavy saved playlists paginate beyond their unique track count, and unknown album "
+                   L"and artist groups select only their own tracks");
         Check(page.find("\"id\":\"a\"") != page.npos && page.find("\"id\":\"b\"") == page.npos,
               L"duplicate-heavy saved playlists paginate beyond the unique track count");
         query.query = {{"album", ""}, {"artist", ""}, {"date", ""}};
@@ -623,6 +643,8 @@ void TestWeb(const std::wstring& scratch) {
     {
         testlog::Group group(L"HTTP parsing and ranges");
         ByteRange range;
+        batch.Next(L"closed, suffix and open-ended byte ranges clamp to the representation, while invalid and "
+                   L"overflowing ones are refused");
         Check(ParseRange("bytes=4-9", 20, range) && range.first == 4 && range.size == 6 && range.partial,
               L"closed byte ranges include both endpoints");
         Check(ParseRange("bytes=-100", 20, range) && range.first == 0 && range.size == 20 &&
@@ -632,6 +654,8 @@ void TestWeb(const std::wstring& scratch) {
               !ParseRange("bytes=0-1,4-5", 20, range) && !ParseRange("bytes=-0", 20, range) &&
               !ParseRange("bytes=18446744073709551616-", 20, range), L"invalid and overflowing ranges are refused");
         web::Request r; size_t needed = 0;
+        batch.Next(L"query text is decoded as UTF-8, ambiguous framing, encoded paths and embedded NULs are "
+                   L"refused, and JSON escapes tag control characters");
         Check(ParseRequest("GET /api/v1/catalog?q=%E9%9B%AA HTTP/1.1\r\nHost: localhost\r\n\r\n", r, needed) &&
               r.query["q"] == "雪", L"query text is decoded as UTF-8");
         Check(!ParseRequest("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\na", r, needed) &&
@@ -648,6 +672,8 @@ void TestWeb(const std::wstring& scratch) {
     {
         testlog::Group group(L"browser data saver");
         auto compressed = web::AacMedia(track, 0, cancel);
+        batch.Next(L"data saver prepares a bounded AAC representation of complete stereo 48 kHz frames with an "
+                   L"exact length");
         Check(compressed.error.empty() && compressed.mime == "audio/aac" && compressed.size > 1000 &&
               compressed.size < original.size() / 8,
               L"Windows data saver prepares a bounded AAC representation with an exact length");
@@ -659,6 +685,8 @@ void TestWeb(const std::wstring& scratch) {
             web::AacCache cache;
             auto cached = ReadMedia(web::AacMedia(track, 0, cancel, 96, &cache), 0, SIZE_MAX);
             auto fragment = ReadMedia(web::AacMedia(track, 0, cancel, 96, &cache), 1003, 4321);
+            batch.Next(L"compressed byte ranges preserve the exact encoded representation across requests, and "
+                       L"cached resumption uses the new connection's cancellation state");
             Check(cached == aac && fragment == aac.substr(1003, 4321),
                   L"compressed byte ranges preserve the exact encoded representation across requests");
             std::atomic<bool> separateCancel{false};
@@ -667,6 +695,8 @@ void TestWeb(const std::wstring& scratch) {
             Check(resumed == fragment, L"cached audio resumption uses the new connection's cancellation state");
             cancel = false;
             auto balanced = ReadMedia(web::AacMedia(track, 0, cancel, 128), 0, SIZE_MAX);
+            batch.Next(L"balanced mode encodes the full track at a distinct higher bitrate that the independent "
+                       L"native decoder reads as audible finite PCM");
             Check(AdtsFrames(balanced) >= 94 && AdtsFrames(balanced) <= 98 && balanced.size() > aac.size() * 1.15 &&
                   balanced.size() < original.size() / 6,
                   L"balanced mode encodes the full track at a distinct higher compressed bitrate");
@@ -687,6 +717,8 @@ void TestWeb(const std::wstring& scratch) {
             Check(decoder && decoded >= 2 * 48000 && decoded < 2.1 * 48000 && finite && peak > .05f,
                   L"the independent native decoder reads audible finite PCM for the complete AAC stream");
             auto later = ReadMedia(web::AacMedia(track, 1, cancel), 0, SIZE_MAX);
+            batch.Next(L"compressed seeking emits only the requested remainder, a resume plays the second half, and "
+                       L"a changed source invalidates the representation");
             Check(AdtsFrames(later) >= 47 && AdtsFrames(later) <= 51 && later.size() < aac.size() * .7,
                   L"compressed seeking emits just the requested remaining audio");
             auto changing = WaveBytes(48000, 4);
@@ -725,6 +757,8 @@ void TestWeb(const std::wstring& scratch) {
             auto lowRate = track; lowRate.path = scratch + L"\\web-data-saver-8k.wav";
             Ready(WriteTestBytes(lowRate.path, WaveBytes(8000)), L"create an isolated low-rate streaming source");
             auto upsampled = ReadMedia(web::AacMedia(lowRate, 0, cancel), 0, SIZE_MAX);
+            batch.Next(L"large resampler output from low-rate sources is encoded completely, and CUE track "
+                       L"boundaries bound the compressed representation");
             Check(AdtsFrames(upsampled) >= 94 && AdtsFrames(upsampled) <= 98,
                   L"large resampler output from low-rate sources is encoded completely with bounded input blocks");
             auto audioCue = scratch + L"\\web-audio.cue";
@@ -746,6 +780,9 @@ void TestWeb(const std::wstring& scratch) {
             bool completed = stopped.send && stopped.send(0, (size_t)stopped.size, [&](const char*, size_t) {
                 ++packets; cancel = true; return true;
             });
+            batch.Next(L"disconnect cancellation stops the compressed encoder after its current packet, a "
+                       L"cancelled stream never starts, and invalid seeks or unsupported bitrates are refused "
+                       L"before a response");
             Check(!completed && packets == 1, L"disconnect cancellation stops the compressed encoder after its current packet");
             cancel = false;
         }
@@ -761,6 +798,8 @@ void TestWeb(const std::wstring& scratch) {
         testlog::Group group(L"browser PCM delivery");
         auto fullMedia = WaveMedia(track, 0, cancel);
         auto pcm = ReadMedia(std::move(fullMedia), 0, 44 + 48000 * 2 * 4);
+        batch.Next(L"the fallback is a complete stereo PCM16 48 kHz WAV whose unaligned ranges reproduce the "
+                   L"full stream");
         Check(pcm.size() == 44 + 48000 * 2 * 4 && pcm.substr(0, 4) == "RIFF" && pcm.substr(8, 8) == "WAVEfmt ",
               L"fallback is a complete stereo PCM16 48 kHz WAV");
         bool equal = !pcm.empty();
@@ -769,6 +808,7 @@ void TestWeb(const std::wstring& scratch) {
             equal = equal && bytes == pcm.substr(at, 1234);
         }
         Check(equal, L"unaligned WAV ranges reproduce full-stream bytes across headers and resampler phases");
+        batch.Next(L"original streams preserve every source byte while a CUE URL exposes only its own track");
         Check(ReadMedia(OriginalMedia(track), 0, original.size()) == original,
               L"original streams preserve every source byte");
         std::string cue = "FILE \"web-audio.wav\" WAVE\n TRACK 01 AUDIO\n INDEX 01 00:00:00\n TRACK 02 AUDIO\n INDEX 01 00:01:00\n";
@@ -780,6 +820,8 @@ void TestWeb(const std::wstring& scratch) {
         Check(!OriginalMedia(subtrack).error.empty(), L"a CUE URL cannot expose the whole underlying album");
         cancel = true;
         auto stopped = ReadMedia(WaveMedia(track, 0, cancel), 44, 4000);
+        batch.Next(L"cancelled or invalid fallback positions stop before producing PCM, and long tracks seek in "
+                   L"bounded WAV windows");
         Check(stopped.empty(), L"cancelled fallback stops before producing PCM"); cancel = false;
         Check(!WaveMedia(track, 3, cancel).error.empty() && !WaveMedia(track, NAN, cancel).error.empty(),
               L"invalid decoded positions fail before any response body");
@@ -807,6 +849,8 @@ void TestWeb(const std::wstring& scratch) {
         }
         snapshot->playlists.push_back({"saved", "Saved 雪", {"page-2", track.key, "page-2"}});
         server.Publish(snapshot);
+        batch.Next(L"the pairing interface, its one source-free audio element and every native theme are served "
+                   L"while library metadata and audio require pairing");
         Check(Request(port, L"/api/v1/catalog").status == 401 && Request(port, L"/api/v1/audio?id=fixture-track").status == 401 &&
               Request(port, L"/api/v1/audio?id=fixture-track&format=aac").status == 401,
               L"library metadata and audio require pairing");
@@ -823,6 +867,7 @@ void TestWeb(const std::wstring& scratch) {
         Check(themes.status == 200 && themes.body.find("DELTARUNE") != themes.body.npos &&
               themes.body.find("Midnight") != themes.body.npos && themes.body.find("Terminal") != themes.body.npos,
               L"all native themes are available on every server");
+        batch.Next(L"explicit pairing creates a temporary code that a browser spends once, leaving one device");
         Check(server.Pair(), L"explicit desktop pairing creates a temporary code");
         auto paired = Request(port, L"/api/v1/pair", ("code=" + server.GetStatus().pairingCode + "&name=Test+phone").c_str());
         std::string cookie = paired.cookie;
@@ -830,6 +875,8 @@ void TestWeb(const std::wstring& scratch) {
               server.GetStatus().devices.size() == 1, L"pairing consumes its code and stores one browser");
         Reply catalog;
         Pump(1000, [&] { catalog = Request(port, L"/api/v1/catalog?limit=1", nullptr, cookie); return catalog.body.find("Sinus") != catalog.body.npos; });
+        batch.Next(L"the catalog serves Unicode metadata without filesystem paths, bounds its pages, keeps saved "
+                   L"duplicates and exposes album, artist, playlist and library views");
         Check(catalog.status == 200 && catalog.body.find("雪") != catalog.body.npos &&
               catalog.body.find("web-audio.wav") == catalog.body.npos, L"catalog returns Unicode metadata without filesystem paths");
         auto page = Request(port, L"/api/v1/catalog?offset=1&limit=2", nullptr, cookie);
@@ -848,16 +895,22 @@ void TestWeb(const std::wstring& scratch) {
               Request(port, L"/api/v1/library?album=Fixture+album", nullptr, cookie).body.find("\"total\":13") != std::string::npos,
               L"versioned album, artist and playlist routes expose the same owned catalog");
         server.SetTheme(ThemeMode::Terminal, true);
+        batch.Next(L"a running theme change reaches the shared metadata while cross-origin requests cannot use "
+                   L"paired credentials");
         Check(Request(port, L"/api/v1/themes").body.find("\"current\":7") != std::string::npos,
               L"host theme changes update the shared theme metadata while running");
         Check(Request(port, L"/api/v1/catalog", nullptr, cookie, L"Origin: http://example.invalid\r\n").status == 403,
               L"cross-origin requests cannot use paired credentials");
         auto bytes = Request(port, L"/api/v1/audio?id=fixture-track", nullptr, cookie, L"Range: bytes=40-99\r\n");
+        batch.Next(L"real HTTP original ranges are byte-identical and HEAD reports the decoded length without "
+                   L"sending audio");
         Check(bytes.status == 206 && bytes.body == original.substr(40, 60), L"real HTTP original ranges are byte-identical");
         auto head = Request(port, L"/api/v1/audio?id=fixture-track&format=wav", nullptr, cookie, {}, true);
         Check(head.status == 200 && head.body.empty() && head.headers.find("Content-Length: 384044") != head.headers.npos,
               L"HEAD reports decoded length without sending audio");
         auto compressed = Request(port, L"/api/v1/audio?id=fixture-track&format=aac", nullptr, cookie);
+        batch.Next(L"HTTP compressed audio reports its exact length and answers the two-byte probe, mid-song "
+                   L"resumption, suffix probes and HEAD with only the requested bytes");
         Check(compressed.status == 200 && AdtsFrames(compressed.body) >= 94 &&
               compressed.headers.find("Content-Type: audio/aac") != compressed.headers.npos &&
               compressed.headers.find("Content-Length: " + std::to_string(compressed.body.size()) + "\r\n") != compressed.headers.npos &&
@@ -881,6 +934,8 @@ void TestWeb(const std::wstring& scratch) {
               compressedHead.headers.find("Content-Length: " + std::to_string(compressed.body.size()) + "\r\n") != compressedHead.headers.npos,
               L"compressed HEAD reports the same representation length without sending audio");
         auto later = Request(port, L"/api/v1/audio?id=fixture-track&format=aac&start=1", nullptr, cookie);
+        batch.Next(L"compressed seeks stay bounded, both bitrate modes are offered, data saver is discoverable, "
+                   L"and out-of-range requests return 416");
         Check(later.status == 200 && AdtsFrames(later.body) >= 47 && AdtsFrames(later.body) <= 51 &&
               Request(port, L"/api/v1/audio?id=fixture-track&format=aac&start=3", nullptr, cookie).status == 409 &&
               Request(port, L"/api/v1/audio?id=fixture-track&format=unknown", nullptr, cookie).status == 400,
@@ -902,6 +957,8 @@ void TestWeb(const std::wstring& scratch) {
                 "&seq=" + std::to_string(seq) + "&heard=" + std::to_string(heard);
             return Request(port, L"/api/v1/listen", body.c_str(), cookie);
         };
+        batch.Next(L"fetching and buffering audio never counts as a listen, progress counts once, and the service "
+                   L"worker serves kept music by byte range");
         Check(server.TakeListens().empty(), L"fetching and buffering audio never produces a listen");
         listen("start", 1, 0); Pump(1100); listen("progress", 2, 1.1); listen("progress", 2, 1.1);
         listen("seek", 3, 1.1); listen("pause", 4, 1.1); Pump(100); listen("resume", 5, 1.1); listen("ended", 6, 1.1);
@@ -922,13 +979,18 @@ void TestWeb(const std::wstring& scratch) {
         auto played = [&](const std::string& plays) { return Request(port, L"/api/v1/played", ("plays=" + plays).c_str(), cookie).body; };
         const std::string unkept = played(play('a', "fixture-track", now, "1.5"));
         const bool downloaded = Request(port, L"/api/v1/audio?id=fixture-track&keep=1", nullptr, cookie).status == 200;
-        const std::string batch = played(play('b', "fixture-track", now, "1.5") + "*" + play('b', "fixture-track", now, "1.5") + "*" +
-                                         play('c', "fixture-track", now - 3600, "1.5") + "*" + play('d', "fixture-track", now + 3600, "1.5") + "*" +
-                                         play('e', "page-3", now, "1.5") + "*" + play('f', "fixture-track", now, "99999") + "*garbage");
+        const std::string offlinePlays = played(play('b', "fixture-track", now, "1.5") + "*" +
+                                                play('b', "fixture-track", now, "1.5") + "*" +
+                                                play('c', "fixture-track", now - 3600, "1.5") + "*" +
+                                                play('d', "fixture-track", now + 3600, "1.5") + "*" +
+                                                play('e', "page-3", now, "1.5") + "*" +
+                                                play('f', "fixture-track", now, "99999") + "*garbage");
         auto offline = server.TakeListens();
-        Check(unkept.find("\"accepted\":0") != std::string::npos && downloaded && batch.find("\"accepted\":1,\"refused\":6") != std::string::npos &&
+        batch.Next(L"offline plays count once, only for kept tracks, between keeping and now");
+        Check(unkept.find("\"accepted\":0") != std::string::npos && downloaded &&
+                  offlinePlays.find("\"accepted\":1,\"refused\":6") != std::string::npos &&
                   offline.size() == 1 && offline[0].time == now && offline[0].path == track.path && offline[0].seconds == 1.5,
-              L"offline plays count once, only for kept tracks, between keeping and now (%hs, %zu listens)", batch.c_str(), offline.size());
+              L"offline plays count once, only for kept tracks, between keeping and now (%hs, %zu listens)", offlinePlays.c_str(), offline.size());
         testlog::Cases ordering;
         for (unsigned shape = 0; shape < 8; ++shape) {
             auto input = std::make_shared<Snapshot>(); input->revision = 100 + shape;
@@ -973,6 +1035,8 @@ void TestWeb(const std::wstring& scratch) {
                 same = same && Request(port, L"/api/v1/track?id=" + FromUtf8(t.key), nullptr, cookie).body == web::TrackJson(t);
             ordering.Add(same, L"shape " + std::to_wstring(shape));
         }
+        batch.Next(L"published sorts preserve known order, ties, payloads and key lookups, and removed identifiers "
+                   L"cannot select another track");
         Check(ordering.Passed(), L"published web sorts preserve known order, ties, payloads and key lookups: seed=%u%ls",
               TestSeed(), ordering.failed.c_str());
         auto replaced = std::make_shared<Snapshot>(); replaced->revision = 2; server.Publish(replaced);
@@ -980,6 +1044,7 @@ void TestWeb(const std::wstring& scratch) {
         Check(Request(port, L"/api/v1/track?id=fixture-track", nullptr, cookie).status == 404,
               L"removed identifiers cannot select another track");
         server.Stop();
+        batch.Next(L"a server restart keeps paired browsers and their offline grants and counted plays");
         Check(server.Start(config) && server.GetStatus().devices.size() == 1, L"paired browsers survive server restarts");
         port = server.GetStatus().port; auto device = server.GetStatus().devices.front().id;
         {
@@ -994,8 +1059,11 @@ void TestWeb(const std::wstring& scratch) {
             cookie = old;
         }
         server.Revoke(device);
+        batch.Next(L"revocation immediately invalidates remembered credentials");
         Check(Request(port, L"/api/v1/catalog", nullptr, cookie).status == 401 && server.GetStatus().devices.empty(),
               L"revocation immediately invalidates remembered credentials");
+        batch.Next(L"five wrong tries disable a temporary code, and fixed codes are 6 to 12 digits refusing a "
+                   L"repeated digit or a straight run");
         server.Pair();
         for (int i = 0; i < 5; ++i) Request(port, L"/api/v1/pair", "code=wrong");
         Check(server.GetStatus().pairingCode.empty() && Request(port, L"/api/v1/pair", "code=wrong").status == 429,
@@ -1006,18 +1074,23 @@ void TestWeb(const std::wstring& scratch) {
               web::CheckFixedCode("777777", code) && web::CheckFixedCode("901234", code) && web::CheckFixedCode("654321", code),
               L"fixed codes are 6 to 12 digits and refuse a repeated digit or a straight run");
         server.SetFixedCode("482917");
+        batch.Next(L"a fixed code applies to the running server at once, without expiring, and stays open "
+                   L"for the next browser");
         Check(server.GetStatus().pairingCode == "482917" && !server.GetStatus().pairingSeconds,
               L"a fixed code applies to the running server at once and does not expire");
         auto fixed = Request(port, L"/api/v1/pair", "code=482917&name=Fixed+phone");
         Check(fixed.status == 200 && !fixed.cookie.empty() && server.GetStatus().pairingCode == "482917",
               L"a fixed code pairs a browser and stays open for the next one");
         server.Stop(); config.fixedCode = "482917";
+        batch.Next(L"the fixed code is kept across a stop and start, and its paired browsers stay paired");
         Check(server.Start(config) && server.GetStatus().pairingCode == "482917", L"the fixed code is kept across a stop and start");
         port = server.GetStatus().port;
         // The ephemeral test port changes on restart, and the cookie is named after the port.
         std::string again = "cordinal_" + std::to_string(port) + fixed.cookie.substr(fixed.cookie.find('='));
         Check(Request(port, L"/api/v1/catalog", nullptr, again).status == 200, L"browsers paired with a fixed code stay paired");
         for (int i = 0; i < 5; ++i) Request(port, L"/api/v1/pair", "code=111111");
+        batch.Next(L"five wrong tries lock a fixed code too, Pair device reopens it, and clearing returns to "
+                   L"temporary codes");
         Check(server.GetStatus().pairingCode.empty() && server.GetStatus().fixedCode &&
               Request(port, L"/api/v1/pair", "code=482917").status == 429,
               L"five wrong tries lock a fixed code too");
@@ -1026,11 +1099,14 @@ void TestWeb(const std::wstring& scratch) {
         Check(server.GetStatus().pairingCode.empty() && !server.GetStatus().fixedCode,
               L"clearing the fixed code returns to temporary codes");
         server.Stop();
+        batch.Next(L"stopping the server joins its workers");
         Check(!server.GetStatus().running, L"stopping the server joins its workers");
         DeleteFileW(config.devicesPath.c_str());
     }
     {
         testlog::Group group(L"QR codes for pairing links");
+        batch.Next(L"Reed-Solomon check bytes, the verified symbol matrices and the largest version encode as the "
+                   L"standard says");
         Check(qr::CheckBytes({32, 91, 11, 120, 209, 114, 220, 77, 67, 64, 236, 17, 236, 17, 236, 17}, 10) ==
               std::vector<uint8_t>{196, 35, 39, 119, 235, 215, 231, 226, 93, 23},
               L"Reed-Solomon check bytes match the standard's worked example");
@@ -1065,6 +1141,8 @@ void TestWeb(const std::wstring& scratch) {
         struct KeyGuard { const std::wstring& name; ~KeyGuard() { web::DeleteTlsKey(name); } } keyGuard{key};
         std::string error, der = web::SelfSignedCertificate(key, {"127.0.0.1", "::1", "music.example"}, 2);
         auto identity = der.empty() ? nullptr : web::TlsIdentity::Create({der}, key, error);
+        batch.Next(L"a persisted key and its certificate make SChannel credentials, one port answers HTTPS and "
+                   L"plain HTTP alike, and only known challenges are answered in the clear");
         Check(identity && identity->Names() == std::vector<std::string>{"127.0.0.1", "::1", "music.example"},
               L"a persisted key and its certificate make SChannel credentials %hs", error.c_str());
         web::Away away;
@@ -1079,6 +1157,8 @@ void TestWeb(const std::wstring& scratch) {
               L"certificate challenges are answered over plain HTTP, and only known ones");
         server.TreatLoopbackAsAwayForTest(true);
         auto moved = Request(port, L"/api/v1/catalog?q=x");
+        batch.Next(L"plain HTTP from away is sent to the secure address before credentials are read, and away "
+                   L"browsers cannot pair with the short code");
         Check(moved.status == 307 && moved.headers.find("Location: https://" + origin + "/api/v1/catalog?q=x") != std::string::npos,
               L"plain HTTP from away is sent to the secure address before any credentials are read");
         server.Pair();
@@ -1086,6 +1166,7 @@ void TestWeb(const std::wstring& scratch) {
               L"away browsers can't pair with the short code");
         auto link = server.PairingLink();
         auto linked = Request(port, L"/api/v1/pair", ("link=" + link + "&name=Phone").c_str(), {}, {}, false, true);
+        batch.Next(L"a pairing link pairs from away over HTTPS with a secure host-only cookie and works once");
         Check(linked.status == 200 && linked.cookie.starts_with("__Host-cordinal=") &&
               linked.headers.find("; Secure") != std::string::npos,
               L"a pairing link pairs from away over HTTPS with a secure host-only cookie");
@@ -1097,6 +1178,8 @@ void TestWeb(const std::wstring& scratch) {
             return catalog.body.find("Sinus") != std::string::npos;
         });
         auto status = server.GetStatus();
+        batch.Next(L"the paired away browser reads the library and streams original and compressed ranges "
+                   L"byte-identically over HTTPS");
         Check(catalog.status == 200 && !status.devices.empty() && status.devices.back().away && status.devices.back().seen,
               L"the paired browser reads the library over HTTPS and shows as away");
         auto audio = Request(port, L"/api/v1/audio?id=fixture-track", nullptr, linked.cookie, L"Range: bytes=40-99\r\n", false, true);
@@ -1115,6 +1198,8 @@ void TestWeb(const std::wstring& scratch) {
         auto offer = Request(port, L"/api/v1/away", "", home.cookie);
         size_t at = offer.body.find("#pair=");
         std::string token = at == std::string::npos ? "" : offer.body.substr(at + 6, 32);
+        batch.Next(L"a browser paired at home fetches a one-time link that pairs the secure address, and HTTPS "
+                   L"requests accept only their own origin");
         Check(home.status == 200 && offer.status == 200 && offer.body.find("https://" + origin + "/#pair=") != std::string::npos &&
               Request(port, L"/api/v1/state", nullptr, home.cookie).body.find("\"away\":\"https://" + origin + "/\"") != std::string::npos,
               L"a browser paired at home can fetch a one-time link to the secure address");
@@ -1133,12 +1218,14 @@ void TestWeb(const std::wstring& scratch) {
                                     proxy + L"X-Forwarded-For: 203.0.113.9, 10.0.0.1\r\n");
         auto fromTailnet = Request(port, L"/api/v1/pair", ("code=" + server.GetStatus().pairingCode + "&name=Proxied").c_str(), {},
                                    proxy + L"X-Forwarded-For: 100.101.102.103\r\n");
+        batch.Next(L"a local reverse proxy's name and HTTPS are honoured, and its internet clients count as away");
         Check(fromInternet.status == 403 && fromTailnet.status == 200 && fromTailnet.cookie.starts_with("__Host-cordinal=") &&
               Request(port, L"/", nullptr, {}, L"Host: other.example\r\n").status == 403,
               L"a local reverse proxy's name and HTTPS are honoured, and its internet clients count as away");
         server.Stop();
         DeleteFileW(config.devicesPath.c_str());
     }
+    batch.End();
     TestWebAway(scratch);
     DeleteFileW(path.c_str());
 }

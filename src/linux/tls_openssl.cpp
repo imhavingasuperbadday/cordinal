@@ -593,7 +593,7 @@ bool RadioHttpStream(const std::string& initial, const std::atomic<bool>& cancel
         freeaddrinfo(list);
         if (!connected || (secure && !stream.Secure(host))) return false;
         std::string request = "GET " + target + " HTTP/1.1\r\nHost: " + authority +
-            "\r\nUser-Agent: cordinal/2.3\r\nIcy-MetaData: 1\r\nAccept-Encoding: identity\r\nConnection: close\r\n" + requestHeaders + "\r\n";
+            "\r\nUser-Agent: cordinal/0.1.2\r\nIcy-MetaData: 1\r\nAccept-Encoding: identity\r\nConnection: close\r\n" + requestHeaders + "\r\n";
         if (!stream.Write(request)) return false;
         std::string raw; size_t end = std::string::npos;
         while ((end = raw.find("\r\n\r\n")) == raw.npos) {

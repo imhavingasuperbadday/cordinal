@@ -538,6 +538,9 @@ std::string Midi() {
 }
 
 void TestZipArchives(const std::wstring& dir) {
+    testlog::Batch batch;
+    batch.Next(L"a ZIP lists its music and nothing else, its stored and deflated members decode exactly, and "
+               L"members keep their tags and archive identity");
     CreateDirectoryW(dir.c_str(), nullptr);
     const std::string wav = MakeSineWav(0.5, 1);
     const std::wstring plain = dir + L"\\tone.wav";
@@ -568,6 +571,7 @@ void TestZipArchives(const std::wstring& dir) {
               !CanWriteTags(tone) && CanWriteTags(dir + L"\\plain.flac"),
           L"a member path names its archive as the file on disk and never claims writable tags");
 
+    batch.Next(L"a member whose CRC doesn't match is refused and the library scanner finds songs inside a ZIP");
     std::string damaged = Zip(files, false);
     const size_t at = damaged.find("data") + 100;  // inside the WAV's samples
     damaged[at] = (char)(damaged[at] ^ 0x55);
@@ -585,6 +589,8 @@ void TestZipArchives(const std::wstring& dir) {
 }
 
 void TestDsd(const std::wstring& dir) {
+    testlog::Batch batch;
+    batch.Next(L"DSD64 decodes at 88.2 kHz for its length, keeping its level, pitch and channel separation");
     CreateDirectoryW(dir.c_str(), nullptr);
     const auto bits = DsdBits(2822400);
     const std::wstring dsf = dir + L"\\tone.dsf", dff = dir + L"\\tone.dff";
@@ -600,6 +606,7 @@ void TestDsd(const std::wstring& dir) {
     double inverse = 0;
     for (size_t i = 0; i + 1 < a.size(); i += 2) inverse = std::max(inverse, (double)std::abs(a[i] + a[i + 1]));
     Check(inverse < 1e-3, L"DSD channels stay apart (right is the inverse of left; worst sum %.5f)", inverse);
+    batch.Next(L"DSDIFF and DSF of the same bits decode alike, seeks land exactly and both give their DSD tags");
     double same = a.size() == b.size() ? 0 : 1;
     for (size_t i = 0; i < std::min(a.size(), b.size()); ++i) same = std::max(same, (double)std::abs(a[i] - b[i]));
     Check(dffRate == rate && same < 1e-5, L"DSDIFF and DSF of the same bits decode alike (largest difference %.6f)", same);
@@ -618,6 +625,8 @@ void TestDsd(const std::wstring& dir) {
 }
 
 void TestModules(const std::wstring& dir) {
+    testlog::Batch batch;
+    batch.Next(L"each module plays to where it would repeat at its sample's pitch and names itself");
     CreateDirectoryW(dir.c_str(), nullptr);
     struct Case { const wchar_t* name; std::string bytes; double hz; const char* title; };
     const Case cases[] = {
@@ -643,6 +652,8 @@ void TestModules(const std::wstring& dir) {
 }
 
 void TestSid(const std::wstring& dir) {
+    testlog::Batch batch;
+    batch.Next(L"a two-song PSID plays each song at the pitch its registers give, including a timer interrupt");
     CreateDirectoryW(dir.c_str(), nullptr);
     const std::wstring tone = dir + L"\\tone.sid", irq = dir + L"\\irq.sid";
     Ready(WriteTestBytes(tone, PsidTone()) && WriteTestBytes(irq, PsidInterrupt()), L"SID fixtures are written");
@@ -661,11 +672,13 @@ void TestSid(const std::wstring& dir) {
     std::vector<float> c(44100 * 2);
     const bool irqRead = withIrq && withIrq->Read(c.data(), 44100) == 44100;
     Check(irqRead && Rms(c, rate, 0.2, 1.0) > 0.05, L"a tune that plays from its own timer interrupt is heard");
+    batch.Next(L"SID tags give the tune, author, year and song number");
     TagData t;
     Check(ReadTags(tone + L"|2", t) && t.title == "cordinal test #2" && t.album == "cordinal test" && t.artist == "Tester" &&
               t.date == "2026" && t.codec == Codec::SID && t.trackTotal == 2,
           L"SID tags give the tune, author, year and song number");
     // The C64's 6510 adds in BCD when D is set; the NES's 2A03 has no decimal mode.
+    batch.Next(L"the 6510 in decimal mode: 09+01 is 10 and 10-01 is 09 in BCD");
     static const uint8_t program[] = {0xF8, 0x18, 0xA9, 0x09, 0x69, 0x01, 0x85, 0x10, 0x38, 0xA9, 0x10, 0xE9, 0x01, 0x85, 0x11, 0xD8, 0x60};
     auto run = [&](bool decimal, uint8_t& sum, uint8_t& diff) {
         RamBus bus;
@@ -685,6 +698,9 @@ void TestSid(const std::wstring& dir) {
 }
 
 void TestMidi(const std::wstring& dir) {
+    testlog::Batch batch;
+    batch.Next(L"MIDI plays a SoundFont's sample at the note's pitch for the note's length, centred across "
+               L"both channels");
     CreateDirectoryW(dir.c_str(), nullptr);
     const std::wstring song = dir + L"\\song.mid", bank = dir + L"\\song.sf2", rmi = dir + L"\\song.rmi";
     std::string riff = "RIFF";
@@ -703,6 +719,8 @@ void TestMidi(const std::wstring& dir) {
           level, after);
     double right = Rms(pcm, rate, 0.1, 0.9, 1);
     Check(Near(right, level, 0.01), L"a centred MIDI note is as loud on the left as on the right");
+    batch.Next(L"an RMI file plays the MIDI it wraps, MIDI tags give its name and length, and a song without a "
+               L"SoundFont falls back to gm.dls");
     unsigned rmiRate = 0;
     Check(DecodeAll(rmi, rmiRate) == pcm, L"an RMI file plays the MIDI file it wraps");
     TagData t;

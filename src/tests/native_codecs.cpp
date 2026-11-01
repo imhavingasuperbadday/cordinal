@@ -96,6 +96,9 @@ bool RescaleMp4Fixture(std::string& bytes, unsigned factor, bool removeEdit, boo
 }
 
 void TestWaveformPreviews(const std::wstring& root, const std::wstring& scratch) {
+    testlog::Batch batch;
+    batch.Next(L"FLAC and Vorbis previews seek real decoded frames, and every common format's preview "
+               L"peaks become its exact whole-file peaks before caching");
     const std::wstring path = root + L"\\native\\preview.flac";
     auto decoder = OpenFlacDecoder(path);
     bool sampled = decoder && !decoder->FastSeek() && decoder->CanPreview();
@@ -167,6 +170,9 @@ void TestWaveformPreviews(const std::wstring& root, const std::wstring& scratch)
 }
 
 void TestMp4TimeScales(const std::wstring& root, const std::wstring& scratch) {
+    testlog::Batch batch;
+    batch.Next(L"MP4 audio clocks preserve every decoded sample, edit and seek, and reject packet "
+               L"boundaries that fall between samples");
     struct Case { const wchar_t* source; unsigned factor; bool removeEdit; const wchar_t* name; };
     const Case cases[] = {
         {L"native\\video-aac.mp4", 10, false, L"video with AAC and an edit"},
@@ -246,6 +252,9 @@ bool FailedPlayback(std::unique_ptr<Decoder> decoder) {
 // Exercise vector groups, scalar tails and mapping changes with integer extrema.
 // Expected PCM comes directly from the stored integers, without another decoder.
 void TestPcmBlocks(const std::wstring& scratch) {
+    testlog::Batch batch;
+    batch.Next(L"PCM mono/stereo 16/24/32-bit groups, tails, seeks and mapping boundaries reproduce exact "
+               L"samples and leave unaligned guards untouched");
     bool exact = true, bounded = true;
     const std::wstring path = scratch + L"\\pcm-blocks.wav";
     for (unsigned depth : {16u, 24u, 32u}) for (unsigned channels : {1u, 2u})
@@ -298,6 +307,9 @@ void TestPcmBlocks(const std::wstring& scratch) {
 // Independent bit-packed fixed-predictor frames cover widths FFmpeg's encoder does
 // not emit. Residuals use the polynomial definition, rather than the decoder's integrators.
 bool TestFlacFixed(const std::wstring& scratch) {
+    testlog::Batch batch;
+    batch.Next(L"FLAC fixed predictors restore exact 4..32-bit PCM and its integers in every stereo mode, "
+               L"reject corrupt frames and a stream truncated at a frame boundary");
     auto crc=[](const std::vector<uint8_t>& bytes,unsigned width,unsigned polynomial) {
         unsigned value=0;
         for (auto byte:bytes) {
@@ -426,12 +438,15 @@ void TestCrc16() {
 }
 
 void TestNativeCodecs(const std::wstring& root, const std::wstring& scratch) {
+    testlog::Batch batch;
     TestWaveformPreviews(root, scratch);
     TestPcmBlocks(scratch);
     TestCrc16();
     TestMp4TimeScales(root, scratch);
     testlog::Cases failures;
     failures.Add(TestFlacFixed(scratch), L"FLAC truncated at a frame boundary");
+    batch.Next(L"WavPack correction files are noticed and container priming is consumed once while explicit "
+               L"discard remains");
     const std::wstring hybrid = scratch + L"\\hybrid.wv", plain = scratch + L"\\plain.wv";
     Ready(WriteTestBytes(hybrid, "wvpk") && WriteTestBytes(hybrid + L"c", "wvpk") && WriteTestBytes(plain, "wvpk"),
           L"WavPack correction-file fixtures are prepared");
@@ -449,6 +464,8 @@ void TestNativeCodecs(const std::wstring& root, const std::wstring& scratch) {
                    L"container priming: codec priming is consumed once while explicit discard remains");
     // exactDuration is false for the lossy codecs (WMA, AC-3) whose decoder cannot report the exact
     // sample count, so their length is only checked against the eight-second source.
+    batch.Next(L"all 11 native codecs open without a fallback, give finite samples matching their duration, "
+               L"seek exactly, refuse edge reads and seek early exactly");
     struct Fixture {
         const wchar_t* file;
         std::unique_ptr<Decoder> (*open)(const std::wstring&);
@@ -506,6 +523,7 @@ void TestNativeCodecs(const std::wstring& root, const std::wstring& scratch) {
     testlog::Check(seeks.Passed(),L"native codec seeks restore the exact native output samples%ls",seeks.failed.c_str());
     testlog::Check(edges.Passed(),L"native codecs refuse zero-size and end reads and non-finite seeks%ls",edges.failed.c_str());
 
+    batch.Next(L"damaged streams fail sticky without leaking PCM, recover on seek, and stay within their range");
     for (const wchar_t* name : {L"sine.flac", L"sine.mp3", L"sine.m4a", L"alac.m4a"}) {
         const std::wstring path = scratch + L"\\damaged-" + name;
         std::string bytes = ReadTestBytes(root + L"\\media\\" + name);

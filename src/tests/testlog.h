@@ -8,11 +8,13 @@
 #include <cwchar>
 #include <source_location>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace testlog {
 
 struct Group;
+struct Batch;
 
 // The implicit conversion captures the assertion's caller, including through variadic wrappers.
 struct Condition {
@@ -38,6 +40,7 @@ struct State {
     std::vector<Failure> details;
     std::vector<std::wstring> skips;
     std::vector<Group*> stack;
+    std::vector<Batch*> batches;
 };
 
 inline State& state() {
@@ -98,10 +101,48 @@ struct Group {
     }
 };
 
+// One behaviour asserted through several cases (codecs, files, seeded trials): they count as a
+// single check, while each failing case still logs and reports its own file, line and message.
+// The cases run in order, so state changes between them behave exactly as they did as checks.
+// A scoped Batch starts at construction; Begin/Next let one object own several phases so phases
+// need no extra braces and variables stay visible across them.
+struct Batch {
+    std::wstring label;
+    std::wstring failed;
+    std::source_location location;
+    int cases = 0;
+    int failures = 0;
+
+    explicit Batch(std::wstring name = {}, std::source_location at = std::source_location::current()) {
+        if (!name.empty()) Begin(std::move(name), at);
+    }
+    Batch(const Batch&) = delete;
+    Batch& operator=(const Batch&) = delete;
+    ~Batch() { End(); }
+
+    void Begin(std::wstring name, std::source_location at = std::source_location::current()) {
+        End();
+        label = std::move(name);
+        failed.clear();
+        location = at;
+        cases = failures = 0;
+        state().batches.push_back(this);
+    }
+    void Next(std::wstring name, std::source_location at = std::source_location::current()) {
+        Begin(std::move(name), at);
+    }
+    void End();
+    void Add(bool ok, const std::wstring& message, std::source_location at);
+};
+
 inline void CheckV(Condition ok, const wchar_t* fmt, va_list args) {
     wchar_t message[2048];
     _vsnwprintf_s(message, 2048, _TRUNCATE, fmt, args);
     State& s = state();
+    if (!s.batches.empty()) {
+        s.batches.back()->Add(ok, message, ok.location);
+        return;
+    }
     ++s.checks;
     if (!ok) {
         ++s.failures;
@@ -126,11 +167,54 @@ inline void CheckV(Condition ok, const wchar_t* fmt, va_list args) {
     }
 }
 
+inline void Batch::Add(bool ok, const std::wstring& message, std::source_location at) {
+    ++cases;
+    if (ok) return;
+    ++failures;
+    State& s = state();
+    s.details.push_back({message, at.file_name(), at.line()});
+    // The summary line names the first few failures; each case above keeps its own location.
+    if (failures <= 6) {
+        if (!failed.empty()) failed += L" | ";
+        failed += message;
+    } else if (failures == 7) {
+        failed += L" | ...";
+    }
+    if (s.log) {
+        fwprintf(s.log, L"FAIL %hs:%u: %ls\n", at.file_name(), at.line(), message.c_str());
+        fflush(s.log);
+    }
+    if (s.console) {
+        fwprintf(stdout, L"FAIL %hs:%u: %ls\n", at.file_name(), at.line(), message.c_str());
+        fflush(stdout);
+    }
+}
+
 inline void Check(Condition ok, const wchar_t* fmt, ...) {
     va_list args;
     va_start(args, fmt);
     CheckV(ok, fmt, args);
     va_end(args);
+}
+
+inline void Batch::End() {
+    State& s = state();
+    if (s.batches.empty() || s.batches.back() != this) return;
+    s.batches.pop_back();
+    if (!cases) return;
+    std::wstring message = label;
+    if (failures) {
+        message += L" (" + std::to_wstring(failures) + L" of " + std::to_wstring(cases) + L" cases failed: ";
+        message += failed;
+        message += L")";
+    }
+    // A batch is always one check of its own, even when a caller's batch is still open: otherwise a
+    // test function calling another would silently fold the callee's checks into the caller's total.
+    auto outer = std::move(s.batches);
+    s.batches.clear();
+    Check(Condition(failures == 0, location), L"%ls", message.c_str());
+    s.batches = std::move(outer);
+    failed.clear();
 }
 
 // The cases of one check that runs over many (codecs, files, seeded trials): the check counts once,

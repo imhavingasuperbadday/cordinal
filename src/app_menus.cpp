@@ -1,6 +1,6 @@
 // Builds the menu bar and its ReplayGain submenu, the accelerator table, and the routine that keeps
 // menu checkmarks and enabled state in sync with the app globals. The menus hold actions and the few
-// toggles changed while a song plays; every setting lives in Preferences (app_tweaks.cpp). Command
+// toggles changed while a song plays; settings live in Preferences (app_tweaks.cpp). Command
 // ids share IDM_*_BASE ranges so a whole group can be checked or enabled in one call.
 #include "app.h"
 
@@ -63,6 +63,7 @@ HMENU BuildMenu() {
     AppendMenuW(file, MF_STRING, IDM_IMPORT_STATISTICS, L"Import playback statistics...");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, IDM_WEB_SERVER, L"&Web server...");
+    AppendMenuW(file, MF_STRING, IDM_LISTENBRAINZ, L"Scrobbling...");
     AppendMenuW(file, MF_STRING, IDM_PREFERENCES, L"&Preferences...\tCtrl+,");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, IDM_EXIT, L"E&xit");
@@ -336,6 +337,8 @@ void UpdateMainMenu(HMENU m) {
     };
     for (const auto& item : enables) EnableMenuItem(m, item.id, MF_BYCOMMAND | (item.enabled ? MF_ENABLED : MF_GRAYED));
     ShowWhileRunning(m, IDM_ADD_FOLDER, IDM_CANCEL_IMPORT, L"&Cancel import", g.importRunning);
+    ShowWhileRunning(m, IDM_STEAM, IDM_CANCEL_STEAM, L"Cancel soundtrack search", SteamDiscoveryRunning());
+    EnableMenuItem(m, IDM_STEAM, MF_BYCOMMAND | (SteamDiscoveryRunning() ? MF_GRAYED : MF_ENABLED));
     ShowWhileRunning(m, IDM_RESCAN, IDM_WATCH_IMPORTED, L"&Watch imported folders", !g.importedFolders.empty());
     ShowWhileRunning(m, IDM_RG_SCAN_PL, IDM_RG_CANCEL, L"&Cancel scan", manualScan);
     ShowWhileRunning(m, IDM_CONVERT, IDM_CONVERT_CANCEL, L"Cancel conversion", ConvertBusy());

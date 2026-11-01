@@ -4,13 +4,20 @@
 #include "steam.h"
 
 #include "library.h"
+#include "md5.h"
+#include "scanner.h"
+#include "streamfile.h"
+#include "sort.h"
 
 #include <windows.h>
 
 #include <cctype>
+#include <algorithm>
 #include <cstring>
 #include <cwchar>
 #include <cwctype>
+#include <map>
+#include <set>
 #ifndef _WIN32
 #include <cstdlib>
 #endif
@@ -41,7 +48,9 @@ std::vector<VdfToken> Tokenize(const std::string& s) {
     std::vector<VdfToken> tokens;
     for (size_t i = 0; i < s.size(); ++i) {
         char c = s[i];
-        if (c == '{') {
+        if (c == '/' && i + 1 < s.size() && s[i + 1] == '/') {
+            while (i < s.size() && s[i] != '\n') ++i;
+        } else if (c == '{') {
             tokens.push_back({VdfToken::Open, {}});
         } else if (c == '}') {
             tokens.push_back({VdfToken::Close, {}});
@@ -115,7 +124,7 @@ std::wstring RegString(HKEY root, const wchar_t* subkey, const wchar_t* name, RE
     std::wstring value;
     if (RegQueryValueExW(key, name, nullptr, &type, nullptr, &bytes) == ERROR_SUCCESS && type == REG_SZ &&
         bytes >= sizeof(wchar_t)) {
-        value.resize(bytes / sizeof(wchar_t));
+        value.resize(bytes / sizeof(wchar_t) + 1, L'\0');
         if (RegQueryValueExW(key, name, nullptr, &type, reinterpret_cast<BYTE*>(value.data()), &bytes) == ERROR_SUCCESS)
             value.resize(wcslen(value.c_str()));
         else
@@ -177,7 +186,7 @@ bool ReadFileBytes(const std::wstring& path, std::string& out) {
                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
     LARGE_INTEGER size{};
-    bool ok = GetFileSizeEx(h, &size) && size.QuadPart <= kMaxVdfBytes;
+    bool ok = GetFileSizeEx(h, &size) && size.QuadPart >= 0 && size.QuadPart <= kMaxVdfBytes;
     if (ok) {
         out.resize((size_t)size.QuadPart);
         DWORD got = 0;
@@ -187,15 +196,26 @@ bool ReadFileBytes(const std::wstring& path, std::string& out) {
     return ok;
 }
 
-// True if the folder has at least one entry (a music folder with only empty subfolders is not used).
-bool HasContent(const std::wstring& folder) {
+// Steam games can ship thousands of empty audio placeholders. They are not soundtrack content,
+// and counting them used to add effects folders to the library.
+bool IsAudioContent(const std::wstring& dir, const WIN32_FIND_DATAW& fd) {
+    return !(fd.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) &&
+           (fd.nFileSizeHigh || fd.nFileSizeLow >= 4) && IsSupportedAudioFile(dir + kSep + fd.cFileName);
+}
+
+bool HasContent(const std::wstring& folder, int depthLeft, const std::atomic<bool>* cancel) {
+    if (Cancelled(cancel)) return false;
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW((folder + kSep + L"*").c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return false;
     bool any = false;
     do {
-        if (wcscmp(fd.cFileName, L".") != 0 && wcscmp(fd.cFileName, L"..") != 0) any = true;
-    } while (!any && FindNextFileW(h, &fd));
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+        any = IsAudioContent(folder, fd);
+        if (!any && depthLeft > 0 && (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+            any = HasContent(folder + kSep + fd.cFileName, depthLeft - 1, cancel);
+    } while (!any && !Cancelled(cancel) && FindNextFileW(h, &fd));
     FindClose(h);
     return any;
 }
@@ -218,11 +238,13 @@ std::vector<std::wstring> Subdirs(const std::wstring& dir) {
 // A game subfolder counts as a soundtrack when its name says so, or when it is a pile of audio
 // (>= 6 files) that outnumbers every other file in it. The name test catches "Soundtrack"/"OST";
 // the count test catches "Bonus Tracks" style folders, while a handful of stray SFX do not.
-bool LooksLikeSoundtrackDir(const std::wstring& dir) {
+bool LooksLikeSoundtrackDir(const std::wstring& dir, const std::atomic<bool>* cancel) {
     std::wstring name = FileNameOf(dir);
     for (wchar_t& c : name) c = (wchar_t)towlower(c);
-    if (name.find(L"soundtrack") != std::wstring::npos || name == L"ost" || name == L"music" || name == L"audio")
-        return true;
+    if (name.find(L"soundtrack") != std::wstring::npos || name == L"ost" || name == L"music")
+        return HasContent(dir, kGameScanDepth, cancel);
+    if (name == L"sfx" || name == L"soundeffects" || name == L"sound effects" || name == L"loadedsoundeffects")
+        return false;
 
     int audio = 0, other = 0;
     WIN32_FIND_DATAW fd;
@@ -231,8 +253,8 @@ bool LooksLikeSoundtrackDir(const std::wstring& dir) {
     do {
         if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;  // only files count
-        if (IsSupportedAudioFile(dir + kSep + fd.cFileName)) ++audio; else ++other;
-    } while (FindNextFileW(h, &fd));
+        if (IsAudioContent(dir, fd)) ++audio; else ++other;
+    } while (!Cancelled(cancel) && FindNextFileW(h, &fd));
     FindClose(h);
     return audio >= 6 && audio > other;
 }
@@ -242,7 +264,7 @@ void ScanGameForSoundtracks(const std::wstring& game, int depthLeft, std::vector
                             const std::atomic<bool>* cancel) {
     for (const std::wstring& sub : Subdirs(game)) {
         if (Cancelled(cancel)) return;
-        if (LooksLikeSoundtrackDir(sub)) out.push_back(sub);
+        if (LooksLikeSoundtrackDir(sub, cancel)) out.push_back(sub);
         if (depthLeft > 1) ScanGameForSoundtracks(sub, depthLeft - 1, out, cancel);
     }
 }
@@ -266,6 +288,209 @@ void KeepOutermost(std::vector<std::wstring>& folders) {
 }
 
 }  // namespace
+
+namespace {
+
+std::string SongText(std::string_view value) {
+    std::wstring text = FromUtf8(value);
+    for (auto& c : text) c = (wchar_t)towlower(c);
+    size_t first = 0, last = text.size();
+    while (first < last && iswspace(text[first])) ++first;
+    while (last > first && iswspace(text[last - 1])) --last;
+    return ToUtf8(text.substr(first, last - first));
+}
+
+std::string SongKey(std::string_view title, std::string_view artist, std::string_view album,
+                    std::string_view date, unsigned track, unsigned disc) {
+    if (title.empty() || artist.empty() || album.empty()) return {};
+    return SongText(artist) + '\x1f' + SongText(album) + '\x1f' + SongText(title) + '\x1f' + SongText(date) + '\x1f' +
+           std::to_string(track) + ':' + std::to_string(disc);
+}
+
+// Untagged WAV/MP3 exports often sit in parallel format folders. Match only within the same
+// album directory, with the same filename stem and duration; never guess from a title alone.
+std::string FormatPathKey(const std::wstring& path) {
+    std::wstring parent = DirectoryOf(path);
+    const std::string name = SongText(ToUtf8(FileNameOf(parent)));
+    for (const char* format : {"flac", "mp3", "wav", "ogg", "opus", "aac", "m4a", "alac", "lossless"}) {
+        if (name == format || name.starts_with(std::string(format) + " ")) {
+            parent = DirectoryOf(parent);
+            break;
+        }
+    }
+    return SongText(ToUtf8(parent + kSep + StemOf(path)));
+}
+
+// Untagged copies need byte evidence, not a filename guess. Read in bounded chunks on the worker.
+std::string FileKey(const std::wstring& path, const std::atomic<bool>* cancel) {
+    FileSource file(path);
+    if (!file.Valid() || !file.Size()) return {};
+    Md5 md5;
+    std::string block;
+    for (uint64_t at = 0; at < file.Size();) {
+        if (Cancelled(cancel)) return {};
+        size_t count = (size_t)std::min<uint64_t>(65536, file.Size() - at);
+        if (!file.Read(at, count, block)) return {};
+        md5.Add(block.data(), block.size());
+        at += count;
+    }
+    auto digest = md5.Finish();
+    return "file:" + std::string((const char*)digest.data(), digest.size());
+}
+
+bool SameSong(const SteamSong& a, const SteamSong& b) {
+    if (a.audioHash && a.audioHash == b.audioHash) return true;
+    if (!a.key.empty() && a.key == b.key && a.key.compare(0, 5, "file:") == 0) return true;
+    if (!a.durationMs || !b.durationMs ||
+        (a.durationMs > b.durationMs ? a.durationMs - b.durationMs : b.durationMs - a.durationMs) > 1000) return false;
+    if (!a.key.empty() && a.key == b.key) return true;
+    return a.codec != b.codec && !a.pathKey.empty() && a.pathKey == b.pathKey &&
+           (a.key.empty() || b.key.empty() || a.key.compare(0, 5, "file:") == 0 || b.key.compare(0, 5, "file:") == 0);
+}
+
+}  // namespace
+
+std::vector<SteamSong> SnapshotSteamSongs(const Library& library) {
+    std::vector<SteamSong> songs;
+    for (TrackId id = 0; id < library.Count(); ++id) {
+        const auto& t = library[id];
+        if (!(t.flags & (Track::kInLibrary | Track::kInbox)) || (t.flags & (Track::kMissing | Track::kExcluded))) continue;
+        songs.push_back({library.Path(id), SongKey(library.View(t.title), library.View(t.artist), library.View(t.album),
+                                                 library.View(t.date), t.trackNo, t.disc),
+                         t.audioHash, t.durationMs, t.codec, FormatPathKey(library.Path(id))});
+    }
+    return songs;
+}
+
+bool PrepareSteamImport(SteamImport& result, std::vector<SteamSong> known, const std::atomic<bool>* cancel) {
+    result.oneCopy.clear();
+    result.eachFormat.clear();
+    result.multipleFormats = false;
+    std::vector<SteamSong> songs;
+    std::set<Codec> codecs;
+    for (const auto& folder : result.folders) {
+        std::vector<ScanFile> files;
+        if (!ListAudioFiles(folder, files, cancel) || Cancelled(cancel)) return false;
+        for (const auto& file : files) {
+            if (Cancelled(cancel)) return false;
+            TagData tags;
+            if (!ReadTags(file.path, tags)) continue;
+            SteamSong song{file.path, SongKey(tags.title, tags.artist, tags.album, tags.date, tags.track, tags.disc),
+                           tags.audioHash, std::isfinite(tags.duration) ?
+                               (uint32_t)std::clamp(tags.duration * 1000, 0.0, 4.0e9) : 0, tags.codec, FormatPathKey(file.path)};
+            if (song.key.empty() && !song.audioHash) song.key = FileKey(song.path, cancel);
+            codecs.insert(song.codec);
+            songs.push_back(std::move(song));
+        }
+    }
+    result.multipleFormats = codecs.size() > 1;
+    // Existing Library paths win. Among new files, prefer lossless audio and then a stable path.
+    auto quality = [](Codec codec) {
+        return codec == Codec::FLAC || codec == Codec::ALAC || codec == Codec::PCM || codec == Codec::Cord ? 1 : 0;
+    };
+    SortObjects(songs.begin(), songs.end(), [&](const auto& a, const auto& b) {
+        return quality(a.codec) != quality(b.codec) ? quality(a.codec) > quality(b.codec) : a.path < b.path;
+    });
+    for (auto& song : known) {
+        if (Cancelled(cancel)) return false;
+        if (song.key.empty() && !song.audioHash) song.key = FileKey(song.path, cancel);
+    }
+    // Prefer an existing music-folder copy over a previously imported Steam copy, even if the
+    // Steam copy has the older library id. That also cleans up duplicates from earlier imports.
+    std::stable_partition(known.begin(), known.end(), [&](const auto& song) {
+        return std::none_of(result.folders.begin(), result.folders.end(), [&](const auto& root) {
+            return IsUnder(song.path, root);
+        });
+    });
+    auto collect = [&](bool eachFormat, SteamDuplicates& duplicates) {
+        std::vector<SteamSong> keep;
+        keep.reserve(known.size() + songs.size());
+        std::map<std::string, std::vector<size_t>> keys;
+        std::map<uint64_t, std::vector<size_t>> hashes;
+        std::map<std::string, std::vector<size_t>> paths;
+        auto index = [&](size_t i) {
+            if (!keep[i].key.empty()) keys[keep[i].key].push_back(i);
+            if (keep[i].audioHash) hashes[keep[i].audioHash].push_back(i);
+            if (!keep[i].pathKey.empty()) paths[keep[i].pathKey].push_back(i);
+        };
+        auto find = [&](const SteamSong& song) {
+            size_t match = keep.size();
+            auto search = [&](const auto& indices) {
+                for (size_t i : indices)
+                    if ((!eachFormat || keep[i].codec == song.codec ||
+                         (keep[i].codec == Codec::Unknown && !song.key.empty() && song.key == keep[i].key &&
+                          song.key.compare(0, 5, "file:") == 0)) && SameSong(song, keep[i])) {
+                        match = std::min(match, i);
+                        break;
+                    }
+            };
+            if (!song.key.empty()) if (auto it = keys.find(song.key); it != keys.end()) search(it->second);
+            if (song.audioHash) if (auto it = hashes.find(song.audioHash); it != hashes.end()) search(it->second);
+            if (!eachFormat && !song.pathKey.empty())
+                if (auto it = paths.find(song.pathKey); it != paths.end()) search(it->second);
+            return match;
+        };
+        for (auto song : known) {
+            if (Cancelled(cancel)) return;
+            size_t match = find(song);
+            if (match != keep.size()) song.path = keep[match].path;
+            keep.push_back(std::move(song));
+            index(keep.size() - 1);
+        }
+        for (const auto& song : songs) {
+            if (Cancelled(cancel)) return;
+            size_t match = find(song);
+            if (match != keep.size()) {
+                if (!SameFolder(song.path, keep[match].path)) duplicates.emplace_back(song.path, keep[match].path);
+                // A retagged FLAC can link a differently named Library copy to an MP3 export.
+                // Keep that metadata as an alias of the retained path for later candidates.
+                SteamSong alias = song;
+                alias.path = keep[match].path;
+                keep.push_back(std::move(alias));
+                index(keep.size() - 1);
+            } else {
+                keep.push_back(song);
+                index(keep.size() - 1);
+            }
+        }
+    };
+    collect(false, result.oneCopy);
+    collect(true, result.eachFormat);
+    if (Cancelled(cancel)) { result.oneCopy.clear(); result.eachFormat.clear(); }
+    return !Cancelled(cancel);
+}
+
+size_t SkipSteamDuplicates(Library& library, const SteamImport& imported, bool eachFormat) {
+    auto underSteam = [&](const std::wstring& path) {
+        return std::any_of(imported.folders.begin(), imported.folders.end(), [&](const auto& root) {
+            return IsUnder(path, root);
+        });
+    };
+    bool restored = false;
+    for (TrackId id = 0; id < library.Count(); ++id) {
+        auto& track = library[id];
+        if ((track.flags & Track::kSteamDuplicate) && underSteam(library.Path(id))) {
+            track.flags = (uint16_t)((track.flags | Track::kInLibrary) & ~(Track::kExcluded | Track::kSteamDuplicate));
+            restored = true;
+        }
+    }
+    size_t skipped = 0;
+    for (const auto& [path, keeper] : eachFormat ? imported.eachFormat : imported.oneCopy) {
+        if (GetFileAttributesW(keeper.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+        TrackId kept = library.Find(keeper);
+        if (kept != kInvalidTrack &&
+            (!(library[kept].flags & (Track::kInLibrary | Track::kInbox)) ||
+             (library[kept].flags & (Track::kExcluded | Track::kMissing)))) continue;
+        if (kept == kInvalidTrack && !underSteam(keeper)) continue;
+        TrackId id = library.Add(path);
+        if (id == kInvalidTrack || (library[id].flags & Track::kExcluded)) continue;
+        library[id].flags = (uint16_t)((library[id].flags | Track::kExcluded | Track::kSteamDuplicate) &
+                                      ~(Track::kInLibrary | Track::kInbox));
+        ++skipped;
+    }
+    if (skipped || restored) library.Touch();
+    return skipped;
+}
 
 std::vector<std::wstring> ParseSteamLibraryFolders(const std::string& vdf) {
     // Walks the tokens as key/value pairs. Values under a "path" key are library folders. The
@@ -299,6 +524,7 @@ std::vector<std::wstring> ParseSteamLibraryFolders(const std::string& vdf) {
 }
 
 std::vector<std::wstring> FindSteamMusicFoldersIn(const std::wstring& libraryPath, const std::atomic<bool>* cancel) {
+    if (Cancelled(cancel)) return {};
     std::wstring lib = NormalizePath(libraryPath);
     if (lib.empty()) return {};
 
@@ -306,7 +532,8 @@ std::vector<std::wstring> FindSteamMusicFoldersIn(const std::wstring& libraryPat
     // soundtracks that are their own entry live flat under steamapps\music (albums below it).
     std::wstring music = lib + kSep + L"steamapps" + kSep + L"music";
     DWORD attr = GetFileAttributesW(music.c_str());
-    if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) && HasContent(music)) roots.push_back(music);
+    if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) && HasContent(music, 16, cancel))
+        roots.push_back(music);
 
     // Soundtracks sold as DLC sit inside the game's install folder.
     std::wstring common = lib + kSep + L"steamapps" + kSep + L"common";
@@ -321,11 +548,13 @@ std::vector<std::wstring> FindSteamMusicFoldersIn(const std::wstring& libraryPat
         if (resolved) { root = FromUtf8(resolved); std::free(resolved); }
     }
 #endif
+    if (Cancelled(cancel)) return {};
     KeepOutermost(roots);
     return roots;
 }
 
 std::vector<std::wstring> FindSteamMusicFolders(const std::atomic<bool>* cancel) {
+    if (Cancelled(cancel)) return {};
     std::wstring steam = DiscoverSteamRoot();
     if (steam.empty()) return {};
 

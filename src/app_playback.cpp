@@ -1033,7 +1033,7 @@ void RecordListening(TrackId id, double seconds, bool manual, uint32_t when) {
     }
     LogPlay(id, now, seconds, counted, skip);  // before the award: its fatigue rule reads the log
     AnnouncePoints(AwardListen(id, seconds, counted, skip, previousLastPlayed));
-    if (counted) PlatformCountedPlay(id, now);
+    if (counted) PlatformCountedPlay(id, now, seconds, when == 0);
     g_lib.Touch();
     g.dirty = true;
 }

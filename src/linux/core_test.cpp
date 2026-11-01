@@ -556,10 +556,10 @@ int CheckListenBrainz(const char* dirArg) {
     std::condition_variable cv;
     int answer = -1;
     SetPostMessageHandler([&](HWND, UINT, WPARAM wp, LPARAM lp) {
-        if (wp > 2) return;
+        if ((wp & 15) > 2 || !listenbrainz::CurrentResult(wp)) return;
         delete reinterpret_cast<std::wstring*>(lp);
         std::lock_guard lock(mu);
-        answer = (int)wp;
+        answer = (int)(wp & 15);
         cv.notify_all();
     });
     listenbrainz::Start(dir, nullptr, WM_APP);
@@ -590,6 +590,28 @@ int CheckListenBrainz(const char* dirArg) {
     listenbrainz::SetToken(L"");
     check(!listenbrainz::Enabled() && stat((std::string(dirArg) + "/listenbrainz.token").c_str(), &st) != 0,
           "clearing the token removes the file");
+    const std::wstring credentials = L"{\"key\":\"test-key\",\"secret\":\"test-secret\",\"session\":\"test-session\",\"user\":\"listener\"}";
+    for (auto service : {listenbrainz::Service::LastFm, listenbrainz::Service::LibreFm})
+        check(listenbrainz::SetToken(credentials, service), "a native service saves its own connection");
+    l.durationMs = 30000;
+    listenbrainz::Submit(l);
+    check(listenbrainz::GetStatus(listenbrainz::Service::LastFm).queued == 0,
+          "Last.fm refuses tracks of thirty seconds or less");
+    l.durationMs = 31000;
+    listenbrainz::Submit(l);
+    listenbrainz::SetPaused(true); listenbrainz::Submit(l);
+    check(listenbrainz::GetStatus(listenbrainz::Service::LastFm).queued == 1 &&
+          listenbrainz::GetStatus(listenbrainz::Service::LibreFm).queued == 1,
+          "separate native service queues stop collecting while paused");
+    listenbrainz::Stop(); listenbrainz::Start(dir, nullptr, WM_APP);
+    for (auto service : {listenbrainz::Service::LastFm, listenbrainz::Service::LibreFm}) {
+        check(listenbrainz::Enabled(service) && listenbrainz::GetStatus(service).queued == 1 &&
+              listenbrainz::GetStatus(service).user == L"listener", "native service credentials and queue survive restart");
+        check(listenbrainz::SetToken(L"", service), "native service disconnect removes credentials");
+    }
+    check(stat((std::string(dirArg) + "/lastfm.token").c_str(), &st) != 0 &&
+          stat((std::string(dirArg) + "/librefm.token").c_str(), &st) != 0, "disconnect removes both native credential files");
+    listenbrainz::SetPaused(false);
     listenbrainz::Stop();
     return failures;
 }

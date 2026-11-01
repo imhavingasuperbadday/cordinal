@@ -42,6 +42,9 @@ void TestExplorerMenu() {
     RemoveExplorerMenu(base.c_str());
     Ready(!ExplorerMenuInstalled(base.c_str()), L"the scratch folder-menu base starts without verbs");
 
+    testlog::Batch batch;
+    batch.Next(L"installing writes the folder and background verbs, their names, icons and commands read "
+               L"back, and the Play and Add command lines pass the clicked folder");
     const bool installed = InstallExplorerMenu(base.c_str());
     const bool readBack = installed && ExplorerMenuInstalled(base.c_str());
     Check(readBack, L"Explorer: installing writes the folder verbs and every verb reads back pointing at this "
@@ -68,6 +71,8 @@ void TestExplorerMenu() {
     Check(verbs.Passed(), L"Explorer: the folder and background menus name their verbs, show this build's icon "
           L"and write the commands the player reads back%ls", verbs.failed.c_str());
 
+    batch.Next(L"a verb left by a previous location counts as stale and installing again repairs it idempotently, "
+               L"and turning the menu off removes every verb");
     // A build that moved must be re-registered, not trusted because a key exists.
     const bool stale =
         SetVerbCommand(base, L"Directory\\shell\\Cordinal.Play", L"\"C:\\old\\cordinal.exe\" \"%1\"") &&
@@ -82,6 +87,8 @@ void TestExplorerMenu() {
     Check(removed && absent, L"Explorer: turning the menu off removes every verb, and removing it again "
           L"succeeds (removed=%d absent=%d)", removed, absent);
 
+    batch.Next(L"--add is taken out of the command line before any path reader sees it, and a quoted drive root "
+               L"keeps its backslash while a stray trailing quote is removed");
     // Explorer's Add verb is a command-line switch, stripped before any path reader sees it.
     std::vector<std::wstring> args{L"--add", L"C:\\Music\\Album"};
     testlog::Cases addSwitch;

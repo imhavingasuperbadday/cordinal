@@ -42,7 +42,7 @@ void OpenPacks();    // View > Packs
 void OpenLayout();   // View > Customize layout
 void OpenPalette();  // View > Command palette (Ctrl+Shift+P)
 void OpenFormat();       // the title formatting window (Preferences > View)
-void OpenListenBrainz();  // the token window (Preferences > Library)
+void OpenListenBrainz();  // the service connections panel (Preferences > Scrobbling)
 void OnListenBrainzMessage(WPARAM wp, LPARAM lp);  // WM_APP_LISTENBRAINZ: a token check's answer
 // Album editions: the manager and its track-comparison view. Modeless overlays like every panel.
 void EditionsOpenManager(uint32_t group);

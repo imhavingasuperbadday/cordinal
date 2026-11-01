@@ -27,8 +27,8 @@ using sv = std::string_view;
 inline uint8_t U8(sv s, size_t i) { return i < s.size() ? (uint8_t)s[i] : 0; }
 inline uint32_t BE24(sv s, size_t i) { return (uint32_t)U8(s, i) << 16 | (uint32_t)U8(s, i + 1) << 8 | U8(s, i + 2); }
 
-// The edit steps every file goes through, each one check across all the files: a failing step names
-// its files and what went wrong in them.
+// The edit steps every file goes through, collected across all the files: a failing step names its
+// files and what went wrong in them.
 struct TestLog {
     testlog::Cases setAll, partial, grow, shrink, clear, audio;
 };
@@ -200,8 +200,8 @@ void TestFile(TestLog& t, const std::wstring& path) {
 
 bool RunFFmpegForTest(const std::wstring& args) { return RunFFmpeg(args); }
 
-// One group for the whole run, one check per edit step across every file; a failing step names the
-// files it failed in.
+// One group for the whole run, and one check per write cycle across every file: a failing step
+// still names the files it failed in.
 int TestTagWriterFiles(const std::vector<std::wstring>& files, FILE* log, const wchar_t* label,
                        bool checkOpusR128) {
     testlog::SetLog(log);
@@ -209,6 +209,12 @@ int TestTagWriterFiles(const std::vector<std::wstring>& files, FILE* log, const 
     TestLog t;
     {
         testlog::Group checkGroup(label);
+        // The edit steps belong to one write cycle, so the batch reports them as one check while a
+        // failure still names the step and the files it failed in.
+        testlog::Batch batch;
+        batch.Next(L"setting every field reads each one back, a partial edit keeps the other fields, 100 KB of "
+                   L"lyrics and a 300 KB cover are written and removed in place, cleared fields are removed, and the "
+                   L"audio is unchanged after every edit");
         for (auto& f : files) TestFile(t, f);
         testlog::Check(t.setAll.Passed(), L"setting every field reads each one back in all %zu files%ls", files.size(),
                        t.setAll.failed.c_str());
@@ -220,6 +226,7 @@ int TestTagWriterFiles(const std::vector<std::wstring>& files, FILE* log, const 
         testlog::Check(t.clear.Passed(), L"cleared fields are removed while the others stay%ls", t.clear.failed.c_str());
         testlog::Check(t.audio.Passed(), L"the audio is unchanged after every edit%ls", t.audio.failed.c_str());
         // rg.opus: the R128 gain the edits didn't touch must survive.
+        batch.Next(L"rg.opus keeps its untouched R128 gain through the edits");
         if (checkOpusR128)
             for (auto& f : files)
                 if (FileNameOf(f) == L"rg.opus") {

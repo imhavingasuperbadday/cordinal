@@ -99,7 +99,7 @@ int Loudest(const Peaks& peaks, BucketSpan span) {
 
 // Start as soon as playback is requested, before the engine announces the first audible sample.
 void PrepareWaveform(TrackId id) {
-    if (g.liveWaveform) return;
+    if (!g.waveform || g.liveWaveform) return;
     Peaks peaks{};
     uint32_t request = 0;
     Request(id, peaks, request);
@@ -108,7 +108,7 @@ void PrepareWaveform(TrackId id) {
 // The engine already chose this track for its gapless hand-off, so its exact peaks can be ready
 // by the time it is heard without guessing from the playlist order.
 void PrefetchWaveform(TrackId id) {
-    if (id == kNone || g.liveWaveform) { CancelPeakPrefetch(); return; }
+    if (!g.waveform || id == kNone || g.liveWaveform) { CancelPeakPrefetch(); return; }
     std::wstring path;
     double start, end;
     if (!PeakSource(id, path, start, end)) return;
@@ -122,9 +122,11 @@ void PrefetchWaveform(TrackId id) {
 void WaveformTrackChanged(bool refresh) {
     // Startup can announce playback before the peak service starts. With no queued request,
     // the same track still needs another chance when UpdateNowPlaying runs after startup.
-    if (!refresh && g.playing == g_wave.track && (g_wave.track == kNone || g_wave.ready || g_wave.request)) return;
-    if (g.playing == kNone) CancelPeaks();
-    g_wave.track = g.playing;
+    TrackId track = g.waveform ? g.playing : kNone;
+    if (!refresh && track == g_wave.track && (g_wave.track == kNone || g_wave.ready || g_wave.request)) return;
+    if (track == kNone) CancelPeaks();
+    if (!g.waveform) CancelPeakPrefetch();
+    g_wave.track = track;
     g_wave.request = 0;
     g_wave.ready = g_wave.track != kNone && Request(g_wave.track, g_wave.peaks, g_wave.request);
     g_wave.drawnPos = -1;
@@ -179,10 +181,10 @@ std::wstring CurrentChapterText() {
     return ChapterTextAt(Chapters(), g.engine.Position());
 }
 
-bool LiveWaveformShown() { return RadioPlaying() || (g.liveWaveform && g.playing != kNone); }
+bool LiveWaveformShown() { return g.waveform && (RadioPlaying() || (g.liveWaveform && g.playing != kNone)); }
 bool WaveformShown() {
-    return LiveWaveformShown() ||
-           (g_wave.track != kNone && g.playing == g_wave.track && (g_wave.ready || g_wave.request));
+    return g.waveform && (LiveWaveformShown() ||
+           (g_wave.track != kNone && g.playing == g_wave.track && (g_wave.ready || g_wave.request)));
 }
 
 // The loudest peak, 0..255, between fractions `from` and `to` of the track (0 while none is known).
@@ -195,9 +197,10 @@ int WaveformPeak(double from, double to) {
 
 // Draws the waveform across the channel's width and the whole bar's height (`rc`, transposed for the
 // vertical seek bar). Columns 2 px wide with a 1 px gap; what has played carries the state color
-// (WaveformPlayedColor, app_fountain.cpp). The spotlight, big mode and the vertical bar show only a
-// waveform: until it's known, its columns lie flat.
+// (WaveformPlayedColor, app_fountain.cpp). With waveforms enabled, the spotlight, big mode and the
+// vertical bar keep flat columns until peaks are known.
 bool DrawWaveform(HDC dc, const RECT& rc, const RECT& channel, double frac) {
+    if (!g.waveform) return false;
     const bool live = LiveWaveformShown();
     std::array<uint8_t, 256> livePeaks{};
     if (live) g.engine.WaveformPeaks(livePeaks.data(), livePeaks.size());

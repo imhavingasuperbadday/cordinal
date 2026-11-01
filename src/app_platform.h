@@ -1,5 +1,5 @@
 // Declares the platform layer shared by the application modules: crash reporting, the system
-// media controls, taskbar and tray integration, ListenBrainz scrobbling, Steam soundtrack
+// media controls, taskbar and tray integration, native scrobbling, Steam soundtrack
 // discovery and the repeat-count setting. InitPlatform/ShutdownPlatform bracket it, and window
 // messages are routed through OnPlatformMessage.
 #pragma once
@@ -13,7 +13,7 @@ void ShutdownPlatform();
 bool OnPlatformMessage(UINT msg, WPARAM wp, LPARAM lp);
 void PlatformTrackChanged();
 void PlatformTick();
-void PlatformCountedPlay(TrackId id, uint32_t when);
+void PlatformCountedPlay(TrackId id, uint32_t when, double seconds, bool local);
 std::optional<int> ForwardTransportCommand(const std::vector<std::wstring>& args);
 void RunTransportCommand(std::wstring_view command);
 // `--add` (Explorer's Add verb) makes command-line paths append without playing; it is removed
@@ -30,11 +30,15 @@ bool RemoveExplorerMenu(const wchar_t* base = kExplorerBase);
 bool ExplorerMenuInstalled(const wchar_t* base = kExplorerBase);
 void ApplyExplorerMenu();   // a live preference change
 void EnsureExplorerMenu();  // startup: follow the preference and this executable's path
-// The ListenBrainz token window (app_platform.cpp).
+// The scrobbling connections window (app_platform.cpp).
 void ShowListenBrainz();
 bool ListenBrainzDialogMessage(MSG* msg);
 // Steam soundtrack discovery and the repeat-count setting (app_platform.cpp).
 void AddSteamSoundtracks();
+bool SteamDiscoveryRunning();
+void CancelSteamDiscovery();
+void OnSteamDiscovery(WPARAM offer, LPARAM result);
+void StopSteamDiscovery();
 void SetLoops(int count);
 void FindDuplicateAudioPlaylist();
 // Taskbar thumbnail buttons and progress (app_taskbar.cpp).

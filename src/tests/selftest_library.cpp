@@ -32,6 +32,7 @@ bool ReferenceSearch(const Library& library, TrackId id, const std::vector<std::
 }
 
 void TestSearch() {
+    testlog::Batch batch;
     Library library;
     for (unsigned i = 0; i < 100; ++i) {
         TrackId id = library.Add(L"C:\\Search\\Música\\" + std::to_wstring(i / 10) + L"\\Track " + std::to_wstring(i) + L".flac");
@@ -43,6 +44,8 @@ void TestSearch() {
         tags.comment = "東京"; tags.codec = i % 2 ? Codec::FLAC : Codec::MP3;
         library.ApplyTags(id, tags);
     }
+    batch.Next(L"SEARCH cached fields agree with the reference matcher for linguistic, Unicode, phrase, "
+               L"path, codec and duplicate-id queries");
     bool same = true;
     for (auto query : {L"", L"track", L"BJÖRK", L"東京", L"Música", L"Å", L"FLAC", L"MP3",
                        L"Rock Björk", L"\"Live 2026\" Track", L"missing", L"Track absent"}) {
@@ -55,6 +58,8 @@ void TestSearch() {
         }
     }
     Check(same, L"SEARCH cached fields preserve linguistic, Unicode, phrase, path, codec and duplicate-id matches");
+    batch.Next(L"SEARCH caches require words beyond the 64-bit mask and end with each query, never "
+               L"crossing pools");
     std::vector<std::wstring> words(70, L"Track");
     TrackMatcher longQuery(library, words);
     bool longOk = longQuery.Matches(0) && longQuery.Matches(1);
@@ -75,6 +80,7 @@ void TestSearch() {
     TrackMatcher separate(other, query);
     Check(changed && !next.Matches(1) && !separate.Matches(id),
           L"SEARCH caches end with each query and never cross library pools");
+    batch.Next(L"SEARCH a full folder path isolates its tracks even when tags repeat");
     const auto folderWords = FilterWords(L"\"C:\\Search\\Música\\2\"");
     TrackMatcher folder(library, folderWords);
     testlog::Cases folderCases;
@@ -82,6 +88,7 @@ void TestSearch() {
         folderCases.Add(folder.Matches(track) == (track >= 20 && track < 30), library.Path(track));
     Check(folderCases.Passed(), L"SEARCH a full folder path isolates its tracks even when tags repeat%ls",
           folderCases.failed.c_str());
+    batch.Next(L"folder trees keep Music, custom, other-drive, UNC and POSIX roots and folder boundaries");
     testlog::Cases roots;
     auto tree = [&](const wchar_t* path, std::vector<std::wstring> folders, std::vector<std::wstring> expected) {
         roots.Add(FolderTreePath(path, folders) == expected, path);
@@ -103,6 +110,7 @@ void TestSearch() {
 // Title-format mini-language against one synthetic track: conditionals, function calls, digit and
 // case helpers, literals, and the built-in fields (filename, ext, directory, album artist).
 void TestTitleFormat() {
+    testlog::Batch batch(L"TF conditionals, functions, literals and built-in fields format as expected");
     TrackId id = g_lib.Add(L"C:\\Music\\Band\\03 Song Name.flac");
     TagData tags;
     tags.artist = "Band";
@@ -133,6 +141,7 @@ void TestTitleFormat() {
 // aside instead of being loaded or overwritten.
 // The FLAC audio hash survives a save and load, also when saved ids are renumbered.
 void TestAudioHashSection(const std::wstring& scratch) {
+    testlog::Batch batch(L"LIBRARYDB audio hashes round trip with renumbered ids");
     std::wstring file = scratch + L"-hash.cdb";
     g_lib = Library();
     TrackId gone = g_lib.Add(L"C:\\Music\\gone.flac");  // not saved: shifts the saved ids
@@ -157,6 +166,7 @@ void TestAudioHashSection(const std::wstring& scratch) {
 // library.cdb round trip: every stored field, the three playlist kinds, path lookups, backup on
 // replacement, blocked/corrupt saves, and that truncated or malformed files never overwrite state.
 void TestLibraryDb(const std::wstring& scratch) {
+    testlog::Batch batch;
     std::wstring file = scratch + L".cdb";
     const std::wstring pathA = L"C:\\Music\\\x00C4rtist\\01 One.flac", pathB = L"C:\\Music\\B\\02 Two.mp3";
     TrackId a = g_lib.Add(pathA), b = g_lib.Add(pathB);
@@ -184,6 +194,8 @@ void TestLibraryDb(const std::wstring& scratch) {
     manualAuto.sortColumn = manualInbox.sortColumn = -2;
     pls.push_back(std::move(manualAuto));
     pls.push_back(std::move(manualInbox));
+    batch.Next(L"LIBRARY DB round trip keeps every stored field, all three playlist kinds and manual "
+               L"view order");
     bool saved = SaveLibrary(file, pls);
     g_lib = Library();
     std::vector<Playlist> back;
@@ -205,12 +217,14 @@ void TestLibraryDb(const std::wstring& scratch) {
               back[4].sortColumn == -2 && back[4].items == std::vector<TrackId>{a2, b2},
           L"LIBRARY DB keeps the manual order of auto and Inbox views across a restart");
 
+    batch.Next(L"LIBRARY DB replacement keeps the previous complete file as a backup");
     std::string valid = ReadTestBytes(file);
     if (found) g_lib[a2].playCount = 8;
     bool savedAgain = SaveLibrary(file, back);
     Check(savedAgain && !valid.empty() && ReadTestBytes(file + L".bak") == valid,
           L"LIBRARY DB replacement keeps the previous complete file as backup");
 
+    batch.Next(L"LIBRARY DB a blocked save preserves the file and backup, and its changes survive a close");
     HANDLE locked = CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     app::g.libraryPath = file;
     app::g.playlists = back;
@@ -234,6 +248,7 @@ void TestLibraryDb(const std::wstring& scratch) {
     Check(kept && restored && app::g.dirty && back9 == a2 && found && g_lib[a2].playCount == 9 &&
               ReadTestBytes(file) == before,
           L"LIBRARY DB changes that couldn't be saved at close are kept beside it and restored at the next start");
+    batch.Next(L"LIBRARY DB a later save succeeds and a kept copy older than library.cdb is ignored");
     if (found) g_lib[a2].playCount = 8;  // what the checks below expect
     app::SaveLibraryNow();
     Check(!app::g.dirty && app::g.ticksSinceSave == 0 && GetFileAttributesW(unsaved.c_str()) == INVALID_FILE_ATTRIBUTES,
@@ -248,6 +263,8 @@ void TestLibraryDb(const std::wstring& scratch) {
     app::g.playlists.clear();
     app::g.libraryPath.clear();
 
+    batch.Next(L"LIBRARY DB invalid track references and a failed creation cannot overwrite or "
+               L"create a file");
     auto invalidLists = back;
     invalidLists.push_back({L"Invalid", {UINT32_MAX}, PlaylistKind::Static});
     before = ReadTestBytes(file);
@@ -259,12 +276,15 @@ void TestLibraryDb(const std::wstring& scratch) {
     Check(!SaveLibrary(unavailable, back, &error) && error.find(L"Couldn't create") != std::wstring::npos,
           L"LIBRARY DB failed creation reports its operation and Windows error");
 
+    batch.Next(L"LIBRARY DB find and rename follow the new path and forget the old one");
     const std::wstring moved = L"D:\\Sorted\\One.flac";
     if (found) g_lib.Rename(a2, moved);
     Check(found && g_lib.Find(moved) == a2 && g_lib.Find(pathA) == UINT32_MAX && g_lib.Find(pathB) == b2 &&
               g_lib.Find(L"C:\\Nope.mp3") == UINT32_MAX,
           L"LIBRARY find/rename");
 
+    batch.Next(L"LIBRARY DB truncated, malformed and out-of-range files leave tracks, stats, strings and "
+               L"playlists untouched");
     size_t memory = g_lib.MemoryBytes(), count = g_lib.Count();
     uint32_t revision = g_lib.Revision();
     auto reject = [&](std::string_view bytes) {
@@ -304,6 +324,7 @@ void TestLibraryDb(const std::wstring& scratch) {
     Check(badField(6, 1ull << 32) && badField(8, 65536) && badField(14, 256) && badField(15, 255) && badField(16, 101),
           L"LIBRARY DB rejects out-of-range stats, bitrate, channels, codecs and ratings");
 
+    batch.Next(L"LIBRARY DB corrupt and unreadable files are set aside and named for the user");
     HANDLE h = CreateFileW(file.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
     DWORD written = 0;
     WriteFile(h, "CDLB\x01\0\0\0\xFF\xFF", 10, &written, nullptr);
@@ -386,8 +407,11 @@ PointsAward ListenTest(uint32_t now, TrackId id, uint32_t plays, double seconds,
 // Play log and statistics: counted/skipped events, period stats, streaks, per-hour/weekday totals,
 // top tracks/artists/albums, "on this day", save/load renumbering, and the plays-in-N-days rules.
 void TestListeningModel() {
+    testlog::Batch batch;
     auto original = PlayLog();
     SetPlayLog({});
+    batch.Next(L"listening weights punish early skips, recover with counted listens and keep unknown "
+               L"tracks equal");
     Check(ListeningWeights({0, 1, 2}) == std::vector<double>({1, 1, 1}), L"unknown tracks have equal weights");
     for (unsigned i = 0; i < 12; ++i) LogPlay(1, 1000 + i * 100, 5, false, true);
     LogPlay(2, 3000, 60, false, true);  // late skips don't train early-skip aversion
@@ -396,6 +420,8 @@ void TestListeningModel() {
           L"early skips lower weight without excluding a track; late skips do not");
     for (unsigned i = 0; i < 30; ++i) LogPlay(1, 4000 + i * 300, 200, true, false);
     Check(ListeningWeights({1})[0] > weights[1] * 5, L"later counted listens recover a skipped track's weight");
+    batch.Next(L"radio learns counted next-track transitions, excludes session gaps and breaks chains "
+               L"at skips");
     SetPlayLog({{0, 1000, 200, PlayEvent::kCounted}, {1, 1200, 200, PlayEvent::kCounted},
                 {0, 1400, 200, PlayEvent::kCounted}, {1, 1600, 200, PlayEvent::kCounted},
                 {2, 9000, 200, PlayEvent::kCounted}, {0, 9200, 200, PlayEvent::kCounted},
@@ -403,16 +429,19 @@ void TestListeningModel() {
     auto radio = ListeningWeights({0, 1, 2, 3}, 0);
     Check(radio[1] == 17 && radio[2] == 1 && radio[3] < 1,
           L"radio learns counted next-track transitions, excludes session gaps and breaks chains at skips");
+    batch.Next(L"compaction rebuilds radio transitions with remapped track IDs");
     RemapPlayLog({2, 0, 1, UINT32_MAX});
     Check(ListeningWeights({0, 1}, 2)[0] == 17, L"compaction rebuilds radio transitions with remapped track IDs");
     SetPlayLog(std::move(original));
 }
 
 void TestPlayLog(const std::wstring& scratch) {
+    testlog::Batch batch;
     ResetPlayState();
     TrackId a = AddTestTrack("One", "Ann", "Alpha", 1, 1, 200, true);
     TrackId b = AddTestTrack("Two", "Ann", "Alpha", 1, 2, 200, true);
     TrackId c = AddTestTrack("Other", "Bob", "Beta", 1, 1, 100, true);
+    batch.Next(L"PLAY LOG records counted plays and skips only, with listened seconds clamped");
     LogPlay(a, LocalAt(2026, 1, 5, 10), 200.4, true, false);
     LogPlay(b, LocalAt(2026, 1, 6, 11), 100, true, false);
     LogPlay(a, LocalAt(2026, 1, 7, 20), 210, true, false);
@@ -421,6 +450,7 @@ void TestPlayLog(const std::wstring& scratch) {
     Check(PlayLog().size() == 4 && PlayLog()[3].flags == PlayEvent::kSkip && PlayLog()[0].seconds == 200,
           L"PLAY LOG logs counted plays and skips only, seconds clamped");
 
+    batch.Next(L"PLAY LOG period totals, streaks and per-hour and weekday counts follow the logged events");
     PeriodStats s = ComputeStats(LocalAt(2026, 1, 1), LocalAt(2027, 1, 1), 5);
     Check(s.plays == 3 && s.skips == 1 && s.seconds == 540 && s.distinctTracks == 2 && s.discoveries == 2,
           L"PLAY LOG stats: plays %u skips %u seconds %llu tracks %u discoveries %u", s.plays, s.skips,
@@ -430,6 +460,7 @@ void TestPlayLog(const std::wstring& scratch) {
     Check(s.byHour[10] == 1 && s.byHour[11] == 1 && s.byHour[20] == 1 && s.byHour[8] == 0 && s.byWeekday[0] == 1 &&
               s.byWeekday[1] == 1 && s.byWeekday[2] == 1,
           L"PLAY LOG hours and weekdays count counted plays only (Jan 5 2026 is a Monday)");
+    batch.Next(L"PLAY LOG rankings of tracks, artists and albums respect their limit");
     Check(s.topTracks.size() == 2 && s.topTracks[0].track == a && s.topTracks[0].plays == 2 &&
               s.topTracks[0].seconds == 410 && s.topTracks[1].track == b && s.topTracks[1].seconds == 130,
           L"PLAY LOG top tracks are ranked by plays, with listened seconds");
@@ -442,10 +473,12 @@ void TestPlayLog(const std::wstring& scratch) {
               s.topAlbums.size() == 1 && s.topAlbums[0].plays == 3 && s.topAlbums[0].key == g_lib[a].album,
           L"PLAY LOG top artists and albums group their tracks");
 
+    batch.Next(L"PLAY LOG periods are [from, to), and tracks first played before them are not discoveries");
     PeriodStats part = ComputeStats(LocalAt(2026, 1, 6), LocalAt(2026, 1, 8), 5);
     Check(part.plays == 2 && part.skips == 0 && part.seconds == 310 && part.discoveries == 1,
           L"PLAY LOG periods are [from, to): Jan 6 to Jan 7, and Tracks first played before the period are not discoveries");
 
+    batch.Next(L"PLAY LOG on this day counts earlier years only and lists the most played first");
     LogPlay(a, LocalAt(2025, 1, 5, 9), 100, true, false);
     LogPlay(c, LocalAt(2025, 1, 5, 21), 100, true, false);
     LogPlay(a, LocalAt(2024, 1, 5, 9), 200, true, false);
@@ -453,6 +486,7 @@ void TestPlayLog(const std::wstring& scratch) {
     std::vector<TrackId> onThisDay = PlayedOnThisDay(LocalAt(2026, 1, 5, 12));
     Check(onThisDay == std::vector<TrackId>{a, c}, L"PLAY LOG on this day: earlier years only, most played first");
 
+    batch.Next(L"PLAY LOG and points round trip retain tracks referenced only by listening history");
     // Listening history keeps a track even after it leaves the library and every playlist.
     ResetPlayState();
     TrackId gone = AddTestTrack("Gone", "Bob", "", 0, 0, 60, false);
@@ -479,6 +513,7 @@ void TestPlayLog(const std::wstring& scratch) {
               PointsRecent().back().id == g_lib.Find(kept2Path),
           L"POINTS round trip keeps the total, initialization and recent events of removed tracks");
 
+    batch.Next(L"LIBRARY DB v2 every truncated prefix of a file with sections is rejected");
     std::string valid = ReadTestBytes(file);
     bool truncations = !valid.empty();
     size_t loadedCount = g_lib.Count();
@@ -489,6 +524,7 @@ void TestPlayLog(const std::wstring& scratch) {
     Check(truncations,
           L"LIBRARY DB v2 all %zu truncated prefixes with sections are rejected", valid.size());
 
+    batch.Next(L"POINTS a library saved before back pay stays uninitialized");
     ResetPoints();
     SaveLibrary(file, none);
     ResetPlayState();
@@ -502,6 +538,7 @@ void TestPlayLog(const std::wstring& scratch) {
         while (FindNextFileW(find, &fd));
         FindClose(find);
     }
+    batch.Next(L"PLAY LOG plays-in-30-and-365-days rules count the plays in each window per track");
     // Auto-playlist rules on the play count of the last 30 and 365 days (skips don't count).
     ResetPlayState();
     TrackId r1 = AddTestTrack("Recent", "Rae", "", 0, 0, 200, true);
@@ -530,6 +567,7 @@ void TestPlayLog(const std::wstring& scratch) {
 // Cordinal points: collection/album bonuses, level thresholds and ranks, listening/play/discovery
 // awards, the day-streak multiplier, per-track fatigue, album runs, rediscovery and back pay.
 void TestPoints() {
+    testlog::Batch batch;
 
     // Collection: once per track, a new album once per album (case-insensitive).
     ResetPlayState();
@@ -539,6 +577,7 @@ void TestPoints() {
     TrackId z = AddTestTrack("Alpha Six", "Ann", "Alpha", 1, 6, 200, false);
     TrackId w = AddTestTrack("Alpha Caps", "ANN", "alpha", 1, 3, 200, true);
     uint32_t t0 = LocalAt(2026, 3, 1, 9);
+    batch.Next(L"POINTS collection awards once per track and once per album, ignoring case");
     PointsAward added = AwardLibraryAddsAt(t0, {t1, t2, xb, z});
     Check(added.centi == 4600 && added.events.size() == 5 && added.events[1].kind == PointsKind::NewAlbum &&
               added.events[4].kind == PointsKind::NewAlbum,
@@ -546,6 +585,7 @@ void TestPoints() {
     Check(AwardLibraryAddsAt(t0, {t1, t2, xb, z}).centi == 0, L"POINTS a track is collected only once");
     Check(AwardLibraryAddsAt(t0, {w}).centi == 200 && PointsTotal() == 4800,
           L"POINTS a second track of an album (any case) is not a new album");
+    batch.Next(L"POINTS level thresholds, ranks and the next rank follow the published curve");
     Check(PointsThreshold(1) == 0 && PointsThreshold(2) == 5000 && PointsThreshold(3) == 28300 &&
               PointsThreshold(4) == 77900 && PointsLevel(0) == 1 && PointsLevel(4999) == 1 && PointsLevel(5000) == 2 &&
               PointsLevel(28299) == 2 && PointsLevel(28300) == 3,
@@ -558,6 +598,8 @@ void TestPoints() {
     ResetPlayState();
     std::vector<TrackId> s;
     for (const char* title : {"S1", "S2", "S3", "S4", "S5", "S6"}) s.push_back(AddTestTrack(title, "Sam", "", 0, 0, 200, true));
+    batch.Next(L"POINTS a first listen, a second track and a replay earn listening, play and "
+               L"discovery points");
     PointsAward a1 = ListenTest(LocalAt(2026, 3, 2, 9), s[0], 1, 200, true, false, 0);
     Check(a1.centi == 2167 && a1.events.size() == 3 && a1.events[2].kind == PointsKind::Discovery,
           L"POINTS 200 s listened: 667 listening + 500 play + 1000 discovery");
@@ -566,6 +608,7 @@ void TestPoints() {
     PointsAward a3 = ListenTest(LocalAt(2026, 3, 2, 10, 30), s[0], 2, 200, true, false, 0);
     Check(a3.centi == 1567 && PointsStreak(LocalAt(2026, 3, 2, 11)) == 1,
           L"POINTS a replay: 667 + 900; ten minutes make the day count (streak 1)");
+    batch.Next(L"POINTS the day streak multiplies awards, and a missed day resets it");
     PointsAward a4 = ListenTest(LocalAt(2026, 3, 3, 9), s[2], 1, 200, true, false, 0);
     Check(a4.centi == 2167 && PointsMultiplier(LocalAt(2026, 3, 3, 9)) == 1.0,
           L"POINTS yesterday counted: the streak of 1 gives no bonus yet");
@@ -581,6 +624,7 @@ void TestPoints() {
     Check(a8.centi == 1567 && PointsStreak(LocalAt(2026, 3, 6, 9)) == 0,
           L"POINTS missing a day resets the streak: no bonus");
 
+    batch.Next(L"POINTS a long day streak raises the multiplier to 1.5 and ends after a missed day");
     // Eleven counting days in a row: streak 11, multiplier 1.5.
     for (int day = 1; day <= 11; ++day)
         ListenTest(LocalAt(2026, 4, day, 9), s[5], (uint32_t)day, 600, true, false, 0);
@@ -591,6 +635,7 @@ void TestPoints() {
     Check(PointsStreak(LocalAt(2026, 4, 14, 9)) == 0 && PointsMultiplier(LocalAt(2026, 4, 14, 9)) == 1.0,
           L"POINTS the streak ends after a missed day (Apr 13), even after twelve days");
 
+    batch.Next(L"POINTS fatigue halves the play points from the eleventh play of a day until midnight");
     // Fatigue: from the 11th counted play of a track on one day, the play points are halved.
     ResetPlayState();
     TrackId f = AddTestTrack("Fatigue", "Fay", "", 0, 0, 60, true);
@@ -615,6 +660,7 @@ void TestPoints() {
         al.push_back(AddTestTrack(title, "Ann", "Alpha", 1, (uint16_t)n, 200, true));
     }
     TrackId beta = AddTestTrack("Beta", "Bob", "Beta", 1, 1, 200, true);
+    batch.Next(L"POINTS an album run awards the fourth track and the whole album in order");
     uint32_t j = LocalAt(2026, 6, 1, 10);
     std::vector<PointsAward> run;
     for (int i = 0; i < 5; ++i) run.push_back(ListenTest(j + i * 300, al[i], 2, 200, true, false, 0));
@@ -624,6 +670,7 @@ void TestPoints() {
     Check(run[4].centi == 7067 && run[4].events.size() == 4 && run[4].events[2].kind == PointsKind::AlbumRun &&
               run[4].events[2].centi == 500 && run[4].events[3].kind == PointsKind::FullAlbum && run[4].events[3].centi == 5000,
           L"POINTS full album run: +5 for the fifth track and +50 for the whole album");
+    batch.Next(L"POINTS an out-of-order track or another album breaks and restarts a run");
     PointsAward broke = ListenTest(j + 1800, beta, 2, 200, true, false, 0);
     Check(broke.centi == 1567, L"POINTS another album's track is a track in between");
     // Plays are 3 here: 667 listening + 1100 play.
@@ -634,8 +681,10 @@ void TestPoints() {
     PointsAward r4 = ListenTest(j + 3300, al[3], 3, 200, true, false, 0);
     Check(r1.centi == 1767 && r2.centi == 1767 && r3.centi == 1767 && r4.centi == 1767,
           L"POINTS runs restart: a track out of order or another album breaks the run");
+    batch.Next(L"POINTS a skipped track earns only its listening time");
     PointsAward skipped = ListenTest(j + 3600, al[4], 3, 30, false, true, 0);
     Check(skipped.centi == 100 && skipped.events.size() == 1, L"POINTS a skip earns only its listening (30 s = 100)");
+    batch.Next(L"POINTS an Inbox-only album run does not earn the full-album bonus");
     // Tracks still waiting in the Inbox are not in the library yet: a run of them must not award
     // the full-album bonus for an album that has no library tracks to complete.
     ResetPlayState();
@@ -651,6 +700,7 @@ void TestPoints() {
                        [](const PointsEvent& e) { return e.kind == PointsKind::FullAlbum; }),
           L"POINTS an Inbox-only album run does not earn the full-album bonus");
 
+    batch.Next(L"POINTS a counted play after 365 days is a rediscovery, not before");
     // Rediscovery: a counted play after 365 days or more.
     ResetPlayState();
     TrackId old = AddTestTrack("Old", "Ola", "", 0, 0, 200, true);
@@ -660,6 +710,7 @@ void TestPoints() {
     Check(rediscovered.centi == 3567 && rediscovered.events.back().kind == PointsKind::Rediscovery && notYet.centi == 2167,
           L"POINTS rediscovery after 365 days: +15, not before");
 
+    batch.Next(L"POINTS back pay is granted once, for what the existing stats are worth");
     // Back pay: granted once, for what the existing stats are worth.
     ResetPlayState();
     TrackId p1 = AddTestTrack("Back One", "Gil", "Gamma", 1, 1, 100, true);
@@ -680,6 +731,7 @@ void TestPoints() {
 }
 // Auto-playlist rules over a small synthetic library.
 void TestAutoPlaylists() {
+    testlog::Batch batch;
     g_lib = Library();
     struct Spec {
         const char *title, *artist, *genre, *date;
@@ -723,6 +775,8 @@ void TestAutoPlaylists() {
         if (!a.ordered) std::sort(r.begin(), r.end());
         return r;
     };
+    batch.Next(L"AUTOPLAYLIST rules on every field kind, nested ALL/ANY groups and limits select the "
+               L"expected tracks, and invalid intervals select none");
     testlog::Cases rules;
     auto check = [&](const wchar_t* what, const AutoPlaylist& a, std::vector<std::wstring> expected) {
         auto got = titles(a);
@@ -782,6 +836,7 @@ void TestAutoPlaylists() {
     Check(rules.Passed(), L"AUTOPLAYLIST rules on every field kind, nested ALL/ANY groups and limits select the expected "
           L"tracks, and invalid intervals select none%ls", rules.failed.c_str());
 
+    batch.Next(L"AUTOPLAYLIST text round trip keeps the rules, and unknown rule fields are skipped");
     std::string text = SerializeAutoPlaylist(a);
     AutoPlaylist back;
     bool parsed = ParseAutoPlaylist(text, back);

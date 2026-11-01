@@ -86,6 +86,25 @@ std::string Mp4Key(const char* key) {
 
 }  // namespace
 
+void TestShortTagHeaders(const std::wstring& scratch) {
+    testlog::Cases shortFiles;
+    const std::wstring path = scratch + L"\\short-header.mp3";
+    for (size_t size = 0; size < 12; ++size) {
+        if (!Ready(WriteTestBytes(path, std::string(size, '\0')), L"the short media header is prepared")) return;
+        TagData tags;
+        std::string image, lyrics;
+        std::vector<Chapter> chapters;
+        bool tagsOk = ReadTags(path, tags);
+        bool artOk = ReadEmbeddedArt(path, image);
+        bool lyricsOk = ReadLyrics(path, lyrics);
+        bool chaptersOk = ReadChapters(path, chapters);
+        shortFiles.Add(!tagsOk && !artOk && !lyricsOk && !chaptersOk,
+                       std::to_wstring(size) + L" bytes");
+    }
+    Check(shortFiles.Passed(), L"short media headers fail safely for tags, covers, lyrics and chapters%ls",
+          shortFiles.failed.c_str());
+}
+
 // MP4 text atoms say whether they are UTF-8 (1), UTF-16BE (2) or implicit; mdta metadata refers
 // to fields by key index. A file cut off after ftyp is not a successful read with empty tags.
 void TestMp4Metadata(const std::wstring& scratch) {
@@ -97,6 +116,9 @@ void TestMp4Metadata(const std::wstring& scratch) {
     Ready(WriteTestBytes(utf16, ftyp + moov), L"the UTF-16 MP4 fixture is prepared");
     TagData t;
     bool utf16Ok = ReadTags(utf16, t);
+    testlog::Batch batch;
+    batch.Next(L"MP4 text atoms decode in their stated encoding, mdta metadata resolves its numeric keys, and a "
+               L"truncated file is unreadable rather than empty tags");
     Check(utf16Ok && t.title == "\xC3\x9Cnicode \xE2\x9C\x93" && t.artist == "Art\xC3\xADst",
           L"MP4 UTF-16BE text atoms decode to the title and artist the file names");
 
@@ -130,6 +152,9 @@ void TestReplayGainTags(const std::wstring& root, const std::wstring& scratchDir
         rgTags &= std::fabs(t.rgTrackGain + 6.5f) < 0.01f && std::fabs(t.rgTrackPeak - 0.988f) < 0.001f &&
                   std::fabs(t.rgAlbumGain + 7.25f) < 0.01f;
     }
+    testlog::Batch batch;
+    batch.Next(L"ReplayGain tags read back in FLAC, MP3 and Ogg, and written gains and peaks read back and clear "
+               L"again on FLAC, MP3, Ogg, Opus (with its R128) and M4A copies");
     Check(rgTags, L"RG TAGS flac, mp3 and ogg track gain -6.50 dB, peak 0.988 and album gain -7.25 dB");
     // The native R128 -> track gain of rg.opus is checked on an edited copy by the tag-writing-ogg suite.
 
@@ -204,6 +229,7 @@ void TestSteam(const std::wstring& scratch) {
         "\t}\n"
         "\t\"1\"\n"
         "\t{\n"
+        "// extra library on another drive\n"
         "\t\t\"path\"\t\t\"D:\\\\SteamLibrary\"\n"
         "\t\t\"apps\"\n"
         "\t\t{\n"
@@ -212,6 +238,9 @@ void TestSteam(const std::wstring& scratch) {
         "\t}\n"
         "}\n";
     auto libs = ParseSteamLibraryFolders(vdf);
+    testlog::Batch batch;
+    batch.Next(L"Steam's 2021+ and older library-folder formats both read their libraries, and empty or "
+               L"truncated input does not crash");
     Check(libs.size() == 2 && libs[0] == L"C:\\Program Files (x86)\\Steam" && libs[1] == L"D:\\SteamLibrary",
           L"STEAM vdf two libraries: %zu, first %ls, second %ls", libs.size(), libs.empty() ? L"" : libs[0].c_str(),
           libs.size() < 2 ? L"" : libs[1].c_str());
@@ -238,15 +267,25 @@ void TestSteam(const std::wstring& scratch) {
     const std::wstring ost = game + L"\\Soundtrack";
     const std::wstring sfx = game + L"\\sfx";
     const std::wstring stray = lib + L"\\steamapps\\common\\Lone Game";
+    const std::wstring placeholders = game + L"\\loadedsoundeffects";
+    const std::wstring emptyMusic = stray + L"\\Music";
     std::error_code ec;
-    for (const std::wstring& d : {album, ost, sfx, stray}) std::filesystem::create_directories(d, ec);
-    bool wrote = WriteTestBytes(album + L"\\song.flac", "") && WriteTestBytes(ost + L"\\track1.flac", "") &&
-                 WriteTestBytes(ost + L"\\track2.mp3", "") && WriteTestBytes(sfx + L"\\hit.wav", "") &&
-                 WriteTestBytes(stray + L"\\stray.wav", "");
+    for (const std::wstring& d : {album, ost, sfx, stray, placeholders, emptyMusic})
+        std::filesystem::create_directories(d, ec);
+    const std::string wav = MakeSineWav(0.01, 0.5);
+    bool wrote = WriteTestBytes(album + L"\\song.wav", wav) && WriteTestBytes(ost + L"\\track1.wav", wav) &&
+                 WriteTestBytes(ost + L"\\broken.mp3", "") && WriteTestBytes(sfx + L"\\hit.wav", wav) &&
+                 WriteTestBytes(stray + L"\\stray.wav", wav) && WriteTestBytes(emptyMusic + L"\\empty.wav", "");
+    for (int i = 0; i < 8; ++i) {
+        wrote &= WriteTestBytes(placeholders + L"\\" + std::to_wstring(i) + L".wav", "");
+        wrote &= WriteTestBytes(sfx + L"\\" + std::to_wstring(i) + L".wav", wav);
+    }
     if (!Ready(wrote, L"STEAM fixture written")) {
         DeleteTestFolder(lib);
         return;
     }
+    batch.Next(L"a synthetic Steam library finds the music album root and an in-game soundtrack while effects, "
+               L"empty placeholders and stray wavs stay out, cancellation discards everything, and the soundtrack scans");
 
     auto found = FindSteamMusicFoldersIn(lib);
     auto has = [&](const std::wstring& p) {
@@ -254,8 +293,37 @@ void TestSteam(const std::wstring& scratch) {
     };
     Check(has(lib + L"\\steamapps\\music") && has(lib + L"\\steamapps\\common\\Some Game\\Soundtrack"),
           L"STEAM library: found music album root and in-game soundtrack (%zu roots)", found.size());
-    Check(!has(sfx) && !has(stray) && found.size() == 2,
-          L"STEAM library: sfx-only folder and stray wav are not soundtracks (%zu roots)", found.size());
+    Check(!has(sfx) && !has(stray) && !has(placeholders) && !has(emptyMusic) && found.size() == 2,
+          L"STEAM library: effects, empty placeholders and stray wavs are not soundtracks (%zu roots)", found.size());
+    std::atomic<bool> cancelled{true};
+    Check(FindSteamMusicFoldersIn(lib, &cancelled).empty(), L"STEAM cancellation discards all discovered roots");
+    std::vector<ScanFile> files;
+    bool imported = ListAudioFiles(ost, files) && files.size() == 2;
+    int read = 0, rejected = 0;
+    for (const auto& file : files) {
+        TagData tags;
+        if (ReadTags(file.path, tags)) ++read; else ++rejected;
+    }
+    Check(imported && read == 1 && rejected == 1,
+          L"STEAM a soundtrack with valid audio and an empty placeholder scans without crashing");
+    const std::wstring copy = ost + L"\\track1-copy.wav";
+    if (!Ready(WriteTestBytes(copy, wav), L"the copied soundtrack file is prepared")) return;
+    Library library;
+    library[library.Add(copy)].flags |= Track::kInLibrary;
+    TrackId original = library.Add(album + L"\\song.wav");
+    library[original].flags |= Track::kInLibrary;
+    library[original].playCount = 7;
+    SteamImport plan;
+    plan.folders = {ost};
+    Check(PrepareSteamImport(plan, SnapshotSteamSongs(library)) && plan.oneCopy.size() == 2 &&
+              plan.eachFormat.size() == 2 && SkipSteamDuplicates(library, plan, false) == 2 &&
+              library[original].InLibrary() && library[original].playCount == 7 &&
+              !library[library.Find(copy)].InLibrary() && ReadTestBytes(copy) == wav,
+          L"STEAM copied files stay out of the Library while the existing song, history and files survive");
+    plan.eachFormat.clear();
+    SkipSteamDuplicates(library, plan, true);
+    Check(library.Contains(library.Find(copy)) && library[library.Find(copy)].InLibrary(),
+          L"STEAM choosing additional formats later can include an automatically skipped copy again");
     DeleteTestFolder(lib);
 }
 
@@ -290,6 +358,8 @@ void TestChapters(const std::wstring& scratch) {
 // LRC lyrics: timestamps, [ar:]/[offset:] metadata, a line with several stamps, and that untimed
 // "plain" lyrics are passed through untouched.
 void TestLyrics() {
+    testlog::Batch batch;
+    batch.Next(L"LRC stamps, metadata and offsets parse into timed lines, and plain lyrics pass through untouched");
     bool timed = false;
     auto lines = app::ParseLyrics(L"[ar:Toby Fox]\r\n[offset:+500]\r\n[00:12.50]Second\r\n[00:01.00][01:02:50]First and last\r\n"
                                   L"[00:30.00]  Third\r\n", timed);
@@ -303,6 +373,8 @@ void TestLyrics() {
 }
 
 void TestCrashDump(const std::wstring& scratch) {
+    testlog::Batch batch;
+    batch.Next(L"a crash dump is written and pruning keeps the newest five, and the newest dump is reported once");
     // No real crash: the writer runs on this thread. Seven dumps must leave the newest five.
     const std::wstring dir = scratch + L"\\crashes";
     bool written = true;
@@ -336,7 +408,7 @@ void TestCrashDump(const std::wstring& scratch) {
 void TestListenBrainz(const std::wstring& scratch) {
     using namespace listenbrainz;
     const std::string info = "\"media_player\":\"cordinal\",\"submission_client\":\"cordinal\","
-                             "\"submission_client_version\":\"0.1.1\"";
+                             "\"submission_client_version\":\"0.1.2\"";
 
     Listen a;
     a.listenedAt = 1700000000;
@@ -348,6 +420,9 @@ void TestListenBrainz(const std::wstring& scratch) {
                        "\"track_name\":\"Line\\u000aBreak\",\"additional_info\":{\"duration_ms\":215000,"
                        "\"tracknumber\":3," + info + "}}}";
     std::string got = ListenJson(a, true);
+    testlog::Batch batch;
+    batch.Next(L"ListenBrainz JSON escapes quotes, backslashes and newlines, passes UTF-8 through, "
+               L"replaces invalid bytes with U+FFFD, skips artistless listens and omits zero fields");
     Check(got == want, L"LISTENBRAINZ json escapes quotes, backslash and newline: %ls", got == want ? L"ok" : L"MISMATCH");
 
     Listen e;  // UTF-8 passes through; no timestamp, release present, zero fields omitted
@@ -382,6 +457,8 @@ void TestListenBrainz(const std::wstring& scratch) {
     const std::wstring fakeToken = L"fake-token-0123456789";
     SetToken(fakeToken);
     std::string tokenBytes = ReadTestBytes(dir + L"\\listenbrainz.token");
+    batch.Next(L"the ListenBrainz token is stored encrypted, the queue survives a restart, and nothing is queued "
+               L"while sending is off");
     Check(Enabled() && !tokenBytes.empty() && tokenBytes.find("fake-token") == std::string::npos,
           L"LISTENBRAINZ token stored encrypted (%zu bytes on disk)", tokenBytes.size());
 

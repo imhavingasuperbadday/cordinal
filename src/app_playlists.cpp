@@ -447,7 +447,8 @@ void ExcludeFromLibrary(const std::vector<TrackId>& ids) {
     std::wstring q = L"Remove " + std::to_wstring(ids.size()) + (ids.size() == 1 ? L" track" : L" tracks") +
                      L" from the library?\n\nThe files stay on disk and won't be added back by folder scans.";
     if (MessageBoxW(g.hwnd, q.c_str(), kAppName, MB_YESNO | MB_ICONQUESTION) != IDYES) return;
-    for (TrackId id : ids) g_lib[id].flags = (uint16_t)((g_lib[id].flags | Track::kExcluded) & ~(Track::kInLibrary | Track::kInbox));
+    for (TrackId id : ids) g_lib[id].flags = (uint16_t)((g_lib[id].flags | Track::kExcluded) &
+                                                    ~(Track::kInLibrary | Track::kInbox | Track::kSteamDuplicate));
     g_lib.Touch();
     g.dirty = true;
     ClearSelection();

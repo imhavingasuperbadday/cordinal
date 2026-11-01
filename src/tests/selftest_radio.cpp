@@ -14,6 +14,10 @@ void TestRadioDirectory(const std::wstring& scratch) {
     ])";
     std::vector<radio::Station> stations;
     bool parsed = radio::ParseStations(json, stations);
+    testlog::Batch batch;
+    batch.Next(L"directory results keep usable streams and tolerate missing artwork, searches escape text "
+               L"and keep genre, country, state and page filters, and local broadcasts match frequencies "
+               L"and call signs without leaking across states");
     Check(parsed && stations.size() == 2 && stations[0].name == "Indie & Rock" && stations[0].bitrate == 128 &&
           stations[1].hls && stations[1].icon.empty(), L"directory results keep usable streams and tolerate missing artwork");
     const std::string query = radio::SearchPath({"rock & roll", "indie/pop", "US", 100});
@@ -29,6 +33,7 @@ void TestRadioDirectory(const std::wstring& scratch) {
               radio::StationMatches(local, {"WMYK-FM", {}, "US", 0, {}}) &&
               !radio::StationMatches(local, {"98.5", {}, "US", 0, "Texas"}),
           L"local broadcast results match frequencies and call signs without leaking across states");
+    batch.Next(L"built-in music stations are valid, unique and found by a Kokomo search");
     testlog::Cases builtIn;
     const auto& catalog = radio::BuiltInStations();
     builtIn.Add(catalog.size() >= 6, L"music station catalog");
@@ -47,6 +52,8 @@ void TestRadioDirectory(const std::wstring& scratch) {
                 L"Kokomo search");
     Check(builtIn.Passed(), L"built-in music stations are valid, unique and found by a Kokomo search%ls",
           builtIn.failed.c_str());
+    batch.Next(L"a favorite survives reopening and can be removed, favorites survive a save and reopen, a rejected "
+               L"write leaves the original byte-identical, and an invalid file does not replace the in-memory list");
     const std::wstring profile = scratch + L"\\profile";
     if (Ready(CreateDirectoryW(profile.c_str(), nullptr) != 0, L"radio profile")) {
         radio::Browser browser(profile);

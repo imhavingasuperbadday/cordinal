@@ -764,8 +764,7 @@ void Paint() {
         RECT rc;
         GetClientRect(v.hwnd, &rc);
         D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties();
-        // The small viewport does not need a hardware device and its driver-side allocations.
-        if (ReducedMemoryMode()) props.type = D2D1_RENDER_TARGET_TYPE_SOFTWARE;
+        if (!GpuDrawing()) props.type = D2D1_RENDER_TARGET_TYPE_SOFTWARE;
         props.dpiX = props.dpiY = 96.0f;  // work in pixels; S() does the scaling
         if (FAILED(v.d2d->CreateHwndRenderTarget(props, D2D1::HwndRenderTargetProperties(v.hwnd, D2D1::SizeU(rc.right, rc.bottom)),
                                                  &v.rt)))

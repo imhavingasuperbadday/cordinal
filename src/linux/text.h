@@ -22,6 +22,12 @@ void ShutdownText();
 void ClearTextCache();
 bool UiSymbolsAvailable();  // the rating stars and auto-playlist mark, including fallback fonts
 
+// Rebuild the enabled packs' private font catalog before InitText. Copies keep the font bytes alive
+// across pack reloads; ResetPackFonts closes the active text before releasing its backing bytes.
+void ResetPackFonts();
+bool AddPackFont(const std::string& bytes);
+bool UsesPackFont(Font font);  // font-source inspection for the headless layout checks
+
 // Draws `text` (UTF-8) at (x, y) top-left. With maxWidth > 0, a string that doesn't fit is cut
 // with an ellipsis. align: 0 left, 1 center, 2 right (within maxWidth). Returns the width drawn.
 float DrawText(Font font, const std::string& text, float x, float y, uint32_t rgb, float maxWidth = 0, int align = 0);

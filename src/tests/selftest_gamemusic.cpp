@@ -193,6 +193,8 @@ const char kGzDynamic[] =
 }  // namespace
 
 void TestInflate() {
+    testlog::Batch batch;
+    batch.Next(L"gzip fixed- and dynamic-Huffman blocks and a named header inflate to the original bytes");
     auto gunzip = [](const std::string& gz, std::string& out, size_t maxOut = 1 << 20) {
         return Gunzip(reinterpret_cast<const unsigned char*>(gz.data()), gz.size(), maxOut, out);
     };
@@ -214,6 +216,7 @@ void TestInflate() {
     Check(gunzip(named, out) && out == dynamicExpect, L"gzip header with a file name");
 
     // Every truncation fails, a flipped bit fails (CRC or structure), and the size limit holds.
+    batch.Next(L"gzip rejects truncation, damage and output past the limit, and CRC-32 matches its check value");
     bool truncOk = true;
     for (size_t cut = 0; cut < dynamicGz.size(); ++cut)
         if (gunzip(dynamicGz.substr(0, cut), out)) truncOk = false;
@@ -235,6 +238,9 @@ void TestInflate() {
 // VGM, and silent SPC/GBS/GYM files. Checks the sub-track suffix parser, per-song tags, decode
 // length and seek, plus that damaged or truncated files fail cleanly instead of crashing.
 void TestGameMusic(const std::wstring& dir) {
+    testlog::Batch batch;
+    batch.Next(L"GME names and subtrack suffixes parse, and an NSFE reports three songs with song 2's tags "
+               L"while its plain path is song 1");
     auto write = [&](const wchar_t* name, const std::string& bytes) {
         std::wstring path = dir + L"\\" + name;
         WriteTestBytes(path, bytes);
@@ -267,6 +273,8 @@ void TestGameMusic(const std::wstring& dir) {
     bool firstRead = ReadTags(nsfe, first);  // read before Check: its arguments may be evaluated first
     Check(firstRead && first.title == "First" && first.track == 1, L"GME NSFE plain path is song 1 (%ls)",
           FromUtf8(first.title).c_str());
+    batch.Next(L"the track decoder selects a game-music subsong, songs decode to their times and seek exactly, "
+               L"and song 4 or a |0 suffix is refused");
     unsigned rate = 0;
     auto all1 = DecodeAll(nsfe, rate);
     auto all2 = DecodeAll(nsfe + L"|2", rate);
@@ -288,6 +296,7 @@ void TestGameMusic(const std::wstring& dir) {
           L"GME NSFE song 4 and suffix |0 are refused");
 
     // VGM: a 10 s tone, plain and gzip-wrapped. The tone fades over the last 8 s.
+    batch.Next(L"a VGM and its VGZ each have one song, play the same 10 s fading tone and report its tags");
     const std::string vgmBytes = GmVgm(441000);
     const std::wstring vgm = write(L"gm_test.vgm", vgmBytes);
     const std::wstring vgz = write(L"gm_test.vgz", GmGzipStored(vgmBytes));
@@ -304,6 +313,7 @@ void TestGameMusic(const std::wstring& dir) {
           L"GME VGZ tags: duration %.3f codec %ls", vt.duration, CodecName(vt.codec));
 
     // Seeking into the fade, then back to the start, where the fade has to come back too.
+    batch.Next(L"seeking a VGM into its fade and back to the start replays the fade exactly");
     auto vd = OpenGameMusicDecoder(vgm, 1, error);
     bool seekFade = vd && vd->Seek(9.5);
     double lateRms = 0;
@@ -320,6 +330,7 @@ void TestGameMusic(const std::wstring& dir) {
           again.size() / 2);
 
     // One song each: tags and a length from the file itself.
+    batch.Next(L"an SPC gives its tags and decodes finite samples");
     const std::wstring spc = write(L"gm_test.spc", GmSpc());
     TagData st;
     bool spcRead = ReadTags(spc, st);
@@ -330,6 +341,7 @@ void TestGameMusic(const std::wstring& dir) {
     Check(GmFinite(spcPcm) && !spcPcm.empty(), L"GME SPC decodes finite samples (%zu frames of 441000: a silent song ends when its fade starts, as in gme)", spcPcm.size() / 2);
 
     const std::wstring gbs = write(L"gm_test.gbs", GmGbs());
+    batch.Next(L"a GBS has three songs, song 3 gives its tags, plays and seeks");
     TagData gt;
     bool gbsRead = ReadTags(gbs + L"|3", gt);
     Check(GameMusicTrackCount(gbs) == 3 && gbsRead && gt.title == "Track 3" && gt.album == "Test GBS" &&
@@ -341,6 +353,7 @@ void TestGameMusic(const std::wstring& dir) {
     Check(gbsGot == 4410 && GmFinite(gbsHead) && gbsDec->Seek(1.0), L"GME GBS song 3 plays and seeks (%zu frames)", gbsGot);
 
     const std::wstring gym = write(L"gm_test.gym", GmGym(600));
+    batch.Next(L"a GYM gives its tags and decodes finite samples");
     TagData yt;
     bool gymRead = ReadTags(gym, yt);
     Check(GameMusicTrackCount(gym) == 1 && gymRead && yt.album == "Test GYM Game" && yt.date == "1993" &&
@@ -356,6 +369,8 @@ void TestGameMusic(const std::wstring& dir) {
         const wchar_t* name;
         std::string bytes;
     };
+    batch.Next(L"damaged game-music files fail or decode cleanly without crashing, and truncated or flipped "
+               L"VGZ archives are refused");
     const std::vector<Fixture> fixtures = {{L"gm_bad.nsfe", GmNsfe()}, {L"gm_bad.vgm", vgmBytes},
                                            {L"gm_bad.vgz", GmGzipStored(vgmBytes)}, {L"gm_bad.spc", GmSpc()},
                                            {L"gm_bad.gbs", GmGbs()}, {L"gm_bad.gym", GmGym(600)}};

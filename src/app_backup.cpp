@@ -144,7 +144,7 @@ std::wstring Summary(const Result& r) {
                std::to_wstring(r.data.playlists.size()) + L" playlists, " +
                std::to_wstring(r.data.log.size()) + L" listening events. " + std::to_wstring(r.missing) +
                L" music files unavailable at the chosen locations; their data is kept.\r\n"
-               L"Music is not included. Packs, soundfonts and settings are restored. Reconnect ListenBrainz "
+               L"Music is not included. Packs, soundfonts and settings are restored. Reconnect scrobbling services "
                L"and pair browser devices again.";
     const auto plan = migration::PlanStatistics(g_lib, r.statistics, r.maps);
     return std::to_wstring(plan.matched.size()) + L" songs matched, " +

@@ -46,6 +46,7 @@ std::vector<float> ReadAllFrom(Decoder& d) {
 // Lossy codecs are compared against FFmpeg's own decode of the same two files, since their encoders
 // smear the file edges.
 void TestGapless(const std::wstring& dir) {
+    testlog::Batch batch;
     if (!FindFFmpeg()) testlog::Skip(L"lossy gapless seam comparison against FFmpeg: oracle unavailable");
     unsigned refRate = 0;
     auto ref = DecodeAll(dir + L"\\ref.wav", refRate);
@@ -115,6 +116,7 @@ void TestGapless(const std::wstring& dir) {
                    bestLag, lenDiff, bodySnr, seamSnr, vsReference);
         joins.Add(ok, detail);
     }
+    batch.Next(L"GAPLESS FLAC, MP3, M4A and Ogg joins line up with the reference and keep a clean seam");
     Check(joins.Passed(), L"GAPLESS FLAC, MP3, M4A and Ogg joins line up with the reference and keep a clean seam%ls",
           joins.failed.c_str());
 }
@@ -122,6 +124,7 @@ void TestGapless(const std::wstring& dir) {
 // Resampler: chunked pushes must match one whole push exactly, the length and a resampled 1 kHz tone
 // must be right, and every rate pair (up, down, equal, extreme) must preserve a stereo DC level.
 void TestResampler() {
+    testlog::Batch batch;
     if (nativeaudio::FastAudioKernels()) {
         // Reproduce the original lane arithmetic with scalar FMA. Synthetic rows
         // expose a misplaced coefficient even when a DC or tone check would pass.
@@ -162,8 +165,11 @@ void TestResampler() {
             exact &= memcmp(actual + 1, expected, sizeof expected) == 0 && index == referenceIndex &&
                      numerator == referenceNum && actual[0] == 123 && actual[frames * 2 + 1] == 123;
         }
+        batch.Next(L"RESAMPLE prepared and interpolated AVX2 phases preserve exact FMA results, cursor and "
+                   L"output guards");
         Check(exact, L"RESAMPLE prepared and interpolated AVX2 phases preserve exact FMA results, cursor and output guards");
     } else testlog::Skip(L"RESAMPLE exact AVX2 phase comparison requires AVX2/FMA");
+    batch.Next(L"RESAMPLE chunked pushes, length, tone SNR and stereo DC gain hold at every rate pair");
     const unsigned in = 44100, out = 48000;
     std::vector<float> src(in * 2 * 2);
     for (size_t i = 0; i < src.size() / 2; ++i) src[i * 2] = src[i * 2 + 1] = (float)(0.5 * std::sin(2 * 3.14159265358979 * 1000 * i / in));
@@ -223,6 +229,7 @@ void TestResampler() {
 // slice the file precisely, seeking is relative to the range start, and the "file.wav|2" sub-track
 // path opens the whole file. A FLAC range is checked the same way.
 void TestRanges(const std::wstring& root, const std::wstring& scratch) {
+    testlog::Batch batch;
     const unsigned rate = 44100;
     const size_t frames = 2 * rate;
     std::wstring wav = scratch + L"\\ranges.wav", error;
@@ -242,7 +249,10 @@ void TestRanges(const std::wstring& root, const std::wstring& scratch) {
         bool duration = d && std::fabs(d->Duration() - (double)(to - from) / rate) < 1e-9;
         rangesOk &= exact && duration;
     }
+    batch.Next(L"RANGE wav exact, fractional and open-ended ranges slice the file and report their duration");
     Check(rangesOk, L"RANGE wav exact, fractional and open-ended ranges slice the file and report their duration");
+    batch.Next(L"RANGE wav seeks, sub-track paths and FLAC ranges read exactly the samples of the "
+               L"whole-file decode");
     // Seeking is relative to the range start, and a seek past the end ends the track.
     auto d = OpenRange(OpenDecoder(wav, 48000, error), 0.5, 1.0);
     bool seekOk = d && d->Seek(0.25);
@@ -267,6 +277,7 @@ void TestRanges(const std::wstring& root, const std::wstring& scratch) {
 }
 
 void TestSoundEffects() {
+    testlog::Batch batch;
     // Every sound, at two device rates and both levels: finite, below full scale, short, starting
     // and ending at silence (no clicks), and the same for the same seed.
     bool ok = true;
@@ -283,6 +294,7 @@ void TestSoundEffects() {
                 ok = ok && good;
                 longest = std::max(longest, s.size() * 1000 / rate);
             }
+    batch.Next(L"SFX all sounds render cleanly, seeded rendering is repeatable and stars extend the run");
     Check(ok, L"SFX all sounds render cleanly (longest %zu ms)", longest);
     Check(sfx::Render(Sfx::Dice, 0, 48000, 7, false) == sfx::Render(Sfx::Dice, 0, 48000, 7, false) &&
               sfx::Render(Sfx::Dice, 0, 48000, 7, false) != sfx::Render(Sfx::Dice, 0, 48000, 8, false),
@@ -290,12 +302,14 @@ void TestSoundEffects() {
     size_t one = sfx::Render(Sfx::Rate, 2, 48000, 1, false).size(), five = sfx::Render(Sfx::Rate, 10, 48000, 1, false).size();
     Check(five > one, L"SFX five stars play a longer run than one (%zu > %zu samples)", five, one);
 
+    batch.End();
     // The DELTARUNE theme's sounds are embedded as FLAC. Frame counts and FNV-1a hashes of the 16-bit
     // samples come from the game's original WAVs, so anything short of an exact decode fails.
     if (!kExtraThemes) {
         testlog::Skip(L"SFX DELTARUNE sounds: this build leaves out the extra themes (build.bat themes)");
         return;
     }
+    batch.Next(L"SFX DELTARUNE sounds decode to the game's exact mono samples at 22.05 kHz");
     struct GameSound { int id; size_t frames; uint32_t hash; };
     const GameSound sounds[] = {
         {IDR_SND_SELECT, 4127, 0x388e9c2e}, {IDR_SND_MENUMOVE, 516, 0xe4874518}, {IDR_SND_NOISE, 1600, 0x151f08c2},
@@ -346,6 +360,7 @@ std::string FlacWithComments(const std::vector<std::string>& comments) {
 
 // Game-music loops: the WAV loop tags, the FLAC comment tags, and the timeline they make.
 void TestLoops(const std::wstring& scratch) {
+    testlog::Batch batch;
     const unsigned rate = 8000;
     const std::string pcm = StereoRamp16(4000);
     auto loopOf = [&](const std::wstring& file, int64_t& s, int64_t& e) { return ReadLoopPoints(scratch + L"\\" + file, s, e); };
@@ -361,6 +376,8 @@ void TestLoops(const std::wstring& scratch) {
     bool noLoop = !loopOf(L"plain.wav", s, e);
     write("badloop.wav", WavFile(rate, 2, pcm, RiffChunk("smpl", SmplChunk(1000, 499))));
     bool wavBad = !loopOf(L"badloop.wav", s, e);
+    batch.Next(L"LOOP tags read WAV smpl loops and FLAC comment loops, with LOOPEND winning and bad values "
+               L"ignored");
     Check(wavOk && noLoop && wavBad, L"LOOP tags WAV smpl: [%lld, %lld) (expect [1000, 2000)), plain WAV none, end before start ignored",
           (long long)s, (long long)e);
 
@@ -376,6 +393,8 @@ void TestLoops(const std::wstring& scratch) {
     Check(lengthOk && endOk && negative && backwards, L"LOOP tags FLAC comments: LOOPLENGTH=[%lld, %lld) LOOPEND wins, bad values ignored",
           (long long)s, (long long)e);
 
+    batch.Next(L"LOOP decode plays the intro, two passes and the fade, seeks on the looped timeline and "
+               L"rejects bad times");
     // Decode: intro [0, 1000), the loop twice (frames 1000..2999), then 0.1 s (800 frames) of fade.
     std::wstring err;
     unsigned r = 0;
@@ -422,6 +441,7 @@ void TestLoops(const std::wstring& scratch) {
               !OpenRange(OpenDecoder(scratch + L"\\loop.wav", 48000, err), 0, INFINITY),
           L"RANGE invalid times are rejected before conversion to sample frames");
 
+    batch.End();
     // The engine uses the same tags: the reported duration is the looped one, and 0 turns loops off.
     if (HeadlessTests()) {
         testlog::Skip(L"loop duration on a physical output: headless mode; offline loop samples were checked");
@@ -446,6 +466,7 @@ void TestLoops(const std::wstring& scratch) {
     engine.Stop();
     Pump(100);
     engine.Shutdown();
+    batch.Next(L"LOOP engine reports the looped duration with loops and the plain one with loops off");
     Check(std::fabs(looped - 0.475) < 0.002 && std::fabs(plain - 0.5) < 0.002,
           L"LOOP engine duration: %.3f s with loops (expect 0.475), %.3f s with loops off (expect 0.500)", looped, plain);
 }
@@ -515,6 +536,7 @@ std::string Utf16Text(const std::wstring& w, bool bigEndian) {
 
 // The 1.1 MB limit and bad input: none of these may crash or hang.
 void CueGarbage(const std::wstring& folder) {
+    testlog::Batch batch;
     unsigned seed = 12345;
     auto next = [&seed] {
         seed = seed * 1103515245u + 12345u;
@@ -541,6 +563,8 @@ void CueGarbage(const std::wstring& folder) {
     }
     CueSheet pregap;
     ParseCue("FILE \"x\" WAVE\nTRACK 01 AUDIO\nINDEX 00 00:00:10\n", folder, pregap);
+    batch.Next(L"CUE garbage: random bytes and broken lines never crash, and a pregap-only track starts at "
+               L"INDEX 00");
     Check(survived && pregap.TrackCount() == 1 && std::fabs(pregap.files[0].tracks[0].start - 10 / 75.0) < 1e-9,
           L"CUE garbage: random bytes and broken lines are survived; a pregap-only track starts at its INDEX 00");
 
@@ -551,6 +575,8 @@ void CueGarbage(const std::wstring& folder) {
         big += line;
     }
     CueSheet many;
+    batch.Next(L"CUE caps 10,000 TRACK lines at 999 tracks, renumbers repeated numbers and rejects input "
+               L"over 1 MB");
     bool manyOk = ParseCue(big, folder, many);
     Check(manyOk && many.TrackCount() == 999,
           L"CUE 10,000 TRACK lines: parsed without a hang, capped at %zu tracks", many.TrackCount());
@@ -573,6 +599,7 @@ void CueGarbage(const std::wstring& folder) {
 // ranges and their decode slices, folder scans that list only tracks, tag/performer inheritance,
 // multi-file sheets, rescan-on-edit, and fuzzed/garbage input that must never crash or hang.
 void TestCue(const std::wstring& media, const std::wstring& scratch) {
+    testlog::Batch batch;
     const std::wstring dir = scratch + L"\\cue", album = dir + L"\\Album", enc = dir + L"\\enc";
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
@@ -617,6 +644,7 @@ void TestCue(const std::wstring& media, const std::wstring& scratch) {
     bool fields = loaded && sheet.date == "1999" && sheet.genre == "Jazz Fusion" && sheet.comment == "ripped" &&
                   sheet.discNumber == 2 && sheet.totalDiscs == 3 && sheet.catalog == "0724349583629" &&
                   sheet.performer == "Caf\xC3\xA9 Band" && sheet.title == "Live \xC3\xA9t\xC3\xA9" && sheet.files.size() == 1;
+    batch.Next(L"CUE sheets read their fields, tracks and 75-frame times");
     Check(fields, L"CUE fields: DATE, GENRE, COMMENT, DISCNUMBER, TOTALDISCS, CATALOG, disc PERFORMER and TITLE (CP-1252 read)");
     bool tracks = loaded && sheet.files[0].tracks.size() == 3 && sheet.files[0].tracks[0].title == "One" &&
                   sheet.files[0].tracks[1].title == "Two & Friends" && sheet.files[0].tracks[2].title == "Three" &&
@@ -628,6 +656,8 @@ void TestCue(const std::wstring& media, const std::wstring& scratch) {
                  same(sheet.files[0].tracks[2].start, t3) && sheet.files[0].tracks[2].end == 0;
     Check(times, L"CUE times: INDEX 01 at 75 frames a second, each track ends where the next starts, the last runs to the end");
 
+    batch.Next(L"CUE text encodings read the same title from UTF-8 with and without a BOM, UTF-16 LE and "
+               L"BE, and ANSI");
     // Encodings: UTF-8 BOM, UTF-16 LE and BE with BOM, UTF-8 without BOM, and the ANSI code page.
     const std::wstring encBody = L"FILE \"Ramp.wav\" WAVE\nTRACK 01 AUDIO\nTITLE \"Ü\"\nINDEX 01 00:00:00\n";
     const std::string utf8Body = "FILE \"Ramp.wav\" WAVE\nTRACK 01 AUDIO\nTITLE \"\xC3\x9C\"\nINDEX 01 00:00:00\n";
@@ -645,6 +675,8 @@ void TestCue(const std::wstring& media, const std::wstring& scratch) {
     }
     Check(encodings, L"CUE encodings: UTF-8 BOM, UTF-16 LE and BE, UTF-8 without BOM and ANSI all read as \xDC");
 
+    batch.Next(L"CUE ranges give [start, end) for each track and fail for a missing number or a file "
+               L"without a sheet");
     // Sub-track ranges and the sheets behind them.
     double s = -1, e = -1;
     std::wstring ramp = album + L"\\Ramp.wav";
@@ -655,6 +687,8 @@ void TestCue(const std::wstring& media, const std::wstring& scratch) {
     bool missing = !SubtrackRange(SubtrackPath(ramp, 9), s, e) && !SubtrackRange(album + L"\\Plain.flac|1", s, e);
     Check(missing, L"CUE lookups fail for a missing track number and for a file with no sheet");
 
+    batch.Next(L"CUE covered files expand into their tracks and the folder scan lists only those, with the "
+               L"file's size");
     // ExpandSubtracks and folder scans: a covered file is only its tracks.
     auto ramp3 = ExpandSubtracks(ramp);
     Check(ramp3.size() == 3 && ramp3[0] == SubtrackPath(ramp, 1) && ExpandSubtracks(album + L"\\Plain.flac").empty() &&
@@ -678,6 +712,8 @@ void TestCue(const std::wstring& media, const std::wstring& scratch) {
     Check(scanned && scanSize, L"CUE scanner: %zu entries, covered audio listed only as tracks carrying their "
           L"file's size, plain files as themselves", scan.size());
 
+    batch.Next(L"CUE tracks, embedded text and binary sheets and .wav-named cues decode to their exact "
+               L"slices");
     // Decoding each range matches the same slice of the whole file.
     auto slice = [](const std::vector<float>& whole, unsigned rate, double start, double end, const std::vector<float>& got) {
         size_t from = (size_t)std::llround(start * rate);
@@ -716,6 +752,8 @@ void TestCue(const std::wstring& media, const std::wstring& scratch) {
     TagData t1, t2tags, t3tags, whole;
     bool read = ReadTags(SubtrackPath(ramp, 1), t1) && ReadTags(SubtrackPath(ramp, 2), t2tags) &&
                 ReadTags(SubtrackPath(ramp, 3), t3tags) && ReadTags(ramp, whole);
+    batch.Next(L"CUE tags: sheet values win, tracks inherit the album artist, durations add up and rescans "
+               L"follow the cue");
     Check(read && t1.title == "One" && t1.artist == "Caf\xC3\xA9 Band" && t1.album == "Live \xC3\xA9t\xC3\xA9" &&
               t1.albumArtist == "Caf\xC3\xA9 Band" && t1.date == "1999" && t1.genre == "Jazz Fusion" &&
               t1.comment == "ripped" && t1.composer == "Writer A" && t1.track == 1 && t1.trackTotal == 3 && t1.disc == 2 &&
@@ -754,5 +792,6 @@ void TestCue(const std::wstring& media, const std::wstring& scratch) {
     });
     Check(newer, L"CUE rescan: a track takes the newer write time of its cue");
 
+    batch.End();
     CueGarbage(album);
 }

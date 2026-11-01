@@ -92,6 +92,8 @@ constexpr int kTimeGap = 6;        // between a time and the seek bar
 constexpr int kVolumeWidth = 90;
 constexpr int kSpeakerWidth = 20;  // the speaker glyph left of the volume
 constexpr int kVolumeGap = 24;     // between the remaining time's room and the speaker
+constexpr int kSliderInset = 8;    // from each end to the handle's centre, also used for hit testing
+constexpr int kSliderTrackHeight = 4, kSliderThumbWidth = 3, kSliderThumbHeight = 14;
 constexpr int kBandGap = 4;        // under the band and under the now playing line
 constexpr int kCover = 32;         // the now playing cover
 constexpr int kCoverGap = 8;       // between the cover and the title

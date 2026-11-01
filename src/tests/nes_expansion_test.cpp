@@ -81,7 +81,9 @@ void SunWrite(Sunsoft5b& chip, uint8_t reg, uint8_t value) {
 // Sunsoft 5B: the shape-based envelope generator and its boundaries.
 void TestSunsoft() {
     using testlog::Check;
+    testlog::Batch batch;
     constexpr int endLevel[16] = {0,0,0,0,0,0,0,0,31,0,0,31,0,31,31,0};
+    batch.Next(L"5B envelope shapes 0-F reach their documented boundary and retrigger from shape 9");
     bool boundaries = true, retriggers = true;
     for (int shape = 0; shape < 16; ++shape) {
         BandBuffer b; Setup(b);
@@ -99,6 +101,7 @@ void TestSunsoft() {
     }
     Check(boundaries, L"5B envelope shapes 0-F each reach their documented boundary");
     Check(retriggers, L"5B envelope shapes 0-F each retrigger from shape 9");
+    batch.Next(L"5B noise, disabled tone/noise gates and invalid latches keep their documented output");
     BandBuffer b; Setup(b);
     Sunsoft5b chip; chip.Reset(&b);
     SunWrite(chip, 6, 15); SunWrite(chip, 7, 0x37); SunWrite(chip, 8, 15);
@@ -110,6 +113,7 @@ void TestSunsoft() {
     SunWrite(chip, 0x18, 0); // invalid upper latch bits disable writes, rather than aliasing register 8
     auto ignored = Render(chip, b, 20000);
     Check(std::abs(ignored.back() - 0.28f) < 0.0001, L"5B invalid register latch ignores data");
+    batch.Next(L"5B envelope uses 32 levels at 1.5 dB spacing");
     b.Clear(); chip.Reset(&b);
     SunWrite(chip, 7, 0x3F); SunWrite(chip, 8, 16);
     SunWrite(chip, 11, 0); SunWrite(chip, 12, 1); SunWrite(chip, 13, 0x0C);
@@ -131,14 +135,17 @@ void LoadFdsWave(FdsAudio& chip) {
 // FDS: wave RAM rules, modulation (pitch and table), volume, and the two envelopes.
 void TestFds() {
     using testlog::Check;
+    testlog::Batch batch;
     BandBuffer b; Setup(b);
     FdsAudio chip; chip.Reset(&b);
     chip.Write(0, 0x4089, 0x80);
     chip.Write(0, 0x4045, 0xFF);
+    batch.Next(L"FDS wave RAM is six bits with an open bus and protected writes are ignored");
     Check(chip.Read(0, 0x4045) == 0x7F, L"FDS wave RAM is six bits with open-bus bit 6");
     chip.Write(0, 0x4089, 0);
     chip.Write(0, 0x4040, 63);
     Check(chip.Read(0, 0x4045) == 0x40, L"FDS protected wave writes are ignored and reads follow playback position");
+    batch.Next(L"FDS wavetable pitch, write-mode hold, modulation gain and table, and volume gating");
     LoadFdsWave(chip);
     auto plain = Render(chip, b, 400000);
     const double hz = Frequency(plain, 0.135);
@@ -162,6 +169,7 @@ void TestFds() {
     auto table = Render(chip, b, 400000);
     Check(Finite(table) && table != plain && Spread(table) > 0.01, L"FDS modulation table advances and changes sound");
 
+    batch.Next(L"FDS envelopes tick at their rate, halt freezes gain and the master enable gates registers");
     b.Clear(); chip.Reset(&b);
     chip.Write(0, 0x408A, 1);
     chip.Write(0, 0x4083, 0);
@@ -182,9 +190,11 @@ void TestFds() {
 // MMC5: two pulse channels, the length counter, and the eight-bit PCM DAC (write and read mode).
 void TestMmc5() {
     using testlog::Check;
+    testlog::Batch batch;
     BandBuffer b; Setup(b);
     Mmc5Audio chip; chip.Reset(&b);
     chip.Write(0, 0x5015, 3);
+    batch.Next(L"MMC5 pulses: pitch and polarity, disable, length counter and the second pulse's envelope");
     chip.Write(0, 0x5000, 0xBF); // constant 50% pulse, length halt
     chip.Write(0, 0x5002, 253);
     chip.Write(0, 0x5003, 0xF8);
@@ -208,6 +218,7 @@ void TestMmc5() {
           L"MMC5 second pulse and looping volume envelope produce sound");
     chip.Write(0, 0x5015, 0);
 
+    batch.Next(L"MMC5 eight-bit PCM DAC: inversion, zero hold with IRQ acknowledge, and read mode");
     chip.Write(0, 0x5011, 128);
     auto dac = Render(chip, b, 20000);
     Check(std::abs(dac.back() + 128 * 0.00335f) < 0.0001, L"MMC5 full eight-bit PCM DAC is inverted");
@@ -245,6 +256,8 @@ void PureVrc7(Vrc7Audio& chip, int channel = 0) {
 // patches, timbre changes, and stability of the fractional clock across frame sizes.
 void TestVrc7() {
     using testlog::Check;
+    testlog::Batch batch;
+    batch.Next(L"VRC7 custom sine keeps 436.96 Hz and releases and retriggers in both NTSC and PAL");
     bool vrc7Pitch = true, vrc7Release = true, vrc7Retrigger = true;
     for (bool pal : {false, true}) {
         BandBuffer b; Setup(b, pal ? 1662607 : kClock);
@@ -264,6 +277,7 @@ void TestVrc7() {
     Check(vrc7Pitch, L"VRC7 custom sine keeps 436.96 Hz in both NTSC and PAL");
     Check(vrc7Release, L"VRC7 key-off release silences the carrier in both regions");
     Check(vrc7Retrigger, L"VRC7 key-on retriggers after release in both regions");
+    batch.Next(L"VRC7 instruments 1-F each produce sound and the instrument ROM changes timbre");
     std::vector<float> first;
     bool instruments = true, timbre = true;
     for (int instrument = 1; instrument <= 15; ++instrument) {
@@ -280,6 +294,7 @@ void TestVrc7() {
     }
     Check(instruments, L"VRC7 instruments 1-F each produce sound");
     Check(timbre, L"VRC7 instrument ROM changes timbre");
+    batch.Next(L"VRC7 fractional clock is stable across different frame sizes");
     auto render = [](uint32_t chunk) {
         BandBuffer b; Setup(b);
         Vrc7Audio chip; chip.Reset(false, &b); PureVrc7(chip, 5);
@@ -356,16 +371,19 @@ std::string Nsfe(const std::string& nsf) {
 // writable and bankable, ROM-read PCM works, and restart/seek reproduce rendered samples exactly.
 void TestNsfBus() {
     using testlog::Check;
+    testlog::Batch batch;
     Program fds;
     fds.Write(0x4089, 0x80);
     for (int i = 0; i < 64; ++i) fds.Write((uint16_t)(0x4040 + i), (uint8_t)i);
     fds.Write(0x4089, 0); fds.Write(0x4080, 0xA0); fds.Write(0x4082, 0); fds.Write(0x4083, 4);
     const auto fdsFile = Nsf(fds, 4, 0x6000);
     auto audio = Play(fdsFile);
+    batch.Next(L"FDS NSF loads at $6000 and its NSFE follows, while non-FDS files cannot load below $8000");
     Check(Finite(audio) && Rms(audio, 1000) > 0.01, L"FDS NSF loads and executes at $6000 with expansion sound");
     Check(Play(Nsfe(fdsFile), true) == audio, L"FDS NSFE follows the same chip and low-memory path");
     auto bad = fdsFile; bad[0x7B] = 0;
     Check(Play(bad).empty(), L"non-FDS files cannot load below $8000");
+    batch.Next(L"NSF program memory is writable and the MMC5 multiplier and arithmetic reach the PCM DAC");
     bool memoryWritable = true;
     for (uint16_t addr : std::initializer_list<uint16_t>{0x6000,0x8000,0xDFFF}) {
         Program p;
@@ -392,6 +410,7 @@ void TestNsfBus() {
     arithmetic.Write(0x5011, 128);
     Check(Rms(Play(Nsf(arithmetic, 8))) > 0.001, L"MMC5 product exposes both bytes and the last expansion-RAM address");
 
+    batch.Next(L"FDS $5FF6/$5FF7/$5FF8 banking copies writable pages and NSFE maps banks like NSF");
     bool bankedOk = true, bankedMatch = true;
     for (uint16_t bankRegister : std::initializer_list<uint16_t>{0x5FF6,0x5FF7,0x5FF8}) {
         Program banking;
@@ -423,6 +442,7 @@ void TestNsfBus() {
     Check(bankedOk, L"FDS $5FF6/$5FF7/$5FF8 banking copies writable program pages");
     Check(bankedMatch, L"FDS NSFE bank mapping matches NSF for all three registers");
 
+    batch.Next(L"MMC5 NSF bus forwards ROM reads to the PCM channel");
     Program pcmRead;
     pcmRead.Write(0x5010, 1);
     pcmRead.Copy(0xB000, 0x6000); // write PCM by reading a byte inside $8000-$BFFF
@@ -436,6 +456,7 @@ void TestNsfBus() {
     pcmFile.replace(128 + 0x4000, pcmCode.size(), pcmCode);
     Check(Rms(Play(pcmFile)) > 0.001, L"MMC5 NSF bus forwards ROM reads to the PCM channel");
 
+    batch.Next(L"VRC7 address/data ports and 5B noise with envelope volume route through the NSF bus");
     Program fm;
     auto reg = [&](uint8_t r, uint8_t v) { fm.Write(0x9010, r); fm.Write(0x9030, v); };
     reg(0x30, 0x40); reg(0x10, 0x20); reg(0x20, 0x19);
@@ -448,6 +469,7 @@ void TestNsfBus() {
     const auto sunFile = Nsf(sunsoft, 0x20);
     Check(Finite(Play(sunFile)) && Rms(Play(sunFile), 1000) > 0.01, L"5B NSF routes noise with envelope volume");
     const auto mmcFile = Nsf(mapper, 8);
+    batch.Next(L"FDS, VRC7, MMC5 and 5B restart, seek and play identically from NSF and NSFE");
     testlog::Cases seeks, nsfe;
     for (const auto& fixture : {std::pair{fdsFile, L"FDS"}, std::pair{fmFile, L"VRC7"},
                                 std::pair{mmcFile, L"MMC5"}, std::pair{sunFile, L"5B"}}) {

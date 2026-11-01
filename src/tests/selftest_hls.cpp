@@ -5,6 +5,9 @@ using namespace std::string_literals;
 
 void TestHls() {
     const std::string base = "https://radio.example/live/master.m3u8?auth=one";
+    testlog::Batch batch;
+    batch.Next(L"HLS links preserve relative paths and query strings and reject control bytes, and a "
+               L"master playlist selects the audio variant, including its separate audio rendition");
     testlog::Cases urls;
     urls.Add(radio::ResolveRadioUrl(base, "../audio/list.m3u8?x=1") == "https://radio.example/audio/list.m3u8?x=1", L"parent path");
     urls.Add(radio::ResolveRadioUrl(base, "//cdn.example/a.aac") == "https://cdn.example/a.aac", L"new host");
@@ -21,6 +24,9 @@ void TestHls() {
         "#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720,AUDIO=\"radio\"\nvideo.m3u8\n";
     Check(radio::ParseHls(rendition, base, playlist, problem) && playlist.variant == "https://radio.example/live/audio.m3u8",
           L"HLS follows the selected variant's separate audio rendition");
+    batch.Next(L"HLS preserves sequence numbers, byte ranges, keys, initialization and discontinuities, rejects "
+               L"unsupported encryption and overflowing ranges before fetching audio, and strips a segment's "
+               L"timestamp tag without accepting non-audio data");
     const std::string media = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:21\n"
         "#EXT-X-KEY:METHOD=AES-128,URI=\"key\",IV=0x1234\n#EXT-X-MAP:URI=\"init.mp4\"\n"
         "#EXT-X-BYTERANGE:100@0\n#EXTINF:4,\nall.m4s\n#EXT-X-DISCONTINUITY\n"

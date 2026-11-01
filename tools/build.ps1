@@ -214,8 +214,8 @@ Add-Group 'chiptune' 'chiptune' ($common + $size + @('/Ob0', '/GL', '/MP')) `
     (Get-ChildItem -LiteralPath 'src\chiptune' -Filter *.cpp -File)
 # Most app modules favour size; the app set also gets Unicode and whole-program optimisation.
 Add-Group 'app' '' ($common + $size + $unicode + @('/Ob0', '/GL', '/MP')) $plainApp
-# Built-in lossy encoders: source-only, baseline SSE2, one worker supplied by the caller.
-Add-Group 'encode' 'encode' ($common + $size + @('/Ob2', '/GL', '/MP', '/D_USE_MATH_DEFINES', '/DGLINT_NO_THREADS')) `
+# Original built-in lossy encoders: source-only, baseline SSE2, one worker supplied by the caller.
+Add-Group 'encode' 'encode' ($common + $size + @('/Ob2', '/GL', '/MP', '/D_USE_MATH_DEFINES')) `
     (Get-ChildItem -LiteralPath 'src\encode' -Filter *.cpp -File)
 # Hot codec cores and the playback engine keep /O2 /Ob3; whole-program decisions would undo their
 # hot-loop inlining. The slow group favours size but keeps bit-reader inlining (/Ob2).

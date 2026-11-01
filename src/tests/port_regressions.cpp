@@ -4,13 +4,13 @@
 // only scratch files, under a hidden window, so no user state is touched.
 #include "app.h"
 #include "playlog.h"
+#include "selftest_common.h"
 #include "testlog.h"
 
 #include <limits>
 #include <stdexcept>
 
 namespace {
-using testlog::Check;
 
 // Writes raw bytes to a scratch file (CREATE_ALWAYS), for building fixtures in place.
 bool WriteBytes(const std::wstring& path, const std::string& bytes) {
@@ -44,6 +44,7 @@ bool PumpUntil(const std::function<bool()>& done) {
 // legacy playlist import, M3U encoding, saved per-tab view state, and title-format nesting.
 void TestPortedStorage(const std::wstring& directory) {
     testlog::Group group(L"recovered storage and playlist protections");
+    testlog::Batch batch;
     Library previous = std::move(g_lib);
     g_lib = Library();
     {
@@ -61,6 +62,7 @@ void TestPortedStorage(const std::wstring& directory) {
             Rule rule{RuleField::Year, positive ? RuleOp::AtLeast : RuleOp::AtMost, positive ? "2026" : "0"};
             years.Add(RuleMatches(rule, id), FromUtf8(date));
         }
+        batch.Next(L"numeric year prefixes retain their sign and ordering when tags exceed 64 bits");
         Check(years.Passed(), L"numeric year prefixes retain their sign and ordering when tags exceed 64 bits%ls",
               years.failed.c_str());
         tags.date.clear();
@@ -72,6 +74,8 @@ void TestPortedStorage(const std::wstring& directory) {
     auto first = pool.Intern(longText);
     auto borrowed = pool.Get(first);
     for (int i = 0; i < 100; ++i) pool.Intern(longText + std::to_string(i));
+    batch.Next(L"the string pool keeps large views valid, rejects invalid handles, deduplicates interning and "
+               L"bounds sizes");
     Check(borrowed == longText && pool.Get(first) == longText, L"large pooled string views survive later insertions");
     Check(pool.Get(UINT32_MAX).empty() && pool.Get(0x7FFFFFFF).empty(), L"invalid pool handles are rejected");
     StringPool compactPool;
@@ -84,6 +88,7 @@ void TestPortedStorage(const std::wstring& directory) {
     catch (const std::length_error&) { bounded = true; }
     Check(bounded, L"library string sizes are bounded");
     std::wstring path = directory + L"\\Case-Test.flac";
+    batch.Next(L"case and extended-path aliases share one track, and failed or invalid lookups allocate nothing");
     TrackId id = g_lib.Add(path);
     Check(g_lib.Add(directory + L"\\case-test.FLAC") == id && g_lib.Find(L"\\\\?\\" + path) == id,
           L"case and extended-path aliases share one track");
@@ -92,6 +97,7 @@ void TestPortedStorage(const std::wstring& directory) {
           L"unsuccessful path lookups allocate no strings");
     Check(g_lib.Add(L"") == kInvalidTrack && g_lib.Add(L"bad\npath.flac") == kInvalidTrack &&
           g_lib.Path(UINT32_MAX).empty(), L"invalid paths and track lookups fail safely");
+    batch.Next(L"metadata text, duration and gain conversions are bounded and never replace measured ReplayGain");
     TagData tags;
     tags.title = std::string(70000, 't');
     tags.duration = NAN;
@@ -104,6 +110,7 @@ void TestPortedStorage(const std::wstring& directory) {
     tags.rgTrackGain = 3;
     g_lib.ApplyTags(id, tags);
     Check(g_lib[id].rgTrackGain == -650, L"late metadata cannot replace measured ReplayGain");
+    batch.Next(L"search phrases, playlist names and name uniqueness follow their sanitizing and bounding rules");
     Check(FilterWords(L"\"Test artist\"\u2003album") == std::vector<std::wstring>{L"Test artist", L"album"},
           L"search supports phrases and Unicode whitespace");
     Check(CleanPlaylistName(L"  A\nB  ") == L"A B" && CleanPlaylistName(std::wstring(200, L'a')).size() == 128,
@@ -115,6 +122,8 @@ void TestPortedStorage(const std::wstring& directory) {
     for (char c : ToUtf8(path)) { if (c == '\\') escapedPath += '\\'; escapedPath += c; }
     std::string fields = "\tArtist\tImported\tAlbum\tArtist\t2026\tGenre\t1\t3\t7\t900\t48000\t2\t90000\t-650\t20000\t-700\t20000\n";
     std::string record = "T\t" + ToUtf8(path) + fields;
+    batch.Next(L"playlist caches import their cached tracks, duplicate occurrences and saved views, or leave "
+               L"state alone");
     Check(WriteBytes(cache, "CORDINAL3\nT\t" + escapedPath + fields + "P\tRecovered\nI\t0\nI\t0\nV\tImported\t6\t0\t1\t1\nS\t1\n") &&
           LoadPlaylists(cache, lists) && lists.size() == 1 && lists[0].items.size() == 2 &&
           g_lib.Path(lists[0].items[0]) == path &&
@@ -123,6 +132,7 @@ void TestPortedStorage(const std::wstring& directory) {
     size_t count = g_lib.Count();
     Check(WriteBytes(cache, "CORDINAL3\nP\tBroken\nI\t99\n") && !LoadPlaylists(cache, lists) &&
           lists[0].name == L"Recovered" && g_lib.Count() == count, L"bad cache references leave live state untouched");
+    batch.Next(L"legacy and UTF-16 playlist imports stay readable and atomic, and reject malformed text");
     bool legacy = true;
     for (const char* header : {"CORDINAL1", "CORDINAL2", "WAVEFORGE1", "WAVEFORGE2"})
         legacy &= WriteBytes(cache, std::string(header) + "\nP\tLegacy\n" + record) && LoadPlaylists(cache, lists) &&
@@ -156,10 +166,12 @@ void TestPortedStorage(const std::wstring& directory) {
     lists[0].position.focus = lists[0].position.top = 1;
     std::wstring database = directory + L"\\recovered-views.cdb";
     std::vector<Playlist> restored;
+    batch.Next(L"the native database preserves per-tab search, sort and duplicate selection");
     Check(SaveLibrary(database, lists) && LoadLibrary(database, restored) && restored.size() == 1 &&
           restored[0].sortColumn == 6 && !restored[0].sortAscending && restored[0].position.search == L"query" &&
           restored[0].position.selected == std::vector<TrackId>{1} && restored[0].position.focus == 1,
           L"native database preserves per-tab search, sort and duplicate selection");
+    batch.Next(L"title-format nesting remains bounded");
     Check(FormatTitle(std::wstring(1000, L'[') + L"%title%", [](const auto&, auto&) { return false; }).size() <= 65536,
           L"title-format nesting remains bounded");
     TrackId sortA = g_lib.Add(directory + L"\\sort-a.flac"), sortB = g_lib.Add(directory + L"\\sort-b.flac"),
@@ -172,6 +184,7 @@ void TestPortedStorage(const std::wstring& directory) {
     bool numericAscending = numericItems == std::vector<TrackId>{sortB, sortC, sortA} &&
                             numericMapping == std::vector<uint32_t>{2, 0, 1};
     app::SortItems(numericItems, 6, false, nullptr);
+    batch.Next(L"numeric sorting preserves stable ties and maps every original occurrence in both directions");
     Check(numericAscending && numericItems == std::vector<TrackId>{sortA, sortB, sortC},
           L"numeric sorting preserves stable ties and maps every original occurrence in both directions");
     DeleteFileW(cache.c_str());
@@ -187,6 +200,7 @@ void TestPortedStorage(const std::wstring& directory) {
 void TestPortedUi(const std::wstring& directory) {
     using namespace app;
     testlog::Group group(L"recovered tabs, playback and background jobs");
+    testlog::Batch batch;
     g.groupAlbums = false;
     g.shuffle = false;
     g.repeat = Repeat::Off;
@@ -209,6 +223,8 @@ void TestPortedUi(const std::wstring& directory) {
         unsigned long long first = NewToken(dragItems[0], g.active, 0);
         unsigned long long last = NewToken(dragItems[3], g.active, 3);
         MoveTrackBlock({2}, 0);
+        batch.Next(L"moving a track block remaps every surviving playback occurrence, gathers sparse drops and follows "
+                   L"filtered group headers to the underlying playlist position");
         Check(Active().items == std::vector<TrackId>{dragItems[2], dragItems[0], dragItems[1], dragItems[3]} &&
                   TokenIndex(first, g.active) == 1 && TokenIndex(last, g.active) == 3,
               L"moving a track block remaps every surviving playback occurrence to its final slot");
@@ -308,6 +324,8 @@ void TestPortedUi(const std::wstring& directory) {
         };
         bool autoReady = Active().items == std::vector<TrackId>{tracks[0], tracks[1], tracks[2]};
         bool autoDragged = dragThirdToFirst();
+        batch.Next(L"smart playlists and the Inbox accept track drags, keep their rules and order, and save a "
+                   L"restored column");
         Check(autoReady && autoDragged && Active().sortColumn == -2 &&
                   Active().items == std::vector<TrackId>{tracks[2], tracks[0], tracks[1]},
               L"a smart playlist accepts a track drag and switches to manual order");
@@ -362,15 +380,19 @@ void TestPortedUi(const std::wstring& directory) {
         update();
         bool refreshed = g.artGeneration == generation + 1 && g_lib[0].fileTime == 123;
         update();
+        batch.Next(L"same-track metadata readback refreshes changed artwork once and keeps an unchanged cache stamp");
         Check(refreshed && g.artGeneration == generation + 1,
               L"same-track metadata readback refreshes changed artwork once and retains an unchanged cache stamp");
         g_lib[0] = original;
     }
+    batch.Next(L"query edits are debounced, and an immediate action flushes a pending search");
     SetWindowTextW(g.search, L"Track");
     Check(g.searchPending, L"query edits are debounced");
     FlushSearch();
     Check(!g.searchPending && g.view.size() == 3, L"immediate actions can flush a pending search");
     auto token = NewToken(0, g.active, 1);
+    batch.Next(L"a damaged track is named while its audio plays out, and playback advances and steps back by "
+               L"occurrence");
     g.playing = 0;
     g.playingToken = token;
     g.playingPl = g.active;
@@ -429,6 +451,7 @@ void TestPortedUi(const std::wstring& directory) {
         g.repeat = Repeat::One;
         radio.Add(ComputeNext(following, false, source) == 2 && ComputeNext(following, true, source) != 2,
                   L"repeat track and manual Next");
+        batch.Next(L"radio advances continuously with stable choices and respects repeat track");
         Check(radio.Passed(), L"radio advances continuously with stable choices and respects repeat track%ls", radio.failed.c_str());
         g.radio = false;
         g.repeat = Repeat::Off;
@@ -506,9 +529,11 @@ void TestPortedUi(const std::wstring& directory) {
         for (TrackId id : {0u, 1u, 2u}) g_lib[id] = saved[id];
         g.decodingToken = decoding;
     }
+    batch.Next(L"track, weighted and album shuffle preserve occurrences, order and playback controls");
     Check(shuffle.Passed(), L"track, weighted and album shuffle preserve occurrences, order and playback controls%ls",
           shuffle.failed.c_str());
     g.shuffle = false;
+    batch.Next(L"removing, closing and reopening playback sources follows the surviving tab");
     ListView_SetItemState(g.list, 1, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
     RemoveTracks(false);
     Check(TokenIndex(token, g.active) == -1 && ComputeNext(token, false, source) == 1,
@@ -518,6 +543,8 @@ void TestPortedUi(const std::wstring& directory) {
     Check(g.playingPl == -1 && ComputeNext(token, false, source) == -1, L"closed playback sources never advance into another tab");
     ReopenPlaylist();
     Check(Active().identity == identity && g.playingPl == g.active, L"reopening reconnects the original playback source");
+    batch.Next(L"duplicated tabs have independent contents and identity, and a computed view translates its "
+               L"selection");
     Stop();
     DuplicatePlaylist();
     Check(Active().identity != identity && Active().items.size() == 2, L"duplicates have independent contents and identity");
@@ -535,6 +562,7 @@ void TestPortedUi(const std::wstring& directory) {
     Check(viewSelection == std::vector<TrackId>{2} && Active().kind == PlaylistKind::Static &&
               SelectedTracks() == viewSelection && Active().position.selected == std::vector<TrackId>{0},
           L"duplicating a computed view translates track selection to static occurrence indices");
+    batch.Next(L"moving a tab commits its pending name, and the Library stays the first tab");
     BeginRename(g.active);
     SetWindowTextW(g.rename, L"Moved edit");
     ReorderPlaylist(g.active, 1);
@@ -542,8 +570,10 @@ void TestPortedUi(const std::wstring& directory) {
     int library = g.active;
     ReorderPlaylist(0, 1);
     Check(g.active == library && g.playlists[0].kind == PlaylistKind::Library, L"the Library remains the first tab");
+    batch.Next(L"imports keep their destination, finish on the worker, stay retryable and cancellable, and "
+               L"bound tab history");
     std::wstring fixture = directory + L"\\import-target.flac";
-    Check(WriteBytes(fixture, "fLaC"), L"isolated import fixture created");
+    if (!Ready(WriteBytes(fixture, "fLaC"), L"the isolated import fixture is created")) return;
     NewPlaylist(L"Import destination");
     identity = Active().identity;
     AddPaths({fixture}, false);
@@ -568,6 +598,7 @@ void TestPortedUi(const std::wstring& directory) {
     Check(PumpUntil(idle), L"closing a destination cancels queued imports without blocking");
     for (int i = 0; i < 12; ++i) { NewPlaylist(L"Bounded history"); RemovePlaylist(g.active); }
     Check(g.closedPlaylists.size() <= 8, L"recently closed tab history is bounded");
+    batch.Next(L"restarting folder scans releases incomplete scopes and stale payloads");
     auto* scope = new ScanResult();
     scope->scope = directory;
     scope->rootOk = false;
@@ -598,6 +629,8 @@ void TestPortedUi(const std::wstring& directory) {
     g.cellCache[UINT64_MAX] = L"stale";
     for (int i = 0; i < 200; ++i) g_lib.Add(directory + L"\\orphan-" + std::to_wstring(i) + L".flac");
     CompactLibrary();
+    batch.Next(L"idle compaction removes orphan records and rewires stats, queue, tokens, history and points "
+               L"while IDs change");
     Check(!g.compactPending && g_lib.Count() <= retained && g_lib.Find(directory + L"\\orphan-0.flac") == kNone && !g.cellCache.count(UINT64_MAX),
           L"idle cleanup removes orphan records and invalidates pooled display caches (pending=%d count=%zu retained=%zu tags=%zu import=%d)",
           g.compactPending, g_lib.Count(), retained, g.tagPending.size(), (int)g.importRunning.load());
@@ -613,6 +646,7 @@ void TestPortedUi(const std::wstring& directory) {
     g.resumeTrack = kNone;
     SetPlayLog({});
     ResetPoints();
+    batch.Next(L"shutdown wakes blocked producers and drains owned import and artwork results");
     StopBackgroundJobs();
     Check(!g.importWorker.joinable() && !g.artWorker.joinable() && !g.importOutstanding,
           L"shutdown wakes blocked producers and drains owned import/artwork results");

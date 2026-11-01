@@ -299,7 +299,7 @@ void RecordListening(TrackId id, double seconds, bool manual, uint32_t when) {
     uint32_t now = when ? std::min(when, UnixNow()) : UnixNow();
     if (counted) {
         ++track.playCount;
-        ScrobbleCounted(id, now);
+        ScrobbleCounted(id, now, seconds, when == 0);
         if (track.playCount == 100 || track.playCount == 250 || track.playCount == 500 || track.playCount % 1000 == 0) {
             ShowMessage(std::to_wstring(track.playCount) + L"th play: " + TrackTitle(id) + L".");
             PlaySfx(Sfx::Milestone);

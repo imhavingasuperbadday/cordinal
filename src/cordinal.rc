@@ -3,7 +3,6 @@
 
 IDI_APP ICON "cordinal.ico"
 1 24 "cordinal.manifest"
-IDR_LICENSE_ENCODERS RCDATA "encode/LICENSE.txt"
 
 // The extra themes' art and sounds, embedded only in a build with them (build.bat themes).
 #ifdef CORDINAL_EXTRA_THEMES
@@ -36,8 +35,8 @@ IDR_APOLLO_TOOLBAR RCDATA "apollo/toolbar.png"
 #endif
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 0,1,1,0
-PRODUCTVERSION 0,1,1,0
+FILEVERSION 0,1,2,0
+PRODUCTVERSION 0,1,2,0
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -48,9 +47,9 @@ BEGIN
             VALUE "CompanyName", "imhavingasuperbadday"
             VALUE "LegalCopyright", "Copyright (C) 2026 imhavingasuperbadday. GPL-3.0-or-later."
             VALUE "FileDescription", "cordinal music player"
-            VALUE "FileVersion", "0.1.1"
+            VALUE "FileVersion", "0.1.2"
             VALUE "ProductName", "cordinal"
-            VALUE "ProductVersion", "0.1.1"
+            VALUE "ProductVersion", "0.1.2"
             VALUE "OriginalFilename", "cordinal.exe"
         END
     END

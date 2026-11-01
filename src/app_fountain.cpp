@@ -432,7 +432,8 @@ COLORREF WaveformRestColor() {
 }
 
 bool FountainShown() {
-    return (g.liveFountain || !LiveWaveformShown()) && g.themeMode == ThemeMode::Deltarune && look.style != WaveStyle::Bars &&
+    return g.waveform && (g.liveFountain || !LiveWaveformShown()) &&
+           g.themeMode == ThemeMode::Deltarune && look.style != WaveStyle::Bars &&
            g.size == ViewSize::Normal && g.layout.wave && g.seek;
 }
 

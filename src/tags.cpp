@@ -1390,6 +1390,9 @@ bool ReadAny(const std::wstring& path, TagData& t, ArtSink& art) {
     File f(path);
     if (!f.Ok()) return false;
     std::string magic = f.Read(0, 12);
+    // Empty or truncated files can also turn up in a saved library. There must be at least
+    // four bytes before the MP4 probe takes a substring at offset four.
+    if (magic.size() < 4) return false;
     sv m = magic;
     bool ok = false;
     if (m.substr(0, 4) == "fLaC") ok = ReadFlac(f, 4, t, art);

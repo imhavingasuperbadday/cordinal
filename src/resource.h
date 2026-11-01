@@ -1,7 +1,6 @@
 // Resource identifiers shared by cordinal.rc and the code that loads the resources.
 #pragma once
 #define IDI_APP 101  // application/tray icon (cordinal.ico, see cordinal.rc)
-#define IDR_LICENSE_ENCODERS 240  // full MIT notice for the built-in MP3/AAC sources
 // DELTARUNE's Dark Fountain sprites (app_fountain.cpp) and its dialogue font as a TrueType font
 // (the DELTARUNE theme, theme_palette.cpp; built by tools/make_deltarune_font.py). RCDATA.
 #define IDR_FOUNTAIN_EDGE 201
