@@ -4,7 +4,9 @@
 // scrobbling and its window, crash reports, Steam soundtrack folders and the game-music loop
 // setting.
 #include "app.h"
+#include "backup.h"
 #include "crashdump.h"
+#include "customcover.h"
 #include "listenbrainz.h"
 #include "peaks.h"
 #include "smtc.h"
@@ -68,12 +70,16 @@ std::wstring LocalCacheDir(const wchar_t* name) {
 // A string-pool handle as UTF-8, which is what the network submission needs.
 std::string Utf8(StringPool::Handle h) { return std::string(g_lib.View(h)); }
 
-// The cover as encoded bytes, for the media flyout: embedded art, else an image next to the file.
+// The cover as encoded bytes, for the media flyout: a cover chosen in cordinal, the embedded art,
+// else an image next to the file.
 std::string CoverBytes(TrackId id) {
     std::wstring path = g_lib.Path(id), file;
+    std::string image;
+    if (std::wstring custom = customcover::ImageFor(path); !custom.empty() && backup::ReadBytes(custom, image, 8u << 20))
+        return image;
+    image.clear();
     int index = 0;
     if (SplitSubtrack(path, file, index)) path = file;
-    std::string image;
     if (ReadEmbeddedArt(path, image) && !image.empty()) return image;
     std::wstring dir = DirectoryOf(path);
     for (const wchar_t* name : {L"cover.jpg", L"folder.jpg", L"front.jpg", L"cover.png", L"folder.png", L"front.png"}) {

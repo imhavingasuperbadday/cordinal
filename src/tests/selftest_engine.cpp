@@ -942,6 +942,7 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
                 if (Ready(dc && bitmap, L"offscreen live player rendering is ready")) {
                     testlog::Cases motion;
                     for (bool fountain : {false, true}) for (Dock dock : {Dock::Top, Dock::Bottom}) {
+                        if (fountain && !kExtraThemes) continue;  // the fountain styles are not built
                         g.layout.player = dock; g.liveFountain = fountain;
                         g.themeMode = fountain ? ThemeMode::Deltarune : ThemeMode::Dark;
                         std::vector<uint32_t> previous;
@@ -961,10 +962,11 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
                         motion.Add(changed >= 8, std::wstring(fountain ? L"fountain" : L"bars") + L"/" +
                             std::to_wstring((int)dock) + L" (" + std::to_wstring(changed) + L"/11 frames)");
                     }
-                    batch.Next(L"quiet live bars and the Dark Fountain animate in both 26 px bands with "
-                               L"fixed progress");
-                    Check(motion.Passed(), L"quiet live bars and Dark Fountain animate in both 26 px bands with fixed progress%ls",
-                          motion.failed.c_str());
+                    const wchar_t* motionText = kExtraThemes
+                        ? L"quiet live bars and the Dark Fountain animate in both 26 px bands with fixed progress"
+                        : L"quiet live bars animate in both 26 px bands with fixed progress";
+                    batch.Next(motionText);
+                    Check(motion.Passed(), L"%ls%ls", motionText, motion.failed.c_str());
                 }
                 if (old) SelectObject(dc, old);
                 if (bitmap) DeleteObject(bitmap);

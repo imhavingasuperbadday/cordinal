@@ -60,6 +60,7 @@ bool LyricsPanelShown();
 int LyricsPanelWidth();
 void LyricsTrackChanged();
 void LyricsLibraryChanged();  // compaction renumbered track ids: drop the loaded lyrics
+void LyricsSourcesChanged();  // a lyrics source was turned on or off: look again for the song shown
 void LyricsTick();
 void LyricsTheme();
 std::vector<std::pair<double, std::wstring>> ParseLyrics(const std::wstring& text, bool& timed);

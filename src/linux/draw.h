@@ -66,11 +66,14 @@ std::vector<std::string> Wrap(Font font, const std::string& text, float width); 
 // points_ui.cpp: the chip in the now-playing strip and the toast under it.
 void DrawPointsChip(const Rect& r, const Palette& p);
 void DrawToast(const Rect& chip, const Palette& p);
+void DrawLiveSeek(const Palette& p);  // the waveforms' own 60 Hz partial frame
 void DrawLyrics(const Rect& area, const Palette& p);  // lyrics.cpp
 void DrawMini(const Palette& p);                      // mini.cpp
+void ReleaseFountainTexture();
 bool DrawLiveFountain(const Rect& area, double progress, const Palette& p);  // fountain.cpp
 // preferences_ui.cpp: the modeless startup-defaults card.
 void DrawStartupReview(const Palette& p, float mouseX, float mouseY);
 bool StartupReviewMouseDown(float x, float y, int button);  // true when the card took the click
+bool StartupReviewOpen();
 
 }  // namespace lx

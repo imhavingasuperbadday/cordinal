@@ -461,7 +461,7 @@ bool Unchunk(std::string_view in, std::string& out) {
 }  // namespace
 
 HttpReply HttpFetch(void* session, const std::string& url, const char* method, const std::string& body,
-                    const std::string& headers, unsigned timeoutMs) {
+                    const std::string& headers, unsigned timeoutMs, size_t maxBody) {
     HttpReply reply;
     bool https = url.starts_with("https://");
     if (!https && !url.starts_with("http://")) return reply;
@@ -496,8 +496,10 @@ HttpReply HttpFetch(void* session, const std::string& url, const char* method, c
     if (!connected || (https && !stream.Secure(host))) return reply;
 
     const bool head = !strcmp(method, "HEAD");
-    std::string request = std::string(method) + ' ' + target + " HTTP/1.1\r\nHost: " + authority + "\r\nUser-Agent: cordinal\r\n"
-        "Accept-Encoding: identity\r\nConnection: close\r\n" + headers;
+    // A caller that names itself (the metadata services ask for a contact) replaces the bare name.
+    const bool named = Lower(headers).find("user-agent:") != std::string::npos;
+    std::string request = std::string(method) + ' ' + target + " HTTP/1.1\r\nHost: " + authority + "\r\n" +
+        (named ? "" : "User-Agent: cordinal\r\n") + "Accept-Encoding: identity\r\nConnection: close\r\n" + headers;
     if (!body.empty() || !strcmp(method, "POST")) request += "Content-Length: " + std::to_string(body.size()) + "\r\n";
     request += "\r\n" + body;
     if (!stream.Write(request)) return reply;
@@ -532,7 +534,7 @@ HttpReply HttpFetch(void* session, const std::string& url, const char* method, c
         }
         if (headerEnd != std::string::npos) {
             size_t have = raw.size() - headerEnd - 4;
-            if (have > (1u << 20)) { reply.status = 0; return reply; }
+            if (have > maxBody) { reply.status = 0; return reply; }
             if (length != std::string::npos && have >= length) break;
             if (chunked && raw.ends_with("\r\n0\r\n\r\n")) break;
         }
@@ -593,7 +595,7 @@ bool RadioHttpStream(const std::string& initial, const std::atomic<bool>& cancel
         freeaddrinfo(list);
         if (!connected || (secure && !stream.Secure(host))) return false;
         std::string request = "GET " + target + " HTTP/1.1\r\nHost: " + authority +
-            "\r\nUser-Agent: cordinal/0.1.2\r\nIcy-MetaData: 1\r\nAccept-Encoding: identity\r\nConnection: close\r\n" + requestHeaders + "\r\n";
+            "\r\nUser-Agent: cordinal/0.1.3\r\nIcy-MetaData: 1\r\nAccept-Encoding: identity\r\nConnection: close\r\n" + requestHeaders + "\r\n";
         if (!stream.Write(request)) return false;
         std::string raw; size_t end = std::string::npos;
         while ((end = raw.find("\r\n\r\n")) == raw.npos) {

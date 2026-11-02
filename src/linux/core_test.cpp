@@ -7,7 +7,9 @@
 //   cordinal-core-test convert FILE DIR       convert FILE to .cord with its log in DIR, then undo the conversion
 //   cordinal-core-test organize FILE ROOT     organize FILE (and its folder's cover) under ROOT, then undo it
 //   cordinal-core-test copy FILE DEST         copy FILE to DEST, find it again, then replace it with AAC
+//   cordinal-core-test ipod DIR               initialize a fake classic iPod, sync one track and reopen its database
 //   cordinal-core-test eq                     check the equalizer's boost through the renderer
+//   cordinal-core-test resampler              check treble fidelity, alias rejection and output length
 //   cordinal-core-test waveform               check live notes and whole-track peak previews
 //   cordinal-core-test weighted-shuffle       check that skip-aware shuffle keeps every occurrence
 //   cordinal-core-test chapters FILE          list FILE's chapters: the first, the last and the next start
@@ -22,11 +24,14 @@
 //   cordinal-core-test away DIR               the away-from-home pieces: JSON, STUN, keys, certificates and HTTPS
 //   cordinal-core-test web DIR CONTROL        serve DIR over HTTP; CONTROL gets the port and pairing code
 #include "audio_output.h"
+#include "backup.h"
+#include "tests/metadata_checks.h"
 #include "convert.h"
 #include "decoder.h"
 #include "devicecopy.h"
 #include "engine.h"
 #include "helpers.h"
+#include "ipod.h"
 #include "library.h"
 #include "listenbrainz.h"
 #include "organize.h"
@@ -45,6 +50,8 @@
 #include "web_remote.h"
 #include "web_tls.h"
 #include "qr.h"
+
+#include <gpod/model.hpp>
 
 #include <openssl/core_names.h>
 #include <openssl/evp.h>
@@ -357,8 +364,80 @@ int ConvertRoundTrip(const char* file, const char* logDir) {
     return 0;
 }
 
+int CheckResampler() {
+    int failures = 0;
+    for (auto rates : {std::pair{8000u,48000u}, std::pair{44100u,48000u}, std::pair{48000u,44100u},
+                       std::pair{96000u,48000u}, std::pair{192000u,48000u}, std::pair{192000u,8000u},
+                       std::pair{65792u,65536u}, std::pair{65536u,65792u}}) {
+        Resampler sampler;
+        sampler.Init(rates.first, rates.second);
+        for (bool reject : {false, true}) {
+            if (reject && rates.first <= rates.second) continue;
+            // Keep stopband tones below the source Nyquist, even when the two rates nearly match.
+            const double hz = reject ? std::min(rates.second * 0.51, (rates.first + (double)rates.second) * 0.25) :
+                                      std::min(rates.first, rates.second) * 0.45;
+            const size_t frames = rates.first / 4;
+            std::vector<float> input(frames * 2), output;
+            for (size_t i = 0; i < frames; ++i) {
+                const double phase = 2 * M_PI * hz * i / rates.first;
+                input[i * 2] = (float)(0.5 * std::sin(phase));
+                input[i * 2 + 1] = (float)(0.25 * std::cos(phase));
+            }
+            sampler.Reset();
+            // Uneven chunks also exercise history across calls with the longer kernel.
+            for (size_t i = 0; i < frames; i += 137)
+                sampler.Push(input.data() + i * 2, std::min<size_t>(137, frames - i), output);
+            sampler.Flush(output);
+            const bool finite = std::all_of(output.begin(), output.end(), [](float v) { return std::isfinite(v); });
+            const size_t guard = (size_t)std::max(256.0, std::ceil(128.0 * rates.second / rates.first));
+            double signal = 0, error = 0;
+            for (size_t i = guard; i + guard < output.size() / 2; ++i) {
+                const double phase = 2 * M_PI * hz * i / rates.second;
+                const double ideal[2] = {0.5 * std::sin(phase), 0.25 * std::cos(phase)};
+                for (unsigned c = 0; c < 2; ++c) {
+                    signal += ideal[c] * ideal[c];
+                    const double delta = output[i * 2 + c] - (reject ? 0 : ideal[c]);
+                    error += delta * delta;
+                }
+            }
+            const double db = 10 * std::log10(signal / std::max(1e-30, error));
+            const size_t expected = ((uint64_t)frames * rates.second + rates.first - 1) / rates.first;
+            const bool ok = finite && output.size() / 2 == expected && db > (reject ? 90 : 85);
+            printf("%s %u->%u %.1f Hz %s %.1f dB\n", ok ? "ok" : "FAIL", rates.first, rates.second,
+                   hz, reject ? "rejection" : "SNR", db);
+            if (!ok) ++failures;
+        }
+    }
+    return failures;
+}
+
 // A 62 Hz tone through the player's renderer with the Bass boost preset: it must come out about
 // as much louder as the preset's 62 Hz slider says (within the limiter's reach).
+// The online metadata core without the network (tests/metadata_checks.h, shared with the Windows
+// "metadata" suite), and an embedded cover undone through one journal on copies of `media`.
+int CheckMetadata(const char* dir, int count, char** media) {
+    std::wstring scratch = compat::Widen(dir);
+    SHCreateDirectoryExW(nullptr, scratch.c_str(), nullptr);
+    auto groups = metadata_checks::All(scratch);
+    std::vector<std::wstring> copies;
+    for (int i = 0; i < count; ++i) {
+        std::wstring source = compat::Widen(media[i]);
+        std::wstring copy = scratch + L"/embed-" + FileNameOf(source);
+        std::string bytes;
+        if (backup::ReadBytes(source, bytes) && backup::WriteBytes(copy, bytes)) copies.push_back(copy);
+    }
+    std::wstring journal = scratch + L"/journal";
+    SHCreateDirectoryExW(nullptr, journal.c_str(), nullptr);
+    if (!copies.empty()) groups.push_back(metadata_checks::EmbedUndo(copies, journal));
+    int failed = 0;
+    for (const auto& group : groups) {
+        printf("%s %s (%d cases)\n", group.Passed() ? "ok  " : "FAIL", group.name.c_str(), group.cases);
+        for (const auto& f : group.failures) printf("     %s\n", f.c_str());
+        failed += !group.Passed();
+    }
+    return failed ? 1 : 0;
+}
+
 int CheckEq() {
     const unsigned rate = 48000;
     std::vector<float> tone(rate * 2);
@@ -865,8 +944,51 @@ int CheckAway(const char* directory) {
     return failures;
 }
 
+int CheckIpod(const char* root) {
+    std::filesystem::path base(root);
+    std::error_code error;
+    std::filesystem::remove_all(base, error);
+    std::filesystem::create_directories(base / "iPod_Control" / "Music" / "F00", error);
+    std::filesystem::create_directories(base / "iPod_Control" / "Device", error);
+    if (error) return 1;
+    const std::filesystem::path audio = base / "track.mp3";
+    {
+        std::ofstream file(audio, std::ios::binary);
+        file << "ID3fake audio";
+    }
+    ipod::SourceTrack source;
+    source.path = audio;
+    source.title = "Track";
+    source.artist = "Artist";
+    source.album = "Album";
+    source.size = std::filesystem::file_size(audio);
+    source.durationMs = 1000;
+    const auto empty = ipod::Inspect(base);
+    if (!empty || !empty->classic || empty->initialized) return 2;
+    ipod::SyncOptions options;
+    try {
+        auto refused = ipod::Sync({source}, base, options, {});
+        if (refused.added || refused.errors.empty()) return 3;
+        options.initializeIfNeeded = true;
+        auto first = ipod::Sync({source}, base, options, {});
+        if (!first.initialized || !first.databaseWritten || first.added != 1 ||
+            !std::filesystem::exists(base / "iPod_Control" / "iTunes" / "iTunesDB")) return 4;
+        auto database = gpod::Itdb::parse(base);
+        if (!database || database->tracks.size() != 1 || database->tracks[0]->title != "Track") return 5;
+        auto again = ipod::Sync({source}, base, options, {});
+        if (again.added || again.skippedExisting != 1) return 6;
+    } catch (const std::exception& exception) {
+        fprintf(stderr, "iPod check failed: %s\n", exception.what());
+        return 7;
+    }
+    std::filesystem::remove_all(base, error);
+    puts("classic iPod: initialized, copied one track, round-tripped iTunesDB and skipped it again");
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc >= 2 && !strcmp(argv[1], "weighted-shuffle")) return CheckWeightedShuffle();
+    if (argc >= 3 && !strcmp(argv[1], "ipod")) return CheckIpod(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "chapters")) return ListChapters(argv[2]);
     if (argc >= 2 && !strcmp(argv[1], "steam")) {
         std::atomic<bool> cancelled{argc >= 3 && !strcmp(argv[2], "cancel")};
@@ -882,6 +1004,8 @@ int main(int argc, char** argv) {
     if (argc >= 4 && !strcmp(argv[1], "organize")) return OrganizeRoundTrip(argv[2], argv[3]);
     if (argc >= 4 && !strcmp(argv[1], "copy")) return CopyRoundTrip(argv[2], argv[3]);
     if (argc >= 2 && !strcmp(argv[1], "eq")) return CheckEq();
+    if (argc >= 3 && !strcmp(argv[1], "metadata")) return CheckMetadata(argv[2], argc - 3, argv + 3);
+    if (argc >= 2 && !strcmp(argv[1], "resampler")) return CheckResampler();
     if (argc >= 2 && !strcmp(argv[1], "waveform"))
         return CheckWaveform(argc >= 3 ? argv[2] : nullptr, argc >= 4 ? argv[3] : nullptr, argc >= 5 ? argv[4] : nullptr);
     if (argc >= 3 && !strcmp(argv[1], "helpers")) return CheckHelpers(argv[2]);
@@ -894,6 +1018,6 @@ int main(int argc, char** argv) {
     if (argc >= 3 && !strcmp(argv[1], "decode")) return Decode(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "play")) return Play(argv[2], argc >= 4 ? atof(argv[3]) : 5);
     fprintf(stderr, "usage: cordinal-core-test scan DIR | decode FILE | play FILE [SECONDS] | replaygain FILE... | "
-                    "tags FILE DIR | convert FILE DIR | organize FILE ROOT | copy FILE DEST | eq | waveform | helpers DIR | devices | sfx | listenbrainz DIR | weighted-shuffle | chapters FILE | library FILE | history FILE | playlists FILE | steam [cancel] | away DIR | web DIR CONTROL\n");
+                    "tags FILE DIR | convert FILE DIR | organize FILE ROOT | copy FILE DEST | ipod DIR | eq | resampler | waveform | helpers DIR | devices | sfx | listenbrainz DIR | weighted-shuffle | chapters FILE | library FILE | history FILE | playlists FILE | steam [cancel] | away DIR | web DIR CONTROL\n");
     return 2;
 }

@@ -132,7 +132,9 @@ bool ListAudioFilesChunked(const std::wstring& dir, const std::function<void(std
                 bool hiddenSystem = (fd.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) ==
                                     (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
                 if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && !hiddenSystem) stack.push_back(std::move(path));
-            } else if (IsSupportedAudioFile(path)) {
+            } else if (IsSupportedAudioFile(path) && (fd.nFileSizeHigh || fd.nFileSizeLow)) {
+                // Games may ship empty audio placeholders. Leave them out until a later write
+                // supplies real bytes; watched size changes will list the file again.
                 files.push_back({std::move(path), (uint64_t)fd.nFileSizeHigh << 32 | fd.nFileSizeLow,
                                  (uint64_t)fd.ftLastWriteTime.dwHighDateTime << 32 | fd.ftLastWriteTime.dwLowDateTime});
             } else if (IsArchiveFile(path)) {

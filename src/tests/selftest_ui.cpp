@@ -2,6 +2,7 @@
 // window, covering the tabs, playback strip and background jobs, and ending with the recovered
 // tab/playback behaviour checks in port_regressions.cpp. No player instance or user state is used.
 #include "selftest_common.h"
+#include "metadata_fetch.h"
 #include "radio.h"
 
 void TestPersonalization(const std::wstring& scratch);
@@ -717,17 +718,22 @@ void TestUiControls(const std::wstring& scratch) {
         HDC dc = GetDC(g.hwnd);
         LRESULT brush = WndProc(g.hwnd, WM_CTLCOLOREDIT, (WPARAM)dc, (LPARAM)g.rename);
         bool surface = dc && brush == (LRESULT)g.surfaceBrush && GetBkColor(dc) == SurfaceColor();
-        ThemeMode savedTheme = g.themeMode;
-        ViewSize savedSize = g.size;
-        const Palette* savedPalette = g.pal;
-        g.themeMode = ThemeMode::Foobar;
-        g.size = ViewSize::Normal;
-        g.pal = &ThemePalette(ThemeMode::Foobar);
-        brush = WndProc(g.hwnd, WM_CTLCOLOREDIT, (WPARAM)dc, (LPARAM)g.rename);
-        bool foobarSurface = dc && brush == (LRESULT)GetStockObject(DC_BRUSH) && GetBkColor(dc) == Ref(P().border);
-        g.themeMode = savedTheme;
-        g.size = savedSize;
-        g.pal = savedPalette;
+        // The foobar2000 window is not linked when this build leaves the extra themes out; its own
+        // test above skips there too.
+        bool foobarSurface = !kExtraThemes;
+        if (kExtraThemes) {
+            ThemeMode savedTheme = g.themeMode;
+            ViewSize savedSize = g.size;
+            const Palette* savedPalette = g.pal;
+            g.themeMode = ThemeMode::Foobar;
+            g.size = ViewSize::Normal;
+            g.pal = &ThemePalette(ThemeMode::Foobar);
+            brush = WndProc(g.hwnd, WM_CTLCOLOREDIT, (WPARAM)dc, (LPARAM)g.rename);
+            foobarSurface = dc && brush == (LRESULT)GetStockObject(DC_BRUSH) && GetBkColor(dc) == Ref(P().border);
+            g.themeMode = savedTheme;
+            g.size = savedSize;
+            g.pal = savedPalette;
+        }
         if (dc) ReleaseDC(g.hwnd, dc);
         batch.Next(L"UI: double-click opens a borderless editor on the tab surface and Enter commits the rename");
         Check(borderless && surface && foobarSurface && first == 0 && last == 13,
@@ -899,6 +905,30 @@ void TestUiControls(const std::wstring& scratch) {
     Check(SelectedTracks().size() == 3, L"UI: clicking an album header selects its tracks");
     Check(GroupHidesCell(0, 4, RowTrack(2)) && GroupHidesCell(0, 3, RowTrack(2)) && !GroupHidesCell(0, 2, RowTrack(2)),
           L"UI: grouped tracks leave the album and its artist to the header");
+    {
+        // The default columns run Title, Artist, Album, Year, Rating: the title's text may use the
+        // Artist and Album cells the header holds, but never reaches the rating.
+        RECT title{}, album{}, rating{};
+        ListView_GetSubItemRect(g.list, 2, SubitemOf(2), LVIR_BOUNDS, &title);
+        ListView_GetSubItemRect(g.list, 2, SubitemOf(4), LVIR_BOUNDS, &album);
+        ListView_GetSubItemRect(g.list, 2, SubitemOf(kColRating), LVIR_BOUNDS, &rating);
+        LONG right = CellTextRight(2, SubitemOf(2), title.right);
+        Check(SubitemOf(4) > SubitemOf(2) && right >= album.right && right <= rating.left,
+              L"UI: a grouped title runs over the blank Artist and Album cells up to the rating");
+    }
+    Check(!ui::ShowEmptyStars(0, false, false) && ui::ShowEmptyStars(0, true, false) &&
+              ui::ShowEmptyStars(0, false, true) && ui::ShowEmptyStars(20, false, false),
+          L"UI: unrated tracks show empty stars only on hover or selection");
+    Check(ui::SeekNotchSeconds(19 * 60) == 0 && ui::SeekNotchSeconds(30 * 60 + 16) == 5 * 60 &&
+              ui::SeekNotchSeconds(2 * 3600 + 46 * 60) == 30 * 60 && ui::SeekNotchSeconds(6 * 3600 + 3 * 60) == 3600 &&
+              ui::SeekNotchSeconds(40 * 3600) == 0,
+          L"UI: long tracks notch the seek bar at round times, at most eight");
+    Check(ui::PlayedWidth(900, 0, 60) == 0 && ui::PlayedWidth(900, 30, 60) == 450 && ui::PlayedWidth(900, 90, 60) == 900 &&
+              ui::PlayedWidth(900, 10, 0) == 0,
+          L"UI: the playing row's underline follows the position");
+    Check(ui::FitTabPadding(400, 5, 600, 18, 8) == 18 && ui::FitTabPadding(400, 5, 500, 18, 8) == 8 &&
+              ui::FitTabPadding(400, 5, 450, 18, 8) == -1,
+          L"UI: crowded tabs tighten, then share the strip, before scrolling");
     g.groupAlbums = false;
     RebuildView();
     batch.Next(L"UI: grouping by album can be turned off");
@@ -1050,8 +1080,78 @@ void TestUiControls(const std::wstring& scratch) {
     GetWindowTextW(g.time, right, 32);
     Check(!g.timeRemaining && wcscmp(right, L"3:19") == 0, L"UI: clicking the time shows the length instead");
     g.timeRemaining = true;
+    {
+        // The cover picker's footer: save choices sized to their labels and painted in the palette
+        // (Explorer's dark radio theme otherwise draws them black), above the dialog's buttons.
+        batch.Next(L"UI: the cover picker's save choices fit their labels, read in the palette and sit above its buttons");
+        auto& covers = online::Config().covers;
+        bool savedCovers[std::size(covers)];
+        std::copy(std::begin(covers), std::end(covers), savedCovers);
+        std::fill(std::begin(covers), std::end(covers), false);  // no search, so nothing goes online
+        std::vector<TrackId> all;
+        for (TrackId id = 0; id < (TrackId)g_lib.Count(); ++id) all.push_back(id);
+        ShowCoverSearch(all);
+        HWND picker = nullptr;
+        for (HWND w = nullptr; (w = FindWindowExW(nullptr, w, L"CordinalCoverSearch", nullptr));) {
+            DWORD process = 0;
+            GetWindowThreadProcessId(w, &process);
+            if (process == GetCurrentProcessId()) picker = w;
+        }
+        if (Ready(picker != nullptr, L"the cover picker opens for a library album")) {
+            std::vector<HWND> radios, pushes;
+            for (HWND c = GetWindow(picker, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) {
+                wchar_t cls[32] = {};
+                GetClassNameW(c, cls, 32);
+                if (_wcsicmp(cls, WC_BUTTONW)) continue;
+                LONG type = GetWindowLongW(c, GWL_STYLE) & BS_TYPEMASK;
+                (type == BS_AUTORADIOBUTTON ? radios : pushes).push_back(c);
+            }
+            auto inPicker = [&](HWND c) {
+                RECT r{};
+                GetWindowRect(c, &r);
+                MapWindowPoints(nullptr, picker, reinterpret_cast<POINT*>(&r), 2);
+                return r;
+            };
+            RECT client;
+            GetClientRect(picker, &client);
+            HDC dc = GetDC(picker);
+            HGDIOBJ old = SelectObject(dc, g.font);
+            bool fit = radios.size() == 3, painted = fit;
+            int previousRight = 0, radiosBottom = 0, buttonsTop = INT_MAX;
+            for (HWND radio : radios) {
+                RECT r = inPicker(radio), text{};
+                std::wstring label = WindowText(radio);
+                DrawTextW(dc, label.c_str(), -1, &text, DT_CALCRECT | DT_SINGLELINE);
+                fit = fit && r.right - r.left >= S(16) + text.right && r.left >= previousRight && r.right <= client.right;
+                previousRight = r.right;
+                radiosBottom = std::max(radiosBottom, (int)r.bottom);
+                NMCUSTOMDRAW draw{};
+                draw.hdr = {radio, (UINT_PTR)GetDlgCtrlID(radio), (UINT)NM_CUSTOMDRAW};
+                draw.dwDrawStage = CDDS_PREPAINT;
+                painted = painted && SendMessageW(picker, WM_NOTIFY, draw.hdr.idFrom, (LPARAM)&draw) == CDRF_NOTIFYPOSTPAINT;
+            }
+            SelectObject(dc, old);
+            ReleaseDC(picker, dc);
+            bool useIsDefault = false;
+            for (HWND button : pushes) {
+                if (WindowText(button) != L"Search" && WindowText(button) != L"&Search")
+                    buttonsTop = std::min(buttonsTop, (int)inPicker(button).top);
+                if (WindowText(button) == L"&Use cover")
+                    useIsDefault = (GetWindowLongW(button, GWL_STYLE) & BS_TYPEMASK) == BS_DEFPUSHBUTTON;
+            }
+            Check(fit, L"UI: each cover save choice is at least as wide as its label and none overlap");
+            Check(painted, L"UI: the cover save choices repaint their labels in the palette's text color");
+            Check(radiosBottom <= buttonsTop && useIsDefault,
+                  L"UI: the save choices sit above the picker's buttons and Use cover is the default button");
+            DestroyWindow(picker);
+        }
+        std::copy(std::begin(savedCovers), std::end(savedCovers), std::begin(covers));
+    }
     ActivatePlaylist(1);
     HMENU menu = BuildMenu();
+    batch.Next(L"UI: Library offers classic iPod sync");
+    Check(GetMenuState(GetSubMenu(menu, 4), IDM_IPOD_SYNC, MF_BYCOMMAND) != (UINT)-1,
+          L"UI: Library has the Sync to iPod command");
     WndProc(g.hwnd, WM_INITMENUPOPUP, (WPARAM)GetSubMenu(menu, 1), 0);
     batch.Next(L"UI: playlist commands that do not apply are disabled");
     Check((GetMenuState(GetSubMenu(menu, 1), IDM_CLEAR, MF_BYCOMMAND) & MF_GRAYED) != 0,

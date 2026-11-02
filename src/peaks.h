@@ -23,9 +23,12 @@ inline uint8_t CompandPeak(float linear) {
     if (!(linear > 0)) return 0;
     return (uint8_t)std::min(255.0f, std::sqrt(std::min(linear, 1.0f)) * 255.0f + 0.5f);
 }
-// Per bucket: the largest |sample| over both channels, sqrt-companded to 0..255 (0 = silence).
+// Per bucket: the largest |sample| over both channels, and the RMS level of both channels, each
+// sqrt-companded to 0..255 (0 = silence). The seek bar draws the RMS as the waveform's solid body
+// and the peaks as its fainter edge, so a loud, dense master still shows its shape.
 struct Peaks {
     uint8_t v[kPeakBuckets];
+    uint8_t rms[kPeakBuckets];
 };
 
 class Decoder;
@@ -72,11 +75,13 @@ private:
     static constexpr size_t kMaxBlocks = 2 * kPeakBuckets;
     void Push();
     void Merge();
-    std::vector<float> maxima_;  // one linear maximum per block of blockFrames_ frames
+    std::vector<float> maxima_;    // one linear maximum per block of blockFrames_ frames
+    std::vector<double> squares_;  // the same blocks' mean squared sample
     uint64_t blockFrames_ = 512;
     uint64_t totalFrames_ = 0;
     uint64_t inBlock_ = 0;
     float blockMax_ = 0;
+    double blockSquares_ = 0;  // sum over the open block
 };
 
 // Stores peaks computed elsewhere (memory and disk). Ignored until StartPeaks has run.

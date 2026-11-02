@@ -1,5 +1,9 @@
 // The Linux window's drawing: the shared shapes and glyphs, the menu bar and popups, and every window part.
+#include "alternate_ui.h"
+#include "big_ui.h"
 #include "ui_internal.h"
+
+#include <array>
 
 namespace lx {
 
@@ -195,12 +199,27 @@ void DrawBandButton(const Rect& r, Icon icon, const Palette& p, bool active, boo
 
 // A flat slider (app_ui_trackbar.cpp, DrawTrackbar): a slim channel, the accent up to the position, and a
 // slim upright thumb in the text color (the accent while hovered or dragged).
-void DrawSlider(const Rect& r, double frac, bool enabled, bool hot, const Palette& p) {
+void DrawSlider(const Rect& r, double frac, bool enabled, bool hot, const Palette& p, bool vertical, double notch) {
+    if (vertical) {
+        float inset = S(ui::kSliderInset), width = S(ui::kSliderTrackHeight);
+        Rect channel{std::round(r.x + r.w / 2 - width / 2), r.y + inset, width, std::max(0.f, r.h - 2 * inset)};
+        Fill(channel, p.border);
+        if (frac > 0) Fill({channel.x, channel.y, width, std::round(channel.h * (float)frac)}, enabled ? p.accent : p.faint);
+        if (enabled) {
+            float th = std::max(2.f, S(ui::kSliderThumbWidth)), tw = std::min(S(ui::kSliderThumbHeight), r.w);
+            Fill({r.x + (r.w - tw) / 2, channel.y + channel.h * (float)frac - th / 2, tw, th}, hot ? p.accent : p.text);
+        }
+        return;
+    }
     float inset = S(ui::kSliderInset), h = S(ui::kSliderTrackHeight);
     Rect channel{r.x + inset, std::round(r.y + r.h / 2 - h / 2), r.w - 2 * inset, h};
     Fill(channel, p.border);
     if (frac > 0) Fill({channel.x, channel.y, std::round(channel.w * (float)frac), h}, enabled ? p.accent : p.faint);
     if (!enabled) return;
+    // A long track's notches at round times (ui::SeekNotchSeconds), `notch` of the channel apart.
+    if (notch > 0 && channel.w * notch >= S(16))
+        for (double at = notch; at < 1; at += notch)
+            Fill({std::floor(channel.x + channel.w * (float)at), channel.y, std::max(1.f, S(1)), h}, p.surface);
     float tw = std::max(2.0f, S(ui::kSliderThumbWidth)), th = std::min(S(ui::kSliderThumbHeight), r.h);
     float cx = std::round(channel.x + channel.w * (float)frac);
     Fill({cx - std::floor(tw / 2), std::round(r.y + r.h / 2 - th / 2), tw, th}, hot ? p.accent : p.text);
@@ -223,9 +242,58 @@ bool RequestPeaks(TrackId id, Peaks& peaks, uint32_t& request) {
     return GetPeaks(path, t.fileSize, t.fileTime, start, end, peaks, request) || GetPeakProgress(request, peaks);
 }
 
-// The waveform over the seek bar's channel: columns two pixels wide a pixel apart, each the loudest
-// peak under it, the played part in the accent (amber while paused), the rest faint. The split is
-// the playhead. False while there are no peaks to draw.
+// The body and edge rectangles of one paint, grouped by color. A column's rectangles never overlap
+// and adjacent columns never touch, so filling each color's rectangles in one SDL_RenderFillRects
+// call gives exactly the pixels the per-column Fill calls did, with a fraction of the draw calls.
+class WaveFills {
+public:
+    void Reset() {
+        for (int i = 0; i < used_; ++i) groups_[i].rects.clear();
+        used_ = 0;
+    }
+
+    void Add(const Rect& r, uint32_t color) {
+        if (!(r.w > 0) || !(r.h > 0)) return;
+        int i = 0;
+        while (i < used_ && groups_[i].color != color) ++i;
+        if (i == used_) {
+            if (used_ == kGroups) {  // more shades than the two color schemes can name
+                Fill(r, color);
+                return;
+            }
+            groups_[i].color = color;
+            ++used_;
+        }
+        groups_[i].rects.push_back({r.x, r.y, r.w, r.h});
+    }
+
+    void Flush() {
+        for (int i = 0; i < used_; ++i) {
+            SetColor(groups_[i].color);
+#if SDL_VERSION_ATLEAST(3, 2, 0)
+            SDL_RenderFillRects(g.renderer, groups_[i].rects.data(), (int)groups_[i].rects.size());
+#else
+            for (const SDL_FRect& r : groups_[i].rects) SDL_RenderFillRect(g.renderer, &r);
+#endif
+        }
+        Reset();
+    }
+
+private:
+    static constexpr int kGroups = 32;  // played and rest, each six body and mirror bands and two edges
+    struct Group {
+        uint32_t color = 0;
+        std::vector<SDL_FRect> rects;
+    };
+    std::array<Group, kGroups> groups_{};
+    int used_ = 0;
+};
+
+// The waveform over the seek bar's channel: columns two pixels wide a pixel apart, each the RMS
+// level under it as a solid body with the loudest peak as a fainter edge (a live waveform has peaks
+// only), the played part in the accent (amber while paused), the rest faint. Shading and the
+// reflected lower half follow WaveShades (app_waveform.cpp). The split is the playhead. False
+// while there are no peaks to draw.
 bool LiveWaveformShown() {
     return g.settings.waveform && (RadioPlaying() || (g.settings.liveWaveform && g.playing != kNone));
 }
@@ -236,35 +304,73 @@ bool LiveFountainShown() {
 
 bool DrawWaveform(const Rect& r, double frac, const Palette& p) {
     if (!g.settings.waveform) return false;
-    if (LiveFountainShown() && DrawLiveFountain(r, frac, p)) return true;
+    if (FountainStyleShown() && DrawFountain(r, frac, p, g_wave.ready ? g_wave.peaks.v : nullptr,
+        kPeakBuckets, LiveFountainShown(), SeekVertical())) return true;
     bool live = LiveWaveformShown();
     if (!live && (g_wave.track != g.playing || g.playing == kNone || (!g_wave.ready && !g_wave.request))) return false;
     std::array<uint8_t, 256> livePeaks{};
     // The shared engine shapes live heights around audible note attacks, as on Windows.
     if (live) g.engine.WaveformPeaks(livePeaks.data(), livePeaks.size());
     if (RadioPlaying()) frac = 1;
-    float left = r.x + S(9), width = r.w - S(18), right = left + width;
-    float cy = std::floor(r.y + r.h / 2), half = std::max(1.0f, std::floor(r.h / 2) - S(2));
+    bool vertical = SeekVertical();
+    float left = (vertical ? r.y : r.x) + S(9), width = (vertical ? r.h : r.w) - S(18), right = left + width;
+    float cy = std::floor(vertical ? r.x + r.w / 2 : r.y + r.h / 2);
+    float half = std::max(1.0f, std::floor((vertical ? r.w : r.h) / 2) - S(2));
     float col = std::max(2.0f, S(2)), step = col + std::max(1.0f, S(1)), playedX = left + std::floor(width * (float)frac);
-    uint32_t played = IsPaused() ? p.amber : p.accent, rest = p.dark ? p.faint : p.border;
+    uint32_t played = WavePlayedColor(p), rest = WaveRestColor(p, live);
     if (live && g.settings.fullLiveWaveform) rest = played;
+    // Brightest along the center line, a dimmer reflection below it; bands as on Windows.
+    constexpr int kBands = 6;
+    struct Shades { uint32_t body[kBands], mirror[kBands], edge, mirrorEdge; };
+    auto shadesOf = [&](uint32_t c) {
+        Shades s{};
+        for (int i = 0; i < kBands; ++i) {
+            s.body[i] = Mix(c, 0xFFFFFF, 24 * (kBands - 1 - i) / (kBands - 1));
+            s.mirror[i] = Mix(c, p.surface, 30 + 40 * i / (kBands - 1));
+        }
+        s.edge = Mix(c, p.surface, 35);
+        s.mirrorEdge = Mix(c, p.surface, 72);
+        return s;
+    };
+    const Shades playedShades = shadesOf(played), restShades = shadesOf(rest);
+    static WaveFills fills;
+    fills.Reset();
+    const int span = (int)half + 1;
+    auto bandStart = [span](int i) { return (float)(i * span / kBands); };
+    // A run of `rows` rows starting `from` rows out from the center line, above it or below.
+    auto rows = [&](float x, float barWidth, float from, float to, bool below, uint32_t color) {
+        if (to <= from) return;
+        float y = below ? cy + 1 + from : cy - to + 1;
+        fills.Add(vertical ? Rect{y, x, to - from, barWidth} : Rect{x, y, barWidth, to - from}, color);
+    };
     for (float x = left; x < right; x += step) {
         int count = live ? (int)livePeaks.size() : kPeakBuckets;
         int first = std::clamp((int)((x - left) * count / width), 0, count - 1);
         int last = std::clamp((int)((x + step - left) * count / width), first + 1, count);
-        int v = 0;
-        for (int b = first; b < last; ++b)
+        int v = 0, rms = 0;
+        for (int b = first; b < last; ++b) {
             v = std::max<int>(v, live ? livePeaks[b] : g_wave.ready ? g_wave.peaks.v[b] : 0);
+            rms = std::max<int>(rms, live ? livePeaks[b] : g_wave.ready ? g_wave.peaks.rms[b] : 0);
+        }
         float h = std::max(1.0f, std::floor(half * v / 255));
-        uint32_t color = x < playedX ? played : rest;
+        float body = std::clamp(std::floor(half * rms / 255), 1.0f, h);
+        const Shades& s = x < playedX ? playedShades : restShades;
         float barWidth = std::min(x + col, right) - x;
-        Fill({x, cy - h, barWidth, 2 * h + 1}, color);
+        for (int i = 0; i < kBands && bandStart(i) <= body; ++i) {
+            float d0 = bandStart(i), d1 = std::min(body + 1, bandStart(i + 1));
+            rows(x, barWidth, d0, d1, false, s.body[i]);
+            rows(x, barWidth, d0, std::min(d1, body), true, s.mirror[i]);
+        }
+        rows(x, barWidth, body + 1, h + 1, false, s.edge);
+        rows(x, barWidth, body, h, true, s.mirrorEdge);
         uint8_t alpha = live ? (uint8_t)std::max(0.f, half * v - h * 255) : 0;
         if (alpha) {
-            Fill({x, cy - h - 1, barWidth, 1}, color, alpha);
-            Fill({x, cy + h + 1, barWidth, 1}, color, alpha);
+            int tip = std::min(kBands - 1, (int)h * kBands / span);
+            Fill(vertical ? Rect{cy - h - 1, x, 1, barWidth} : Rect{x, cy - h - 1, barWidth, 1}, s.body[tip], alpha);
+            Fill(vertical ? Rect{cy + h + 1, x, 1, barWidth} : Rect{x, cy + h + 1, barWidth, 1}, s.mirror[tip], alpha);
         }
     }
+    fills.Flush();
     return true;
 }
 
@@ -272,10 +378,18 @@ void DrawSection(const Rect& r, double duration, const Palette& p) {
     if (g.playing == kNone || duration <= 0) return;
     PlaybackSection section = SectionOf(g.playing);
     if (section.end - section.start <= 0.05) return;
-    float left = r.x + S(8), width = std::max(0.0f, r.w - S(16));
+    bool vertical = SeekVertical();
+    float left = (vertical ? r.y : r.x) + S(8);
+    float width = std::max(0.0f, (vertical ? r.h : r.w) - S(16));
     float first = left + width * (float)std::clamp(section.start / duration, 0.0, 1.0);
     float last = left + width * (float)std::clamp(section.end / duration, 0.0, 1.0);
     if (last <= first) return;
+    if (vertical) {
+        Fill({r.x + S(2), first, r.w - S(4), last - first}, p.accent, 45);
+        Fill({r.x + S(2), first, r.w - S(4), S(2)}, p.accent);
+        Fill({r.x + S(2), last - S(2), r.w - S(4), S(2)}, p.accent);
+        return;
+    }
     Fill({first, r.y + S(2), last - first, r.h - S(4)}, p.accent, 45);
     Fill({first, r.y + S(2), std::max(1.0f, S(2)), r.h - S(4)}, p.accent);
     Fill({last - std::max(1.0f, S(2)), r.y + S(2), std::max(1.0f, S(2)), r.h - S(4)}, p.accent);
@@ -287,12 +401,27 @@ double TrackDuration() {
     return dur;
 }
 
+// The seek bar alone: the live waveform/fountain, or the regular slider. It fills its own background
+// first, so a partial frame repaints every pixel in this rectangle and leaves the rest untouched.
+void DrawLiveSeek(const Palette& p) {
+    if (L.seek.w <= 0) return;
+    bool live = RadioPlaying(), playing = g.playing != kNone || live;
+    double dur = TrackDuration();
+    double pos = playing ? (g_seekPreview >= 0 ? g_seekPreview : g.engine.Position()) : 0;
+    Fill(L.seek, p.surface);
+    bool seekHot = g_popups.empty() && (L.seek.In(g_mouseX, g_mouseY) || g_drag == Drag::Seek);
+    double frac = dur > 0 ? std::clamp(pos / dur, 0.0, 1.0) : 0;
+    double notch = !live && playing && dur > 0 ? ui::SeekNotchSeconds(dur) / dur : 0;
+    if (!DrawWaveform(L.seek, frac, p)) DrawSlider(L.seek, frac, !live && playing && dur > 0, seekHot, p, SeekVertical(), notch);
+    DrawSection(L.seek, dur, p);
+}
+
 void DrawBand(const Palette& p) {
-    Fill({0, L.menuBar.B(), L.menuBar.w, L.tabs.y - L.menuBar.B()}, p.surface);
+    Fill(L.player, p.surface);
     // The handle: a few dots.
     float dot = std::max(2.0f, S(2)), step = dot + std::max(2.0f, S(2));
     float gx = std::round(L.grip.x + (L.grip.w - (2 * step - (step - dot))) / 2), gy = std::round(L.grip.y + (L.grip.h - (3 * step - (step - dot))) / 2);
-    for (int i = 0; i < 2; ++i)
+    for (int i = 0; L.grip.w > 0 && L.grip.h > 0 && i < 2; ++i)
         for (int j = 0; j < 3; ++j) Fill({gx + i * step, gy + j * step, dot, dot}, p.faint);
     bool live = RadioPlaying(), playing = g.playing != kNone || live;
     DrawBandButton(L.buttons[kBtnPrev], Icon::Prev, p);
@@ -308,12 +437,7 @@ void DrawBand(const Palette& p) {
         DrawText(Font::Normal, live ? "LIVE" : Utf8(FormatDuration(pos)), L.elapsed.x, TextY(L.elapsed), p.text, L.elapsed.w, 2);
         if (dur > 0) DrawText(Font::Normal, (g.settings.timeRemaining ? "-" + Utf8(FormatDuration(std::max(0.0, dur - pos))) : Utf8(FormatDuration(dur))), L.remaining.x, TextY(L.remaining), p.text, L.remaining.w, 0);
     }
-    bool seekHot = g_popups.empty() && (L.seek.In(g_mouseX, g_mouseY) || g_drag == Drag::Seek);
-    double frac = dur > 0 ? std::clamp(pos / dur, 0.0, 1.0) : 0;
-    if (L.seek.w > 0) {
-        if (!DrawWaveform(L.seek, frac, p)) DrawSlider(L.seek, frac, !live && playing && dur > 0, seekHot, p);
-        DrawSection(L.seek, dur, p);
-    }
+    DrawLiveSeek(p);
     if (L.volume.w > 0) {
         DrawIcon(Icon::Speaker, L.speaker, p.text);
         bool volumeHot = g_popups.empty() && (L.volume.In(g_mouseX, g_mouseY) || g_drag == Drag::Volume);
@@ -353,6 +477,7 @@ void DrawBand(const Palette& p) {
             sub = "Your library is empty: add your music folder with Library \xE2\x96\xB8 Library folders, or drop folders here.";
     }
     DrawText(Font::Bold, title, L.title.x, TextY(L.title, Font::Bold), p.text, L.title.w);
+    if (g.settings.layout.hints && !playing) sub += "  Space: play / pause";
     DrawText(Font::Normal, sub, L.subtitle.x, TextY(L.subtitle), p.sub, L.subtitle.w);
     if (L.chip.w > 0) DrawPointsChip(L.chip, p);
 }
@@ -362,8 +487,9 @@ int PlayingTab() { return g.playing != kNone ? NowPlayingIndex() : -1; }
 // The tab strip (app_tabstrip.cpp): flat tabs on the surface, the open one underlined in the accent,
 // the playing playlist's name in the playing color, a close box on the open and hovered tabs.
 void DrawTabs(const Palette& p) {
+    if (L.tabs.h <= 0) return;
     Fill(L.tabs, p.surface);
-    Fill({L.tabs.R(), L.tabs.y, L.menuBar.w - L.tabs.R(), L.tabs.h}, p.surface);
+    Fill({L.tabs.R(), L.tabs.y, std::max(0.f, L.search.R() - L.tabs.R()), L.tabs.h}, p.surface);
     Fill({L.tabs.x, L.tabs.B() - S(1), L.tabs.w, S(1)}, p.border);  // the rule the open tab's underline sits on
     SDL_Rect clip{(int)L.tabs.x, (int)L.tabs.y, (int)L.tabs.w, (int)L.tabs.h};
     SDL_SetRenderClipRect(g.renderer, &clip);
@@ -374,7 +500,8 @@ void DrawTabs(const Palette& p) {
         bool closable = g.playlists[i].kind == PlaylistKind::Static || g.playlists[i].kind == PlaylistKind::Auto ||
                         g.playlists[i].kind == PlaylistKind::NowPlaying;
         if (sel) Fill({r.x + S(10), r.B() - S(2), r.w - S(20), S(2)}, p.accent);
-        float left = r.x + S(6), right = r.R() - S(closable ? 24 : 6);
+        // The label keeps its place whether or not the close box shows over its end.
+        float left = r.x + S(6), right = r.R() - S(6);
         if ((int)i == g_renameIndex) {
             Rect field{left, r.y + S(2), std::max(S(1), right - left), r.h - S(4)};
             Fill(field, g_renameSelected ? p.select : p.bg);
@@ -391,9 +518,10 @@ void DrawTabs(const Palette& p) {
             uint32_t color = (int)i == PlayingTab() ? p.playing : sel || hover ? p.text : p.sub;
             DrawText(Font::Normal, name, x, TextY(r), color, right - x);
         }
-        if (closable && (sel || hover)) {
+        if (closable && hover && (int)i != g_renameIndex) {  // only under the mouse; Ctrl+W and a middle click close too
             Rect close{r.R() - S(22), r.y + S(3), S(19), r.h - S(6)};
-            DrawText(Font::Normal, "\xC3\x97", close.x, TextY(close), hover ? p.text : p.faint, close.w, 1);
+            Fill(close, p.surface);
+            DrawText(Font::Normal, "\xC3\x97", close.x, TextY(close), p.text, close.w, 1);
         }
     }
     SDL_SetRenderClipRect(g.renderer, nullptr);
@@ -406,7 +534,8 @@ void DrawTabs(const Palette& p) {
         Rect close{L.radioTab.R() - S(22), L.radioTab.y + S(3), S(19), L.radioTab.h - S(6)};
         bool hover = g_popups.empty() && close.In(g_mouseX, g_mouseY);
         if (hover) Fill(close, p.hover);
-        DrawText(Font::Normal, "\xC3\x97", close.x, TextY(close), hover ? p.text : p.sub, close.w, 1);
+        if (g_popups.empty() && L.radioTab.In(g_mouseX, g_mouseY))  // the × only while over the tab
+            DrawText(Font::Normal, "\xC3\x97", close.x, TextY(close), hover ? p.text : p.sub, close.w, 1);
     }
     // The search box: a field with Windows 11's darker bottom edge, and its cue while empty.
     if (L.search.w > 0) {
@@ -445,7 +574,7 @@ float RadioMaxScroll() {
 Rect RadioCard(int index) {
     int columns = RadioColumns(); float gap = S(6), pad = S(6);
     float width = std::max(1.0f, (L.radioGrid.w - 2 * pad - gap * (columns - 1)) / columns);
-    return {pad + (index % columns) * (width + gap), L.radioGrid.y + (index / columns) * S(82) - InternetRadio().scroll,
+    return {L.radioGrid.x + pad + (index % columns) * (width + gap), L.radioGrid.y + (index / columns) * S(82) - InternetRadio().scroll,
             width, S(76)};
 }
 
@@ -537,7 +666,7 @@ void DrawRadio(const Palette& p) {
 }
 
 void DrawVisuals(const Palette& p) {
-    if (g.settings.theme != ThemeMode::Foobar) return;
+    if (g.settings.theme != ThemeMode::Foobar && g.settings.theme != ThemeMode::Apollo) return;
     uint64_t now = SDL_GetTicks();
     if (now - g_visualAt >= ui::kFoobarFrameMs) {
         bool active = g.playing != kNone && !IsPaused();
@@ -596,10 +725,10 @@ void DrawGroupCover(const Group& gr, const Rect& r, const Palette& p) {
 
 void DrawGroupHeader(const Group& gr, int index, float top, float right, const Palette& p) {
     float h = L.rowH;
-    if (index > 0) Fill({0, top, right, std::max(1.0f, S(1) / 2)},
+    if (index > 0) Fill({L.rows.x, top, right - L.rows.x, std::max(1.0f, S(1) / 2)},
                         g.settings.theme == ThemeMode::Foobar ? Mix(p.bg, p.text, 50) : p.border);
     float size = 2 * h - S(8);
-    Rect cover{S(8), top + S(5), size, size};
+    Rect cover{L.rows.x + S(8), top + S(5), size, size};
     DrawGroupCover(gr, cover, p);
     float x = cover.R() + S(10), r = right - S(10);
     std::wstring artist = gr.artist ? g_lib.Str(gr.artist) : L"Various artists";
@@ -618,10 +747,12 @@ void DrawGroupHeader(const Group& gr, int index, float top, float right, const P
 // own background with quiet labels and short dividers, then the rows: selection, hover or nothing
 // behind them, and each column's text with the album header's parts left out.
 void DrawList(const Palette& p) {
+    SDL_Rect listClip{(int)L.list.x, (int)L.list.y, (int)L.list.w, (int)L.list.h};
+    SDL_SetRenderClipRect(g.renderer, &listClip);
     Fill(L.list, p.bg);
     std::vector<float> xs;
-    float x = 0;
-    for (int c : g.settings.columns) {
+    float x = L.rows.x;
+    for (int c : ActiveColumnTypes()) {
         xs.push_back(x);
         x += ColumnWidth(c);
     }
@@ -629,20 +760,20 @@ void DrawList(const Palette& p) {
     const Playlist& pl = Active();
     uint32_t divider = Mix(p.bg, p.border, 50);
     for (size_t i = 0; i < xs.size(); ++i) {
-        int c = g.settings.columns[i];
+        int c = ActiveColumnTypes()[i];
         float w = ColumnWidth(c);
         Fill({xs[i] + w - 1, L.header.y + S(6), 1, L.header.h - S(12)}, divider);
         bool sorted = pl.sortColumn == c;
         Rect tr{xs[i] + S(5), L.header.y, w - S(10) - (sorted ? S(14) : 0), L.header.h};
-        std::string name = Utf8(kColumns[c].name);
-        DrawText(Font::Normal, name, tr.x, TextY(tr), sorted ? p.text : p.sub, tr.w, kColumns[c].align == ui::kAlignRight ? 2 : 0);
+        std::string name = Utf8(ActiveColumnHeading(c));
+        DrawText(Font::Normal, name, tr.x, TextY(tr), sorted ? p.text : p.sub, tr.w, ColumnAt(c).align == ui::kAlignRight ? 2 : 0);
         if (sorted) {
             float cx = xs[i] + w - S(12), cy = L.header.y + L.header.h / 2;
             if (pl.sortAscending) Polygon({{cx - S(4), cy + S(2)}, {cx, cy - S(3)}, {cx + S(4), cy + S(2)}}, p.text);
             else Polygon({{cx - S(4), cy - S(2)}, {cx + S(4), cy - S(2)}, {cx, cy + S(3)}}, p.text);
         }
     }
-    Fill({0, L.header.B() - S(1), L.header.w, S(1)}, p.border);
+    Fill({L.header.x, L.header.B() - S(1), L.header.w, S(1)}, p.border);
 
     SDL_Rect clip{(int)L.rows.x, (int)L.rows.y, (int)L.rows.w, (int)L.rows.h};
     SDL_SetRenderClipRect(g.renderer, &clip);
@@ -655,11 +786,11 @@ void DrawList(const Palette& p) {
         const Line& ln = g_lines[line];
         float y = L.rows.y + line * L.rowH - g.scroll;
         if (ln.row < 0) {
-            if (ln.part == 0) DrawGroupHeader(g_groups[ln.group], ln.group, y, std::min(total, L.rows.w), p);
+            if (ln.part == 0) DrawGroupHeader(g_groups[ln.group], ln.group, y, std::min(total, L.rows.R()), p);
             continue;
         }
         TrackId id = g.rows[ln.row];
-        Rect r{0, y, total, L.rowH};
+        Rect r{L.rows.x, y, total - L.rows.x, L.rowH};
         bool sel = ln.row < (int)g.selected.size() && g.selected[ln.row];
         if (sel) Fill(r, p.select);
         else if (line == hover) Fill(r, p.hover);
@@ -671,18 +802,24 @@ void DrawList(const Palette& p) {
             Fill(r, p.playing);
             color = TextOn(p.playing);
             font = Font::Normal;
+        } else if (isPlaying) {
+            // The playing row underlines how far the track has got (app_playlists.cpp, DrawTrackRow).
+            Fill({r.x, r.B() - S(2), (float)ui::PlayedWidth((int)r.w, g.engine.Position(), TrackDuration()), S(2)}, p.playing);
         }
         for (size_t i = 0; i < xs.size(); ++i) {
-            int c = g.settings.columns[i];
+            int c = ActiveColumnTypes()[i];
             float w = ColumnWidth(c);
             Rect cell{xs[i] + S(6), y, w - S(12), L.rowH};
+            if (DrawAlternateCell(id, c, cell, font, p, ln.row)) continue;
             if (c == 0) {
                 if (isPlaying) DrawText(font, mark ? mark : playingMark, cell.x, TextY(cell, font), color, cell.w);
                 else if (int queued = QueuePosition(id)) DrawText(font, "[" + std::to_string(queued) + "]", cell.x, TextY(cell, font), color, cell.w);
                 continue;
             }
             if (c == ui::kColRating) {
-                // Five stars: the rating's in the accent over the rest in the faint color.
+                // Five stars: the rating's in the accent over the rest in the faint color; an unrated
+                // track's only while its row is hovered or selected.
+                if (!ui::ShowEmptyStars(t.rating, line == hover, sel)) continue;
                 std::string star = "\xE2\x98\x85";
                 float sw = TextWidth(Font::Normal, star), sx = xs[i] + S(4);
                 for (int k = 0; k < 5; ++k, sx += sw) {
@@ -694,7 +831,9 @@ void DrawList(const Palette& p) {
             if (GroupHidesCell(ln, c)) continue;
             const std::string& text = Cell(id, c);
             if (text.empty()) continue;
-            DrawText(font, text, cell.x, TextY(cell, font), color, cell.w, kColumns[c].align == ui::kAlignRight ? 2 : 0);
+            bool right = ColumnAt(c).align == ui::kAlignRight;
+            if (!right) cell.w = CellTextWidth(ln, i, cell.w);
+            DrawText(font, text, cell.x, TextY(cell, font), color, cell.w, right ? 2 : 0);
         }
     }
     if (g_drag == Drag::Tracks && g_trackDrag.target >= 0 && !g_lineOfRow.empty()) {
@@ -741,14 +880,33 @@ std::wstring StatusMessage() {
         else swprintf(rate, std::size(rate), L" | %gx %ls", g.speed != 1 ? g.speed : g.tempo, g.speed != 1 ? L"speed" : L"tempo");
         status += rate;
     }
+    if (g.settings.layout.statusDetails) {
+        const auto output = g.engine.Output();
+        status += g.settings.eq.enabled ? L" | EQ" : L"";
+        if (g.settings.eq.crossfeed) status += L" + crossfeed";
+        if (g.settings.rg.on) status += L" | ReplayGain";
+        if (output.ready) status += L" | " + std::wstring(output.exclusive ? L"Exclusive " : L"Shared ") +
+            std::to_wstring(output.rate) + L" Hz";
+    }
     if (g.stopAfterCurrent) status += L" | stop after current";
     if (!g.queue.empty()) status += L"  \x2022  " + std::to_wstring(g.queue.size()) + L" queued";
+    // When a long track will be over, on the local clock (app_playback.cpp, EndsAtText).
+    double dur = TrackDuration();
+    if (dur >= ui::kLongTrackSeconds && !IsPaused() && g.settings.repeat != Repeat::One) {
+        double left = std::max(0.0, dur - g.engine.Position()) / std::max(0.05, g.speed * g.tempo);
+        time_t end = time(nullptr) + (time_t)left;
+        tm local{};
+        char clock[64];
+        if (localtime_r(&end, &local) && strftime(clock, sizeof(clock), "%H:%M", &local))
+            status += L"  \x2022  ends at " + FromUtf8(clock);
+    }
     return status;
 }
 
 // The status bar (app_window.cpp, DrawMainItem): three parts on the surface split by hairlines:
 // the message or what's playing, work in progress, and the count and length of the list or selection.
 void DrawStatus(const Palette& p) {
+    if (DrawAlternateStatus(p)) return;
     if (L.status.h <= 0) return;
     Fill(L.status, p.surface);
     float W = L.status.w;
@@ -785,6 +943,26 @@ void DrawStatus(const Palette& p) {
     }
 }
 
+void DrawUpNext(const Palette& p) {
+    if (L.upNext.w <= 0 || L.upNext.h <= 0) return;
+    SDL_Rect clip{(int)L.upNext.x, (int)L.upNext.y, (int)L.upNext.w, (int)L.upNext.h};
+    SDL_SetRenderClipRect(g.renderer, &clip);
+    Fill(L.upNext, p.surface);
+    Frame(L.upNext, p.border);
+    DrawText(Font::Bold, "Up next", L.upNext.x + S(12), L.upNext.y + S(10), p.text, L.upNext.w - S(24));
+    float y = L.upNext.y + S(38);
+    const auto tracks = UpNextTracks();
+    for (TrackId id : tracks) {
+        if (y + S(38) > L.upNext.B()) break;
+        DrawText(Font::Normal, Utf8(TrackTitle(id)), L.upNext.x + S(12), y, p.text, L.upNext.w - S(24));
+        DrawText(Font::Small, Utf8(g_lib.Str(g_lib[id].artist)), L.upNext.x + S(12), y + S(16),
+            p.sub, L.upNext.w - S(24));
+        y += S(42);
+    }
+    if (tracks.empty()) DrawText(Font::Normal, "Nothing queued.", L.upNext.x + S(12), y, p.sub, L.upNext.w - S(24));
+    SDL_SetRenderClipRect(g.renderer, nullptr);
+}
+
 void Draw() {
     ++g_frame;
     // The library changed (a scan, tags arriving): rebuild what's shown, at most twice a second.
@@ -814,16 +992,18 @@ void Draw() {
     ClampScroll();
     SetColor(p.bg);
     SDL_RenderClear(g.renderer);
-    if (InternetRadio().active) DrawRadio(p);
-    else if (CanvasActive()) DrawCanvas(L.list, p, g_popups.empty() ? g_mouseX : -1, g_popups.empty() ? g_mouseY : -1);
-    else DrawList(p);
+    if (InternetRadio().active && L.list.w > 0 && L.list.h >= S(68)) DrawRadio(p);
+    else if (CanvasActive() && L.list.w > 0 && L.list.h > 0) DrawCanvas(L.list, p, g_popups.empty() ? g_mouseX : -1, g_popups.empty() ? g_mouseY : -1);
+    else if (L.list.w > 0 && L.list.h > 0) DrawList(p);
     if (L.browser.h > 0) {
         DrawBrowser(L.browser, p, g_popups.empty() ? g_mouseX : -1, g_popups.empty() ? g_mouseY : -1);
         Fill(L.splitter, p.surface);
     }
     if (L.lyrics.w > 0) DrawLyrics(L.lyrics, p);
     DrawTabs(p);
-    DrawBand(p);
+    DrawBigPanels(p);
+    DrawUpNext(p);
+    if (!DrawAlternate(p)) DrawBand(p);
     DrawVisuals(p);
     DrawStatus(p);
     DrawMenuBar(p);
@@ -832,11 +1012,22 @@ void Draw() {
     if (g_web.open) DrawWeb(p);
     if (PanelOpen()) DrawPanel(p, g_mouseX, g_mouseY);
     if (g_exclude.open) DrawExcludeConfirm(p);
-    if (g.settings.pointsChip) {
+    if (g.settings.layout.points) {
         StepPointsChip();
         DrawToast(L.chip, p);
     }
     DrawStartupReview(p, g_popups.empty() ? g_mouseX : -1, g_popups.empty() ? g_mouseY : -1);
+    if (g_drag == Drag::Dock && std::hypot(g_mouseX - g_dragStart, g_mouseY - g_dragStartValue) >= S(4)) {
+        float w = L.menuBar.w, h = L.status.y;
+        double distance[] = {g_mouseY / std::max(1.f, h), (h - g_mouseY) / std::max(1.f, h),
+            1.6 * g_mouseX / std::max(1.f, w), 1.6 * (w - g_mouseX) / std::max(1.f, w)};
+        int dock = (int)(std::min_element(std::begin(distance), std::end(distance)) - distance);
+        Rect target = dock == 0 ? Rect{0, 0, w, S(76)} : dock == 1 ? Rect{0, h - S(76), w, S(76)} :
+            dock == 2 ? Rect{0, 0, S(216), h} : Rect{w - S(216), 0, S(216), h};
+        Fill(target, p.accent, 35);
+        Frame(target, p.accent);
+    }
+    DrawAlternateOverlay(p);
     DrawPopups(p);
 }
 

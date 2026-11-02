@@ -14,9 +14,12 @@
 //    a folder and naming pattern with a preview of every move, carried out by organize_run.cpp.
 //  - Library > Copy to folder or device (app_copy.cpp): a destination, a naming pattern, a format and
 //    a preview of every file, copied by copy_run.cpp.
+#include "headphones_ui.h"
 #include "panels.h"
+#include "ui_internal.h"
 
 #include "album_editions.h"
+#include "metadata_fetch.h"
 #include "musicbrainz.h"
 
 #include "audio_output.h"
@@ -39,7 +42,7 @@ namespace lx {
 
 namespace {
 
-enum class Kind { None, Eq, Tags, Prefs, Rules, Organize, Copy, ListenBrainz, Format, Device, Points, Review, Palette, Layout, Packs, Helpers, Games, Editions };
+enum class Kind { None, Eq, Headphones, Tags, Prefs, Rules, Organize, Copy, ListenBrainz, Format, Device, Points, Review, Palette, Layout, Packs, Helpers, Games, Editions, Covers, Artist };
 Kind g_kind = Kind::None;
 float g_mx = -1, g_my = -1;
 
@@ -121,7 +124,7 @@ std::string ReadSmallFile(const std::wstring& path, size_t max) {
 constexpr double kGraphLow = 20, kGraphHigh = 20000, kGraphRange = 18;  // Hz, Hz, +/- dB, as on Windows
 
 struct EqPanel {
-    Rect panel, enable, crossfeed, autoPreamp, graph, import, reset, close, useSliders;
+    Rect panel, enable, crossfeed, autoPreamp, graph, import, reset, close, useSliders, headphones;
     Rect sliders[kEqBands + 1];  // [0] = preamp; each slider's channel
     std::vector<Rect> presets;
     int drag = -1;        // the slider being dragged, or kEqBands + 1 for the curve
@@ -345,6 +348,8 @@ void DrawEq(const Palette& p) {
     g_eq.reset = {x + S(150), by, S(90), S(28)};
     g_eq.close = {right - S(90), by, S(90), S(28)};
     DrawButton(g_eq.import, "Import AutoEq...", p);
+    g_eq.headphones = {x + S(250), by, S(130), S(28)};
+    DrawButton(g_eq.headphones, "Headphones...", p);
     DrawButton(g_eq.reset, "Reset", p);
     DrawButton(g_eq.close, "Close", p, true);
 }
@@ -371,6 +376,7 @@ void EqCurveAt(float x, float y, bool finished) {
 }
 
 void EqMouseDown(float x, float y, int clicks) {
+    if (g_eq.headphones.In(x, y)) return OpenHeadphones();
     if (!g_eq.panel.In(x, y) || g_eq.close.In(x, y)) {
         ClosePanel();
         return;
@@ -463,10 +469,11 @@ struct TagPanel {
     int focus = Title;
     int compilation = 0, initialCompilation = 0;  // 0 off, 1 on, 2 some of the tracks
     std::optional<std::string> cover;             // set when replaced (the image) or removed ("")
+    std::string previewBytes;
     SDL_Texture* preview = nullptr;
     int previewW = 0, previewH = 0;
     std::string info, warning;
-    Rect panel, compilationRect, art, choose, remove, save, cancel;
+    Rect panel, compilationRect, art, choose, remove, online, save, cancel;
 } g_tags;
 
 std::wstring TrackValue(TrackId id, int f) {
@@ -493,6 +500,7 @@ std::wstring TrackValue(TrackId id, int f) {
 }
 
 void SetPreview(const std::string& bytes) {
+    g_tags.previewBytes = bytes;
     if (g_tags.preview) SDL_DestroyTexture(g_tags.preview);
     g_tags.preview = nullptr;
     CoverImage img{};
@@ -687,6 +695,8 @@ void DrawTags(const Palette& p) {
     g_tags.remove = {ax, ay + artSize + S(36), artSize, S(26)};
     DrawButton(g_tags.choose, "Choose cover...", p);
     DrawButton(g_tags.remove, "Remove cover", p, false, g_tags.cover ? !g_tags.cover->empty() : g_tags.preview != nullptr);
+    g_tags.online = {ax, ay + artSize + S(66), artSize, S(26)};
+    DrawButton(g_tags.online, "Find cover online...", p);
     float by = panel.B() - pad - S(28);
     DrawText(Font::Small, g_tags.warning.empty() ? g_tags.info : g_tags.warning, x0, by - S(24),
              g_tags.warning.empty() ? p.sub : p.error, panel.R() - pad - x0);
@@ -762,6 +772,16 @@ void TagsMouseDown(float x, float y) {
     }
     if (g_tags.remove.In(x, y) && (g_tags.cover ? !g_tags.cover->empty() : g_tags.preview != nullptr)) {
         g_tags.cover = std::string();
+        return;
+    }
+    if (g_tags.online.In(x, y)) {
+        // The picker opens over the editor and hands its choice back, to be written with the rest on Save.
+        std::vector<TrackId> ids = g_tags.ids;
+        OpenCoverSearchForTags(ids, [ids](const std::string& bytes) {
+            if (g_tags.ids != ids) return;
+            SetPreview(bytes);
+            g_tags.cover = bytes;
+        });
         return;
     }
     if (g_tags.compilationRect.In(x, y)) {
@@ -961,6 +981,10 @@ const char* const kBandWaveSizes[] = {"Use layout size", "Slim (26 px)", "Medium
                                     "Extra tall (108 px)", "Largest (144 px)"};
 static_assert(std::size(kBandWaveSizes) == std::size(ui::kBandWaveHeights));
 const char* const kUndoNames[] = {"1 day", "3 days", "1 week", "7 weeks"};
+const char* const kCoverSourceNames[] = {"Deezer", "iTunes", "MusicBrainz"};
+const char* const kCoverSaveNames[] = {"Save as cover.jpg in the album folder", "Embed in the files' tags",
+                                      "Show in cordinal only"};
+static_assert(std::size(kCoverSourceNames) == online::kCoverSources);
 static_assert(std::size(kReverbNames) == (size_t)ReverbPreset::Count);
 
 Settings& Cfg() { return g.settings; }
@@ -1059,12 +1083,47 @@ const Pref kPrefs[] = {
      "Results are cached; browsing and playback never wait for or require the network.", PrefType::Bool, 0, 1, 0, 1,
      [] { return (double)Cfg().musicBrainzLookup; },
      [](double v) { Cfg().musicBrainzLookup = v != 0; musicbrainz::SetEnabled(v != 0); Saved(); }},
+    // Online sources, as on Windows: each says exactly what it sends, and all are off until chosen.
+    {"online_covers_deezer", "Online", "Covers from Deezer",
+     "Sends the album's artist and title to api.deezer.com when you look for a cover.", PrefType::Bool, 0, 1, 0, 1,
+     [] { return (double)online::Config().covers[0]; }, [](double v) { online::Config().covers[0] = v != 0; Saved(); }},
+    {"online_covers_itunes", "Online", "Covers from iTunes",
+     "Sends the album's artist and title to itunes.apple.com when you look for a cover.", PrefType::Bool, 0, 1, 0, 1,
+     [] { return (double)online::Config().covers[1]; }, [](double v) { online::Config().covers[1] = v != 0; Saved(); }},
+    {"online_covers_musicbrainz", "Online", "Covers from MusicBrainz",
+     "Sends the album's artist and title to musicbrainz.org, then the release it finds to coverartarchive.org.",
+     PrefType::Bool, 0, 1, 0, 1, [] { return (double)online::Config().covers[2]; },
+     [](double v) { online::Config().covers[2] = v != 0; Saved(); }},
+    {"online_cover_first", "Online", "Preferred cover source",
+     "Its covers are listed first, and it wins when two covers are about as good.", PrefType::Choice, 0, 2, 0, 1,
+     [] { return (double)online::Config().coverFirst; }, [](double v) { online::Config().coverFirst = (int)v; Saved(); },
+     kCoverSourceNames},
+    {"online_cover_save", "Online", "Save chosen covers",
+     "Shown in cordinal only, or as a folder file, no audio file changes. Embedding rewrites each track's tags; Undo last tag edit takes it back.",
+     PrefType::Choice, 0, 2, 2, 1, [] { return (double)online::Config().coverSave; },
+     [](double v) { online::Config().coverSave = (int)v; Saved(); }, kCoverSaveNames},
+    {"online_cover_overwrite", "Online", "Replace an existing cover file",
+     "When off, an album folder that already has cover.jpg, folder.jpg or front.jpg keeps it.", PrefType::Bool, 0, 1, 0,
+     1, [] { return (double)online::Config().coverOverwrite; },
+     [](double v) { online::Config().coverOverwrite = v != 0; Saved(); }},
+    {"online_lyrics_lrclib", "Online", "Lyrics from LrcLib",
+     "Sends the song's artist, title, album and length to lrclib.net when it has no lyrics of its own.",
+     PrefType::Bool, 0, 1, 0, 1, [] { return (double)online::Config().lyrics[0]; },
+     [](double v) { online::Config().lyrics[0] = v != 0; LyricsSourcesChanged(); Saved(); }},
+    {"online_lyrics_ovh", "Online", "Lyrics from lyrics.ovh",
+     "Sends the song's artist and title to api.lyrics.ovh when it has no lyrics of its own and LrcLib had none.",
+     PrefType::Bool, 0, 1, 0, 1, [] { return (double)online::Config().lyrics[1]; },
+     [](double v) { online::Config().lyrics[1] = v != 0; LyricsSourcesChanged(); Saved(); }},
+    {"online_artist_info", "Online", "Artist info from MusicBrainz and Wikipedia",
+     "Sends the artist's name to musicbrainz.org, then asks wikidata.org and en.wikipedia.org for the article it names.",
+     PrefType::Bool, 0, 1, 0, 1, [] { return (double)online::Config().artistInfo; },
+     [](double v) { online::Config().artistInfo = v != 0; Saved(); }},
     {"group_albums", "View", "Group tracks by album", "The track list shows a header with the cover above each album's tracks.",
      PrefType::Bool, 0, 1, 1, 1, [] { return (double)Cfg().groupAlbums; },
      [](double v) { Cfg().groupAlbums = v != 0; RebuildRows(); Saved(); }},
     {"points_chip", "View", "Show level and points",
      "Shows your rank, level and points beside the now-playing lines, and announces a new level.", PrefType::Bool, 0, 1, 0, 1,
-     [] { return (double)Cfg().pointsChip; }, [](double v) { Cfg().pointsChip = v != 0; Saved(); }},
+     [] { return (double)Cfg().layout.points; }, [](double v) { Cfg().layout.points = v != 0; Saved(); }},
     {"preference_saving", "Startup", "Preference saving",
      "Whether a new theme, library view or browser becomes how cordinal opens: asked about once it settles, saved as you go, or only "
      "through Startup defaults.", PrefType::Choice, 0, 2, 0, 1, [] { return (double)(int)Cfg().preferenceSaving; },
@@ -1076,8 +1135,8 @@ const Pref kPrefs[] = {
      [] { return (double)Cfg().alwaysOnTop; }, [](double v) { Cfg().alwaysOnTop = v != 0; SDL_SetWindowAlwaysOnTop(g.window, v != 0); Saved(); }},
     {"gpu_drawing", "View", "Draw with the graphics card",
      "Draws the window with the graphics card instead of the processor. Off uses less memory; turn it on if scrolling is slow on a "
-     "large, high-resolution screen. Takes effect the next time cordinal starts.", PrefType::Bool, 0, 1, 0, 1,
-     [] { return (double)Cfg().gpuDrawing; }, [](double v) { Cfg().gpuDrawing = v != 0; Saved(); }},
+     "large, high-resolution screen. Changes take effect immediately.", PrefType::Bool, 0, 1, 0, 1,
+     [] { return (double)Cfg().gpuDrawing; }, [](double v) { SetGpuDrawing(v != 0); Saved(); }},
     {"sound_effects", "View", "Sound effects",
      "Small, quiet sounds for things that otherwise happen silently, such as saving tags or dropping files.", PrefType::Bool, 0, 1,
      0, 1, [] { return (double)Cfg().soundEffects; }, [](double v) { Cfg().soundEffects = v != 0; Saved(); }},
@@ -1112,21 +1171,34 @@ const Pref kPrefs[] = {
 struct PrefLink {
     const char* label;
     void (*open)();
+    bool (*enabled)() = nullptr;
+    bool (*shown)() = nullptr;
+    bool action = false;  // a scan keeps Preferences open, rather than replacing it with another panel
 };
 struct PrefPage {
     const char* name;  // null for All settings
-    PrefLink links[3];
+    PrefLink links[4];
 };
 const PrefPage kPrefPages[] = {
     {nullptr, {}},
     {"Playback", {}},
     {"Output", {{"Output device...", OpenOutputDevice}}},
-    {"ReplayGain", {}},
+    {"Headphones", {{"Headphones...", OpenHeadphones}}},
+    {"ReplayGain",
+     {{"Scan selection", [] { ScanReplayGain(SelectedTracks()); },
+       [] { return (!g.rgRunning || g.rgAuto) &&
+                   std::any_of(g.selected.begin(), g.selected.end(), [](char value) { return value != 0; }); }, nullptr, true},
+      {"Scan playlist", [] { ScanReplayGain(PlaylistTracks(Active())); },
+       [] { return (!g.rgRunning || g.rgAuto) && !g.rows.empty(); }, nullptr, true},
+      {"Scan library", [] { ScanReplayGain(replaygain::LibraryTracks()); },
+       [] { return (!g.rgRunning || g.rgAuto) && replaygain::HasLibraryTracks(); }, nullptr, true},
+      {"Cancel scan", CancelReplayGain, nullptr, [] { return g.rgRunning && !g.rgAuto; }, true}}},
     {"Effects", {{"Equalizer...", OpenEqualizer}}},
     {"View", {{"Title formatting...", OpenFormat}, {"Customize layout...", OpenLayout}}},
     {"Startup", {{"Startup defaults...", OpenStartupDefaults}}},
     {"Scrobbling", {{"Scrobbling...", OpenListenBrainz}}},
     {"Library", {{"Library folders...", OpenLibraryFolders}, {"Web server...", OpenWebServer}}},
+    {"Online", {{"Fetch missing covers...", FetchMissingCovers, [] { return !CoverFetchBusy(); }}}},
 };
 
 struct PrefRow {
@@ -1136,6 +1208,7 @@ struct PrefRow {
 struct PrefsPanel {
     int page = 0;
     int focus = -1;       // the shown setting the keys change (an index into ShownPrefs), or -1
+    int linkFocus = -1;
     bool reveal = false;  // scroll the focused setting into view on the next draw
     std::wstring search;
     float scroll = 0, contentH = 0;
@@ -1143,6 +1216,20 @@ struct PrefsPanel {
     std::vector<Rect> pages, links;
     std::vector<PrefRow> rows;
 } g_prefs;
+
+bool LinkShown(const PrefLink& link) {
+    return link.label && g_prefs.search.empty() && (!link.shown || link.shown());
+}
+
+bool LinkEnabled(const PrefLink& link) { return !link.enabled || link.enabled(); }
+
+void OpenPreferenceLink(size_t index) {
+    const auto& links = kPrefPages[g_prefs.page].links;
+    if (index >= std::size(links) || !LinkShown(links[index]) || !LinkEnabled(links[index])) return;
+    const PrefLink& link = links[index];
+    if (!link.action) ClosePanel();
+    link.open();
+}
 
 bool Changed(const Pref& t) { return std::fabs(t.get() - t.def) > 1e-4; }
 
@@ -1219,7 +1306,9 @@ void DrawPrefs(const Palette& p) {
     float w = DrawText(Font::Normal, Utf8(g_prefs.search), box.x + S(6), TextY(box), p.text, box.w - S(12));
     if (SDL_GetTicks() % 1060 < 530) Fill({box.x + S(6) + w, TextY(box), S(1), LineHeight(Font::Normal)}, p.text);
     // The pages, each with how many of its settings differ from their defaults.
-    float bottom = panel.B() - pad - S(28) - S(12);
+    int linkCount = 0;
+    for (const PrefLink& link : kPrefPages[g_prefs.page].links) linkCount += LinkShown(link);
+    float bottom = panel.B() - pad - S(28) - S(12) - (linkCount ? S(40) : 0);
     g_prefs.pages.clear();
     float py = top;
     for (int i = 0; i < (int)std::size(kPrefPages); ++i) {
@@ -1297,18 +1386,23 @@ void DrawPrefs(const Palette& p) {
     }
     g_prefs.contentH = y + g_prefs.scroll - list.y;
     SDL_SetRenderClipRect(g.renderer, nullptr);
-    // The page's links to the windows that hold the rest of its settings, and the resets.
+    // Links and actions have their own row above the footer, so scans never overlap the resets.
     float by = panel.B() - pad - S(28);
-    g_prefs.links.clear();
-    float lx = x0;
-    if (g_prefs.search.empty())
-        for (const PrefLink& link : kPrefPages[g_prefs.page].links) {
-            if (!link.label) continue;
-            Rect r{lx, by, TextWidth(Font::Normal, link.label) + S(28), S(28)};
-            DrawButton(r, link.label, p);
-            g_prefs.links.push_back(r);
-            lx = r.R() + S(8);
-        }
+    const auto& links = kPrefPages[g_prefs.page].links;
+    g_prefs.links.assign(std::size(links), {});
+    if (g_prefs.linkFocus >= 0 && (!LinkShown(links[g_prefs.linkFocus]) || !LinkEnabled(links[g_prefs.linkFocus])))
+        g_prefs.linkFocus = -1;
+    float lx = list.x;
+    float maxLinkW = (list.w - S(8) * std::max(0, linkCount - 1)) / std::max(1, linkCount);
+    for (size_t i = 0; i < std::size(links); ++i) {
+        const PrefLink& link = links[i];
+        if (!LinkShown(link)) continue;
+        Rect r{lx, by - S(40), std::min(TextWidth(Font::Normal, link.label) + S(28), maxLinkW), S(28)};
+        DrawButton(r, link.label, p, false, LinkEnabled(link));
+        if ((int)i == g_prefs.linkFocus) Frame(r, p.accent);
+        g_prefs.links[i] = r;
+        lx = r.R() + S(8);
+    }
     bool any = false;
     for (int i : shown) any = any || Changed(kPrefs[i]);
     const char* resetLabel = !g_prefs.search.empty() ? "Reset these to defaults"
@@ -1342,6 +1436,7 @@ void PrefsMouseDown(float x, float y) {
             g_prefs.search.clear();
             g_prefs.scroll = 0;
             g_prefs.focus = -1;
+            g_prefs.linkFocus = -1;
             return;
         }
     if (g_prefs.resetAll.In(x, y)) {
@@ -1352,10 +1447,8 @@ void PrefsMouseDown(float x, float y) {
     if (g_prefs.search.empty())
         for (size_t i = 0; i < g_prefs.links.size(); ++i)
             if (g_prefs.links[i].In(x, y)) {
-                // The link's window takes the place of Preferences, as one panel is open at a time.
-                auto open = kPrefPages[g_prefs.page].links[i].open;
-                ClosePanel();
-                open();
+                g_prefs.linkFocus = (int)i;
+                OpenPreferenceLink(i);
                 return;
             }
     if (!g_prefs.list.In(x, y)) return;
@@ -1369,17 +1462,33 @@ void PrefsMouseDown(float x, float y) {
         else continue;
         auto shown = ShownPrefs();
         g_prefs.focus = (int)(std::find(shown.begin(), shown.end(), row.pref) - shown.begin());
+        g_prefs.linkFocus = -1;
         return;
     }
 }
 
 // Typing searches; Up and Down pick a setting, Left and Right step it (Space flips an on/off one),
-// Delete resets it, Escape clears the search and then closes.
+// Delete resets it, Escape clears the search and then closes. Tab visits enabled actions; Enter
+// or Space runs the focused action, and Up/Down returns to the settings.
 void PrefsKey(const SDL_KeyboardEvent& e) {
     auto shown = ShownPrefs();
     int& focus = g_prefs.focus;
     const Pref* t = focus >= 0 && focus < (int)shown.size() ? &kPrefs[shown[focus]] : nullptr;
     switch (e.key) {
+        case SDLK_TAB: {
+            const auto& links = kPrefPages[g_prefs.page].links;
+            const int step = e.mod & SDL_KMOD_SHIFT ? -1 : 1;
+            int at = g_prefs.linkFocus;
+            if (at < 0) at = step > 0 ? -1 : (int)std::size(links);
+            for (size_t n = 0; n < std::size(links); ++n) {
+                at = (at + step + (int)std::size(links)) % (int)std::size(links);
+                if (LinkShown(links[at]) && LinkEnabled(links[at])) { g_prefs.linkFocus = at; break; }
+            }
+            break;
+        }
+        case SDLK_RETURN:
+            if (g_prefs.linkFocus >= 0) OpenPreferenceLink((size_t)g_prefs.linkFocus);
+            break;
         case SDLK_ESCAPE:
             if (!g_prefs.search.empty()) {
                 g_prefs.search.clear();
@@ -1394,18 +1503,20 @@ void PrefsKey(const SDL_KeyboardEvent& e) {
             break;
         case SDLK_UP:
         case SDLK_DOWN:
+            g_prefs.linkFocus = -1;
             if (!shown.empty()) focus = std::clamp(focus + (e.key == SDLK_UP ? -1 : 1), 0, (int)shown.size() - 1);
             g_prefs.reveal = true;
             break;
         case SDLK_LEFT:
         case SDLK_RIGHT:
-            if (t) SetPref(*t, t->get() + (e.key == SDLK_RIGHT ? t->step : -t->step));
+            if (t && g_prefs.linkFocus < 0) SetPref(*t, t->get() + (e.key == SDLK_RIGHT ? t->step : -t->step));
             break;
         case SDLK_SPACE:
-            if (t && t->type == PrefType::Bool) SetPref(*t, t->get() != 0 ? 0 : 1);
+            if (g_prefs.linkFocus >= 0) OpenPreferenceLink((size_t)g_prefs.linkFocus);
+            else if (t && t->type == PrefType::Bool) SetPref(*t, t->get() != 0 ? 0 : 1);
             break;
         case SDLK_DELETE:
-            if (t) SetPref(*t, t->def);
+            if (t && g_prefs.linkFocus < 0) SetPref(*t, t->def);
             break;
         case SDLK_PAGEUP: g_prefs.scroll -= g_prefs.list.h; break;
         case SDLK_PAGEDOWN: g_prefs.scroll += g_prefs.list.h; break;
@@ -1640,6 +1751,10 @@ void RulesSave() {
         if (!NoValue(row.rule.op) && Trimmed(row.value.text).empty()) return fail("Rule " + std::to_string(i + 1) + " needs a value.");
         if (NeedsNumber(row.rule) && !IsNumber(Trimmed(row.value.text))) return fail(number);
         if (row.rule.op == RuleOp::Between && !IsNumber(Trimmed(row.value2.text))) return fail(number);
+        uint32_t day;
+        if ((row.rule.op == RuleOp::Before || row.rule.op == RuleOp::OnOrAfter) &&
+            !ParseRuleDate(Utf8(Trimmed(row.value.text)), day))
+            return fail("Rule " + std::to_string(i + 1) + " needs a date such as 2026-01-31.");
     }
     if (g_rules.limitOn && !IsNumber(Trimmed(g_rules.limit.text))) return fail("Enter the limit as a number.");
     const std::string text = SerializeAutoPlaylist(RulesModel());
@@ -3004,61 +3119,117 @@ void PaletteText(const std::wstring& s) {
 struct LayoutPart {
     unsigned bit;
     const char* label;
+    bool WindowLayout::*flag = nullptr;
 };
 const LayoutPart kLayoutParts[] = {
-    {kPartTransport, "Previous, play and next"}, {kPartOrder, "Shuffle and repeat"}, {kPartWave, "Waveform seek bar"},
-    {kPartTimes, "Times"}, {kPartVolume, "Volume"}, {kPartNowPlaying, "Now playing (cover, title and artist)"},
-    {kPartTabs, "Playlist tabs"}, {kPartSearch, "Search box"}, {kPartViews, "Library view buttons"}, {kPartStatus, "Status bar"},
+    {kPartTransport, "Previous, play and next"}, {kPartOrder, "Shuffle and repeat"},
+    {kPartWave, "Waveform seek bar"}, {kPartTimes, "Times"}, {kPartVolume, "Volume"},
+    {kPartNowPlaying, "Now playing"}, {kPartTabs, "Playlist tabs"}, {kPartSearch, "Search box"},
+    {kPartViews, "Library view buttons"}, {kPartStatus, "Status bar"},
+    {0, "Large cover", &WindowLayout::largeCover}, {0, "Level and points", &WindowLayout::points},
+    {0, "Up next panel", &WindowLayout::upNext}, {0, "Menu bar", &WindowLayout::menuBar},
+    {0, "Track counts on tabs", &WindowLayout::tabCounts},
+    {0, "Audio details in status bar", &WindowLayout::statusDetails},
+    {0, "Playback hints", &WindowLayout::hints}, {0, "Waveform on its own row", &WindowLayout::waveOwnRow},
+    {0, "Side panels on the left", &WindowLayout::panelsLeft}
 };
 struct LayoutPanel {
-    Rect panel, rows[std::size(kLayoutParts) + 1], reset, close;
+    Rect panel, rows[std::size(kLayoutParts)], dock, wave, reset, close, presets;
+    int focus = 0;
 } g_layout;
 
-bool PartShown(unsigned bit) { return !(g.settings.hiddenParts & bit); }
+bool PartShown(unsigned bit) { return !(g.settings.layout.hiddenParts & bit); }
 
 void SetPart(unsigned bit, bool shown) {
-    if (shown) g.settings.hiddenParts &= ~bit;
-    else g.settings.hiddenParts |= bit;
+    if (shown) g.settings.layout.hiddenParts &= ~bit;
+    else g.settings.layout.hiddenParts |= bit;
     SaveSettings();
     g.redraw = true;
 }
 
+void LayoutActivate(int index) {
+    if (index < (int)std::size(kLayoutParts)) {
+        const auto& part = kLayoutParts[index];
+        if (part.flag) {
+            g.settings.layout.*part.flag = !(g.settings.layout.*part.flag);
+            SaveSettings();
+            g.redraw = true;
+        } else SetPart(part.bit, !PartShown(part.bit));
+    } else if (index == (int)std::size(kLayoutParts)) {
+        OpenChoice(g_layout.dock.x, g_layout.dock.B(), {"Top", "Bottom", "Left", "Right"},
+            g.settings.layout.dock, [](int i) { g.settings.layout.dock = i; g.redraw = true; SaveSettings(); });
+    } else if (index == (int)std::size(kLayoutParts) + 1) {
+        OpenChoice(g_layout.wave.x, g_layout.wave.B(), {"Slim", "Medium", "Tall"},
+            g.settings.layout.waveSize, [](int i) { g.settings.layout.waveSize = i; g.redraw = true; SaveSettings(); });
+    } else if (index == (int)std::size(kLayoutParts) + 2) {
+        g.settings.layout = WindowLayout{};
+        SaveSettings();
+        g.redraw = true;
+    } else if (index == (int)std::size(kLayoutParts) + 3) {
+        std::vector<std::string> names{"Classic", "Player at the bottom", "Player on the side", "Waveform studio", "Minimal"};
+        for (const auto& name : PackLayoutNames()) names.push_back(Utf8(name));
+        OpenChoice(g_layout.presets.x, g_layout.presets.B(), names, -1, [](int i) {
+            if (i >= 5) { ApplyPackLayout(i - 5); return; }
+            auto& l = g.settings.layout;
+            l = WindowLayout{};
+            if (i == 1) { l.dock = 1; l.waveSize = 1; l.waveOwnRow = l.largeCover = true; }
+            if (i == 2) { l.dock = 2; l.waveSize = 1; l.upNext = true; }
+            if (i == 3) { l.waveSize = 2; l.waveOwnRow = l.largeCover = true; }
+            if (i == 4) l.hiddenParts = kPartOrder | kPartNowPlaying | kPartViews | kPartStatus;
+            SaveSettings(); g.redraw = true;
+        });
+    } else ClosePanel();
+}
+
 void DrawLayoutPanel(const Palette& p) {
-    Rect panel = g_layout.panel = DrawFrame(p, S(460), S(520), "Customize layout");
-    const float pad = S(20), x0 = panel.x + pad, w = panel.w - 2 * pad, rowH = S(30);
-    DrawText(Font::Normal, "Show these parts of the window:", x0, panel.y + S(48), p.sub, w);
-    float y = panel.y + S(76);
-    for (size_t i = 0; i < std::size(kLayoutParts); ++i, y += rowH) {
-        g_layout.rows[i] = {x0, y, w, rowH};
-        DrawCheck(g_layout.rows[i], kLayoutParts[i].label, PartShown(kLayoutParts[i].bit), p);
+    Rect panel = g_layout.panel = DrawFrame(p, S(680), S(480), "Customize layout");
+    float x = panel.x + S(20), y = panel.y + S(50), w = panel.w - S(40);
+    DrawText(Font::Normal, "Changes apply now. Keep them for startup from Startup defaults.", x, y, p.sub, w);
+    y += S(30);
+    const char* docks[] = {"Top", "Bottom", "Left", "Right"};
+    const char* sizes[] = {"Slim", "Medium", "Tall"};
+    g_layout.dock = {x, y, w / 2 - S(10), S(28)};
+    g_layout.wave = {x + w / 2 + S(10), y, w / 2 - S(10), S(28)};
+    DrawButton(g_layout.dock, std::string("Player: ") + docks[g.settings.layout.dock], p);
+    DrawButton(g_layout.wave, std::string("Waveform: ") + sizes[g.settings.layout.waveSize], p);
+    y += S(40);
+    constexpr int perColumn = (std::size(kLayoutParts) + 1) / 2;
+    float rowH = std::min(S(26), std::max(LineHeight(Font::Normal) + S(2),
+        (panel.B() - S(46) - y) / perColumn));
+    for (size_t i = 0; i < std::size(kLayoutParts); ++i) {
+        const auto& part = kLayoutParts[i];
+        g_layout.rows[i] = {x + (i / perColumn) * w / 2, y + (i % perColumn) * rowH, w / 2 - S(8), rowH};
+        DrawCheck(g_layout.rows[i], part.label, part.flag ? g.settings.layout.*part.flag : PartShown(part.bit), p);
+        if (g_layout.focus == (int)i) Frame(g_layout.rows[i], p.accent);
     }
-    g_layout.rows[std::size(kLayoutParts)] = {x0, y, w, rowH};
-    DrawCheck(g_layout.rows[std::size(kLayoutParts)], "Level and points", g.settings.pointsChip, p);
-    const float by = panel.B() - pad - S(28);
-    g_layout.close = {panel.R() - pad - S(90), by, S(90), S(28)};
-    g_layout.reset = {x0, by, S(160), S(28)};
-    DrawButton(g_layout.reset, "Reset the layout", p, false, g.settings.hiddenParts != 0 || g.settings.pointsChip);
+    float by = panel.B() - S(46);
+    g_layout.reset = {x, by, S(160), S(28)};
+    g_layout.presets = {x + S(170), by, S(100), S(28)};
+    g_layout.close = {panel.R() - S(110), by, S(90), S(28)};
+    DrawButton(g_layout.reset, "Reset the layout", p);
+    DrawButton(g_layout.presets, "Presets...", p);
     DrawButton(g_layout.close, "Close", p, true);
+    const Rect controls[] = {g_layout.dock, g_layout.wave, g_layout.reset, g_layout.presets, g_layout.close};
+    for (int i = 0; i < 5; ++i)
+        if (g_layout.focus == (int)std::size(kLayoutParts) + i) Frame(controls[i], p.accent);
 }
 
 void LayoutMouseDown(float x, float y) {
-    if (!g_layout.panel.In(x, y) || g_layout.close.In(x, y)) return ClosePanel();
-    if (g_layout.reset.In(x, y)) {
-        g.settings.hiddenParts = 0;
-        g.settings.pointsChip = false;
-        SaveSettings();
-        return;
-    }
+    if (!g_layout.panel.In(x, y)) return ClosePanel();
     for (size_t i = 0; i < std::size(kLayoutParts); ++i)
-        if (g_layout.rows[i].In(x, y)) return SetPart(kLayoutParts[i].bit, !PartShown(kLayoutParts[i].bit));
-    if (g_layout.rows[std::size(kLayoutParts)].In(x, y)) {
-        g.settings.pointsChip = !g.settings.pointsChip;
-        SaveSettings();
-    }
+        if (g_layout.rows[i].In(x, y)) { g_layout.focus = (int)i; return LayoutActivate(g_layout.focus); }
+    const Rect controls[] = {g_layout.dock, g_layout.wave, g_layout.reset, g_layout.presets, g_layout.close};
+    for (int i = 0; i < 5; ++i)
+        if (controls[i].In(x, y)) { g_layout.focus = (int)std::size(kLayoutParts) + i; return LayoutActivate(g_layout.focus); }
 }
 
 void LayoutKey(const SDL_KeyboardEvent& e) {
-    if (e.key == SDLK_ESCAPE || e.key == SDLK_RETURN || e.key == SDLK_KP_ENTER) ClosePanel();
+    constexpr int count = std::size(kLayoutParts) + 5;
+    if (e.key == SDLK_ESCAPE) ClosePanel();
+    else if (e.key == SDLK_TAB) g_layout.focus = (g_layout.focus + (e.mod & SDL_KMOD_SHIFT ? count - 1 : 1)) % count;
+    else if (e.key == SDLK_DOWN || e.key == SDLK_RIGHT) g_layout.focus = (g_layout.focus + 1) % count;
+    else if (e.key == SDLK_UP || e.key == SDLK_LEFT) g_layout.focus = (g_layout.focus + count - 1) % count;
+    else if (e.key == SDLK_SPACE || e.key == SDLK_RETURN || e.key == SDLK_KP_ENTER) LayoutActivate(g_layout.focus);
 }
 
 // --- packs ---------------------------------------------------------------------------------------------------
@@ -3152,7 +3323,7 @@ void PacksKey(const SDL_KeyboardEvent& e) {
 constexpr int kHelperRows = 8;
 struct HelpersPanel {
     int selected = 0, first = 0;
-    Rect panel, list, installFolder, folder, close;
+    Rect panel, list, installFolder, folder, close, visualizers;
 } g_helpersUi;
 
 void DrawHelpers(const Palette& p) {
@@ -3196,9 +3367,12 @@ void DrawHelpers(const Palette& p) {
         }
     }
     const float by = panel.B() - pad - S(28);
-    g_helpersUi.close = {panel.R() - pad - S(90), by, S(90), S(28)};
-    g_helpersUi.folder = {g_helpersUi.close.x - S(8) - S(130), by, S(130), S(28)};
-    g_helpersUi.installFolder = {g_helpersUi.folder.x - S(8) - S(150), by, S(150), S(28)};
+    const float buttonW = (w - S(24)) / 4;
+    g_helpersUi.visualizers = {x0, by, buttonW, S(28)};
+    g_helpersUi.installFolder = {x0 + buttonW + S(8), by, buttonW, S(28)};
+    g_helpersUi.folder = {x0 + 2 * (buttonW + S(8)), by, buttonW, S(28)};
+    g_helpersUi.close = {x0 + 3 * (buttonW + S(8)), by, buttonW, S(28)};
+    DrawButton(g_helpersUi.visualizers, "Visualizers...", p, false, !HelperVisualizerLabels().empty());
     DrawButton(g_helpersUi.installFolder, "Install folder...", p);
     DrawButton(g_helpersUi.folder, "Open the folder", p);
     DrawButton(g_helpersUi.close, "Close", p, true);
@@ -3206,6 +3380,7 @@ void DrawHelpers(const Palette& p) {
 
 void HelpersMouseDown(float x, float y) {
     if (!g_helpersUi.panel.In(x, y) || g_helpersUi.close.In(x, y)) return ClosePanel();
+    if (g_helpersUi.visualizers.In(x, y)) return OpenHelperVisualizers(x, y);
     if (g_helpersUi.installFolder.In(x, y)) {
         auto chosen = [](void*, const char* const* list, int) {
             if (!list || !*list) return;
@@ -3224,6 +3399,7 @@ void HelpersMouseDown(float x, float y) {
 }
 
 void HelpersKey(const SDL_KeyboardEvent& e) {
+    if (e.key == SDLK_V) return OpenHelperVisualizers(g_helpersUi.visualizers.x, g_helpersUi.visualizers.B());
     const int count = (int)HelperCount();
     if (e.key == SDLK_ESCAPE) return ClosePanel();
     if (e.key == SDLK_UP) g_helpersUi.selected = std::max(0, g_helpersUi.selected - 1);
@@ -3454,6 +3630,13 @@ void OpenCopy(const std::vector<TrackId>& ids, const std::wstring& playlist) {
 bool PanelReplanPending() { return (g_kind == Kind::Organize && g_org.dirty) || (g_kind == Kind::Copy && g_copy.dirty); }
 
 // --- public ------------------------------------------------------------------------------------------------
+void OpenHeadphones() {
+    ClosePanel();
+    g_kind = Kind::Headphones;
+    PrepareHeadphonesPanel();
+    g.redraw = true;
+}
+
 void OpenEqualizer() {
     g_kind = Kind::Eq;
     g_eq.drag = -1;
@@ -3474,8 +3657,52 @@ void OpenPreferences() {
     g_prefs.search.clear();
     g_prefs.scroll = 0;
     g_prefs.focus = -1;
+    g_prefs.linkFocus = -1;
     SDL_StartTextInput(g.window);  // typing searches
     g.redraw = true;
+}
+
+int CheckPreferences() {
+    const auto saved = g_prefs;
+    const auto kind = g_kind;
+    const bool running = g.rgRunning, automatic = g.rgAuto, cancelled = g.rgCancel;
+    OpenPreferences();
+    for (size_t i = 1; i < std::size(kPrefPages); ++i)
+        if (std::string_view(kPrefPages[i].name) == "ReplayGain") g_prefs.page = (int)i;
+    g.rgRunning = false;
+    g.rgAuto = false;
+    DrawPrefs(CurrentPalette());
+    const auto& links = kPrefPages[g_prefs.page].links;
+    bool idle = g_prefs.links.size() == 4 && g_prefs.links[0].w > 0 && g_prefs.links[1].w > 0 &&
+                g_prefs.links[2].w > 0 && g_prefs.links[3].w == 0 &&
+                LinkEnabled(links[2]) == replaygain::HasLibraryTracks();
+    g.rgRunning = true;
+    DrawPrefs(CurrentPalette());
+    bool active = !LinkEnabled(links[0]) && !LinkEnabled(links[1]) && !LinkEnabled(links[2]) &&
+                  LinkShown(links[3]) && LinkEnabled(links[3]);
+    float right = g_prefs.list.x;
+    for (const auto& button : g_prefs.links) {
+        active &= button.w > 0 && button.x >= right && button.R() <= g_prefs.panel.R() &&
+                  button.y >= g_prefs.list.B() && button.B() <= g_prefs.resetAll.y;
+        right = button.R();
+    }
+    SDL_KeyboardEvent key{};
+    key.key = SDLK_TAB;
+    PrefsKey(key);
+    const bool tab = g_prefs.linkFocus == 3;
+    key.key = SDLK_SPACE;
+    PrefsKey(key);
+    const bool keyboard = tab && g.rgCancel && g_kind == Kind::Prefs;
+    g.rgRunning = running;
+    g.rgAuto = automatic;
+    g.rgCancel = cancelled;
+    g_prefs = saved;
+    g_kind = kind;
+    if (kind != Kind::Prefs) SDL_StopTextInput(g.window);
+    printf("%s ReplayGain Preferences exposes three scan scopes and live cancellation without overlap\n",
+           idle && active ? "ok  " : "FAIL");
+    printf("%s ReplayGain Preferences supports Tab and Space without closing the panel\n", keyboard ? "ok  " : "FAIL");
+    return (!idle || !active) + !keyboard;
 }
 
 void OpenHelpers() {
@@ -3618,13 +3845,27 @@ void OnListenBrainzMessage(WPARAM wp, LPARAM lp) {
     g.redraw = true;
 }
 
+void ResetPanelRenderer(bool restore) {
+    if (restore) {
+        if (!g_tags.previewBytes.empty()) SetPreview(g_tags.previewBytes);
+    } else {
+        if (g_tags.preview) SDL_DestroyTexture(g_tags.preview);
+        g_tags.preview = nullptr;
+    }
+    CoverPanelRenderer(restore);
+    ResetGameRenderer(restore);
+}
+
 bool PanelOpen() { return g_kind != Kind::None; }
+
+bool g_coverOverTags = false;  // the cover picker was opened from the tag editor, which waits under it
 
 void ClosePanel() {
     if (g_kind == Kind::Eq && g_eq.drag >= 0) SaveSettings();
     if (g_kind == Kind::Tags) {
         if (g_tags.preview) SDL_DestroyTexture(g_tags.preview);
         g_tags.preview = nullptr;
+        g_tags.previewBytes.clear();
         g_tags.ids.clear();
     }
     if (g_kind == Kind::Organize) {
@@ -3635,7 +3876,18 @@ void ClosePanel() {
     if (g_kind == Kind::Copy) g_copy = CopyPanel{};
     if (g_kind == Kind::Games) CloseGames();
     if (g_kind == Kind::Editions) EditionsClose();
-    if (g_kind == Kind::Tags || g_kind == Kind::Prefs || g_kind == Kind::Rules || g_kind == Kind::Organize || g_kind == Kind::Copy ||
+    if (g_kind == Kind::Artist) ArtistPanelClose();
+    if (g_kind == Kind::Covers) {
+        CoverPanelClose();
+        if (g_coverOverTags) {  // the tag editor underneath closes with it, unsaved
+            if (g_tags.preview) SDL_DestroyTexture(g_tags.preview);
+            g_tags.preview = nullptr;
+            g_tags.previewBytes.clear();
+            g_tags.ids.clear();
+        }
+        g_coverOverTags = false;
+    }
+    if (g_kind == Kind::Tags || g_kind == Kind::Covers || g_kind == Kind::Prefs || g_kind == Kind::Rules || g_kind == Kind::Organize || g_kind == Kind::Copy ||
         g_kind == Kind::ListenBrainz || g_kind == Kind::Format || g_kind == Kind::Palette || g_kind == Kind::Games ||
         g_kind == Kind::Editions)
         SDL_StopTextInput(g.window);
@@ -3645,10 +3897,41 @@ void ClosePanel() {
     g.redraw = true;
 }
 
+void ShowCoverPanel(bool overTags) {
+    if (overTags && g_kind == Kind::Tags) {
+        g_coverOverTags = true;  // not ClosePanel: the editor's fields stay as they are
+    } else if (g_kind != Kind::Covers) {
+        ClosePanel();
+        g_coverOverTags = false;
+    }
+    g_kind = Kind::Covers;
+    SDL_StartTextInput(g.window);
+    g.redraw = true;
+}
+
+void ShowArtistPanel() {
+    if (g_kind != Kind::Artist) ClosePanel();
+    g_kind = Kind::Artist;
+    g.redraw = true;
+}
+
+void CoverPanelDone() {
+    if (g_kind != Kind::Covers) return;
+    if (g_coverOverTags) {
+        CoverPanelClose();
+        g_coverOverTags = false;
+        g_kind = Kind::Tags;
+        g.redraw = true;
+        return;
+    }
+    ClosePanel();
+}
+
 void DrawPanel(const Palette& p, float mouseX, float mouseY) {
     g_mx = mouseX;
     g_my = mouseY;
     if (g_kind == Kind::Eq) DrawEq(p);
+    else if (g_kind == Kind::Headphones) DrawHeadphones(p);
     else if (g_kind == Kind::Tags) DrawTags(p);
     else if (g_kind == Kind::Prefs) DrawPrefs(p);
     else if (g_kind == Kind::Rules) DrawRules(p);
@@ -3665,6 +3948,8 @@ void DrawPanel(const Palette& p, float mouseX, float mouseY) {
     else if (g_kind == Kind::Helpers) DrawHelpers(p);
     else if (g_kind == Kind::Games) DrawGames(p, mouseX, mouseY);
     else if (g_kind == Kind::Editions) DrawEditionsPanel(p);
+    else if (g_kind == Kind::Covers) DrawCoverPanel(p, mouseX, mouseY);
+    else if (g_kind == Kind::Artist) DrawArtistPanel(p);
 }
 
 void PanelMouseDown(float x, float y, int button, int clicks) {
@@ -3673,6 +3958,7 @@ void PanelMouseDown(float x, float y, int button, int clicks) {
     g.redraw = true;
     if (button != SDL_BUTTON_LEFT) return;
     if (g_kind == Kind::Eq) EqMouseDown(x, y, clicks);
+    else if (g_kind == Kind::Headphones) HeadphonesMouseDown(x, y);
     else if (g_kind == Kind::Tags) TagsMouseDown(x, y);
     else if (g_kind == Kind::Prefs) PrefsMouseDown(x, y);
     else if (g_kind == Kind::Rules) RulesMouseDown(x, y);
@@ -3689,6 +3975,8 @@ void PanelMouseDown(float x, float y, int button, int clicks) {
     else if (g_kind == Kind::Helpers) HelpersMouseDown(x, y);
     else if (g_kind == Kind::Games) GamesMouseDown(x, y);
     else if (g_kind == Kind::Editions) EditionsMouseDown(x, y, button, clicks);
+    else if (g_kind == Kind::Covers) CoverPanelMouseDown(x, y, button, clicks);
+    else if (g_kind == Kind::Artist && button == SDL_BUTTON_LEFT) ArtistPanelMouseDown(x, y);
 }
 
 void PanelMouseMove(float x, float y) {
@@ -3711,7 +3999,8 @@ void PanelMouseUp() {
 }
 
 void PanelWheel(float x, float y, float dy) {
-    if (g_kind == Kind::Eq) {
+    if (g_kind == Kind::Headphones) HeadphonesWheel(dy);
+    else if (g_kind == Kind::Eq) {
         if (int i = EqSliderAt(x, y); i >= 0) {
             g_eq.focus = i;
             SetEqValue(i, *EqValue(i) + (dy > 0 ? 0.5 : -0.5), true);
@@ -3729,6 +4018,10 @@ void PanelWheel(float x, float y, float dy) {
         g_palette.first = std::clamp(g_palette.first - (int)std::lround(dy * 2), 0, std::max(0, (int)g_palette.shown.size() - kPaletteRows));
     } else if (g_kind == Kind::Editions) {
         EditionsWheel(x, y, dy);
+    } else if (g_kind == Kind::Covers) {
+        CoverPanelWheel(x, y, dy);
+    } else if (g_kind == Kind::Artist) {
+        ArtistPanelWheel(x, y, dy);
     } else if (g_kind == Kind::Device) {
         g_dev.first = std::clamp(g_dev.first - (int)std::lround(dy * 2), 0, std::max(0, (int)g_dev.devices.size() + 1 - kDeviceRows));
     } else if (g_kind == Kind::Prefs) {
@@ -3749,6 +4042,7 @@ void PanelWheel(float x, float y, float dy) {
 
 void PanelKey(const SDL_KeyboardEvent& e) {
     if (g_kind == Kind::Eq) EqKey(e);
+    else if (g_kind == Kind::Headphones) HeadphonesKey(e);
     else if (g_kind == Kind::Tags) TagsKey(e);
     else if (g_kind == Kind::Prefs) PrefsKey(e);
     else if (g_kind == Kind::Rules) RulesKey(e);
@@ -3766,6 +4060,8 @@ void PanelKey(const SDL_KeyboardEvent& e) {
     else if (g_kind == Kind::Helpers) HelpersKey(e);
     else if (g_kind == Kind::Games) GamesKey(e);
     else if (g_kind == Kind::Editions) EditionsKey(e);
+    else if (g_kind == Kind::Covers) CoverPanelKey(e);
+    else if (g_kind == Kind::Artist) ArtistPanelKey(e);
 }
 
 void PanelText(const char* text) {
@@ -3778,6 +4074,7 @@ void PanelText(const char* text) {
     if (g_kind == Kind::Tags && text) InsertText(compat::Widen(text));
     if (g_kind == Kind::Games && text) GamesText(compat::Widen(text));
     if (g_kind == Kind::Editions && text) EditionsText(text);
+    if (g_kind == Kind::Covers && text) CoverPanelText(text);
     if (g_kind == Kind::Prefs && text && !(g_prefs.focus >= 0 && !strcmp(text, " "))) {
         g_prefs.search += compat::Widen(text);
         g_prefs.scroll = 0;
@@ -3790,6 +4087,7 @@ void PanelFileChosen(int purpose, const std::wstring& path) {
     if (purpose == kFileHelper && g_kind == Kind::Helpers) InstallHelper(path);
     else if (purpose == kFilePack && g_kind == Kind::Packs) InstallPack(path);
     else if (purpose == kFileCover && g_kind == Kind::Tags) ChooseCover(path);
+    else if (purpose == kFileCoverPick && g_kind == Kind::Covers) CoverPanelFile(path);
     else if (purpose == kFileAutoEq && g_kind == Kind::Eq) ImportAutoEq(path);
     else if (purpose == kFileOrganizeRoot && g_kind == Kind::Organize) {
         g_org.root.text = path;
@@ -3807,6 +4105,7 @@ bool PanelWantsText(float x, float y) {
     if (g_kind == Kind::ListenBrainz) return LbBrainz() ? g_lb.field.In(x, y) :
         g_lb.keyField.In(x, y) || g_lb.secretField.In(x, y);
     if (g_kind == Kind::Editions) return EditionsWantsText(x, y);
+    if (g_kind == Kind::Covers) return CoverPanelWantsText(x, y);
     if (g_kind == Kind::Palette) return g_palette.field.In(x, y);
     if (g_kind == Kind::Games) return GamesWantsText(x, y);
     if (g_kind == Kind::Format) {

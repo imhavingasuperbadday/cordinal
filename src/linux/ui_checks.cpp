@@ -1,11 +1,16 @@
 // The Linux window's headless checks: layout and pack behaviour, plus the separate theme/menu screenshots.
+#include "alternate_ui.h"
+#include "big_ui.h"
+#include "headphones_ui.h"
 #include "ui_internal.h"
 
 namespace lx {
 
+int CheckWindowLayouts();
 int CheckLinuxPacks();  // src/tests/selftest_linux_packs.cpp
 
 int CheckLayout() {
+    setvbuf(stdout, nullptr, _IONBF, 0);
     int pw = 0, ph = 0;
     SDL_GetRenderOutputSize(g.renderer, &pw, &ph);
     // ui::kLayout is the Tracks view without the browser.
@@ -61,7 +66,60 @@ int CheckLayout() {
     off += !regular;
     g.playing = savedPlaying;
     g.settings = savedSettings;
-    return off + CheckLinuxPacks();
+    // Unrated stars wait for hover or selection; a grouped title runs over the Album and matching
+    // Artist and Year cells its header speaks for, stopping at the rating.
+    bool stars = !ui::ShowEmptyStars(0, false, false) && ui::ShowEmptyStars(0, true, false) &&
+                 ui::ShowEmptyStars(0, false, true) && ui::ShowEmptyStars(20, false, false);
+    printf("%s unrated tracks show empty stars only on hover or selection\n", stars ? "ok  " : "FAIL");
+    off += !stars;
+    bool notches = ui::SeekNotchSeconds(19 * 60) == 0 && ui::SeekNotchSeconds(30 * 60 + 16) == 5 * 60 &&
+                   ui::SeekNotchSeconds(6 * 3600 + 3 * 60) == 3600 && ui::PlayedWidth(900, 30, 60) == 450;
+    bool tabsFit = ui::FitTabPadding(400, 5, 600, 18, 8) == 18 && ui::FitTabPadding(400, 5, 500, 18, 8) == 8 &&
+                   ui::FitTabPadding(400, 5, 450, 18, 8) == -1;
+    printf("%s crowded tabs tighten, then share the strip, before scrolling\n", tabsFit ? "ok  " : "FAIL");
+    off += !tabsFit;
+    printf("%s long tracks notch the seek bar and the playing row underlines its progress\n", notches ? "ok  " : "FAIL");
+    off += !notches;
+    {
+        // A one-track library of its own, so the check needs no profile; the real one is put back.
+        Library saved = std::move(g_lib);
+        g_lib = Library();
+        const auto savedRows = g.rows;
+        const auto savedTypes = ActiveColumnTypes();
+        const auto savedGroups = g_groups;
+        TrackId id = g_lib.Add(L"/checks/grouped.flac");
+        Track& t = g_lib[id];
+        t.artist = g_lib.Intern("Artist");
+        t.album = g_lib.Intern("Album");
+        t.date = g_lib.Intern("2020");
+        g.rows = {id};
+        g_groups = {{0, 2, t.album, t.artist, t.date, 0}};
+        ActiveColumnTypes() = {0, 2, 3, 4, 5, ui::kColRating, 6};
+        const float title = ColumnWidth(2), all = title + ColumnWidth(3) + ColumnWidth(4) + ColumnWidth(5);
+        bool runs = CellTextWidth({0, 0, 0}, 1, title) == all && CellTextWidth({0, -1, 0}, 1, title) == title;
+        // Another artist than the album's keeps its Artist cell, which ends the run at the title.
+        g_groups[0].artist = g_lib.Intern("Album artist");
+        runs = runs && CellTextWidth({0, 0, 0}, 1, title) == title;
+        printf("%s grouped titles run over the cells their album header holds\n", runs ? "ok  " : "FAIL");
+        off += !runs;
+        ActiveColumnTypes() = savedTypes;
+        g_groups = savedGroups;
+        g.rows = savedRows;
+        g_lib = std::move(saved);
+    }
+    off += CheckWindowLayouts() + CheckPreferences() + CheckLinuxPacks() + CheckLinuxHeadsets() + CheckLinuxBig() + CheckLinuxHelperFeed() + CheckLinuxAlternateThemes();
+    const bool software = SetGpuDrawing(false) && !g.settings.gpuDrawing &&
+        std::string_view(SDL_GetRendererName(g.renderer)) == SDL_SOFTWARE_RENDERER &&
+        UiSymbolsAvailable() && DrawText(Font::Normal, "Renderer restored", 0, 0, CurrentPalette().text) > 0;
+    printf("%s switching renderer rebuilds text and cover caches without restarting\n", software ? "ok  " : "FAIL");
+    off += !software;
+    const bool accelerated = SetGpuDrawing(true);
+    const bool recovered = g.renderer && !g.quit && UiSymbolsAvailable() &&
+        (accelerated ? g.settings.gpuDrawing : !g.settings.gpuDrawing);
+    printf("%s accelerated drawing switches or retains the working software renderer\n", recovered ? "ok  " : "FAIL");
+    off += !recovered;
+    SetGpuDrawing(false);
+    return off;
 }
 
 int CaptureUi(const std::string& dir) {

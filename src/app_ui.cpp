@@ -20,6 +20,30 @@ LRESULT SurfaceControlColor(HDC dc, COLORREF text) {
     return (LRESULT)g.surfaceBrush;
 }
 
+// Explorer's dark checkbox/radio theme draws its label black whatever WM_CTLCOLORBTN says. Keep the
+// native glyph, input and accessibility, but repaint the label after it in the palette's text color.
+// `glyph` is the width the box or circle and its gap take before the label.
+LRESULT ChoiceLabelCustomDraw(const NMCUSTOMDRAW* draw, HFONT font, int glyph) {
+    if (draw->dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYPOSTPAINT;
+    if (draw->dwDrawStage == CDDS_POSTPAINT) {
+        RECT r = draw->rc;
+        r.left += glyph;
+        FillRect(draw->hdc, &r, g.surfaceBrush);
+        ++r.left;
+        HGDIOBJ old = SelectObject(draw->hdc, font);
+        SetBkMode(draw->hdc, TRANSPARENT);
+        SetTextColor(draw->hdc, IsWindowEnabled(draw->hdr.hwndFrom) ? TextColor() : SubColor());
+        auto text = WindowText(draw->hdr.hwndFrom);
+        UINT state = (UINT)SendMessageW(draw->hdr.hwndFrom, WM_QUERYUISTATE, 0, 0);
+        DrawTextW(draw->hdc, text.c_str(), -1, &r,
+                  DT_SINGLELINE | DT_VCENTER | ((state & UISF_HIDEACCEL) ? DT_HIDEPREFIX : 0));
+        if (g.showFocusBoxes && (draw->uItemState & CDIS_FOCUS) && !(state & UISF_HIDEFOCUS))
+            DrawFocusRect(draw->hdc, &r);
+        SelectObject(draw->hdc, old);
+    }
+    return CDRF_DODEFAULT;
+}
+
 const wchar_t* s_fontFace = nullptr;  // the theme font the UI fonts were last made with (none: the system's)
 // The dark menu bar's font: Windows lays the bar's items out for the system menu font, so its text
 // stays in that font even when a theme brings its own (a wider pixel font would overrun the items).
@@ -87,9 +111,10 @@ void CreateFonts() {
 }
 
 void ApplyFonts() {
-    if (g.tabs) TabCtrl_SetPadding(g.tabs, S(18), S(3));
+    if (g.tabs) TabCtrl_SetPadding(g.tabs, S(ui::kTabPad), S(3));
     for (HWND h : {g.list, g.tabs, g.search, g.status, g.npSub, g.time, g.elapsed})
         SendMessageW(h, WM_SETFONT, (WPARAM)g.font, TRUE);
+    FitTabs();  // the new font measures the labels differently
     SendMessageW(g.npTitle, WM_SETFONT, (WPARAM)g.fontTitle, TRUE);
     SendMessageW(g.speaker, WM_SETFONT, (WPARAM)g.fontSymbol, TRUE);
     for (HWND b : g.buttons) SendMessageW(b, WM_SETFONT, (WPARAM)g.fontSymbol, TRUE);

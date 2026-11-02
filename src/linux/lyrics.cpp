@@ -2,9 +2,14 @@
 // track list, the playing song's lyrics. They come from a .lrc file next to it or from the file's tags (what the
 // tag editor writes). Timed lyrics ("[01:12.30] line") follow the song: the current line is highlighted and kept
 // in the middle, and clicking a line seeks to it. Plain lyrics scroll with the wheel.
+// When a song has neither and a lyrics source is on (Preferences > Online), the worker asks LrcLib, then
+// lyrics.ovh (metadata_fetch.h), the panel names where they came from, and they are written nowhere until
+// Save lyrics to tags or Save as .lrc file is chosen from its right-click menu, as on Windows.
 #include "cue.h"
 #include "draw.h"
+#include "metadata_fetch.h"
 #include "tags.h"
+#include "tagwriter.h"
 
 #include <thread>
 
@@ -22,6 +27,8 @@ struct Loaded {
     uint64_t generation;
     std::vector<Line> lines;
     bool synced = false;
+    std::string source;   // the host fetched lyrics came from; empty for the song's own
+    std::string fetched;  // fetched lyrics as received, for saving
 };
 
 struct Panel {
@@ -34,6 +41,8 @@ struct Panel {
     float scroll = 0, target = 0;  // pixels; synced lyrics glide toward `target`
     int current = -1;
     Rect body;
+    std::shared_ptr<online::Cancel> cancel;  // the fetch in flight, when lyrics sources are on
+    std::string source, fetched;
 } p;
 
 // mm:ss(.xx) or mm:ss:xx; -1 when it is not a time.
@@ -105,13 +114,20 @@ std::string ReadTextFile(const std::wstring& path) {
 }
 
 // Runs on a worker: a .lrc next to the file wins (it's usually timed), then the tags.
-void Load(TrackId id, std::wstring path, uint64_t generation) {
-    auto* out = new Loaded{id, generation, {}, false};
+void Load(TrackId id, std::wstring path, uint64_t generation, online::LyricsQuery query,
+          std::shared_ptr<online::Cancel> cancel) {
+    auto* out = new Loaded{id, generation, {}, false, {}, {}};
     std::wstring audio = AudioFileOf(path);
     size_t dot = audio.find_last_of(L'.'), slash = audio.find_last_of(L'/');
     std::string text;
     if (dot != std::wstring::npos && (slash == std::wstring::npos || dot > slash)) text = ReadTextFile(audio.substr(0, dot) + L".lrc");
     if (text.empty()) ReadLyrics(path, text);
+    online::LyricsFound found;
+    if (text.empty() && cancel && online::FetchLyrics(query, *cancel, found)) {
+        text = found.text;
+        out->source = Utf8(online::LyricsSourceHost(found.source));
+        out->fetched = std::move(found.text);
+    }
     for (auto& [time, line] : ParseLyrics(FromUtf8(text), out->synced)) out->lines.push_back({time, ToUtf8(line)});
     if (!PostMessageW(nullptr, WM_APP_LYRICS, 0, (LPARAM)out)) delete out;
 }
@@ -119,7 +135,18 @@ void Load(TrackId id, std::wstring path, uint64_t generation) {
 void StartLoad() {
     if (p.loading || p.stopping || !LyricsShown() || p.requested == kNone || !g_lib.Contains(p.requested)) return;
     p.loading = true;
-    p.worker = std::thread(Load, p.requested, g_lib.Path(p.requested), p.generation);
+    const Track& t = g_lib[p.requested];
+    online::LyricsQuery query{ToUtf8(g_lib.Str(t.artist ? t.artist : t.albumArtist)), ToUtf8(g_lib.Str(t.album)),
+                              ToUtf8(g_lib.Str(t.title)), (t.durationMs + 500) / 1000};
+    p.cancel = online::AnyLyricsSource() ? std::make_shared<online::Cancel>() : nullptr;
+    p.worker = std::thread(Load, p.requested, g_lib.Path(p.requested), p.generation, std::move(query), p.cancel);
+}
+
+// A fetch for a song no longer shown ends at once, so the next song's lyrics needn't wait for it.
+void CancelFetch() {
+    if (p.cancel) p.cancel->Stop();
+    p.source.clear();
+    p.fetched.clear();
 }
 
 float HeaderHeight() { return S(48); }
@@ -157,7 +184,7 @@ void Layout(float width) {
 }
 
 void ClampScroll() {
-    float maxScroll = std::max(0.0f, p.contentHeight + S(24) - BodyHeight());
+    float maxScroll = std::max(0.0f, p.contentHeight + S(24) + (p.source.empty() ? 0 : S(30)) - BodyHeight());
     p.scroll = std::clamp(p.scroll, 0.0f, maxScroll);
     p.target = std::clamp(p.target, 0.0f, maxScroll);
 }
@@ -173,6 +200,7 @@ void ToggleLyrics() {
         ++p.generation;
         p.requested = p.loadedFor = kNone;
         p.lines.clear();
+        CancelFetch();
     }
     SaveSettings();
     g.redraw = true;
@@ -189,6 +217,8 @@ void OnLyricsLoaded(LPARAM lp) {
     p.loadedFor = r->id;
     p.lines = std::move(r->lines);
     p.synced = r->synced;
+    p.source = std::move(r->source);
+    p.fetched = std::move(r->fetched);
     p.layoutWidth = -1;
     p.scroll = p.target = 0;
     p.current = -1;
@@ -203,6 +233,7 @@ void LyricsTick() {
         p.requested = g.playing;
         ++p.generation;
         p.lines.clear();
+        CancelFetch();
         p.loadedFor = g.playing;
         p.current = -1;
         p.scroll = p.target = 0;
@@ -228,6 +259,7 @@ void LyricsTick() {
 
 void StopLyrics() {
     p.stopping = true;
+    CancelFetch();
     if (p.worker.joinable()) p.worker.join();
     p.loading = false;
 }
@@ -247,7 +279,7 @@ void DrawLyrics(const Rect& area, const Palette& p2) {
     SDL_SetRenderClipRect(g.renderer, &clip);
     if (p.lines.empty()) {
         const char* hint = g.playing == kNone ? "Lyrics of the playing song show here."
-                           : p.loading        ? ""
+                           : p.loading        ? (p.cancel ? "Looking for lyrics online..." : "")
                                               : "No lyrics for this song.\n\nAdd them in the tag editor (Alt+Enter), or put a .lrc file "
                                                 "with the same name next to it for lyrics that follow the song.";
         float y = p.body.y + S(24);
@@ -280,8 +312,39 @@ void DrawLyrics(const Rect& area, const Palette& p2) {
                 y += LineHeight(Font::Bold);
             }
         }
+        if (!p.source.empty())  // where fetched lyrics came from, after the last line
+            DrawText(Font::Normal, "Lyrics from " + p.source, area.x + pad, y0 + p.contentHeight + S(10), p2.sub, width,
+                     p.synced ? 1 : 0);
     }
     SDL_SetRenderClipRect(g.renderer, nullptr);
+}
+
+bool CanSaveFetchedLyrics(bool tags) {
+    if (p.fetched.empty() || p.loadedFor == kNone || !g_lib.Contains(p.loadedFor)) return false;
+    const std::wstring path = g_lib.Path(p.loadedFor);
+    return tags ? CanWriteTags(path) : !IsSubtrack(path);
+}
+
+void SaveFetchedLyrics(bool tags) {
+    if (!CanSaveFetchedLyrics(tags)) return;
+    if (tags) {
+        TagEdit edit;
+        edit.lyrics = p.fetched;
+        SubmitTagWrites({{p.loadedFor, edit}}, true);
+        return;
+    }
+    std::wstring error;
+    switch (online::WriteLrcFile(AudioFileOf(g_lib.Path(p.loadedFor)), p.fetched, error)) {
+        case online::FolderWrite::Written: ShowMessage(L"Saved the lyrics as a .lrc file beside the song."); break;
+        case online::FolderWrite::Exists: ShowMessage(L"A .lrc file with this name is already there; it was kept."); break;
+        case online::FolderWrite::Failed: ShowMessage(L"Couldn't save the .lrc file: " + error + L"."); break;
+    }
+}
+
+void LyricsSourcesChanged() {
+    if (!LyricsShown() || (!p.lines.empty() && p.fetched.empty())) return;  // the song's own lyrics stay
+    p.requested = kNone;  // the next tick looks again
+    g.redraw = true;
 }
 
 void LyricsWheel(float dy) {

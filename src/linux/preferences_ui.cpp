@@ -1,12 +1,13 @@
-// Startup defaults on Linux, as the Windows build's app_preferences.cpp: the theme, library view and browser
-// (and the window size and layout once those can be chosen) are how cordinal opens only when the user says
-// so. A change is a temporary choice for this session; settings.ini keeps the approved defaults. Depending
+// Startup defaults on Linux, as the Windows build's app_preferences.cpp: the theme, library view,
+// browser, window size and layout become startup choices only when the user says so. A change is a temporary choice for this session; settings.ini keeps the approved defaults. Depending
 // on Preferences > Startup > Preference saving, a settled change is asked about once, in one compact
 // checklist, saved as it is made, or kept only when chosen in Startup defaults. See docs/product-notes.md.
 #include "draw.h"
 #include "panels.h"
 
 #include <ctime>
+#include <filesystem>
+#include <unistd.h>
 
 namespace lx {
 namespace {
@@ -32,23 +33,26 @@ std::vector<std::string> WrapLines(Font font, const std::string& text, float wid
     return lines;
 }
 
-constexpr unsigned kDefaultTheme = 1, kDefaultLibraryView = 2, kDefaultBrowser = 4;
-constexpr unsigned kChoiceCount = 3;
+constexpr unsigned kDefaultTheme = 1, kDefaultLibraryView = 2, kDefaultBrowser = 4, kDefaultSize = 8, kDefaultLayout = 16;
+constexpr unsigned kChoiceCount = 5;
 constexpr uint64_t kSettleMs = 5 * 60 * 1000, kQuietMs = 15 * 1000, kReviewInterval = 24 * 60 * 60;
 
 struct Choices {
     ThemeMode theme = ThemeMode::System;
     LibraryMode library = LibraryMode::Albums;
     bool browser = true;
+    ViewSize size = ViewSize::Normal;
+    WindowLayout layout;
     bool operator==(const Choices&) const = default;
 };
 
-Choices Current() { return {g.settings.theme, g.settings.libraryMode, g.settings.browserVisible}; }
-Choices Approved() { return {g.settings.defaultTheme, g.settings.defaultLibraryMode, g.settings.defaultBrowserVisible}; }
+Choices Current() { return {g.settings.theme, g.settings.libraryMode, g.settings.browserVisible, g.settings.size, g.settings.layout}; }
+Choices Approved() { return {g.settings.defaultTheme, g.settings.defaultLibraryMode, g.settings.defaultBrowserVisible, g.settings.defaultSize, g.settings.defaultLayout}; }
 
 unsigned Difference(const Choices& a, const Choices& b) {
     return (a.theme != b.theme ? kDefaultTheme : 0) | (a.library != b.library ? kDefaultLibraryView : 0) |
-           (a.browser != b.browser ? kDefaultBrowser : 0);
+           (a.browser != b.browser ? kDefaultBrowser : 0) | (a.size != b.size ? kDefaultSize : 0) |
+        (a.layout != b.layout ? kDefaultLayout : 0);
 }
 
 Choices g_observed;
@@ -71,7 +75,10 @@ std::wstring ChoiceText(unsigned index) {
     switch (index) {
         case 0: return L"Theme: " + std::wstring(ThemeInfo(c.theme).name);
         case 1: return L"Library view: " + compat::Widen(views[(int)c.library]);
-        default: return c.browser ? L"Library browser: shown" : L"Library browser: hidden";
+        case 2: return c.browser ? L"Library browser: shown" : L"Library browser: hidden";
+        case 3: { const wchar_t* sizes[] = {L"Compact", L"Normal", L"Big mode plus", L"Big mode"};
+            return L"Window size: " + std::wstring(sizes[(int)c.size]); }
+        default: return L"Window layout";
     }
 }
 
@@ -91,6 +98,8 @@ static void SaveStartupDefaults(const Choices& choices, unsigned selected) {
     if (selected & kDefaultTheme) g.settings.defaultTheme = choices.theme;
     if (selected & kDefaultLibraryView) g.settings.defaultLibraryMode = choices.library;
     if (selected & kDefaultBrowser) g.settings.defaultBrowserVisible = choices.browser;
+    if (selected & kDefaultSize) g.settings.defaultSize = choices.size;
+    if (selected & kDefaultLayout) g.settings.defaultLayout = choices.layout;
     SaveSettings();
 }
 
@@ -199,11 +208,13 @@ void DrawStartupReview(const Palette& p, float mouseX, float mouseY) {
     Review& v = g_review;
     unsigned count = 0;
     for (unsigned i = 0; i < kChoiceCount; ++i) count += (v.mask >> i) & 1;
-    const float w = S(440), pad = S(18), rowH = S(30);
-    const float h = v.policy ? S(252) : S(192) + count * rowH;
     int pw = 0, ph = 0;
     SDL_GetRenderOutputSize(g.renderer, &pw, &ph);
-    v.card = {(float)pw - w - S(16), (float)ph - h - S(40), w, h};
+    const float w = std::min(S(440), pw - S(16)), pad = S(18);
+    const float rowH = count ? std::min(S(30), std::max(LineHeight(Font::Normal) + S(2),
+        (ph - S(208)) / count)) : S(30);
+    const float h = std::min(v.policy ? S(252) : S(192) + count * rowH, ph - S(16));
+    v.card = {(float)pw - w - S(8), (float)ph - h - S(8), w, h};
     Fill(v.card, p.surface);
     Frame(v.card, p.accent);
     float y = v.card.y + S(16);
@@ -272,6 +283,35 @@ bool StartupReviewMouseDown(float x, float y, int button) {
             if (v.checks[i].w > 0 && v.checks[i].In(x, y)) v.checked ^= 1u << i;
     }
     return true;
+}
+
+int CheckStartupPresentation() {
+    const Settings saved = g.settings;
+    const auto oldObserved = g_observed;
+    const auto oldReview = g_review;
+    Choices choices = Approved();
+    choices.size = ViewSize::Compact;
+    choices.layout.dock = 3;
+    choices.layout.largeCover = true;
+    const unsigned before = Difference(choices, Approved());
+    // Write only to a throwaway path; the headless diagnostic never starts output profiles.
+    const auto settingsPath = g.settingsPath;
+    char temporary[] = "/tmp/cordinal-presentation-XXXXXX";
+    if (!mkdtemp(temporary)) return 1;
+    g.settingsPath = FromUtf8(std::string(temporary) + "/settings.ini");
+    SaveStartupDefaults(choices, kDefaultSize);
+    const bool selectedOnly = g.settings.defaultSize == ViewSize::Compact &&
+        g.settings.defaultLayout == saved.defaultLayout && (before & kDefaultLayout);
+    SaveStartupDefaults(choices, kDefaultLayout);
+    const bool layout = g.settings.defaultLayout == choices.layout;
+    std::error_code cleanupError;
+    std::filesystem::remove_all(temporary, cleanupError);
+    g.settingsPath = settingsPath;
+    g.settings = saved;
+    g_observed = oldObserved;
+    g_review = oldReview;
+    printf("%s startup review saves only checked size/layout choices\n", selectedOnly && layout ? "ok  " : "FAIL");
+    return !(selectedOnly && layout);
 }
 
 }  // namespace lx

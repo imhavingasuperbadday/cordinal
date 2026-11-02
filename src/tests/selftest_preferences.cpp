@@ -2,7 +2,18 @@
 // without SaveState: changes must already be on disk before the application exits.
 #include "selftest_common.h"
 
+#include "metadata_fetch.h"
+
 namespace {
+HWND ProcessWindow(const wchar_t* className) {
+    for (HWND window = nullptr; (window = FindWindowExW(nullptr, window, className, nullptr));) {
+        DWORD process = 0;
+        GetWindowThreadProcessId(window, &process);
+        if (process == GetCurrentProcessId()) return window;
+    }
+    return nullptr;
+}
+
 // True when `menu` or one of its submenus holds command `id`.
 bool Holds(HMENU menu, UINT id) {
     for (int i = 0, n = GetMenuItemCount(menu); i < n; ++i)
@@ -209,7 +220,7 @@ void TestWaveform(const std::wstring& scratch) {
         HGDIOBJ old = bitmap ? SelectObject(dc, bitmap) : nullptr;
         const bool columns = dc && bitmap && !LiveWaveformShown() &&
                              DrawWaveform(dc, {0, 0, 120, 26}, {4, 0, 116, 26}, 0.625) &&
-                             GetPixel(dc, 4, 13) == WaveformPlayedColor() && GetPixel(dc, 4, 2) == SurfaceColor();
+                             GetPixel(dc, 4, 13) != SurfaceColor() && GetPixel(dc, 4, 2) == SurfaceColor();
         batch.Next(L"whole-track columns appear while an uncached song loads and refresh from completed cache data");
         Check(waiting && columns, L"whole-track waveform columns appear while an uncached song is loading");
         if (old) SelectObject(dc, old);
@@ -267,6 +278,55 @@ void TestWaveform(const std::wstring& scratch) {
         Check(prepared && WaveformShown() && WaveformPeak(0.75, 0.8) > 0,
               L"a play request prepares the song's whole waveform before playback starts");
         DeleteFileW(early.c_str());
+    }
+    {
+        // A theme build can save these; the plain waveform still reads them when this build does
+        // not link the fountain menu or animation.
+        const wchar_t* names[] = {L"Top", L"Bottom", L"Left", L"Right"};
+        const Rgb played[] = {0x112233, 0x223344, 0x334455, 0x445566};
+        const Rgb rest[] = {0x556677, 0x667788, 0x778899, 0x8899AA};
+        std::wstring savedPlayed[4], savedRest[4];
+        for (int i = 0; i < (int)Dock::Count; ++i) {
+            savedPlayed[i] = IniRead(L"Waveform", (std::wstring(names[i]) + L"Played").c_str(), L"");
+            savedRest[i] = IniRead(L"Waveform", (std::wstring(names[i]) + L"Unplayed").c_str(), L"");
+        }
+        g.size = ViewSize::Normal;
+        g.layout.player = Dock::Top;
+        g.playing = kNone;
+        g.engine.SetPaused(false);
+        g.stopAfterCurrent = false;
+        g.fullLiveWaveform = false;
+        const COLORREF themePlayed = WaveformPlayedColor(), themeRest = WaveformRestColor();
+        auto write = [&](int dock, const std::wstring& playedValue, const std::wstring& restValue) {
+            IniWrite(L"Waveform", (std::wstring(names[dock]) + L"Played").c_str(), playedValue);
+            IniWrite(L"Waveform", (std::wstring(names[dock]) + L"Unplayed").c_str(), restValue);
+        };
+        for (int i = 0; i < (int)Dock::Count; ++i) {
+            wchar_t p[8], r[8];
+            swprintf_s(p, L"%06X", played[i]);
+            swprintf_s(r, L"%06X", rest[i]);
+            write(i, p, r);
+        }
+        LoadWaveLook();
+        testlog::Cases positions;
+        for (int i = 0; i < (int)Dock::Count; ++i) {
+            g.layout.player = (Dock)i;
+            bool own = WaveformPlayedColor() == Ref(played[i]) && WaveformRestColor() == Ref(rest[i]);
+            g.size = ViewSize::Compact;
+            bool theme = WaveformPlayedColor() == themePlayed && WaveformRestColor() == themeRest;
+            g.size = ViewSize::Normal;
+            positions.Add(own && theme, names[i]);
+        }
+        for (int i = 0; i < (int)Dock::Count; ++i) write(i, L"", L"");
+        LoadWaveLook();
+        g.layout.player = Dock::Bottom;
+        bool cleared = WaveformPlayedColor() == themePlayed && WaveformRestColor() == themeRest;
+        for (int i = 0; i < (int)Dock::Count; ++i) write(i, savedPlayed[i], savedRest[i]);
+        LoadWaveLook();
+        batch.Next(L"per-position waveform colors load from settings in every build");
+        Check(positions.Passed() && cleared,
+              L"per-position waveform colors apply in Normal and fall back in Compact and after reset%ls",
+              positions.failed.c_str());
     }
     g.engine.SetPaused(paused);
     g.stopAfterCurrent = stopAfter;
@@ -434,6 +494,31 @@ void TestTweaks(const std::wstring& scratch) {
     batch.Next(L"tweak keys are unique and sane, every row has a default and an empty profile loads them all");
     Check(unique && sane && Tweaks().size() >= 20, L"tweak keys are unique and every row has a default in range and help");
     Check(defaults, L"an empty profile loads every tweak at its default");
+    {
+        // Online sources stay off until chosen; each row names what it sends, and choices survive a reload.
+        // A chosen cover is shown in cordinal only unless asked otherwise, so no file changes by default.
+        bool off = !online::AnyCoverSource(), named = true, kept = true;
+        int rows = 0;
+        for (const Tweak& t : Tweaks()) {
+            if (strncmp(t.key, "online.", 7)) continue;
+            ++rows;
+            const int def = strcmp(t.key, "online.cover_save") ? 0 : (int)online::CoverSave::Custom;
+            off = off && t.def == def && t.get() == def && !wcscmp(TweakPage(t), L"Online");
+            if (!strncmp(t.key, "online.covers_", 14)) named = named && wcsstr(t.help, L"Sends ") && wcsstr(t.help, L"artist and title");
+            if (!strncmp(t.key, "online.lyrics_", 14)) named = named && wcsstr(t.help, L"Sends the song's artist");
+        }
+        for (const char* key : {"online.covers_deezer", "online.covers_musicbrainz", "online.cover_save"})
+            if (const Tweak* t = FindTweak(key)) SetTweak(*t, 1);
+        online::Config() = online::Settings{};
+        LoadPreferences();
+        kept = online::Config().covers[0] && !online::Config().covers[1] && online::Config().covers[2] &&
+               online::Config().coverSave == 1 && online::CoverOrder().size() == 2 &&
+               IniRead(L"Online", L"CoversDeezer", L"") == L"1";
+        for (const char* key : {"online.covers_deezer", "online.covers_musicbrainz", "online.cover_save"})
+            if (const Tweak* t = FindTweak(key)) SetTweak(*t, t->def);
+        Check(rows >= 8 && off && named && kept && !online::AnyCoverSource(),
+              L"online sources default to off, each names what it sends, and choices round-trip settings.ini");
+    }
     if (const Tweak* display = FindTweak("view.waveform")) {
         SetTweak(*display, 0); g.waveform = true; LoadPreferences();
         bool regular = !g.waveform && IniRead(L"Window", L"Waveform", L"") == L"0";
@@ -600,7 +685,7 @@ void TestTweaks(const std::wstring& scratch) {
             ++effects;
         }
     ShowPreferences("effects.night_mode");
-    HWND window = FindWindowW(L"CordinalPreferences", nullptr);
+    HWND window = ProcessWindow(L"CordinalPreferences");
     HWND list = window ? FindWindowExW(window, nullptr, WC_LISTVIEWW, nullptr) : nullptr;
     HWND search = window ? FindWindowExW(window, nullptr, WC_EDITW, nullptr) : nullptr;
     HWND pages = window ? FindWindowExW(window, nullptr, WC_LISTBOXW, nullptr) : nullptr;
@@ -619,6 +704,68 @@ void TestTweaks(const std::wstring& scratch) {
     if (search) SetWindowTextW(search, L"night");
     Check(list && ListView_GetItemCount(list) == 1 && SendMessageW(pages, LB_GETCURSEL, 0, 0) == 0,
           L"a search from any page covers every page");
+    Pump(5000, [] { return !g.rgRunning; });
+    if (Ready(window && pages && !g.rgRunning, L"ReplayGain controls have an idle worker and an open Preferences window")) {
+        const bool automatic = g.rgAutoScan;
+        g.rgAutoScan = false;
+        const std::wstring a = scratch + L"\\rg-controls-a.wav", b = scratch + L"\\rg-controls-b.wav";
+        if (Ready(WriteTestBytes(a, MakeSineWav(1, 1)) && WriteTestBytes(b, MakeSineWav(1, 1)),
+                  L"ReplayGain controls have two available library files")) {
+            for (const auto& path : {a, b}) g_lib[g_lib.Add(path)].flags |= Track::kInLibrary;
+            const auto targets = replaygain::LibraryTracks();
+            const auto active = Active().items, selected = SelectedTracks();
+            choosePage(3);
+            HWND scans[3] = {GetDlgItem(window, 110), GetDlgItem(window, 111), GetDlgItem(window, 112)};
+            HWND cancel = GetDlgItem(window, 113);
+            batch.Next(L"ReplayGain Preferences scans the whole library and keeps its controls in step with the worker");
+            Check(IsWindowVisible(scans[0]) && IsWindowVisible(scans[1]) && IsWindowVisible(scans[2]) &&
+                  IsWindowEnabled(scans[2]) && !IsWindowVisible(cancel),
+                  L"ReplayGain Preferences exposes selection, playlist and library scans with cancellation hidden while idle");
+            SendMessageW(scans[2], BM_CLICK, 0, 0);
+            MSG action{};
+            bool posted = PeekMessageW(&action, g.hwnd, WM_COMMAND, WM_COMMAND, PM_REMOVE) &&
+                          LOWORD(action.wParam) == IDM_RG_SCAN_ALL;
+            if (posted) DispatchMessageW(&action);
+            bool covers = posted && g.rgRunning && !g.rgAuto && g.rgRunIds.size() == targets.size();
+            for (TrackId id : targets) covers &= g.rgRunIds.count(id) != 0;
+            Check(covers && Active().items == active && SelectedTracks() == selected,
+                  L"the real Scan library button queues every available library track without changing the playlist or selection");
+            SendMessageW(window, WM_TIMER, 1, 0);
+            Check(!IsWindowEnabled(scans[0]) && !IsWindowEnabled(scans[1]) && !IsWindowEnabled(scans[2]) &&
+                  IsWindowVisible(cancel) && IsWindowEnabled(cancel),
+                  L"a manual scan disables duplicate starts and exposes Cancel scan while Preferences stays open");
+            RECT originalBounds;
+            GetWindowRect(window, &originalBounds);
+            bool fits = true;
+            const UINT dpi = g.dpi;
+            for (UINT scale : {dpi, dpi * 2}) {
+                g.dpi = scale;
+                SetWindowPos(window, nullptr, 0, 0, S(700), S(520), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+                RECT client;
+                GetClientRect(window, &client);
+                int right = 0;
+                for (HWND button : {scans[0], scans[1], scans[2], cancel}) {
+                    RECT r;
+                    GetWindowRect(button, &r);
+                    MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&r), 2);
+                    fits &= r.left >= right && r.right <= client.right && r.top >= 0 && r.bottom <= client.bottom;
+                    right = r.right;
+                }
+            }
+            g.dpi = dpi;
+            SetWindowPos(window, nullptr, 0, 0, originalBounds.right - originalBounds.left,
+                         originalBounds.bottom - originalBounds.top,
+                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            Check(fits, L"ReplayGain scan and cancel buttons fit the minimum window at normal and double scaling");
+            SendMessageW(cancel, BM_CLICK, 0, 0);
+            if (PeekMessageW(&action, g.hwnd, WM_COMMAND, WM_COMMAND, PM_REMOVE)) DispatchMessageW(&action);
+            Pump(10000, [] { return !g.rgRunning; });
+            SendMessageW(window, WM_TIMER, 1, 0);
+            Check(!g.rgRunning && !g.rgWorker.joinable() && !IsWindowVisible(cancel) && IsWindowEnabled(scans[2]),
+                  L"Cancel scan finishes the worker and restores the scan buttons without closing Preferences");
+        }
+        g.rgAutoScan = automatic;
+    }
     if (window) DestroyWindow(window);
 
     std::vector<std::wstring> texts = {L"Display mode", L"Play / Pause Playback", L"Repeat playlist Playback",
@@ -682,6 +829,9 @@ void TestTweaks(const std::wstring& scratch) {
         return false;
     };
     Check(inPreferences(IDM_LISTENBRAINZ), L"Scrobbling remains available in Preferences");
+    Check(Holds(menus, IDM_RG_SCAN_ALL) && inPreferences(IDM_RG_SCAN_ALL) &&
+          inPreferences(IDM_RG_SCAN_SEL) && inPreferences(IDM_RG_SCAN_PL),
+          L"ReplayGain scanning is reachable from both Playback and Preferences");
     bool moved = !Holds(menus, IDM_OUTPUT_EXCLUSIVE) && !Holds(menus, IDM_PREFERENCE_MANUAL);
     for (int id : {IDM_SKIP_SHUFFLE, IDM_RESUME, IDM_OUTPUT_SHARED, IDM_LOOPS_BASE, IDM_RG_AUTO_SCAN, IDM_RG_ESTIMATE,
                    IDM_LOUDNESS_COMP, IDM_SOUND_EFFECTS, IDM_TASKBAR_PROGRESS, IDM_START_WITH_WINDOWS, IDM_THEME_ROBOTIC,

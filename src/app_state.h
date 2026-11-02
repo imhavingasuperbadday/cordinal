@@ -86,6 +86,8 @@ constexpr UINT WM_APP_WEB = WM_APP + 66;           // server status/listening ev
 constexpr UINT WM_APP_BACKUP = WM_APP + 67;        // lParam owns a backup worker result
 constexpr UINT WM_APP_HELPER = WM_APP + 68;        // a helper tool's progress (wParam 0), or its result (1: lParam owns it)
 constexpr UINT WM_APP_STEAM = WM_APP + 69;         // lParam owns discovered soundtrack folders
+constexpr UINT WM_APP_IPOD = WM_APP + 70;          // iPod scan (1), progress (0) or sync result (2); lParam owns it
+constexpr UINT WM_APP_COVERFETCH = WM_APP + 71;    // cover search results and progress (app_coverfetch.cpp)
 constexpr UINT_PTR kSearchTimer = 3;
 constexpr UINT_PTR kUiTimer = 1;
 constexpr UINT_PTR kBusyTimer = 5;  // animates the busy spinners (app_badges.cpp)
@@ -147,7 +149,7 @@ enum : int {
     IDM_REGION_PLAY, IDM_REGION_START, IDM_REGION_END,  // the seek bar's right-click menu (app_region.cpp)
     IDM_WEB_SERVER, IDM_PREFERENCES, IDM_COMMAND_PALETTE,
     IDM_BACKUP, IDM_RESTORE_BACKUP, IDM_IMPORT_STATISTICS,
-    IDM_CANCEL_BACKUP, IDM_OPEN_RADIO, IDM_WRITE_STATISTICS,
+    IDM_CANCEL_BACKUP, IDM_OPEN_RADIO, IDM_WRITE_STATISTICS, IDM_RG_SCAN_ALL,
     IDM_DUPLICATE_PL = 4000, IDM_REOPEN_PL, IDM_MOVE_PL_LEFT, IDM_MOVE_PL_RIGHT, IDM_PLAYING_PL,
     IDM_RELOAD_TAGS, IDM_CANCEL_IMPORT, IDM_WATCH_IMPORTED, IDM_CANCEL_STEAM, IDM_SELECT_PL_BASE = 4020,
     // Album editions (album_editions.h): manual grouping, preferred choice and comparison.
@@ -199,6 +201,10 @@ enum : int {
     IDM_HELPERS_FOLDER = 3932, IDM_HELPERS_RELOAD, IDM_HELPERS_REPORT, IDM_HELPER_CANCEL,
     IDM_HELPER_VIS_BASE = 3940,   // + visualizer, up to kMaxHelperVisualizers
     IDM_HELPER_TOOL_BASE = 3960,  // + tool, up to kMaxHelperTools
+    // Classic iPod sync (app_ipod.cpp); the 4100 edition block ends before this.
+    IDM_IPOD_SYNC = 4200,
+    // Covers (app_coverfetch.cpp) and artist info.
+    IDM_FIND_COVER = 4210, IDM_FETCH_COVERS, IDM_FETCH_COVERS_CANCEL, IDM_ARTIST_INFO, IDM_RESTORE_COVER,
 };
 constexpr int kMaxPacks = 64, kMaxPackThemes = 64, kMaxPackAutoPlaylists = 64, kMaxPackColumnSets = 30;
 constexpr int kMaxHelpers = 32, kMaxHelperVisualizers = 16, kMaxHelperTools = 40;

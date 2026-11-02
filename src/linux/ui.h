@@ -11,6 +11,8 @@ namespace lx {
 void InitUi();
 void ShutdownUi();
 void Render();
+void RenderSeek();           // the live seek bar alone, between full frames
+bool SeekAnimationOnly();    // only the software-rendered live seek bar is moving
 void HandleEvent(const SDL_Event& e);
 void SetCover(CoverImage* image);  // takes ownership
 void SetThumb(CoverImage* image);  // an album header's cover; takes ownership
@@ -23,12 +25,14 @@ bool PlaylistImportPending();
 void StopPlaylistFiles();
 void MaybeOfferSteamSoundtracks();
 void OnScaleChanged();
+bool SetGpuDrawing(bool enabled);  // rebuild renderer caches and retain a working mode on failure
 void ApplyTheme();  // the fonts follow the theme
 bool UiAnimating();  // live visualizations request a short frame interval
 
 // `cordinal --check-layout`: lays the window out at ui::kLayoutWidth x kLayoutHeight (under the menu
 // bar) and compares every part with ui::kLayout, the Windows build's measured layout. Also checks
-// private pack fonts, shortcuts and EQ presets in an isolated profile. Returns the failures, printing each.
+// pack fonts, columns, layouts, shortcut portal protocol and EQ presets in an isolated profile.
+// Returns the failures, printing each.
 int CheckLayout();
 // `cordinal --capture-ui DIR`: renders the window in every theme, with each menu open, into DIR as
 // PNG files named like docs/ui-reference/windows/ (linux/capture-ui.sh). Returns nonzero on failure.

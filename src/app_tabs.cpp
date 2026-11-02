@@ -30,7 +30,7 @@ void RefreshTabs() {
     TabCtrl_SetCurSel(g.tabs, RadioActive() ? -1 : g.active);
     if (!RadioActive()) TabCtrl_SetCurFocus(g.tabs, g.active);
     SendMessageW(g.tabs, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(g.tabs, nullptr, FALSE);
+    FitTabs();
 }
 
 void UpdateSearchCue() {

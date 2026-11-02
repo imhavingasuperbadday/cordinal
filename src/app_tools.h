@@ -29,6 +29,30 @@ void UndoConversion();
 bool ConvertCommand(int id);
 void UpdateConvertMenu(HMENU m);
 void StopConverter();
+// Classic iPod sync (app_ipod.cpp).
+void ShowIpod();
+bool IpodDialogMessage(MSG* msg);
+bool IpodBusy();
+void OnIpodMessage(WPARAM wp, LPARAM lp);
+void StopIpod();
+// Covers (app_coverfetch.cpp): the picker for the selected tracks' album (online results, a file,
+// a pasted or dropped image), or with `pick` for the tag editor, which receives the chosen image
+// instead of it being saved; the batch search for albums without a cover, reviewed before anything
+// is written; and the custom covers shown in cordinal only (customcover.h).
+void ShowCoverSearch(const std::vector<TrackId>& ids, std::function<void(const std::string&)> pick = {});
+bool HasCustomCover(const std::vector<TrackId>& ids);
+void RestoreOriginalCovers(const std::vector<TrackId>& ids);
+bool CoverSearchDialogMessage(MSG* msg);
+void FetchMissingCovers();
+void CancelCoverFetch();
+bool CoverFetchBusy();
+void OnCoverFetchMessage(WPARAM wp, LPARAM lp);
+void StopCoverFetch();
+void OnlineSettingsChanged();  // Preferences > Online changed a source
+// Artist info (app_artistinfo.cpp): the selected or playing track's artist, from MusicBrainz and Wikipedia.
+void ShowArtistInfo();
+bool ArtistInfoDialogMessage(MSG* msg);
+void StopArtistInfo();
 // Copy to folder or device (app_copy.cpp).
 bool CopyCommand(int id);
 bool CopyBusy();

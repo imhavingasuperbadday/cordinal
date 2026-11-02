@@ -1,6 +1,8 @@
 // Main-window startup, idle work and ordered shutdown.
 #include "app.h"
 
+#include "customcover.h"
+#include "metadata_fetch.h"
 #include "musicbrainz.h"
 
 namespace app {
@@ -13,6 +15,7 @@ void CreateMainWindow(HWND hwnd) {
     g.closing = false;
     g.dpi = GetDpiForWindow(hwnd);
     LoadState();
+    customcover::Start(g.dataDir);  // before any cover is decoded
     if (!g.showFocusBoxes) SendMessageW(hwnd, WM_CHANGEUISTATE, MAKEWPARAM(UIS_SET, UISF_HIDEFOCUS), 0);
     g.tagWorker = std::thread(TagWorker, hwnd);
     CreateFonts();
@@ -60,6 +63,7 @@ void FinishStartup(HWND hwnd) {
     InitConvert();
     InitWebServer();
     musicbrainz::Start(g.dataDir, g.musicBrainzLookup);
+    online::Start(g.dataDir);
 }
 
 // Ordered shutdown of every worker. Each is signalled and joined, then its already
@@ -83,6 +87,9 @@ void StopAppWorkers(HWND hwnd) {
     StopOrganizer();
     StopConverter();
     StopCopier();
+    StopIpod();
+    StopArtistInfo();
+    StopCoverFetch();
     MSG completed;
     while (PeekMessageW(&completed, hwnd, WM_APP_TAGWRITE, WM_APP_TAGWRITE, PM_REMOVE))
         OnTagWriteMessage(completed.wParam, completed.lParam);

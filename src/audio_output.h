@@ -23,6 +23,8 @@ enum class OutputMode { Shared, Exclusive };
 struct OutputDevice {
     std::string node;         // node.name, what the stream is pointed at
     std::string description;  // what to show
+    std::string alsaCard;     // API ALSA card number, used to match an optional headset's USB parent
+    bool systemDefault = false;
 };
 // The sinks right now (asks the server; empty without one).
 std::vector<OutputDevice> ListOutputDevices();

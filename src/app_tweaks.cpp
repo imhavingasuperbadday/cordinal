@@ -5,6 +5,7 @@
 // change does. Pages also link to the windows that hold the rest of their area's settings.
 #include "app.h"
 
+#include "metadata_fetch.h"
 #include "musicbrainz.h"
 #include "listenbrainz.h"
 
@@ -20,12 +21,16 @@ const wchar_t* const kReverbNames[] = {L"Off", L"Room", L"Hall", L"Plate"};
 const wchar_t* const kUndoNames[] = {L"1 day", L"3 days", L"1 week", L"7 weeks"};
 const wchar_t* const kSavingNames[] = {L"Ask before saving", L"Save automatically", L"Manual only (don't ask)"};
 const wchar_t* const kNewMusicNames[] = {L"Add automatically", L"Review in Inbox"};
+const wchar_t* const kCoverSourceNames[] = {L"Deezer", L"iTunes", L"MusicBrainz"};
+const wchar_t* const kCoverSaveNames[] = {L"Save as cover.jpg in the album folder", L"Embed in the files' tags",
+                                          L"Show in cordinal only"};
 const wchar_t* const kBandWaveSizes[] = {L"Use layout size", L"Slim (26 px)", L"Medium (44 px)", L"Tall (72 px)",
                                        L"Extra tall (108 px)", L"Largest (144 px)"};
 static_assert(std::size(kBandWaveSizes) == std::size(ui::kBandWaveHeights));
 static_assert(std::size(kLoopNames) == 4 && std::size(kReverbNames) == (size_t)ReverbPreset::Count &&
               std::size(kUndoNames) == std::size(kConvertMemoryDays) &&
-              std::size(kSavingNames) == (size_t)PreferenceSaving::Count);
+              std::size(kSavingNames) == (size_t)PreferenceSaving::Count &&
+              std::size(kCoverSourceNames) == online::kCoverSources);
 
 // Grouped as the window shows them. Keys are permanent: renaming one would orphan saved values.
 const Tweak kTweaks[] = {
@@ -195,6 +200,43 @@ const Tweak kTweaks[] = {
      TweakType::Bool, 0, 1, 0, [] { return (double)g.musicBrainzLookup; },
      [](double v) { g.musicBrainzLookup = v != 0; musicbrainz::SetEnabled(g.musicBrainzLookup); }, 0,
      [] { musicbrainz::SetEnabled(g.musicBrainzLookup); }},
+    // Online sources: each says exactly what it sends, and all are off until chosen.
+    {"online.covers_deezer", L"Online", L"CoversDeezer", L"Covers from Deezer",
+     L"Sends the album's artist and title to api.deezer.com when you look for a cover.", TweakType::Bool, 0, 1, 0,
+     [] { return (double)online::Config().covers[0]; }, [](double v) { online::Config().covers[0] = v != 0; }, 0,
+     OnlineSettingsChanged},
+    {"online.covers_itunes", L"Online", L"CoversITunes", L"Covers from iTunes",
+     L"Sends the album's artist and title to itunes.apple.com when you look for a cover.", TweakType::Bool, 0, 1, 0,
+     [] { return (double)online::Config().covers[1]; }, [](double v) { online::Config().covers[1] = v != 0; }, 0,
+     OnlineSettingsChanged},
+    {"online.covers_musicbrainz", L"Online", L"CoversMusicBrainz", L"Covers from MusicBrainz",
+     L"Sends the album's artist and title to musicbrainz.org, then the release it finds to coverartarchive.org.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)online::Config().covers[2]; },
+     [](double v) { online::Config().covers[2] = v != 0; }, 0, OnlineSettingsChanged},
+    {"online.cover_first", L"Online", L"CoverFirst", L"Preferred cover source",
+     L"Its covers are listed first, and it wins when two covers are about as good.", TweakType::Choice, 0, 2, 0,
+     [] { return (double)online::Config().coverFirst; }, [](double v) { online::Config().coverFirst = (int)v; }, 0,
+     OnlineSettingsChanged, kCoverSourceNames},
+    {"online.cover_save", L"Online", L"CoverSave", L"Save chosen covers",
+     L"Shown in cordinal only, or as a folder file, no audio file changes. Embedding rewrites each track's tags; Undo last tag edit takes it back.",
+     TweakType::Choice, 0, 2, 2, [] { return (double)online::Config().coverSave; },
+     [](double v) { online::Config().coverSave = (int)v; }, 0, OnlineSettingsChanged, kCoverSaveNames},
+    {"online.cover_overwrite", L"Online", L"CoverOverwrite", L"Replace an existing cover file",
+     L"When off, an album folder that already has cover.jpg, folder.jpg or front.jpg keeps it.", TweakType::Bool, 0, 1,
+     0, [] { return (double)online::Config().coverOverwrite; },
+     [](double v) { online::Config().coverOverwrite = v != 0; }, 0, OnlineSettingsChanged},
+    {"online.lyrics_lrclib", L"Online", L"LyricsLrcLib", L"Lyrics from LrcLib",
+     L"Sends the song's artist, title, album and length to lrclib.net when it has no lyrics of its own.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)online::Config().lyrics[0]; },
+     [](double v) { online::Config().lyrics[0] = v != 0; }, 0, LyricsSourcesChanged},
+    {"online.lyrics_ovh", L"Online", L"LyricsOvh", L"Lyrics from lyrics.ovh",
+     L"Sends the song's artist and title to api.lyrics.ovh when it has no lyrics of its own and LrcLib had none.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)online::Config().lyrics[1]; },
+     [](double v) { online::Config().lyrics[1] = v != 0; }, 0, LyricsSourcesChanged},
+    {"online.artist_info", L"Online", L"ArtistInfo", L"Artist info from MusicBrainz and Wikipedia",
+     L"Sends the artist's name to musicbrainz.org, then asks wikidata.org and en.wikipedia.org for the article it names.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)online::Config().artistInfo; },
+     [](double v) { online::Config().artistInfo = v != 0; }, 0, OnlineSettingsChanged},
     {"library.explorer_menu", L"Explorer", L"FolderMenu", L"Play folders from Explorer",
      L"Right-clicking a folder offers Play with cordinal and Add to cordinal; a folder plays its tracks like a "
      L"command line does.", TweakType::Bool, 0, 1, 1, [] { return (double)g.explorerMenu; },
@@ -205,8 +247,8 @@ const Tweak kTweaks[] = {
      [](double v) { SetWebStartsWithCordinal(v != 0); }, 0, ApplyWebStart},
 };
 
-// The window's pages: All settings, then one per key prefix in registry order. A page may also point
-// to the windows that hold the rest of its area's settings (Library links to its own windows).
+// The window's pages: All settings, then one per key prefix in registry order. A page may also
+// link to related windows or actions, using the same commands as the menus.
 struct Link {
     int command;
     const wchar_t* label;
@@ -214,13 +256,15 @@ struct Link {
 struct Page {
     const char* prefix;  // null: every setting
     const wchar_t* name;
-    Link links[3];
+    Link links[4];
 };
 const Page kPages[] = {
     {nullptr, L"All settings", {}},
     {"playback.", L"Playback", {}},
     {"output.", L"Output", {{IDM_HEADPHONES, L"&Headphones and devices..."}}},
-    {"replaygain.", L"ReplayGain", {}},
+    {"replaygain.", L"ReplayGain",
+     {{IDM_RG_SCAN_SEL, L"Scan &selection"}, {IDM_RG_SCAN_PL, L"Scan &playlist"},
+      {IDM_RG_SCAN_ALL, L"Scan &library"}, {IDM_RG_CANCEL, L"&Cancel scan"}}},
     {"effects.", L"Effects", {{IDM_EQUALIZER, L"&Equalizer..."}}},
     {"view.", L"View", {{IDM_FORMAT, L"Title &formatting..."}}},
     {"startup.", L"Startup", {{IDM_STARTUP_DEFAULTS, L"&Startup defaults..."}}},
@@ -228,6 +272,7 @@ const Page kPages[] = {
     {"scrobbling.", L"Scrobbling", {{IDM_LISTENBRAINZ, L"&Scrobbling..."}}},
     {"library.", L"Library",
      {{IDM_LIBRARY_FOLDERS, L"Library &folders..."}, {IDM_WEB_SERVER, L"&Web server..."}}},
+    {"online.", L"Online", {{IDM_FETCH_COVERS, L"&Fetch missing covers..."}}},
 };
 constexpr int kLinks = (int)std::size(kPages[0].links);
 
@@ -269,6 +314,34 @@ bool LinksOnly() {
 
 void LayoutPreferences();
 
+bool LinkShown(const Link& link) {
+    return link.label && !Searching() && (link.command != IDM_RG_CANCEL || (g.rgRunning && !g.rgAuto));
+}
+
+bool LinkEnabled(int command) {
+    const bool manual = g.rgRunning && !g.rgAuto;
+    switch (command) {
+        case IDM_RG_SCAN_SEL: return !manual && !SelectedTracks().empty();
+        case IDM_RG_SCAN_PL: return !manual && !Active().items.empty();
+        case IDM_RG_SCAN_ALL: return !manual && replaygain::HasLibraryTracks();
+        case IDM_RG_CANCEL: return manual;
+        default: return true;
+    }
+}
+
+void RefreshLinks() {
+    bool layout = false;
+    for (int i = 0; i < kLinks; ++i) {
+        const Link& link = kPages[w.page].links[i];
+        const bool visible = LinkShown(link);
+        layout |= ((GetWindowLongPtrW(w.links[i], GWL_STYLE) & WS_VISIBLE) != 0) != visible;
+        if (link.label) SetTextIfChanged(w.links[i], link.label);
+        ShowWindow(w.links[i], visible ? SW_SHOWNA : SW_HIDE);
+        EnableWindow(w.links[i], LinkEnabled(link.command));
+    }
+    if (layout) LayoutPreferences();
+}
+
 void ShowEditor() {
     const bool any = w.current >= 0;
     const Tweak* t = any ? &kTweaks[w.current] : nullptr;
@@ -304,11 +377,7 @@ void ShowEditor() {
     EnableWindow(w.resetAll, changed);
     ShowWindow(w.list, LinksOnly() ? SW_HIDE : SW_SHOWNA);
     ShowWindow(w.resetAll, LinksOnly() ? SW_HIDE : SW_SHOWNA);
-    for (int i = 0; i < kLinks; ++i) {
-        const Link& link = kPages[w.page].links[i];
-        if (link.label) SetTextIfChanged(w.links[i], link.label);
-        ShowWindow(w.links[i], link.label && !Searching() ? SW_SHOWNA : SW_HIDE);
-    }
+    RefreshLinks();
     LayoutPreferences();
     w.filling = false;
 }
@@ -368,7 +437,9 @@ void LayoutPreferences() {
     MoveWindow(w.search, x, y, width - filterW - S(8), S(24), TRUE);
     MoveWindow(w.filter, x + width - filterW, y, filterW, S(200), TRUE);
     y += S(34);
-    const bool linked = IsWindowVisible(w.links[0]) != 0;
+    int linkCount = 0;
+    for (const Link& link : kPages[w.page].links) linkCount += LinkShown(link);
+    const bool linked = linkCount != 0;
     if (w.hwnd && !LinksOnly()) {
         int listH = std::max(bottom - y - S(178) - (linked ? S(36) : 0), S(80));
         MoveWindow(w.list, x, y, width, listH, TRUE);
@@ -389,8 +460,9 @@ void LayoutPreferences() {
     MoveWindow(w.number, x, y, numberW, buttonH, TRUE);
     MoveWindow(w.reset, x + (number ? numberW : editW) + S(8), y, resetW, buttonH, TRUE);
     y = w.hwnd && LinksOnly() ? pad + S(34) + S(30) : y + S(40);  // under the title, with no setting to edit
+    const int linkW = std::min(S(190), (width - S(8) * std::max(0, linkCount - 1)) / std::max(1, linkCount));
     for (int i = 0, lx = x; i < kLinks; ++i) {
-        int linkW = S(190);
+        if (!LinkShown(kPages[w.page].links[i])) continue;
         MoveWindow(w.links[i], lx, y, linkW, buttonH, TRUE);
         lx += linkW + S(8);
     }
@@ -471,8 +543,12 @@ LRESULT CALLBACK PreferencesProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             SetWindowSubclass(ListView_GetHeader(w.list), HeaderSubclass, 0, 0);  // the track list's flat header
             ApplyWindowTheme(h, P());
             LayoutPreferences();  // now, not at the first WM_SIZE: the list must have its height before it scrolls
+            SetTimer(h, 1, 250, nullptr);  // scan state can change while this modeless window stays open
             return 0;
         }
+        case WM_TIMER:
+            RefreshLinks();
+            return 0;
         case WM_SIZE:
             LayoutPreferences();
             return 0;
@@ -565,7 +641,8 @@ LRESULT CALLBACK PreferencesProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 SetTweak(kTweaks[w.current], kTweaks[w.current].def);
                 RefreshValues();
             } else if (id >= kIdLink0 && id < kIdLink0 + kLinks) {
-                if (int command = kPages[w.page].links[id - kIdLink0].command)
+                const Link& link = kPages[w.page].links[id - kIdLink0];
+                if (int command = link.command; command && LinkShown(link) && LinkEnabled(command))
                     PostMessageW(g.hwnd, WM_COMMAND, MAKEWPARAM(command, 0), 0);
             } else if (id == kIdResetAll) {
                 int count = 0;
@@ -667,7 +744,8 @@ std::vector<PreferenceLink> PreferenceLinks() {
     std::vector<PreferenceLink> links;
     for (const Page& page : kPages)
         for (const Link& link : page.links)
-            if (link.label) links.push_back({link.command, link.label, page.name});
+            if (link.label && (link.command != IDM_RG_CANCEL || (g.rgRunning && !g.rgAuto)))
+                links.push_back({link.command, link.label, page.name});
     return links;
 }
 

@@ -1,8 +1,10 @@
 // Image decoding for album art on top of WIC: DecodeImage scales any stream WIC understands into
 // an ArtImage, and LoadAlbumArt prefers a picture embedded in the media file (with a size cap)
-// before falling back to the cover files sitting next to it. Requires COM on the calling thread.
+// before falling back to the cover files sitting next to it; a cover chosen in cordinal comes before
+// both. Requires COM on the calling thread.
 #include "art.h"
 
+#include "customcover.h"
 #include "library.h"
 #include "tags.h"
 
@@ -16,7 +18,7 @@ using Microsoft::WRL::ComPtr;
 
 // Rejects absurd declared sizes and target sizes up front, so a corrupt or hostile image can't
 // trigger a huge allocation before it fails.
-bool DecodeImage(IStream* stream, int size, ArtImage& out, uint64_t maxPixels) {
+bool DecodeImage(IStream* stream, int size, ArtImage& out, uint64_t maxPixels, int* sourceWidth, int* sourceHeight) {
     ComPtr<IWICImagingFactory> wic;
     if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic)))) return false;
     ComPtr<IWICBitmapDecoder> decoder;
@@ -26,6 +28,8 @@ bool DecodeImage(IStream* stream, int size, ArtImage& out, uint64_t maxPixels) {
     UINT w = 0, h = 0;
     frame->GetSize(&w, &h);
     if (!w || !h || w > 32768 || h > 32768 || (uint64_t)w * h > maxPixels || size <= 0 || size > 4096) return false;
+    if (sourceWidth) *sourceWidth = (int)w;
+    if (sourceHeight) *sourceHeight = (int)h;
     double scale = std::min(1.0, (double)size / std::max(w, h));
     UINT tw = std::max(1u, (UINT)(w * scale)), th = std::max(1u, (UINT)(h * scale));
     ComPtr<IWICBitmapSource> source = frame;
@@ -55,8 +59,16 @@ bool DecodeImage(IStream* stream, int size, ArtImage& out, uint64_t maxPixels) {
 
 // Embedded art wins over sidecar files; the 32 MB cap rejects id3/vorbis blobs that are really
 // junk or a mis-sized tag.
-bool LoadAlbumArt(const std::wstring& mediaPath, int size, ArtImage& out) {
+bool LoadAlbumArt(const std::wstring& mediaPath, int size, ArtImage& out, bool custom) {
     out = ArtImage{};
+    // A custom cover that has gone missing or unreadable falls back to the track's own.
+    if (std::wstring image = custom ? customcover::ImageFor(mediaPath) : std::wstring(); !image.empty()) {
+        ComPtr<IStream> s;
+        if (SUCCEEDED(SHCreateStreamOnFileEx(image.c_str(), STGM_READ | STGM_SHARE_DENY_NONE, 0, FALSE, nullptr, &s)) &&
+            DecodeImage(s.Get(), size, out))
+            return true;
+        out = ArtImage{};
+    }
     std::string bytes;
     if (ReadEmbeddedArt(mediaPath, bytes) && bytes.size() <= (32u << 20)) {
         ComPtr<IWICImagingFactory> wic;

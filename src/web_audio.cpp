@@ -2,6 +2,7 @@
 // request never needs a complete decoded song or a temporary converted file.
 #include "web_internal.h"
 #include "cue.h"
+#include "customcover.h"
 #include "decoder.h"
 #include "peaks.h"
 #include "tags.h"
@@ -145,8 +146,16 @@ Media WaveMedia(std::shared_ptr<Decoder> decoder, double start, const std::atomi
     return result;
 }
 std::string Artwork(const Track& track, std::string& mime) {
-    std::wstring path = AudioFileOf(track.path);
     std::string bytes;
+    if (std::wstring custom = customcover::ImageFor(track.path); !custom.empty()) {
+        Source file;
+        if (file.Open(custom) && file.size <= 16u * 1024 * 1024) {
+            bytes.resize((size_t)file.size);
+            if (file.Read(0, bytes.size(), bytes.data()) && !(mime = ImageMime(bytes)).empty()) return bytes;
+        }
+        bytes.clear();
+    }
+    std::wstring path = AudioFileOf(track.path);
     ReadEmbeddedArt(path, bytes);
     mime = ImageMime(bytes);
     if (!mime.empty() && bytes.size() <= 16u * 1024 * 1024) return bytes;

@@ -184,7 +184,7 @@ int RunPerformanceBenchmark(const std::vector<std::wstring>& args) {
                     if (mode==3) wave.Add(pcm,n);
                 }
                 if (mode==1 || mode==3) ok &= std::isfinite(meter.Integrated());
-                if (mode==2 || mode==3) ok &= peak.Peak()>0;
+                if (mode==2 || mode==3) ok &= peak.FinalPeak()>0;
             }
         };
         measure(L"decode_20",[&]{scan(0);});

@@ -3,6 +3,7 @@
 #include "cover.h"
 
 #include "app.h"
+#include "customcover.h"
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -51,11 +52,16 @@ std::string ReadWhole(const std::wstring& path) {
     return data;
 }
 
-std::string CoverBytes(const std::wstring& trackPath) {
+// A cover chosen in cordinal (customcover.h) first, unless `custom` is false as for the tag editor.
+std::string CoverBytes(const std::wstring& trackPath, bool custom = true) {
     std::wstring path = trackPath, file;
+    std::string image;
+    if (std::wstring chosen = custom ? customcover::ImageFor(trackPath) : std::wstring(); !chosen.empty()) {
+        image = ReadWhole(chosen);
+        if (!image.empty()) return image;
+    }
     int index = 0;
     if (SplitSubtrack(path, file, index)) path = file;
-    std::string image;
     if (ReadEmbeddedArt(path, image) && !image.empty()) return image;
     std::wstring dir = DirectoryOf(path);
     for (const wchar_t* name : {L"cover.jpg", L"folder.jpg", L"front.jpg", L"cover.png", L"folder.png", L"front.png",
@@ -151,7 +157,7 @@ void Worker() {
 
 void StartCovers() { g_thread = std::thread(Worker); }
 
-std::string TrackCoverBytes(const std::wstring& path) { return CoverBytes(path); }
+std::string TrackCoverBytes(const std::wstring& path) { return CoverBytes(path, false); }
 
 bool DecodeCover(const std::string& bytes, int size, CoverImage& out) {
     out.width = out.height = 0;
@@ -166,6 +172,25 @@ bool DecodeRadioIcon(const std::string& bytes, int size, CoverImage& out) {
         !stbi_info_from_memory((const stbi_uc*)bytes.data(), (int)bytes.size(), &w, &h, &channels) ||
         w <= 0 || h <= 0 || (uint64_t)w * h > 4000000) return false;
     return DecodeCover(bytes, size, out);
+}
+
+bool DecodeFetchedCover(const std::string& bytes, int thumbSize, online::Decoded& out) {
+    int w = 0, h = 0, channels = 0;
+    if (bytes.empty() || !stbi_info_from_memory((const stbi_uc*)bytes.data(), (int)bytes.size(), &w, &h, &channels) ||
+        w <= 0 || h <= 0 || (uint64_t)w * h > 100000000)
+        return false;
+    CoverImage image{};
+    if (!DecodeCover(bytes, thumbSize > 0 ? thumbSize : 32, image)) return false;
+    out.width = w;
+    out.height = h;
+    if (thumbSize > 0) {
+        out.thumbWidth = image.width;
+        out.thumbHeight = image.height;
+        out.thumb.resize((size_t)image.width * image.height);
+        for (size_t i = 0; i < out.thumb.size(); ++i)
+            out.thumb[i] = (uint32_t)image.rgba[i * 4] << 16 | (uint32_t)image.rgba[i * 4 + 1] << 8 | image.rgba[i * 4 + 2];
+    }
+    return true;
 }
 
 void StopCovers() {

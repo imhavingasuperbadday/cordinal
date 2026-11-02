@@ -198,6 +198,7 @@ void OnCommand(int id, int code, HWND ctl) {
         {IDM_CANCEL_BACKUP, CancelBackup},
         {IDM_EXIT, [] { SendMessageW(g.hwnd, WM_CLOSE, 0, 0); }},
         {IDM_WEB_SERVER, ShowWebServer},
+        {IDM_IPOD_SYNC, ShowIpod},
         {IDM_REMOVE, [] { RemoveTracks(false); }},
         {IDM_CROP, [] { RemoveTracks(true); }},
         {IDM_REMOVE_DUPES, RemoveDuplicates},
@@ -229,6 +230,11 @@ void OnCommand(int id, int code, HWND ctl) {
         {IDM_REVIEW, ShowReview},
         {IDM_LISTENBRAINZ, ShowListenBrainz},
         {IDM_STEAM, AddSteamSoundtracks},
+        {IDM_FIND_COVER, [] { ShowCoverSearch(SelectedTracks()); }},
+        {IDM_RESTORE_COVER, [] { RestoreOriginalCovers(SelectedTracks()); }},
+        {IDM_FETCH_COVERS, FetchMissingCovers},
+        {IDM_FETCH_COVERS_CANCEL, CancelCoverFetch},
+        {IDM_ARTIST_INFO, ShowArtistInfo},
         {IDM_CANCEL_STEAM, CancelSteamDiscovery},
         {IDM_WATCH_IMPORTED, WatchImportedFolders},
         {IDM_DUPLICATES, FindDuplicateAudioPlaylist},
@@ -280,6 +286,11 @@ void OnCommand(int id, int code, HWND ctl) {
         {IDM_WRITE_STATISTICS, [] { WriteStatisticsTags(SelectedTracks()); }},
         {IDM_RG_SCAN_SEL, [] { ScanReplayGain(SelectedTracks()); }},
         {IDM_RG_SCAN_PL, [] { ScanReplayGain(Active().items); }},
+        {IDM_RG_SCAN_ALL, [] {
+             auto ids = replaygain::LibraryTracks();
+             if (ids.empty()) { ShowMessage(L"There are no available library tracks to scan."); return; }
+             ScanReplayGain(ids);
+         }},
     };
     for (const auto& command : commands)
         if (id == command.id) {

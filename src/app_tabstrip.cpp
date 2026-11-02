@@ -83,6 +83,46 @@ RECT TabContentRect(HWND tabs) {
 
 }  // namespace
 
+// Sizes the tabs so they all fit the strip (ui::FitTabPadding): roomy padding, then tight padding,
+// then equal fixed widths. The control only falls back to its overflow arrows when even the
+// narrowest tabs don't fit. Runs after the tabs or the strip's width change.
+void FitTabs() {
+    int count = g.tabs ? TabCtrl_GetItemCount(g.tabs) : 0;
+    if (!count) return;
+    RECT client{};
+    GetClientRect(g.tabs, &client);
+    int labels = 0;
+    HDC dc = GetDC(g.tabs);
+    HGDIOBJ old = SelectObject(dc, g.font);
+    for (int i = 0; i < count; ++i) {
+        wchar_t text[256] = {};
+        TCITEMW item{};
+        item.mask = TCIF_TEXT;
+        item.pszText = text;
+        item.cchTextMax = (int)std::size(text);
+        TabCtrl_GetItem(g.tabs, i, &item);
+        SIZE ext{};
+        GetTextExtentPoint32W(dc, text, (int)wcslen(text), &ext);
+        labels += ext.cx;
+    }
+    SelectObject(dc, old);
+    ReleaseDC(g.tabs, dc);
+    int room = client.right - S(4);
+    int pad = ui::FitTabPadding(labels, count, room, S(ui::kTabPad), S(ui::kTabPadTight));
+    LONG style = GetWindowLongW(g.tabs, GWL_STYLE);
+    bool fixed = pad < 0;
+    if (fixed != ((style & TCS_FIXEDWIDTH) != 0)) SetWindowLongW(g.tabs, GWL_STYLE, style ^ TCS_FIXEDWIDTH);
+    TabCtrl_SetPadding(g.tabs, fixed ? S(ui::kTabPadTight) : pad, S(3));
+    if (fixed) {
+        RECT first{};
+        TabCtrl_GetItemRect(g.tabs, 0, &first);
+        TabCtrl_SetItemSize(g.tabs, std::max(S(ui::kMinTabWidth), room / count), first.bottom - first.top);
+    }
+    // The control measures its tabs again when its font is set; the padding alone doesn't.
+    SendMessageW(g.tabs, WM_SETFONT, (WPARAM)g.font, FALSE);
+    InvalidateRect(g.tabs, nullptr, FALSE);
+}
+
 // Flat tab strip drawn from the palette in both themes (the tab control has no dark theme).
 // Drag state is shared across messages (the subclass proc keeps no instance data): press records the
 // source tab, a mousemove past the system drag threshold flips g_tabDragging, and the drop target
@@ -252,9 +292,10 @@ LRESULT CALLBACK TabsSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
             item.cchTextMax = (int)std::size(text);
             TabCtrl_GetItem(h, i, &item);
             bool closable = i > 0 && g.playlists[i].kind != PlaylistKind::Inbox;
+            // The label keeps its place whether or not the close box shows over its end.
             RECT tr = r;
             tr.left += S(6);
-            tr.right -= S(closable ? 24 : 6);
+            tr.right -= S(6);
             // "Name (12)": the count follows the name in the faint color, without the brackets.
             std::wstring name = text, count;
             if (size_t open = name.rfind(L" ("); open != std::wstring::npos && name.size() > open + 3 && name.back() == L')') {
@@ -276,11 +317,11 @@ LRESULT CALLBACK TabsSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
                 SetTextColor(dc, Ref(P().faint));
                 DrawTextW(dc, count.c_str(), (int)count.size(), &cr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             }
-            // The close box appears where it can be used: on the hovered and the selected tab.
+            // The close box shows only under the mouse; Ctrl+W and a middle click close too.
             RECT close = TabCloseRect(h, i);
-            if (closable && (i == s_hover || i == sel || i == g_tabClosePressed)) {
-                SetTextColor(dc, i == s_hover ? TextColor() : Ref(P().faint));
-                if (i == g_tabClosePressed) FillSolid(dc, close, Ref(P().select));
+            if (closable && (i == s_hover || i == g_tabClosePressed)) {
+                SetTextColor(dc, TextColor());
+                FillSolid(dc, close, foobar ? Ref(P().hover) : i == g_tabClosePressed ? Ref(P().select) : SurfaceColor());
                 DrawTextW(dc, L"\x00D7", 1, &close, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             }
             if (g.showFocusBoxes && i == sel && GetFocus() == h &&
@@ -297,6 +338,11 @@ LRESULT CALLBACK TabsSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
         RestoreDC(dc, saved);
         if (msg != WM_PRINTCLIENT) EndPaint(h, &ps);
         return 0;
+    }
+    if (msg == WM_SIZE) {
+        LRESULT result = DefSubclassProc(h, msg, wp, lp);
+        FitTabs();  // a wider or narrower strip may change how the tabs share it
+        return result;
     }
     if (msg == WM_NCDESTROY) RemoveWindowSubclass(h, TabsSubclass, 0);
     return DefSubclassProc(h, msg, wp, lp);

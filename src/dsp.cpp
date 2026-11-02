@@ -1066,6 +1066,16 @@ void TruePeak::Add(const float* stereo, size_t frames) {
     peak_ = _mm_cvtsd_f64(_mm_max_pd(maximum, _mm_unpackhi_pd(maximum, maximum)));
 }
 
+float TruePeak::FinalPeak() const {
+    if (!started_) return Peak();
+    // The last half kernel is still pending. Resolve positions through the file's final
+    // fractional sample, without measuring beyond its duration or advancing the live history.
+    TruePeak tail = *this;
+    const float silence[kTaps]{};
+    tail.Add(silence, kTaps / 2);
+    return tail.Peak();
+}
+
 void TruePeak::Reset() {
     for (auto& ch : hist_)
         for (double& v : ch) v = 0;

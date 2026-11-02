@@ -156,26 +156,7 @@ LRESULT CALLBACK ReviewProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             auto* draw = (NMCUSTOMDRAW*)lp;
             if (draw->hdr.code != NM_CUSTOMDRAW || GetDlgCtrlID(draw->hdr.hwndFrom) < 100 ||
                 GetDlgCtrlID(draw->hdr.hwndFrom) > 106) break;
-            if (draw->dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYPOSTPAINT;
-            if (draw->dwDrawStage == CDDS_POSTPAINT) {
-                // Explorer's dark checkbox/radio theme can keep black text. Retain the native
-                // glyph, input and accessibility, but paint its label with the active palette.
-                RECT r = draw->rc;
-                r.left += D(16);
-                FillRect(draw->hdc, &r, g.surfaceBrush);
-                ++r.left;
-                HGDIOBJ font = SelectObject(draw->hdc, review.font);
-                SetBkMode(draw->hdc, TRANSPARENT);
-                SetTextColor(draw->hdc, TextColor());
-                auto text = WindowText(draw->hdr.hwndFrom);
-                UINT state = (UINT)SendMessageW(draw->hdr.hwndFrom, WM_QUERYUISTATE, 0, 0);
-                DrawTextW(draw->hdc, text.c_str(), -1, &r,
-                          DT_SINGLELINE | DT_VCENTER | ((state & UISF_HIDEACCEL) ? DT_HIDEPREFIX : 0));
-                if (g.showFocusBoxes && (draw->uItemState & CDIS_FOCUS) && !(state & UISF_HIDEFOCUS))
-                    DrawFocusRect(draw->hdc, &r);
-                SelectObject(draw->hdc, font);
-            }
-            return CDRF_DODEFAULT;
+            return ChoiceLabelCustomDraw(draw, review.font, D(16));
         }
         case WM_COMMAND:
             if (LOWORD(wp) == IDCANCEL) DestroyWindow(h);

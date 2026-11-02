@@ -122,7 +122,7 @@ void CopyTree(const std::wstring& from, const std::wstring& to, const std::atomi
         Require(CopyFileW(from.c_str(), to.c_str(), TRUE) != FALSE, "Couldn't copy a profile file.");
 }
 void Extras(const std::wstring& from, const std::wstring& to, const std::atomic<bool>& cancel) {
-    for (const wchar_t* name : {L"packs", L"soundfonts", L"tagundo", L"organize", L"convert", L"radio"}) {
+    for (const wchar_t* name : {L"packs", L"soundfonts", L"tagundo", L"organize", L"convert", L"radio", L"output-profiles.ini"}) {
         auto path = Child(from, name);
         if (Exists(path)) CopyTree(path, Child(to, name), cancel);
     }

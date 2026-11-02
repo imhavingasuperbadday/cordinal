@@ -1,4 +1,4 @@
-// Output recognition and optional headset hardware control. The worker owns COM and HID handles;
+// Output recognition and optional headset hardware control. The worker owns native device handles;
 // callers exchange copied snapshots and explicit commands, never live application state.
 #pragma once
 #include <array>
@@ -35,6 +35,9 @@ public:
     void Start();
     void Stop();
     void Refresh();
+#ifndef _WIN32
+    void SelectOutput(std::string node);  // copied PipeWire preference; empty follows the desktop
+#endif
     HeadsetInfo Snapshot() const;
     bool Apply(const std::wstring& outputId, const HeadsetChanges& changes);
 private:

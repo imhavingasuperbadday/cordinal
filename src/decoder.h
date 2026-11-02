@@ -124,9 +124,9 @@ std::unique_ptr<Decoder> OpenRange(std::unique_ptr<Decoder> inner, double start,
 std::unique_ptr<Decoder> OpenLooped(std::unique_ptr<Decoder> inner, int64_t loopStart, int64_t loopEnd, int count,
                                     double fadeSeconds);
 
-// Polyphase windowed-sinc resampler for interleaved stereo float (Kaiser window, 32 taps,
-// 256 phases with linear interpolation). Its state carries across Push calls, so a stream
-// joined from several tracks is resampled without seams.
+// Polyphase windowed-sinc resampler for interleaved stereo float (Kaiser window, 128 taps scaled
+// for downsampling, 256 phases with linear interpolation). Its state carries across Push calls,
+// so a stream joined from several tracks is resampled without seams.
 class Resampler {
 public:
     void Init(unsigned inRate, unsigned outRate);
@@ -143,7 +143,8 @@ public:
 
 private:
     void Convert(const float* in,size_t frames,std::vector<float>& out,bool append);
-    static constexpr int kTaps = 32, kPhases = 256;
+    static constexpr int kPhases = 256;
+    unsigned taps_ = 128;
     unsigned inRate_ = 0;
     unsigned in_ = 0, out_ = 0;  // reduced by their GCD
     // Exact position in hist_: idx_ + num_ / out_ input frames. Integer stepping makes the

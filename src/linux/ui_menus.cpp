@@ -1,4 +1,6 @@
 // The Linux window's menus: the menu bar, its popups and row menus, and the actions they run.
+#include "alternate_ui.h"
+#include "big_ui.h"
 #include "ui_internal.h"
 
 namespace lx {
@@ -58,7 +60,8 @@ std::vector<MenuItem> ReplayGainMenu() {
     bool manual = g.rgRunning && !g.rgAuto, any = !g.rows.empty();
     std::vector<MenuItem> items{Item("Enabled", kRgEnable, {}, g.settings.rg.on), Separator(),
                                 Item("Scan selection", kRgScanSel, {}, false, any && !manual),
-                                Item("Scan playlist", kRgScanPl, {}, false, any && !manual)};
+                                Item("Scan playlist", kRgScanPl, {}, false, any && !manual),
+                                Item("Scan library", kRgScanAll, {}, false, replaygain::HasLibraryTracks() && !manual)};
     if (manual) items.push_back(Item("Cancel scan", kRgCancel));  // shown only while one runs
     items.push_back(Separator());
     items.push_back(Item("Clear ReplayGain", kRgClear, {}, false, any && !manual));
@@ -177,7 +180,8 @@ std::vector<MenuItem> BarMenu(int m) {
                 Item("Convert to .cord...", kConvert, {}, false, !ConvertBusy() && !CordExportBusy() && !TagWriteBusy() && !OrganizeBusy()),
                 Submenu("Export .cord", CordExportItems()),
                 Item("Undo last conversion", kConvertUndo, {}, false, CanUndoConversion() && !ConvertBusy()), Separator(),
-                Item("Copy to folder or device...", kCopyTo, {}, false, !CopyBusy()), Separator(),
+                Item("Copy to folder or device...", kCopyTo, {}, false, !CopyBusy()),
+                Item("Sync to iPod...", kIpodSync, {}, false, !IpodBusy()), Separator(),
                 Submenu("Album editions", {Item("Group selected albums as editions", kGroupEditions, {}, false,
                                                CanvasSelectedAlbums().size() >= 2),
                                           Item("Album editions...", kAlbumEditions, {}, false,
@@ -192,10 +196,13 @@ std::vector<MenuItem> BarMenu(int m) {
                                                SelectedTracks().size() == 1 &&
                                                    AlbumGroupForTrack(SelectedTracks().front()) != nullptr)}),
                 Separator(),
+                Item("Fetch missing covers...", kFetchCovers, {}, false, !CoverFetchBusy()),
                 Item("Find duplicate audio", kDuplicateAudio, {}, false, !g_playlistFileBusy && !g_playlistImport),
                 Item("Add Steam soundtracks", kSteam, {}, false, !g_playlistFileBusy && !g_playlistImport)};
             if (ConvertBusy()) items.push_back(Item("Cancel conversion", kCancelConvert));
             if (CopyBusy()) items.push_back(Item("Cancel copy", kCancelCopy));
+            if (IpodBusy()) items.push_back(Item("Cancel iPod sync", kCancelIpodSync));
+            if (CoverFetchBusy()) items.push_back(Item("Cancel cover search", kCancelFetchCovers));
             if (CordExportBusy()) items.push_back(Item("Cancel export", kCancelExport));
             if (g_checkingDuplicates && g_playlistFileBusy) items.push_back(Item("Cancel duplicate search", kCancelDuplicates));
             if (g_checkingSteam && g_playlistFileBusy) items.push_back(Item("Cancel soundtrack search", kCancelSteam));
@@ -211,10 +218,20 @@ std::vector<MenuItem> BarMenu(int m) {
                 themes.push_back(Separator());
             for (int t = (int)ThemeMode::Deltarune; t < ThemeTotal(); ++t)
                 if (ThemeAvailable((ThemeMode)t)) themes.push_back(Radio(Plain(ThemeInfo((ThemeMode)t).name), kTheme, t, (int)g.settings.theme == t));
-            return {Submenu("Theme", std::move(themes)), Item("Radio", kOpenRadio, "Ctrl+Shift+R"), Item("Lyrics panel", kLyrics, "Ctrl+L", LyricsShown()), Item("Customize layout...", kLayout), Item("Mini player", kMini, "Ctrl+Shift+M"), Item("Packs...", kPacks), Item("Helpers...", kHelpers), Item("Command palette...", kPalette, "Ctrl+Shift+P"), Separator(), Item("Group tracks by album", kGroupAlbums, {}, g.settings.groupAlbums),
+            std::vector<MenuItem> view = {Submenu("Theme", std::move(themes)), Item("Radio", kOpenRadio, "Ctrl+Shift+R"), Item("Lyrics panel", kLyrics, "Ctrl+L", LyricsShown()), Item("Artist info...", kArtistInfo), Item("Customize layout...", kLayout),
+                    Submenu("Window size", {Radio("Compact", kViewSize, 0, g.settings.size == ViewSize::Compact),
+                        Radio("Normal", kViewSize, 1, g.settings.size == ViewSize::Normal),
+                        Radio("Big mode plus", kViewSize, 2, g.settings.size == ViewSize::Spotlight),
+                        Radio("Big mode", kViewSize, 3, g.settings.size == ViewSize::Big)}), Submenu("Big mode panels", {Item("Library", kBigPanel, {}, BigPanelShown(0)),
+                        Radio("Now playing", kBigPanel, 1, BigPanelShown(1)),
+                        Radio("Up next", kBigPanel, 2, BigPanelShown(2)),
+                        Item("Reset panel layout", kBigReset)}), Item("Mini player", kMini, "Ctrl+Shift+M"), Item("Packs...", kPacks), Item("Helpers...", kHelpers), Item("Command palette...", kPalette, "Ctrl+Shift+P"), Separator(), Item("Group tracks by album", kGroupAlbums, {}, g.settings.groupAlbums),
                     Separator(), Item("Start on login", kStartOnLogin, {}, StartsOnLogin()), Separator(),
                     Submenu("Games and stats", {Item("Name That Track...", kNameThatTrack), Item("Which Came First...", kWhichCameFirst), Separator(),
                                                 Item("cordinal points...", kPoints), Item("Year in review...", kReview)})};
+            auto appearance = WaveAppearanceMenu();
+            if (!appearance.empty()) view.insert(view.begin() + 4, Submenu("Waveform appearance", std::move(appearance)));
+            return view;
         }
         case 6: return {Item("About cordinal", kAbout)};
         default: return {};
@@ -268,9 +285,16 @@ void OpenBarMenu(int index) {  // index into L.barItems
     auto menus = BarMenus();
     if (index < 0 || index >= (int)menus.size()) return;
     g_barOpen = index;
-    const Rect& r = L.barItems[index];
+    const Rect r = index < (int)L.barItems.size() ? L.barItems[index] : Rect{0, 0, 0, 0};
     OpenPopup(r.x, L.menuBar.B() - S(1), BarMenu(menus[index]));
     g.redraw = true;
+}
+
+// The lyrics panel's right-click menu: fetched lyrics are kept only when one of these is chosen.
+void OpenLyricsMenu(float x, float y) {
+    g_barOpen = -1;
+    OpenPopup(x, y, {Item("Save lyrics to tags", kSaveLyricsTags, {}, false, CanSaveFetchedLyrics(true)),
+                     Item("Save as .lrc file", kSaveLyricsLrc, {}, false, CanSaveFetchedLyrics(false))});
 }
 
 void OpenRowMenu(float x, float y) {
@@ -303,17 +327,28 @@ void OpenRowMenu(float x, float y) {
     items.push_back(Item("Convert to .cord...", kConvert, {}, false, !ConvertBusy() && !CordExportBusy() && !TagWriteBusy()));
     items.push_back(Submenu("Export .cord", CordExportItems()));
     items.push_back(Item("Copy to folder or device...", kCopyTo, {}, false, !CopyBusy()));
+    items.push_back(Item("Sync to iPod...", kIpodSync, {}, false, !IpodBusy()));
     items.push_back(Item("Edit tags...", kEditTags, "Alt+Enter"));
+    items.push_back(Item("Change cover...", kFindCover));
+    if (HasCustomCover(SelectedTracks())) items.push_back(Item("Restore original cover", kRestoreCover));
+    items.push_back(Item("Artist info...", kArtistInfo));
     g_barOpen = -1;
     OpenPopup(x, y, std::move(items));
 }
 
 void OpenHeaderMenu(float x, float y) {
     std::vector<MenuItem> items;
-    for (int c = 1; c < ui::kColumnCount && c < ui::kColCover; ++c) {
-        bool shown = std::find(g.settings.columns.begin(), g.settings.columns.end(), c) != g.settings.columns.end();
-        MenuItem it = Item(Utf8(kColumns[c].name), kColumnToggle, {}, shown, c != 2);
+    for (int c = 1; c < ColumnTotal(); ++c) {
+        if (c >= ui::kColCover && c < ui::kColumnCount) continue;
+        bool shown = std::find(ActiveColumnTypes().begin(), ActiveColumnTypes().end(), c) != ActiveColumnTypes().end();
+        MenuItem it = Item(Utf8(ColumnAt(c).name), kColumnToggle, {}, shown, c != 2);
         it.arg = c;
+        items.push_back(std::move(it));
+    }
+    const auto sets = PackColumnSetNames();
+    for (size_t i = 0; i < sets.size(); ++i) {
+        MenuItem it = Item(Utf8(sets[i]), kPackColumnSet);
+        it.arg = (int)i;
         items.push_back(std::move(it));
     }
     g_barOpen = -1;
@@ -329,6 +364,7 @@ void OpenChoice(float x, float y, const std::vector<std::string>& labels, int se
 }
 
 void RunAction(const MenuItem& item) {
+    if (RunAlternateAction(item.action, item.arg)) return;
     switch (item.action) {
         case kAddFiles: ChooseFiles(); break;
         case kOpenPlaylistFile: ChoosePlaylistFile(false); break;
@@ -414,6 +450,12 @@ void RunAction(const MenuItem& item) {
         case kDuplicateAudio: FindDuplicateAudio(); break;
         case kCancelDuplicates: g_playlistFileCancel = true; break;
         case kSteam: AddSteamSoundtracks(); break;
+        case kFetchCovers: FetchMissingCovers(); break;
+        case kCancelFetchCovers: CancelCoverFetch(); break;
+        case kFindCover: OpenCoverSearch(SelectedTracks()); break;
+        case kRestoreCover: RestoreOriginalCovers(SelectedTracks()); break;
+        case kSaveLyricsTags: SaveFetchedLyrics(true); break;
+        case kSaveLyricsLrc: SaveFetchedLyrics(false); break;
         case kCancelSteam: g_playlistFileCancel = true; break;
         case kWebServer: OpenWebServer(); break;
         case kExportCord: ExportCordTracks(SelectedTracks(), (CordExport)item.arg); break;
@@ -430,6 +472,8 @@ void RunAction(const MenuItem& item) {
             break;
         }
         case kCancelCopy: CancelCopy(); break;
+        case kIpodSync: StartIpodSync(); break;
+        case kCancelIpodSync: CancelIpodSync(); break;
         case kCancelConvert: CancelConversion(); break;
         case kNewAuto: OpenRules(-1); break;
         case kEditAuto: OpenRules(g.active); break;
@@ -505,7 +549,11 @@ void RunAction(const MenuItem& item) {
         case kPoints: OpenPoints(); break;
         case kPalette: OpenPalette(); break;
         case kLyrics: ToggleLyrics(); break;
+        case kArtistInfo: OpenArtistInfo(); break;
         case kOpenRadio: OpenRadio(); break;
+        case kBigPanel: ToggleBigPanel(item.arg); break;
+        case kBigReset: ResetBigPanels(); break;
+        case kViewSize: SetViewSize((ViewSize)item.arg); break;
         case kLayout: OpenLayout(); break;
         case kPacks: OpenPacks(); break;
         case kPackPlaylist: AddPackAutoPlaylist((size_t)item.arg); break;
@@ -539,13 +587,20 @@ void RunAction(const MenuItem& item) {
         case kEqualizer: OpenEqualizer(); break;
         case kRgEnable: SetReplayGain(!g.settings.rg.on); break;
         case kRgScanSel: ScanReplayGain(SelectedTracks()); break;
-        case kRgScanPl: ScanReplayGain(g.rows); break;
+        case kRgScanPl: ScanReplayGain(PlaylistTracks(Active())); break;
+        case kRgScanAll: {
+            auto ids = replaygain::LibraryTracks();
+            if (ids.empty()) ShowMessage(L"There are no available library tracks to scan.");
+            else ScanReplayGain(ids);
+            break;
+        }
         case kRgCancel: CancelReplayGain(); break;
         case kRgClear: ClearReplayGain(SelectedTracks()); break;
         case kRgWrite: WriteReplayGainTags(SelectedTracks()); break;
         case kWriteStatistics: WriteStatisticsTags(SelectedTracks()); break;
+        case kPackColumnSet: ApplyPackColumnSet(item.arg); break;
         case kColumnToggle: {
-            auto& cols = g.settings.columns;
+            auto& cols = ActiveColumnTypes();
             auto it = std::find(cols.begin(), cols.end(), item.arg);
             if (it != cols.end()) cols.erase(it);
             else cols.push_back(item.arg);
@@ -623,6 +678,7 @@ void SetTheme(ThemeMode mode) {
     g.settings.theme = mode;
     SaveSettings();
     ApplyTheme();
+    RebuildRows();
 }
 
 }  // namespace lx

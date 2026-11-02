@@ -24,8 +24,8 @@ struct Editor {
     HWND hwnd = nullptr;
     std::vector<TrackId> ids;
     HWND labels[FieldCount] = {}, edits[FieldCount] = {};
-    HWND compilation = nullptr, art = nullptr, artReplace = nullptr, artRemove = nullptr, info = nullptr, save = nullptr,
-         cancel = nullptr;
+    HWND compilation = nullptr, art = nullptr, artReplace = nullptr, artRemove = nullptr, artOnline = nullptr,
+         info = nullptr, save = nullptr, cancel = nullptr;
     std::wstring initial[FieldCount];
     bool mixed[FieldCount] = {}, changed[FieldCount] = {};
     int initialCompilation = 0;  // BST_* (BST_INDETERMINATE when mixed)
@@ -96,6 +96,20 @@ void LoadCoverFromFile() {
     ShowPreview();
 }
 
+// The picker hands its choice back here; it joins the other edits and is written on Save.
+void FindCoverOnline() {
+    std::vector<TrackId> ids = e.ids;
+    ShowCoverSearch(ids, [ids](const std::string& bytes) {
+        if (!e.hwnd || e.ids != ids) return;  // the editor closed or moved on meanwhile
+        ComPtr<IStream> s;
+        s.Attach(SHCreateMemStream(reinterpret_cast<const BYTE*>(bytes.data()), (UINT)bytes.size()));
+        e.preview = ArtImage{};
+        if (s) DecodeImage(s.Get(), S(160), e.preview);
+        e.cover = bytes;
+        ShowPreview();
+    });
+}
+
 void Layout(HWND h) {
     RECT rc;
     GetClientRect(h, &rc);
@@ -141,6 +155,7 @@ void Layout(HWND h) {
     MoveWindow(e.art, ax, pad, artSize, artSize, TRUE);
     MoveWindow(e.artReplace, ax, pad + artSize + S(6), artSize, S(26), TRUE);
     MoveWindow(e.artRemove, ax, pad + artSize + S(36), artSize, S(26), TRUE);
+    MoveWindow(e.artOnline, ax, pad + artSize + S(66), artSize, S(26), TRUE);
     MoveWindow(e.info, pad, rc.bottom - pad - S(26) - S(26), rc.right - pad * 2, S(22), TRUE);
     MoveWindow(e.save, rc.right - pad - S(200) - S(8), rc.bottom - pad - S(28), S(100), S(28), TRUE);
     MoveWindow(e.cancel, rc.right - pad - S(100), rc.bottom - pad - S(28), S(100), S(28), TRUE);
@@ -180,7 +195,7 @@ void Fill() {
     if (multi) SendMessageW(e.edits[Lyrics], EM_SETCUEBANNER, TRUE, (LPARAM)L"(select one track to edit lyrics)");
     e.cover.reset();
     e.preview = ArtImage{};
-    if (!e.ids.empty()) LoadAlbumArt(g_lib.Path(e.ids[0]), S(160), e.preview);
+    if (!e.ids.empty()) LoadAlbumArt(g_lib.Path(e.ids[0]), S(160), e.preview, false);
     // File details of the first track.
     std::wstring info;
     if (!e.ids.empty()) {
@@ -296,10 +311,11 @@ LRESULT CALLBACK TagEditorProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             e.art = make(0, WC_STATICW, L"", SS_OWNERDRAW);
             e.artReplace = make(0, WC_BUTTONW, L"Choose &cover...", BS_PUSHBUTTON | WS_TABSTOP, 201);
             e.artRemove = make(0, WC_BUTTONW, L"&Remove cover", BS_PUSHBUTTON | WS_TABSTOP, 202);
+            e.artOnline = make(0, WC_BUTTONW, L"Find cover &online...", BS_PUSHBUTTON | WS_TABSTOP, 203);
             e.info = make(0, WC_STATICW, L"", SS_LEFT | SS_PATHELLIPSIS | SS_NOPREFIX);
             e.save = make(0, WC_BUTTONW, L"&Save", BS_DEFPUSHBUTTON | WS_TABSTOP, IDOK);
             e.cancel = make(0, WC_BUTTONW, L"Cancel", BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL);
-            for (HWND c : {e.compilation, e.artReplace, e.artRemove, e.save, e.cancel}) ApplyControlTheme(c, g.dark);
+            for (HWND c : {e.compilation, e.artReplace, e.artRemove, e.artOnline, e.save, e.cancel}) ApplyControlTheme(c, g.dark);
             ApplyWindowTheme(h, P());
             Fill();
             return 0;
@@ -337,6 +353,7 @@ LRESULT CALLBACK TagEditorProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 e.cover = std::string();
                 ShowPreview();
             }
+            if (id == 203) FindCoverOnline();
             if (id == IDOK) Save();
             if (id == IDCANCEL) DestroyWindow(h);
             return 0;

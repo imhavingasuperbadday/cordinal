@@ -64,7 +64,7 @@ bool Wait(SOCKET s, uint64_t until) {
 
 #ifdef _WIN32
 HttpReply HttpFetch(void* session, const std::string& url, const char* method, const std::string& body,
-                    const std::string& headers, unsigned timeoutMs) {
+                    const std::string& headers, unsigned timeoutMs, size_t maxBody) {
     HttpReply reply;
     std::wstring wide = FromUtf8(url);
     URL_COMPONENTS parts{};
@@ -110,7 +110,7 @@ HttpReply HttpFetch(void* session, const std::string& url, const char* method, c
                 if (!WinHttpReadData(request, bytes, sizeof(bytes), &read)) { complete = false; break; }
                 if (!read) break;
                 reply.body.append(bytes, read);
-                if (reply.body.size() > (1u << 20)) { complete = false; break; }
+                if (reply.body.size() > maxBody) { complete = false; break; }
             }
             if (complete) reply.status = status;
         }

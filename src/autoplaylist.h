@@ -15,6 +15,8 @@ enum class RuleField : uint8_t {
     Year, Rating, PlayCount, SkipCount, Length, Bitrate, TrackNo, Disc, Bpm,                         // numbers
     LastPlayed, DateAdded,                                                                          // dates
     Plays30, Plays365,                                                                              // numbers from the play log (playlog.h)
+    SampleRate, Channels, FileSize, TrackGain,                                                      // numbers
+    FirstPlayed,                                                                                    // date
     Count
 };
 
@@ -23,6 +25,7 @@ enum class RuleOp : uint8_t {
     Contains, NotContains, Is, IsNot, StartsWith, EndsWith, IsEmpty, NotEmpty,  // text
     Equals, NotEquals, AtLeast, AtMost, Between,                               // numbers (also IsEmpty / NotEmpty)
     InLastDays, NotInLastDays, Never,                                          // dates
+    Before, OnOrAfter,                                                         // dates, as YYYY[-MM[-DD]]
     Count
 };
 
@@ -63,6 +66,9 @@ bool IsTextField(RuleField f);
 bool IsDateField(RuleField f);
 // Operators that make sense for a field, in menu order.
 std::vector<RuleOp> OpsFor(RuleField f);
+// The local midnight starting "2026", "2026-03" or "2026-03-14" as UnixNow() seconds; false when
+// the text is not such a date. Before / OnOrAfter rules compare against it.
+bool ParseRuleDate(const std::string& text, uint32_t& when);
 
 std::string SerializeAutoPlaylist(const AutoPlaylist& a);
 bool ParseAutoPlaylist(const std::string& text, AutoPlaylist& out);

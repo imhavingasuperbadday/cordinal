@@ -183,6 +183,7 @@ void TestMigration(const std::wstring& scratch) {
     fs::create_directories(profile + L"\\packs\\mine");
     Ready(WriteTestBytes(profile + L"\\packs\\mine\\pack.ini", "[pack]\nformat=1\nname=Mine\n") &&
               WriteTestBytes(profile + L"\\listenbrainz.token", "secret") &&
+              WriteTestBytes(profile + L"\\output-profiles.ini", "sound profiles") &&
               WriteTestBytes(profile + L"\\settings.ini", settings),
           L"throwaway backup profile prepared");
     std::atomic<bool> cancel{false};
@@ -196,6 +197,7 @@ void TestMigration(const std::wstring& scratch) {
     Check(
         backup::Read(folder, reopened, readIni, error) && readIni == settings &&
             fs::exists(folder + L"\\profile\\packs\\mine\\pack.ini") &&
+            ReadTestBytes(folder + L"\\profile\\output-profiles.ini") == "sound profiles" &&
             !fs::exists(folder + L"\\profile\\listenbrainz.token") &&
             backup::Stage(folder, profile, remappedIni, restored, cancel, stage, error) &&
             ReadTestBytes(profile + L"\\settings.ini") == settings &&
@@ -204,6 +206,7 @@ void TestMigration(const std::wstring& scratch) {
                 Settings(L"[Library]\r\nFolders=F:\\Audio|H:\\Lost\r\n[Player]\r\nResumePath=F:\\Audio\\Two."
                          L"flac|2\r\nVolume=73\r\n") &&
             ReadLibraryArchive(profile + L"\\library.cdb", reopened) &&
+            ReadTestBytes(profile + L"\\output-profiles.ini") == "sound profiles" &&
             reopened.library[a].firstPlayed == t.firstPlayed &&
             ReadTestBytes(previous + L"\\settings.ini") == settings &&
             ReadTestBytes(previous + L"\\listenbrainz.token") == "secret",

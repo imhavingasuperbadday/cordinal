@@ -105,6 +105,18 @@ uint64_t ThumbLoader::Key(const std::wstring& path, uint64_t fileTime) {
     return (h ^ fileTime) * 1099511628211ull;
 }
 
+void ThumbLoader::Forget(uint64_t key) {
+    if (dir_.empty()) return;
+    wchar_t pattern[64];
+    swprintf_s(pattern, L"\\%016llx-*.jpg", (unsigned long long)key);
+    WIN32_FIND_DATAW found;
+    HANDLE find = FindFirstFileW((dir_ + pattern).c_str(), &found);
+    if (find == INVALID_HANDLE_VALUE) return;
+    do DeleteFileW((dir_ + L"\\" + found.cFileName).c_str());
+    while (FindNextFileW(find, &found));
+    FindClose(find);
+}
+
 // Cache file name encodes key and size, so one track's cover can be cached at several sizes.
 std::wstring ThumbLoader::CacheFile(uint64_t key, int size, const wchar_t* ext) const {
     wchar_t name[64];

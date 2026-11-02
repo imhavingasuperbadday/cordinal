@@ -71,6 +71,42 @@ constexpr int kColApolloTitle = 28, kColApolloBitrate = 29, kColApolloRate = 30,
 // The columns a new profile shows, left to right.
 inline constexpr int kDefaultColumns[] = {0, 1, 2, 3, 4, 5, kColRating, 6, 7};
 
+// Whether a rating cell draws its empty stars. An unrated track shows them only while its row is
+// hovered or selected, where a click rates it, so a mostly unrated library isn't a column of grey stars.
+constexpr bool ShowEmptyStars(int rating, bool hover, bool selected) { return rating > 0 || hover || selected; }
+
+// A long recording (a mix, a DJ set, an ambience video) is hard to read on a bar alone, so from this
+// length the seek bar is notched at round times and the status bar says when the track will end.
+constexpr double kLongTrackSeconds = 20 * 60;
+
+// The seek bar's notch spacing in seconds for a track this long: the roundest step that leaves at
+// most eight notches (every 5 minutes on a half-hour mix, every hour on a six-hour one), or 0
+// when the track is short enough to need none.
+constexpr int SeekNotchSeconds(double seconds) {
+    if (!(seconds >= kLongTrackSeconds)) return 0;
+    constexpr int kMinutes[] = {5, 10, 15, 30, 60, 120, 240};
+    for (int m : kMinutes)
+        if (seconds / (m * 60) <= 8) return m * 60;
+    return 0;
+}
+
+// The playlist tabs share the strip instead of scrolling it behind arrows. Each label gets `pad` on
+// both sides while every tab fits that way, `tight` when only that fits, and otherwise (-1) the
+// tabs take equal shares of the strip, at least kMinTabWidth each, their labels shortened with an
+// ellipsis. Only a strip too short even for that still scrolls. `labels` is the labels' total width.
+constexpr int kTabPad = 18, kTabPadTight = 8, kMinTabWidth = 64;
+constexpr int FitTabPadding(int labels, int count, int room, int pad, int tight) {
+    if (labels + 2 * pad * count <= room) return pad;
+    if (labels + 2 * tight * count <= room) return tight;
+    return -1;
+}
+
+// The playing row's underline: how much of a `width` pixel row the played part spans.
+constexpr int PlayedWidth(int width, double position, double duration) {
+    if (!(duration > 0) || !(position > 0) || width <= 0) return 0;
+    return position >= duration ? width : (int)(width * (position / duration));
+}
+
 // The menu bar, left to right ('&' marks the mnemonic).
 inline constexpr const wchar_t* kMenuBar[] = {L"&File", L"&Edit", L"&Playback", L"P&laylist", L"&Library", L"&View",
                                               L"&Help"};

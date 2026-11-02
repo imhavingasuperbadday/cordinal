@@ -1,7 +1,8 @@
 // Band-limited sinc resampler used by the playback pipeline to convert a
 // decoder's rate to the output device rate. A 256-phase polyphase table with a
 // Kaiser window is built once per rate pair; the fractional cursor (idx_/num_)
-// carries position across pushes so streaming stays sample-accurate.
+// carries position across pushes so streaming stays sample-accurate. The kernel
+// grows for downsampling so high source rates retain the same transition width.
 #include "decoder.h"
 #include <algorithm>
 #include <cmath>
@@ -49,34 +50,38 @@ void Resampler::Init(unsigned inRate, unsigned outRate) {
     out_ = outRate;
     table_.reset();
     if (in_ != out_) {
-        const double beta = 8.0, half = kTaps / 2.0;
-        const double cutoff = std::min(1.0, (double)outRate / inRate) * 0.96;
-        table_.reset(new float[(kPhases + 1) * kTaps]);
+        const double ratio = std::min(1.0, (double)outRate / inRate);
+        // A short fixed kernel loses treble and barely rejects aliases at high downsampling
+        // ratios. Keep its width in output frames, with a bound for unusual file/speed rates.
+        taps_ = (unsigned)std::min(8192.0, std::ceil(128.0 / ratio / 8) * 8);
+        const double beta = 10.0, half = taps_ / 2.0;
+        const double cutoff = ratio * 0.95;
+        table_.reset(new float[(kPhases + 1) * taps_]);
         const double normalization = BesselI0(beta);
         for (int p = 0; p <= kPhases; ++p) {
             double frac = (double)p / kPhases, sum = 0;
-            float* row = &table_[p * kTaps];
-            for (int k = 0; k < kTaps; ++k) {
-                double x = (k - (kTaps / 2 - 1)) - frac;
+            float* row = &table_[p * taps_];
+            for (unsigned k = 0; k < taps_; ++k) {
+                double x = (double)k - (taps_ / 2 - 1) - frac;
                 double s = x == 0 ? 1.0 : std::sin(3.14159265358979 * cutoff * x) / (3.14159265358979 * cutoff * x);
                 double r = x / half;
                 double w = std::fabs(r) >= 1 ? 0 : BesselI0(beta * std::sqrt(1 - r * r)) / normalization;
                 row[k] = (float)(cutoff * s * w);
                 sum += row[k];
             }
-            for (int k = 0; k < kTaps; ++k) row[k] = (float)(row[k] / sum);  // unity DC gain
+            for (unsigned k = 0; k < taps_; ++k) row[k] = (float)(row[k] / sum);  // unity DC gain
         }
         // Since p=floor(num*kPhases/out_) >= num, ascending writes can reuse
         // this allocation without clobbering a phase still needed as input.
-        if (fast_ && out_<=kPhases) nativeaudio::AudioResamplePrepareAvx2(table_.get(),out_);
+        if (fast_ && out_<=kPhases) nativeaudio::AudioResamplePrepareAvx2(table_.get(),taps_,out_);
     }
     Reset();
 }
 
 // Zero the filter history; the cursor starts half a kernel in.
 void Resampler::Reset() {
-    hist_.assign((size_t)kTaps / 2 * 2, 0.0f);  // zero history before the first sample
-    idx_ = kTaps / 2;
+    hist_.assign(taps_, 0.0f);  // zero history before the first sample
+    idx_ = taps_ / 2;
     num_ = 0;
 }
 
@@ -110,24 +115,24 @@ void Resampler::Convert(const float* in,size_t frames,std::vector<float>& out,bo
     const size_t available = hist_.size() / 2;
     const float* h = hist_.data();
     const size_t begin=append?out.size():0;
-    uint64_t distance=idx_+kTaps/2<available?uint64_t(available-kTaps/2-idx_)*out_-num_:0;
+    uint64_t distance=idx_+taps_/2<available?uint64_t(available-taps_/2-idx_)*out_-num_:0;
     const size_t count=(size_t)((distance+in_-1)/in_);
     out.resize(begin+count*2);
     const unsigned step=in_/out_,remainder=in_%out_;
     const double phaseScale=(double)kPhases/out_;
     if (fast_) {
-        if (count) nativeaudio::AudioResampleAvx2(h,table_.get(),count,step,remainder,out_,idx_,num_,out.data()+begin);
+        if (count) nativeaudio::AudioResampleAvx2(h,table_.get(),taps_,count,step,remainder,out_,idx_,num_,out.data()+begin);
     }
     else for (size_t frame=0;frame<count;++frame) {
         size_t i0 = idx_;
         double f = (double)(unsigned)num_ * phaseScale;
         int p = (int)f;
         float t = (float)(f - p);
-        const float* r0 = &table_[p * kTaps];
-        const float* r1 = r0 + kTaps;
-        const float* s = h + (i0 - (kTaps / 2 - 1)) * 2;
+        const float* r0 = &table_[p * taps_];
+        const float* r1 = r0 + taps_;
+        const float* s = h + (i0 - (taps_ / 2 - 1)) * 2;
         __m128 a=_mm_setzero_ps(),b=a,blend=_mm_set1_ps(t);
-        for (int k=0;k<kTaps;k+=4) {
+        for (unsigned k=0;k<taps_;k+=4) {
             __m128 first=_mm_loadu_ps(r0+k),second=_mm_loadu_ps(r1+k);
             __m128 w=_mm_add_ps(first,_mm_mul_ps(_mm_sub_ps(second,first),blend));
             a=_mm_add_ps(a,_mm_mul_ps(_mm_loadu_ps(s+k*2),_mm_unpacklo_ps(w,w)));
@@ -139,7 +144,7 @@ void Resampler::Convert(const float* in,size_t frames,std::vector<float>& out,bo
         if (num_>=out_) { num_-=out_;++idx_; }
     }
     // Drop input no longer needed, keeping the filter's history.
-    size_t keepFrom = idx_ > (size_t)(kTaps / 2 - 1) ? idx_ - (kTaps / 2 - 1) : 0;
+    size_t keepFrom = idx_ > (size_t)(taps_ / 2 - 1) ? idx_ - (taps_ / 2 - 1) : 0;
     keepFrom = std::min(keepFrom, hist_.size() / 2);
     if (keepFrom > 0) {
         hist_.erase(hist_.begin(), hist_.begin() + (std::ptrdiff_t)(keepFrom * 2));
@@ -151,7 +156,7 @@ void Resampler::Convert(const float* in,size_t frames,std::vector<float>& out,bo
 // nothing.
 void Resampler::Flush(std::vector<float>& out) {
     if (Passthrough()) return;
-    float zeros[kTaps] = {};
-    Push(zeros, kTaps / 2, out);
+    std::vector<float> zeros(taps_);
+    Push(zeros.data(), taps_ / 2, out);
     Reset();
 }

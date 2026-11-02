@@ -398,11 +398,15 @@ void DrawRadioTab(const DRAWITEMSTRUCT* di) {
     RECT close = CloseRect(di->hwndItem);
     r.right -= S(22);
     DrawTextW(di->hDC, L"Radio", -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    // Like the playlist tabs' close boxes, the × shows only while the mouse is over the tab.
     POINT point{}; GetCursorPos(&point); ScreenToClient(di->hwndItem, &point);
-    bool hover = PtInRect(&close, point);
-    if (hover) FillSolid(di->hDC, close, Ref(P().hover));
-    SetTextColor(di->hDC, Ref(hover ? P().text : P().sub));
-    DrawTextW(di->hDC, L"\x00D7", 1, &close, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    RECT all{}; GetClientRect(di->hwndItem, &all);
+    if (PtInRect(&all, point)) {
+        bool hover = PtInRect(&close, point);
+        if (hover) FillSolid(di->hDC, close, Ref(P().hover));
+        SetTextColor(di->hDC, Ref(hover ? P().text : P().sub));
+        DrawTextW(di->hDC, L"\x00D7", 1, &close, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
     if ((di->itemState & ODS_FOCUS) && g.showFocusBoxes) { InflateRect(&r, -S(3), -S(3)); DrawFocusRect(di->hDC, &r); }
     SelectObject(di->hDC, old);
 }

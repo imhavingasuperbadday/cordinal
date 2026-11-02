@@ -13,6 +13,8 @@
 #include "audio_output.h"
 
 #include <pipewire/pipewire.h>
+#include <pipewire/extensions/metadata.h>
+#include <spa/utils/json.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/utils/result.h>
 
@@ -175,17 +177,53 @@ struct SinkList {
     spa_hook coreListener{}, registryListener{};
     int pending = 0;
     std::vector<OutputDevice> sinks;
+    pw_metadata* metadata = nullptr;
+    spa_hook metadataListener{};
+    std::string defaultSink;
 };
 
-void OnGlobal(void* data, uint32_t, uint32_t, const char* type, uint32_t, const spa_dict* props) {
+int OnSinkMetadata(void* data, uint32_t subject, const char* key, const char*, const char* value) {
     auto* list = static_cast<SinkList*>(data);
-    if (!props || strcmp(type, PW_TYPE_INTERFACE_Node)) return;
+    if (subject != PW_ID_CORE || !key || strcmp(key, "default.audio.sink")) return 0;
+    list->defaultSink.clear();
+    if (!value) return 0;
+    spa_json root{}, object{};
+    spa_json_init(&root, value, strlen(value));
+    if (spa_json_enter_object(&root, &object) <= 0) return 0;
+    char name[1024], text[1024];
+    while (spa_json_get_string(&object, name, sizeof(name)) > 0) {
+        if (spa_json_get_string(&object, text, sizeof(text)) <= 0) break;
+        if (!strcmp(name, "name")) list->defaultSink = text;
+    }
+    return 0;
+}
+
+void OnGlobal(void* data, uint32_t id, uint32_t, const char* type, uint32_t version, const spa_dict* props) {
+    auto* list = static_cast<SinkList*>(data);
+    if (!props) return;
+    if (!strcmp(type, PW_TYPE_INTERFACE_Metadata)) {
+        const char* name = spa_dict_lookup(props, PW_KEY_METADATA_NAME);
+        if (list->metadata || !name || strcmp(name, "default")) return;
+        pw_registry* registry = pw_core_get_registry(list->core, PW_VERSION_REGISTRY, 0);
+        list->metadata = (pw_metadata*)pw_registry_bind(registry, id, PW_TYPE_INTERFACE_Metadata,
+            std::min(version, (uint32_t)PW_VERSION_METADATA), 0);
+        pw_proxy_destroy((pw_proxy*)registry);
+        if (list->metadata) {
+            static const pw_metadata_events events{PW_VERSION_METADATA_EVENTS, OnSinkMetadata};
+            pw_metadata_add_listener(list->metadata, &list->metadataListener, &events, list);
+            list->pending = pw_core_sync(list->core, PW_ID_CORE, 0);
+        }
+        return;
+    }
+    if (strcmp(type, PW_TYPE_INTERFACE_Node)) return;
     const char* mediaClass = spa_dict_lookup(props, PW_KEY_MEDIA_CLASS);
     const char* name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
     if (!mediaClass || !name || strcmp(mediaClass, "Audio/Sink")) return;
     const char* text = spa_dict_lookup(props, PW_KEY_NODE_DESCRIPTION);
     if (!text) text = spa_dict_lookup(props, PW_KEY_NODE_NICK);
-    list->sinks.push_back({name, text ? text : name});
+    const char* card = spa_dict_lookup(props, "api.alsa.pcm.card");
+    if (!card) card = spa_dict_lookup(props, "api.alsa.card");
+    list->sinks.push_back({name, text ? text : name, card ? card : ""});
 }
 
 void OnDone(void* data, uint32_t id, int seq) {
@@ -226,6 +264,10 @@ std::vector<OutputDevice> ListOutputDevices() {
         pw_loop_update_timer(loop, timer, &timeout, nullptr, false);
         pw_main_loop_run(list.loop);
         pw_loop_destroy_source(loop, timer);
+        if (list.metadata) {
+            spa_hook_remove(&list.metadataListener);
+            pw_proxy_destroy((pw_proxy*)list.metadata);
+        }
         spa_hook_remove(&list.registryListener);
         pw_proxy_destroy(reinterpret_cast<pw_proxy*>(registry));
         spa_hook_remove(&list.coreListener);
@@ -233,6 +275,7 @@ std::vector<OutputDevice> ListOutputDevices() {
     }
     if (context) pw_context_destroy(context);
     pw_main_loop_destroy(list.loop);
+    for (auto& sink : list.sinks) sink.systemDefault = sink.node == list.defaultSink;
     std::sort(list.sinks.begin(), list.sinks.end(), [](const OutputDevice& a, const OutputDevice& b) { return a.description < b.description; });
     return list.sinks;
 }

@@ -584,6 +584,25 @@ std::wstring RateText() {
     return buf;
 }
 
+// "ends at 9:41 PM" in the user's clock format for a long track playing on, since on a six-hour mix
+// the time left says less than the time it will be over. Empty for short tracks, while paused, and
+// when the track repeats.
+static std::wstring EndsAtText(double pos, double dur) {
+    if (dur < ui::kLongTrackSeconds || g.engine.Paused() || g.repeat == Repeat::One) return L"";
+    double left = std::max(0.0, dur - pos) / std::max(0.05, g.speed * g.tempo);
+    FILETIME now;
+    GetSystemTimeAsFileTime(&now);
+    ULARGE_INTEGER t{{now.dwLowDateTime, now.dwHighDateTime}};
+    t.QuadPart += (ULONGLONG)(left * 1e7);
+    FILETIME end{t.LowPart, t.HighPart};
+    SYSTEMTIME utc, local;
+    wchar_t buf[64];
+    if (!FileTimeToSystemTime(&end, &utc) || !SystemTimeToTzSpecificLocalTime(nullptr, &utc, &local) ||
+        !GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, TIME_NOSECONDS, &local, nullptr, buf, (int)std::size(buf)))
+        return L"";
+    return std::wstring(L"ends at ") + buf;
+}
+
 void RevealPlayingTrack() {
     if (g.playing == kNone) return;
     if (IndexIn(g.playingPl, g.playing) < 0) {
@@ -734,6 +753,7 @@ void UpdateStatus() {
         SetTextIfChanged(g.elapsed, L"");
         SetTextIfChanged(g.time, L"");
     }
+    PlayingRowTick();
     const bool seekEnabled = active && dur > 0;
     if (!!IsWindowEnabled(g.seek) != seekEnabled) EnableWindow(g.seek, seekEnabled);
     WaveformTick();  // the waveform's color follows play/pause and the warnings
@@ -758,6 +778,7 @@ void UpdateStatus() {
         if (g.stopAfterCurrent) text += L"  (stop after current)";
         if (!g.queue.empty()) text += L"  \x2022  " + std::to_wstring(g.queue.size()) + L" queued";
         if (active && !RateText().empty()) text += L"  \x2022  " + RateText();
+        if (std::wstring end = active && !FoobarMode() ? EndsAtText(pos, dur) : L""; !end.empty()) text += L"  \x2022  " + end;
         SetStatusPart(0, text);
     }
 

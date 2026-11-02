@@ -1289,12 +1289,17 @@ bool Engine::WaveformPeaks(uint8_t* out, size_t buckets) const {
         d.waveMotion.Add(d.ring.data() + slot * 2, count, rate);
         d.wavePos += count;
     }
+    // CompandPeak is monotonic, so the loudest linear sample per bucket can be companded once
+    // instead of once per sample: the bytes are identical, without thousands of square roots.
+    std::array<float, 4096> linear;
+    std::fill_n(linear.begin(), buckets, 0.0f);
     for (uint64_t at = std::max(first, oldest); at < end; ++at) {
         size_t slot = (size_t)(at % d.cap) * 2;
         float peak = std::max(std::fabs(d.ring[slot]), std::fabs(d.ring[slot + 1]));
         size_t bucket = (size_t)((frames - (end - at)) * buckets / frames);
-        out[bucket] = std::max(out[bucket], CompandPeak(peak));
+        linear[bucket] = std::max(linear[bucket], peak);
     }
+    for (size_t b = 0; b < buckets; ++b) out[b] = CompandPeak(linear[b]);
     d.waveMotion.Shape(out, buckets);
     return true;
 }

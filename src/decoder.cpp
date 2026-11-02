@@ -209,7 +209,13 @@ std::unique_ptr<Decoder> OpenDecoder(const std::wstring& path, unsigned fallback
     }
     // A file type cordinal doesn't play itself may belong to a helper program (helpers.h).
     else if (HelperForExtension(ext)) return OpenHelperDecoder(path, error);
-    if (!d) error = L"Couldn't play " + FileNameOf(path) + L": unsupported or damaged audio stream.";
+    if (!d) {
+        WIN32_FILE_ATTRIBUTE_DATA info{};
+        bool empty = GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info) &&
+                     !(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !info.nFileSizeHigh && !info.nFileSizeLow;
+        error = L"Couldn't play " + FileNameOf(path) +
+                (empty ? L": the file is empty." : L": unsupported or damaged audio stream.");
+    }
     return d;
 }
 

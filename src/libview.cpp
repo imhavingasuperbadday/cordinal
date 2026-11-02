@@ -533,7 +533,8 @@ void DrawCover(const Album& a, D2D1_RECT_F r, const std::wstring& title) {
     v.rt->DrawRectangle({r.left + 0.5f, r.top + 0.5f, r.right - 0.5f, r.bottom - 0.5f}, v.brush.Get(), 1.0f);
 }
 
-void DrawStarsD2D(D2D1_RECT_F r, uint8_t rating, bool selected) {
+void DrawStarsD2D(D2D1_RECT_F r, uint8_t rating, bool selected, bool hover) {
+    if (!ui::ShowEmptyStars(rating, hover, selected)) return;
     float w = F(12);
     for (int i = 0; i < 5; ++i) {
         D2D1_RECT_F s{r.left + i * w, r.top, r.left + (i + 1) * w + F(2), r.bottom};
@@ -583,7 +584,7 @@ void DrawTrackRow(const Album& a, int t, D2D1_RECT_F r, bool hover) {
     std::wstring len = FormatDuration(tr.Duration());
     Text(len, v.fNum.Get(), {right - F(48), r.top, right, r.bottom}, Col(sub));
     right -= F(56);
-    DrawStarsD2D({right - F(64), r.top, right, r.bottom}, tr.rating, sel);
+    DrawStarsD2D({right - F(64), r.top, right, r.bottom}, tr.rating, sel, hover);
     right -= F(72);
     StringPool::Handle artist = tr.artist;
     if (artist && artist != a.artist) {
@@ -1367,6 +1368,14 @@ void LibViewBusyTick(bool any) {
 
 void LibViewInvalidate() {
     if (v.hwnd && IsWindowVisible(v.hwnd)) InvalidateRect(v.hwnd, nullptr, FALSE);
+}
+
+void LibViewForgetCovers(const std::vector<TrackId>& ids) {
+    for (TrackId id : ids)
+        if (g_lib.Contains(id)) v.loader.Forget(ThumbLoader::Key(g_lib.Path(id), g_lib[id].fileTime));
+    if (!v.hwnd) return;
+    DropBitmaps();
+    LibViewInvalidate();
 }
 
 void LibViewTheme() {

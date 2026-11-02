@@ -16,6 +16,7 @@
 // the other sizes keep Cordinal's own arrangement in Apollo's colors.
 #include "app.h"
 
+#ifdef CORDINAL_EXTRA_THEMES
 #include <wincodec.h>
 
 namespace app {
@@ -1210,3 +1211,29 @@ bool ApolloField(TrackId id, const std::wstring& name, std::wstring& out) {
 }
 
 }  // namespace app
+
+#else
+
+// The theme is hidden from this build, so its window code is not linked. These stubs keep the call
+// sites compiling and make every Apollo-specific branch unreachable.
+namespace app {
+
+bool ApolloMode() { return false; }
+void ApolloSync() {}
+void LayoutApollo(HDWP&, RECT) {}
+void PaintApolloChrome(HDC) {}
+void ApolloTheme() {}
+void ApolloTick() {}
+void ApolloStatus() {}
+std::wstring ApolloWindowTitle() { return {}; }
+bool ApolloContextMenu(HWND, POINT) { return false; }
+LRESULT ApolloDrawTrackbar(NMCUSTOMDRAW*) { return 0; }
+void ApolloPaintHeader(HWND, HDC) {}
+void ApolloDrawStatusPart(const DRAWITEMSTRUCT*) {}
+void ApolloDrawTrackIcon(HDC, const RECT&) {}
+bool ApolloField(TrackId, const std::wstring&, std::wstring&) { return false; }
+void ForgetApolloProbes() {}
+
+}  // namespace app
+
+#endif

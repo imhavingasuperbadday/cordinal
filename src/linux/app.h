@@ -53,6 +53,9 @@ constexpr UINT WM_APP_ORGANIZE = WM_APP + 24;  // an organize run finished; the 
 constexpr UINT WM_APP_LISTENBRAINZ = WM_APP + 33;  // see listenbrainz.h
 constexpr UINT WM_APP_LYRICS = WM_APP + 34;  // a song's lyrics read (lParam = lyrics.cpp's Loaded*)
 constexpr UINT WM_APP_HELPER = WM_APP + 35;  // a helper tool's result (wParam 1: lParam owns it, helpers_ui.cpp)
+constexpr UINT WM_APP_ARTISTINFO = WM_APP + 39;  // an artist looked up (lParam owns it, artistinfo_ui.cpp)
+constexpr UINT WM_APP_COVERFETCH = WM_APP + 38;  // cover search results, progress and saves (coverfetch_ui.cpp)
+constexpr UINT WM_APP_IPOD = WM_APP + 37;    // classic iPod progress (0) or sync result (1); lParam owns it
 constexpr UINT WM_APP_GAME = WM_APP + 36;  // a game's clip or cover decoded (lParam owns it, games.cpp)
 constexpr UINT WM_APP_FILE = WM_APP + 31;    // a file chosen for a dialog (wParam = what for, lParam = std::wstring*)
 
@@ -107,6 +110,17 @@ enum LayoutPartBit : unsigned {
     kPartTabs = 64, kPartSearch = 128, kPartViews = 256, kPartStatus = 512,
 };
 
+enum class ViewSize : uint8_t { Compact, Normal, Spotlight, Big, Count };
+
+// Session presentation; startup defaults are saved only by the explicit preference review.
+struct WindowLayout {
+    unsigned hiddenParts = 0;
+    int dock = 0, waveSize = 0;  // top, bottom, left, right; slim, medium, tall
+    bool points = false, waveOwnRow = false, largeCover = false, upNext = false, panelsLeft = false;
+    bool menuBar = true, tabCounts = false, statusDetails = false, hints = false;
+    bool operator==(const WindowLayout&) const = default;
+};
+
 struct Settings {
     uint16_t webPort = 8787;
     bool webStart = false;
@@ -121,9 +135,9 @@ struct Settings {
     std::map<std::string, std::string> helperTrust;  // id -> the record of the files it was turned on with
     std::string packThemeKey;    // "pack/theme" of the default theme when a pack provides it (resolved once the packs load)
     std::string packsOn;         // ids of the packs that are on, joined by |
-    unsigned hiddenParts = 0;    // LayoutPartBit: View > Customize layout
+    WindowLayout layout, defaultLayout;
+    ViewSize size = ViewSize::Normal, defaultSize = ViewSize::Normal;
     bool lyricsPanel = false;    // the lyrics panel beside the track list (lyrics.cpp)
-    bool pointsChip = false;     // the level and points chip in the now-playing strip (level-ups are announced while it is shown)
     bool timeRemaining = true;   // the time beside the seek bar counts down instead of showing the length
     bool waveform = true;       // off uses a regular seek bar, overriding the saved live display settings
     bool liveWaveform = false;   // animate the audio being heard instead of the whole-song overview
@@ -131,7 +145,7 @@ struct Settings {
     bool fullLiveWaveform = true; // light the whole live display instead of splitting it at the song position
     int bandWaveSize = 0;        // normal top waveform height; 0 follows the layout size
     bool alwaysOnTop = false;
-    bool gpuDrawing = false;     // draw through the graphics card; off keeps its driver out (applies at start)
+    bool gpuDrawing = false;     // draw through the graphics card; off keeps its driver out
     // The games (games.cpp), as the Windows build's [Games] keys: Name That Track's rounds solved at each clip
     // length and then missed, and both games' current and best streaks.
     std::vector<int> nttGuesses;
@@ -189,6 +203,7 @@ struct Settings {
     uint8_t browserFields[3] = {(uint8_t)BrowseField::Genre, (uint8_t)BrowseField::AlbumArtist, (uint8_t)BrowseField::Album};
     int browserHeight = 150, coverSize = 160;
     std::vector<int> columns{std::begin(ui::kDefaultColumns), std::end(ui::kDefaultColumns)};
+    std::string savedPackColumns;  // named pack columns read before the enabled packs load
     std::vector<int> widths = std::vector<int>(ui::kColumnCount, 0);  // per column, at scale 1 (0 = default)
     // The Windows window's default size: 1120 x 720 with its frame, so this client area.
     int windowW = ui::kLayoutWidth, windowH = ui::kMenuBarHeight + 662;
@@ -418,6 +433,13 @@ void OnCopyMessage(WPARAM wp, LPARAM lp);
 void CancelCopy();
 void StopCopier();
 
+// ipod_run.cpp: Library > Sync to iPod writes a classic iPod's iTunesDB on a worker.
+bool IpodBusy();
+void StartIpodSync();
+void CancelIpodSync();
+void OnIpodMessage(WPARAM wp, LPARAM lp);
+void StopIpod();
+
 // views (ui.cpp)
 void RebuildRows();
 void InvalidateCellCache();  // album labels or ids changed without a track revision
@@ -487,6 +509,13 @@ HelperRow HelperAt(size_t index);
 void ToggleHelper(size_t index);
 void OpenHelpersFolder();
 bool InstallHelper(const std::wstring& source);
+std::vector<std::wstring> HelperVisualizerLabels();
+bool HelperVisualizerRunning(size_t index);
+bool HelperVisualizersRunning();
+void ToggleHelperVisualizer(size_t index);
+void OpenHelperVisualizers(float x, float y);
+void TickHelperVisualizers();
+int CheckLinuxHelperFeed();
 std::vector<std::wstring> HelperToolLabels();  // the tools of the helpers that are on, in menu order
 int RunningHelperTool();                       // its index, or -1
 void RunHelperTool(size_t index, const std::vector<TrackId>& ids);
@@ -500,6 +529,17 @@ struct PackRow {
     std::vector<std::wstring> warnings;
     bool on = false;
 };
+int ColumnTotal();
+ui::Column ColumnAt(int type);
+std::string PackColumnKey(int type);
+int PackColumnType(const std::string& key);
+std::vector<std::wstring> PackColumnSetNames();
+void ApplyPackColumnSet(size_t index);
+std::vector<std::wstring> PackLayoutNames();
+void ApplyPackLayout(size_t index);
+bool PackGlobalKeysActive();
+void TickPackGlobalKeys();
+void StopPackGlobalKeys();
 void LoadPacks();  // reads the packs folder and applies the ones that are on
 size_t PackCount();
 PackRow PackAt(size_t index);
@@ -511,6 +551,7 @@ const PackTheme* PackThemeFor(ThemeMode mode);    // a pack theme's sounds and t
 bool PackField(TrackId id, const std::wstring& name, std::wstring& out);  // a pack's %field%
 std::vector<std::wstring> PackAutoPlaylistNames();  // the auto-playlists of the packs that are on
 void AddPackAutoPlaylist(size_t index);
+void SetViewSize(ViewSize size);
 void ApplyTheme();
 bool PackKeyDown(const SDL_KeyboardEvent& e);  // a key a pack that is on binds to a menu command: runs it
 std::vector<EqPreset> AllEqPresets();         // the built-in presets, then those of the packs that are on
@@ -527,6 +568,12 @@ void LyricsTick();
 bool LyricsAnimating();
 void LyricsWheel(float dy);
 bool LyricsMouseDown(float x, float y);
+// Fetched lyrics (Preferences > Online) are kept only when chosen from the panel's right-click menu:
+// in the song's tags (`tags`, one undoable edit) or as a .lrc file beside it.
+void OpenLyricsMenu(float x, float y);  // ui_menus.cpp
+bool CanSaveFetchedLyrics(bool tags);
+void SaveFetchedLyrics(bool tags);
+void LyricsSourcesChanged();  // a lyrics source was turned on or off: look again for the song shown
 
 // Sound effects (sounds.cpp).
 void PlaySfx(Sfx sound, int arg = 0, bool evenWhenOff = false);
@@ -536,6 +583,7 @@ void ShutdownSounds();
 // The playback queue (playback.cpp): Play next / Add to queue, played before the playlist continues.
 void QueueTracks(const std::vector<TrackId>& ids, bool next);
 void ClearQueue();
+std::vector<TrackId> UpNextTracks();
 void RefreshNext();
 int QueuePosition(TrackId id);  // 1-based place in the queue, 0 when not queued
 void InitWeb();

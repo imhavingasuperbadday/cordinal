@@ -47,6 +47,7 @@ void DrawToolbarButton(const DRAWITEMSTRUCT* di);
 void RegisterAppClass(const wchar_t* cls, WNDPROC proc, UINT style = 0, bool appIcon = true);
 LRESULT FieldControlColor(HDC dc);
 LRESULT SurfaceControlColor(HDC dc, COLORREF text);
+LRESULT ChoiceLabelCustomDraw(const NMCUSTOMDRAW* draw, HFONT font, int glyph);
 void DoubleBufferedPaint(HWND hwnd, void (*draw)(HDC, RECT));
 void TrimMemory();
 bool ReducedMemoryMode();

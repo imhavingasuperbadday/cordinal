@@ -1080,6 +1080,7 @@ std::vector<std::string> ArgvFromCommandLine(const std::wstring& line) {
 
 std::mutex g_pidMx;
 std::vector<pid_t> g_pids;  // the process groups of the programs running, so closing cordinal ends them
+std::vector<pid_t> g_pendingReaps;  // stopped children; even kernel I/O must not make a UI close block
 
 constexpr DWORD kCancelled = 1223, kTimeout = 1460, kGeneral = 31;
 
@@ -1087,16 +1088,18 @@ HelperProcess::~HelperProcess() {
     if (Running()) Stop();
     if (pid_ > 0) {
         int status = 0;
-        waitpid(pid_, &status, 0);
+        pid_t waited = waitpid(pid_, &status, WNOHANG);
         std::lock_guard<std::mutex> lock(g_pidMx);
-        std::erase(g_pids, pid_);
+        if (waited == 0 || (waited < 0 && errno == EINTR)) g_pendingReaps.push_back(pid_);
+        else std::erase(g_pids, pid_);
     }
     for (int fd : {out_, err_})
         if (fd >= 0) close(fd);
 }
 
 bool HelperProcess::Start(const std::wstring& program, const std::wstring& arguments, const std::wstring& dir, std::wstring& error,
-                          HANDLE, bool) {
+                          HANDLE inherit, bool window) {
+    ReapHelperPrograms();
     int outPipe[2], errPipe[2];
     if (pipe2(outPipe, O_CLOEXEC) != 0) return error = SystemText((DWORD)errno), false;
     if (pipe2(errPipe, O_CLOEXEC) != 0) {
@@ -1112,7 +1115,12 @@ bool HelperProcess::Start(const std::wstring& program, const std::wstring& argum
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
     posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0);
-    posix_spawn_file_actions_adddup2(&actions, outPipe[1], 1);
+    if (window) posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0);
+    else posix_spawn_file_actions_adddup2(&actions, outPipe[1], 1);
+    if (inherit) {
+        int fd = (int)(intptr_t)inherit;
+        posix_spawn_file_actions_adddup2(&actions, fd, fd);  // also clears FD_CLOEXEC in the child
+    }
     posix_spawn_file_actions_adddup2(&actions, errPipe[1], 2);
     posix_spawn_file_actions_addchdir_np(&actions, cwd.c_str());
     posix_spawnattr_t attributes;
@@ -1142,7 +1150,10 @@ bool HelperProcess::Start(const std::wstring& program, const std::wstring& argum
 
 void HelperProcess::DrainErrors() {
     char buffer[4096];
-    for (ssize_t got; err_ >= 0 && (got = read(err_, buffer, sizeof(buffer))) > 0;) {
+    // A visualizer is polled on the UI thread: a child continuously printing must not monopolize it.
+    for (int chunk = 0; chunk < 4 && err_ >= 0; ++chunk) {
+        ssize_t got = read(err_, buffer, sizeof(buffer));
+        if (got <= 0) break;
         errors_.append(buffer, (size_t)got);
         if (errors_.size() > 8192) errors_.erase(0, errors_.size() - 4096);
     }
@@ -1233,7 +1244,19 @@ std::wstring HelperProcess::Complaint() {
     return last;
 }
 
+void ReapHelperPrograms() {
+    std::lock_guard<std::mutex> lock(g_pidMx);
+    std::erase_if(g_pendingReaps, [](pid_t pid) {
+        int status = 0;
+        pid_t waited = waitpid(pid, &status, WNOHANG);
+        if (waited == 0 || (waited < 0 && errno == EINTR)) return false;
+        std::erase(g_pids, pid);
+        return true;
+    });
+}
+
 void StopHelperPrograms() {
+    ReapHelperPrograms();
     std::lock_guard<std::mutex> lock(g_pidMx);
     for (pid_t pid : g_pids) {
         killpg(pid, SIGKILL);

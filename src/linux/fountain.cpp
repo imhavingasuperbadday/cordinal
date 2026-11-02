@@ -1,6 +1,7 @@
-// DELTARUNE's live fountain on Linux: the same sprites and water deformation as app_fountain.cpp,
-// driven by the engine's audible PCM. Assets stay embedded; the SDL renderer owns only one texture.
+// DELTARUNE waveform styles on Linux: cached whole-song loudness or audible live PCM drives the
+// same embedded sprites and fountain bars as app_fountain.cpp. One renderer texture is retained.
 #include "draw.h"
+#include "alternate_ui.h"
 #include "cover.h"
 #include "radio_ui.h"
 #include "fountain_images.inc"
@@ -59,9 +60,25 @@ bool SpritesReady() {
 }
 }  // namespace
 
-bool DrawLiveFountain(const Rect& area, double progress, const Palette& palette) {
+void ReleaseFountainTexture() {
+    if (texture) SDL_DestroyTexture(texture);
+    texture = nullptr;
+    textureW = textureH = 0;
+}
+
+bool DrawFountain(const Rect& area, double progress, const Palette& palette,
+                  const uint8_t* source, size_t count, bool live, bool vertical) {
     int width = (int)area.w, height = (int)area.h;
-    if (width <= 0 || height <= 0 || !SpritesReady()) return false;
+    const auto& look = FountainAppearance();
+    if (width <= 0 || height <= 0 || look.style == 0) return false;
+    bool sprites = look.style == 2 && SpritesReady();
+    std::array<uint8_t, 256> heard{};
+    if (live) {
+        g.engine.WaveformPeaks(heard.data(), heard.size());
+        source = heard.data();
+        count = heard.size();
+    }
+    if (!source || !count) return false;
     if (!texture || textureW != width || textureH != height) {
         if (texture) SDL_DestroyTexture(texture);
         texture = SDL_CreateTexture(g.renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, width, height);
@@ -72,18 +89,18 @@ bool DrawLiveFountain(const Rect& area, double progress, const Palette& palette)
     }
     const uint64_t now = SDL_GetTicks();
     bool active = g.playing != kNone || RadioPlaying();
-    if (last && active && !IsPaused()) phase += std::min(4.0, (now - last) * 0.03);
+    if (last && look.motion && active && !IsPaused()) phase += std::min(4.0, (now - last) * 0.03);
     last = now;
     // Render along the vertical sprite axis, turning it onto the horizontal seek bar at the end.
-    int w = height, h = width, top = std::min(h / 2, (int)S(9)), bottom = std::max(top + 1, h - top);
-    std::array<uint8_t, 256> peaks{};
-    g.engine.WaveformPeaks(peaks.data(), peaks.size());
+    int w = vertical ? width : height, h = vertical ? height : width;
+    int top = std::min(h / 2, (int)S(9)), bottom = std::max(top + 1, h - top);
     std::vector<float> raw(h), levels(h);
     for (int y = 0; y < h; ++y) {
         int row = std::clamp(y, top, bottom - 1) - top, length = bottom - top;
-        int first = std::clamp(row * 256 / length, 0, 255), end = std::clamp((row + 1) * 256 / length, first + 1, 256);
+        size_t first = std::min(count - 1, (size_t)row * count / length);
+        size_t end = std::clamp((size_t)(row + 1) * count / length, first + 1, count);
         uint8_t peak = 0;
-        for (int i = first; i < end; ++i) peak = std::max(peak, peaks[i]);
+        for (size_t i = first; i < end; ++i) peak = std::max(peak, source[i]);
         raw[y] = peak / 255.f;
     }
     int smooth = std::max(1, (int)S(2));
@@ -92,15 +109,16 @@ bool DrawLiveFountain(const Rect& area, double progress, const Palette& palette)
         for (int d = -smooth; d <= smooth; ++d) sum += raw[std::clamp(y + d, 0, h - 1)];
         levels[y] = sum / (2 * smooth + 1);
     }
-    int playY = RadioPlaying() || (active && g.settings.fullLiveWaveform) ? h :
+    int playY = RadioPlaying() || (live && active && g.settings.fullLiveWaveform) ? h :
         g.playing != kNone ? top + (int)((bottom - top) * progress) : -1;
-    Color light = Hsv(phase / 4, 160 + std::sin(phase / 32) * 60, 255);
-    Color backdrop = Hsv(phase / 4, 255, std::sin(phase / 16) * 40 + 60);
-    Color surround{((palette.bg >> 16) & 255) / 255.f, ((palette.bg >> 8) & 255) / 255.f, (palette.bg & 255) / 255.f};
-    float cx = w / 2.f, maxHalf = std::max(4.f, w / 2.f - S(2)), minHalf = maxHalf * 0.16f;
+    auto rgb = [](Rgb c) { return Color{((c >> 16) & 255) / 255.f, ((c >> 8) & 255) / 255.f, (c & 255) / 255.f}; };
+    Color light = look.drColors ? Hsv(phase / 4, 160 + std::sin(phase / 32) * 60, 255) : rgb(WavePlayedColor(palette));
+    Color backdrop = look.glow ? Hsv(phase / 4, 255, std::sin(phase / 16) * 40 + 60) : Color{};
+    Color surround = look.black ? Color{} : rgb(palette.bg);
+    float cx = w / 2.f, maxHalf = std::max(4.f, w / 2.f - S(2)), minHalf = maxHalf * (live ? 0.16f : 0.5f);
     double scale = maxHalf / 66, detailScale = std::max(scale, 0.6 * S(1));
     float footHalf = (float)(57 * scale); maxHalf *= 0.9f;
-    double wobble = std::sin(phase / 16) * 1.8, edgeScroll = std::fmod((phase - 100) * 0.0625, 7.0) * 20;
+    double wobble = std::sin(phase / 16) * (live ? 1.8 : 6), edgeScroll = std::fmod((phase - 100) * 0.0625, 7.0) * 20;
     double footTop = h - 70 * scale, basinTop = h - basin.height * scale, bob = std::sin(phase / 16);
     for (int y = 0; y < h; ++y) {
         float half = minHalf + (maxHalf - minHalf) * levels[y];
@@ -114,6 +132,23 @@ bool DrawLiveFountain(const Rect& area, double progress, const Palette& palette)
                 return (int)std::floor(dx >= 0 ? std::max(50.0, 90 + past) + shift : std::min(49.0, 10 - past) + shift);
             };
             Color c = surround;
+            if (!sprites) {
+                // The bars retain the waveform's spacing; color and a small ripple follow the fountain clock.
+                float ripple = std::sin(y * 0.05 + phase / 8) * (live ? 0.03f : 0.14f);
+                float extent = std::max(1.f, maxHalf * levels[y] * (1 + ripple));
+                bool bar = y >= top && y < bottom && ((y - top) % std::max(2, (int)S(3))) < std::max(1, (int)S(2));
+                if (bar && std::fabs(dx) <= extent) {
+                    c = look.drColors ? Hsv(phase / 4 + (double)y * 40 / std::max(1, h), 180, 255) : light;
+                    c = Scale(c, 0.6f + 0.4f * (1 - std::fabs((float)dx) / std::max(1.f, extent)));
+                } else if (look.glow && std::fabs(dx) < extent + S(3)) c = Scale(backdrop, 0.35f);
+                if (look.motion && y >= top && y < bottom && ((y + (int)phase) % std::max(9, (int)S(31))) == 0 &&
+                    std::fabs(dx) < extent && ((x + (int)(phase / 4)) % std::max(5, (int)S(13))) == 0)
+                    c = Mix(light, rgb(palette.text), 0.65f);
+                if (y > playY) c = Scale(Mix(c, rgb(WaveRestColor(palette, live)), 0.4f), 0.68f);
+                size_t at = vertical ? (size_t)y * width + x : (size_t)(w - 1 - x) * width + y;
+                pixels[at] = Pack(c);
+                continue;
+            }
             if (past < 10) {
                 c = backdrop;
                 c = Over(c, Sample(water, (int)std::floor(x / detailScale + phase / 2), waterY1, true, true), light, 0.7f);
@@ -133,11 +168,15 @@ bool DrawLiveFountain(const Rect& area, double progress, const Palette& palette)
                 float grey = (c.r + c.g + c.b) / 3;
                 c = Scale(Mix(c, {grey, grey, grey}, 0.35f), 0.68f);
             }
-            pixels[(size_t)(w - 1 - x) * width + y] = Pack(c);
+            pixels[vertical ? (size_t)y * width + x : (size_t)(w - 1 - x) * width + y] = Pack(c);
         }
     }
     if (!SDL_UpdateTexture(texture, nullptr, pixels.data(), width * sizeof(uint32_t))) return false;
     SDL_FRect target{area.x, area.y, area.w, area.h};
     return SDL_RenderTexture(g.renderer, texture, nullptr, &target);
+}
+
+bool DrawLiveFountain(const Rect& area, double progress, const Palette& palette) {
+    return DrawFountain(area, progress, palette, nullptr, 0, true, false);
 }
 }  // namespace lx

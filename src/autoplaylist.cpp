@@ -13,6 +13,7 @@
 #include <cerrno>
 #include <cmath>
 #include <cstdlib>
+#include <ctime>
 #include <limits>
 #include <random>
 #include <unordered_map>
@@ -22,17 +23,21 @@ namespace {
 // Stable identifiers used in the saved text (never change them; append new ones).
 const char* const kFieldKeys[] = {"any", "title", "artist", "albumartist", "album", "genre", "composer", "comment", "grouping",
                                   "label", "path", "codec", "year", "rating", "plays", "skips", "length", "bitrate", "track",
-                                  "disc", "bpm", "lastplayed", "added", "plays30", "plays365"};
+                                  "disc", "bpm", "lastplayed", "added", "plays30", "plays365", "samplerate",
+                                  "channels", "size", "gain", "firstplayed"};
 const wchar_t* const kFieldNames[] = {L"Any text", L"Title", L"Artist", L"Album artist", L"Album", L"Genre", L"Composer",
                                       L"Comment", L"Grouping", L"Label", L"Path", L"Codec", L"Year", L"Rating", L"Play count",
                                       L"Skip count", L"Length (seconds)", L"Bitrate (kbps)", L"Track number", L"Disc number",
                                       L"BPM", L"Last played", L"Date added", L"Plays in the last 30 days",
-                                      L"Plays in the last 365 days"};
+                                      L"Plays in the last 365 days", L"Sample rate (kHz)", L"Channels",
+                                      L"File size (MB)", L"Track gain (dB)", L"First played"};
 const char* const kOpKeys[] = {"contains", "notcontains", "is", "isnot", "starts", "ends", "empty", "notempty",
-                               "eq", "ne", "atleast", "atmost", "between", "inlast", "notinlast", "never"};
+                               "eq", "ne", "atleast", "atmost", "between", "inlast", "notinlast", "never",
+                               "before", "after"};
 const wchar_t* const kOpNames[] = {L"contains", L"doesn't contain", L"is", L"is not", L"starts with", L"ends with",
                                    L"is empty", L"isn't empty", L"is", L"is not", L"is at least", L"is at most", L"is between",
-                                   L"in the last (days)", L"not in the last (days)", L"never"};
+                                   L"in the last (days)", L"not in the last (days)", L"never",
+                                   L"before (YYYY-MM-DD)", L"on or after (YYYY-MM-DD)"};
 const char* const kPickKeys[] = {"random", "mostplayed", "leastplayed", "highestrated", "lowestrated", "recentlyadded",
                                  "recentlyplayed", "leastrecentlyplayed"};
 const wchar_t* const kPickNames[] = {L"random", L"most played", L"least played", L"highest rated", L"lowest rated",
@@ -88,7 +93,14 @@ public:
     bool Match(const Rule& r, TrackId id) {
         const Track& t = library_[id];
         if (IsDateField(r.field)) {
-            uint32_t when = r.field == RuleField::LastPlayed ? t.lastPlayed : t.added;
+            uint32_t when = r.field == RuleField::LastPlayed ? t.lastPlayed
+                            : r.field == RuleField::FirstPlayed ? t.firstPlayed : t.added;
+            if (r.op == RuleOp::Before || r.op == RuleOp::OnOrAfter) {
+                // A track with no date is neither before nor after any day.
+                uint32_t day;
+                if (!when || !ParseRuleDate(r.value, day)) return false;
+                return r.op == RuleOp::Before ? when < day : when >= day;
+            }
             double days = ParseNumber(r.value);
             if ((r.op == RuleOp::InLastDays || r.op == RuleOp::NotInLastDays) &&
                 (!std::isfinite(days) || days < 0)) return false;
@@ -113,8 +125,9 @@ public:
                 case RuleOp::AtLeast: return v >= a - 1e-6;
                 case RuleOp::AtMost: return v <= a + 1e-6;
                 case RuleOp::Between: return v >= std::min(a, b) - 1e-6 && v <= std::max(a, b) + 1e-6;
-                case RuleOp::IsEmpty: return v == 0;
-                case RuleOp::NotEmpty: return v != 0;
+                // Unknown numbers are NaN; a gain of 0 dB is a measurement, other zeros are not.
+                case RuleOp::IsEmpty: return std::isnan(v) || (r.field != RuleField::TrackGain && v == 0);
+                case RuleOp::NotEmpty: return !std::isnan(v) && (r.field == RuleField::TrackGain || v != 0);
                 default: return false;
             }
         }
@@ -245,6 +258,11 @@ private:
             case RuleField::TrackNo: return t.trackNo;
             case RuleField::Disc: return t.disc;
             case RuleField::Bpm: return t.bpm;
+            case RuleField::SampleRate: return t.sampleRate / 1000.0;
+            case RuleField::Channels: return t.channels;
+            case RuleField::FileSize: return t.fileSize / 1e6;
+            case RuleField::TrackGain:
+                return t.rgTrackGain == kNoGain ? std::numeric_limits<double>::quiet_NaN() : t.rgTrackGain / 100.0;
             default: return 0;
         }
     }
@@ -313,14 +331,47 @@ const wchar_t* RuleOpName(RuleOp op) { return kOpNames[(int)op]; }
 const wchar_t* PickByName(PickBy p) { return kPickNames[(int)p]; }
 const wchar_t* LimitUnitName(LimitUnit u) { return kUnitNames[(int)u]; }
 bool IsTextField(RuleField f) { return f <= RuleField::Codec; }
-bool IsDateField(RuleField f) { return f == RuleField::LastPlayed || f == RuleField::DateAdded; }
+bool IsDateField(RuleField f) {
+    return f == RuleField::LastPlayed || f == RuleField::DateAdded || f == RuleField::FirstPlayed;
+}
 
 std::vector<RuleOp> OpsFor(RuleField f) {
-    if (IsDateField(f)) return {RuleOp::InLastDays, RuleOp::NotInLastDays, RuleOp::Never};
+    if (IsDateField(f)) return {RuleOp::InLastDays, RuleOp::NotInLastDays, RuleOp::Before, RuleOp::OnOrAfter, RuleOp::Never};
     if (IsTextField(f))
         return {RuleOp::Contains, RuleOp::NotContains, RuleOp::Is, RuleOp::IsNot, RuleOp::StartsWith, RuleOp::EndsWith,
                 RuleOp::IsEmpty, RuleOp::NotEmpty};
     return {RuleOp::Equals, RuleOp::NotEquals, RuleOp::AtLeast, RuleOp::AtMost, RuleOp::Between, RuleOp::IsEmpty, RuleOp::NotEmpty};
+}
+
+bool ParseRuleDate(const std::string& text, uint32_t& when) {
+    // Digits separated by '-', '/' or '.': a year, then optionally a month and a day.
+    int parts[3] = {0, 1, 1}, n = 0, digits = 0;
+    size_t b = text.find_first_not_of(' '), e = text.find_last_not_of(' ');
+    if (b == std::string::npos) return false;
+    for (size_t i = b; i <= e; ++i) {
+        char c = text[i];
+        if (c >= '0' && c <= '9') {
+            if (++digits > 4) return false;
+            parts[n] = (digits == 1 ? 0 : parts[n] * 10) + (c - '0');
+        } else if ((c == '-' || c == '/' || c == '.') && digits && n < 2) {
+            ++n;
+            digits = 0;
+        } else {
+            return false;
+        }
+    }
+    if (!digits || parts[0] < 1970 || parts[0] > 2105 || parts[1] < 1 || parts[1] > 12 || parts[2] < 1 || parts[2] > 31)
+        return false;
+    std::tm tm{};
+    tm.tm_year = parts[0] - 1900;
+    tm.tm_mon = parts[1] - 1;
+    tm.tm_mday = parts[2];
+    tm.tm_isdst = -1;
+    std::time_t t = std::mktime(&tm);
+    // mktime normalizes 2026-02-31 into March; such a date is a typo, not a day.
+    if (t == (std::time_t)-1 || tm.tm_mday != parts[2]) return false;
+    when = (uint32_t)std::clamp<long long>(t, 0, UINT32_MAX);
+    return true;
 }
 
 std::string SerializeAutoPlaylist(const AutoPlaylist& a) {

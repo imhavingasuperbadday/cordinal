@@ -64,24 +64,24 @@ size_t AudioCrc16FoldAvx2(const uint8_t* p,size_t n,uint8_t* folded) {
     _mm_storeu_si128((__m128i*)folded,_mm_shuffle_epi8(a,swap));
     return at;
 }
-void AudioResamplePrepareAvx2(float* table,unsigned denominator) {
+void AudioResamplePrepareAvx2(float* table,unsigned taps,unsigned denominator) {
     const double phaseScale=256.0/denominator;
     for (unsigned num=0;num<denominator;++num) {
         double phase=num*phaseScale;unsigned p=(unsigned)phase;
         __m256 blend=_mm256_set1_ps((float)(phase-p));
-        for (unsigned k=0;k<32;k+=8) {
-            __m256 first=_mm256_loadu_ps(table+p*32+k),second=_mm256_loadu_ps(table+(p+1)*32+k);
+        for (unsigned k=0;k<taps;k+=8) {
+            __m256 first=_mm256_loadu_ps(table+p*taps+k),second=_mm256_loadu_ps(table+(p+1)*taps+k);
             __m256 row=_mm256_fmadd_ps(_mm256_sub_ps(second,first),blend,first);
             // Put each half's four taps together so the hot loop duplicates weights
             // with lane-local unpacks instead of cross-lane variable permutations.
-            _mm256_storeu_ps(table+num*32+k,_mm256_castpd_ps(_mm256_permute4x64_pd(_mm256_castps_pd(row),0xD8)));
+            _mm256_storeu_ps(table+num*taps+k,_mm256_castpd_ps(_mm256_permute4x64_pd(_mm256_castps_pd(row),0xD8)));
         }
     }
     _mm256_zeroupper();
 }
 // Common rate pairs visit at most 256 rational phases. Their weights are already
 // interpolated, with the same FMA rounding, so convolution only loads one row.
-template<bool Prepared> static void ResampleAvx2(const float* history,const float* table,size_t frames,unsigned step,unsigned remainder,
+template<bool Prepared> static void ResampleAvx2(const float* history,const float* table,unsigned taps,size_t frames,unsigned step,unsigned remainder,
     unsigned denominator,size_t& index,uint64_t& numerator,float* output) {
     size_t at=index;uint64_t num=numerator;const double phaseScale=256.0/denominator;
     const __m256i low=_mm256_setr_epi32(0,0,1,1,2,2,3,3),high=_mm256_setr_epi32(4,4,5,5,6,6,7,7);
@@ -90,12 +90,12 @@ template<bool Prepared> static void ResampleAvx2(const float* history,const floa
         if constexpr (!Prepared) {
             double phase=(unsigned)num*phaseScale;p=(unsigned)phase;blend=_mm256_set1_ps((float)(phase-p));
         }
-        const float* first=table+p*32;const float* samples=history+(at-15)*2;
+        const float* first=table+p*taps;const float* samples=history+(at-(taps/2-1))*2;
         __m256 a=_mm256_setzero_ps(),b=a;
-        for (unsigned k=0;k<32;k+=8) {
+        for (unsigned k=0;k<taps;k+=8) {
             __m256 row=_mm256_loadu_ps(first+k);
             __m256 w=row;
-            if constexpr (!Prepared) w=_mm256_fmadd_ps(_mm256_sub_ps(_mm256_loadu_ps(first+32+k),row),blend,row);
+            if constexpr (!Prepared) w=_mm256_fmadd_ps(_mm256_sub_ps(_mm256_loadu_ps(first+taps+k),row),blend,row);
             __m256 lo,hi;
             if constexpr (Prepared) { lo=_mm256_unpacklo_ps(w,w);hi=_mm256_unpackhi_ps(w,w); }
             else { lo=_mm256_permutevar8x32_ps(w,low);hi=_mm256_permutevar8x32_ps(w,high); }
@@ -110,10 +110,10 @@ template<bool Prepared> static void ResampleAvx2(const float* history,const floa
     }
     index=at;numerator=num;_mm256_zeroupper();
 }
-void AudioResampleAvx2(const float* history,const float* table,size_t frames,unsigned step,unsigned remainder,
+void AudioResampleAvx2(const float* history,const float* table,unsigned taps,size_t frames,unsigned step,unsigned remainder,
     unsigned denominator,size_t& index,uint64_t& numerator,float* output) {
-    if (denominator<=256) ResampleAvx2<true>(history,table,frames,step,remainder,denominator,index,numerator,output);
-    else ResampleAvx2<false>(history,table,frames,step,remainder,denominator,index,numerator,output);
+    if (denominator<=256) ResampleAvx2<true>(history,table,taps,frames,step,remainder,denominator,index,numerator,output);
+    else ResampleAvx2<false>(history,table,taps,frames,step,remainder,denominator,index,numerator,output);
 }
 // Four pre-rotated fold values z_j..z_j+3 as real and imaginary parts: z_j is
 // (in[2j], -in[m-1-2j]) times pre[j]. A curve (Vorbis's floor) multiplies each input first.

@@ -43,6 +43,7 @@ HMENU ReplayGainMenu() {
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, IDM_RG_SCAN_SEL, L"&Scan selection");
     AppendMenuW(m, MF_STRING, IDM_RG_SCAN_PL, L"Scan &playlist");
+    AppendMenuW(m, MF_STRING, IDM_RG_SCAN_ALL, L"Scan &library");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, IDM_RG_CLEAR, L"Clear ReplayGain");
     AppendMenuW(m, MF_STRING, IDM_RG_WRITE_TAGS, L"&Write ReplayGain tags");
@@ -157,6 +158,7 @@ HMENU BuildMenu() {
     AppendMenuW(library, MF_STRING, IDM_CONVERT_UNDO, L"Undo last conversion");
     AppendMenuW(library, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(library, MF_STRING, IDM_COPY_TO, L"Cop&y to folder or device...");
+    AppendMenuW(library, MF_STRING, IDM_IPOD_SYNC, L"Sync to &iPod...");
     AppendMenuW(library, MF_SEPARATOR, 0, nullptr);
     HMENU editions = CreatePopupMenu();
     AppendMenuW(editions, MF_STRING, IDM_EDITION_GROUP, L"&Group selected albums as editions");
@@ -173,6 +175,7 @@ HMENU BuildMenu() {
     AppendMenuW(editions, MF_STRING, IDM_EDITION_VERSIONS, L"Other &versions...");
     AppendMenuW(library, MF_POPUP, (UINT_PTR)editions, L"Album &editions");
     AppendMenuW(library, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(library, MF_STRING, IDM_FETCH_COVERS, L"Fetch missing &covers...");
     AppendMenuW(library, MF_STRING, IDM_DUPLICATES, L"Find &duplicate audio");
     AppendMenuW(library, MF_STRING, IDM_STEAM, L"Add &Steam soundtracks");
 
@@ -195,6 +198,7 @@ HMENU BuildMenu() {
     AppendMenuW(view, MF_STRING, IDM_OPEN_RADIO, L"&Radio\tCtrl+Shift+R");
     AppendMenuW(view, MF_STRING, IDM_GROUP_ALBUMS, L"&Group tracks by album");
     AppendMenuW(view, MF_STRING, IDM_LYRICS, L"L&yrics panel\tCtrl+L");
+    AppendMenuW(view, MF_STRING, IDM_ARTIST_INFO, L"Artist &info...");
     AppendMenuW(view, MF_POPUP, (UINT_PTR)LayoutMenu(), L"Customize la&yout");
     HMENU sizes = CreatePopupMenu();
     const wchar_t* sizeNames[] = {L"&Compact", L"&Normal", L"Big mode &plus", L"&Big mode"};
@@ -332,6 +336,7 @@ void UpdateMainMenu(HMENU m) {
         {IDM_CLEAR, populated}, {IDM_REMOVE_DUPES, populated}, {IDM_REMOVE_DEAD, populated},
         {IDM_PROPERTIES, selected}, {IDM_TAG_UNDO, CanUndoTagEdit(undoDescription)},
         {IDM_RG_SCAN_PL, !manualScan}, {IDM_RG_SCAN_SEL, selected && !manualScan},
+        {IDM_RG_SCAN_ALL, replaygain::HasLibraryTracks() && !manualScan},
         {IDM_RG_CLEAR, selected && !manualScan},
         {IDM_RG_WRITE_TAGS, selected && !manualScan},
     };
@@ -339,8 +344,10 @@ void UpdateMainMenu(HMENU m) {
     ShowWhileRunning(m, IDM_ADD_FOLDER, IDM_CANCEL_IMPORT, L"&Cancel import", g.importRunning);
     ShowWhileRunning(m, IDM_STEAM, IDM_CANCEL_STEAM, L"Cancel soundtrack search", SteamDiscoveryRunning());
     EnableMenuItem(m, IDM_STEAM, MF_BYCOMMAND | (SteamDiscoveryRunning() ? MF_GRAYED : MF_ENABLED));
+    ShowWhileRunning(m, IDM_FETCH_COVERS, IDM_FETCH_COVERS_CANCEL, L"Cancel cover search", CoverFetchBusy());
+    EnableMenuItem(m, IDM_FETCH_COVERS, MF_BYCOMMAND | (CoverFetchBusy() ? MF_GRAYED : MF_ENABLED));
     ShowWhileRunning(m, IDM_RESCAN, IDM_WATCH_IMPORTED, L"&Watch imported folders", !g.importedFolders.empty());
-    ShowWhileRunning(m, IDM_RG_SCAN_PL, IDM_RG_CANCEL, L"&Cancel scan", manualScan);
+    ShowWhileRunning(m, IDM_RG_SCAN_ALL, IDM_RG_CANCEL, L"&Cancel scan", manualScan);
     ShowWhileRunning(m, IDM_CONVERT, IDM_CONVERT_CANCEL, L"Cancel conversion", ConvertBusy());
     ShowWhileRunning(m, IDM_COPY_TO, IDM_COPY_CANCEL, L"Cancel copy", CopyBusy());
     ShowWhileRunning(m, IDM_BACKUP, IDM_CANCEL_BACKUP, L"Cancel backup operation", BackupBusy());
@@ -349,6 +356,7 @@ void UpdateMainMenu(HMENU m) {
     UpdateHelperMenu(m);
     UpdateEditionMenu(m);
     EnableMenuItem(m, IDM_COPY_TO, MF_BYCOMMAND | (CopyBusy() ? MF_GRAYED : MF_ENABLED));
+    EnableMenuItem(m, IDM_IPOD_SYNC, MF_BYCOMMAND | (IpodBusy() ? MF_GRAYED : MF_ENABLED));
 }
 
 }  // namespace app

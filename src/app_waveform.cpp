@@ -89,11 +89,192 @@ BucketSpan BucketsFor(int x0, int x1, int left, int width) {
     return {first, last};
 }
 
-int Loudest(const Peaks& peaks, BucketSpan span) {
+int Loudest(const uint8_t* levels, BucketSpan span) {
     int v = 0;
-    for (int b = span.first; b < span.last; ++b) v = std::max<int>(v, peaks.v[b]);
+    for (int b = span.first; b < span.last; ++b) v = std::max<int>(v, levels[b]);
     return v;
 }
+
+// `percent` of the way from a to b.
+COLORREF Mix(COLORREF a, COLORREF b, int percent) {
+    auto mix = [percent](int x, int y) { return x + (y - x) * percent / 100; };
+    return RGB(mix(GetRValue(a), GetRValue(b)), mix(GetGValue(a), GetGValue(b)), mix(GetBValue(a), GetBValue(b)));
+}
+
+// One waveform color worked into its shades. The body is brightest along the center line and
+// falls to the plain color at its tips, which gives the columns a lit, rounded look; the lower half
+// is the upper one's reflection, dimmer and fading away from the line. Bands rather than a true
+// gradient: GDI's GradientFill doesn't follow the upright bar's transposing world transform.
+struct WaveShades {
+    static constexpr int kBands = 6;
+    COLORREF body[kBands], mirror[kBands];  // nearest the center line first
+    COLORREF edge, mirrorEdge;              // the peaks above the RMS body
+};
+
+WaveShades ShadesOf(COLORREF c, COLORREF bg) {
+    WaveShades s{};
+    for (int i = 0; i < WaveShades::kBands; ++i) {
+        s.body[i] = Mix(c, RGB(255, 255, 255), 24 * (WaveShades::kBands - 1 - i) / (WaveShades::kBands - 1));
+        s.mirror[i] = Mix(c, bg, 30 + 40 * i / (WaveShades::kBands - 1));
+    }
+    s.edge = Mix(c, bg, 35);
+    s.mirrorEdge = Mix(c, bg, 72);
+    return s;
+}
+
+// The rectangles of one paint, grouped by color. A column's rectangles never overlap and adjacent
+// columns never touch, so filling each color's rectangles with PolyPolygon gives exactly the pixels
+// the per-column FillSolid calls did, with a fraction of the GDI calls. Most columns share a shade;
+// the antialiased tips add a few more colors, so a paint costs a handful of calls per color rather
+// than one per rectangle.
+class WaveFills {
+public:
+    void Reset() {
+        for (int i = 0; i < used_; ++i) {
+            points_[i].clear();
+            counts_[i].clear();
+        }
+        used_ = 0;
+        overflow_.clear();
+    }
+
+    void Add(COLORREF color, const RECT& r) {
+        if (r.right <= r.left || r.bottom <= r.top) return;
+        int i = 0;
+        while (i < used_ && colors_[i] != color) ++i;
+        if (i == used_) {
+            if (used_ == kGroups) {  // too many tip blends this frame: draw the rest one by one
+                overflow_.push_back({color, r});
+                return;
+            }
+            colors_[i] = color;
+            ++used_;
+        }
+        points_[i].push_back({r.left, r.top});
+        points_[i].push_back({r.right, r.top});
+        points_[i].push_back({r.right, r.bottom});
+        points_[i].push_back({r.left, r.bottom});
+        counts_[i].push_back(4);
+    }
+
+    void Flush(HDC dc) {
+        if (used_) {
+            HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(DC_BRUSH));
+            HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+            for (int i = 0; i < used_; ++i) {
+                SetDCBrushColor(dc, colors_[i]);
+                // PolyPolygon's cost grows faster than its polygon count. Batches of 32 avoid one
+                // giant call while keeping the call count far below one per rectangle.
+                const int n = (int)counts_[i].size();
+                for (int at = 0; at < n; at += kBatch)
+                    PolyPolygon(dc, points_[i].data() + at * 4, counts_[i].data() + at, std::min(kBatch, n - at));
+            }
+            SelectObject(dc, oldPen);
+            SelectObject(dc, oldBrush);
+        }
+        for (const auto& [color, rect] : overflow_) FillSolid(dc, rect, color);
+        Reset();
+    }
+
+private:
+    static constexpr int kGroups = 256;  // the two color schemes' shades and their blended tips
+    static constexpr int kBatch = 32;    // rectangles per PolyPolygon call
+    std::array<COLORREF, kGroups> colors_{};
+    std::array<std::vector<POINT>, kGroups> points_;
+    std::array<std::vector<INT>, kGroups> counts_;
+    struct Overflow {
+        COLORREF color;
+        RECT rect;
+    };
+    std::vector<Overflow> overflow_;
+    int used_ = 0;
+};
+
+uint32_t DibColor(COLORREF c) {
+    return (uint32_t)GetRValue(c) << 16 | (uint32_t)GetGValue(c) << 8 | GetBValue(c);
+}
+
+// The direct path draws in device coordinates. An advanced DC can hold the upright seek bar's
+// transpose, so only an identity world transform may use it; every other target keeps GDI.
+bool PlainTarget(HDC dc) {
+    if (GetMapMode(dc) != MM_TEXT) return false;
+    if (GetGraphicsMode(dc) != GM_ADVANCED) return true;
+    XFORM transform{};
+    return GetWorldTransform(dc, &transform) && transform.eM11 == 1 && transform.eM12 == 0 &&
+           transform.eM21 == 0 && transform.eM22 == 1 && transform.eDx == 0 && transform.eDy == 0;
+}
+
+// A reusable top-down 32-bit surface for the live waveform. Every frame is built by direct pixel
+// writes and copied once: the same rectangles through PolyPolygon cost many GDI calls per frame.
+struct WaveDib {
+    HDC dc = nullptr;
+    HBITMAP bitmap = nullptr;
+    HGDIOBJ previous = nullptr;
+    uint32_t* bits = nullptr;
+    int width = 0, height = 0;
+
+    bool Ready(HDC target, int w, int h) {
+        if (dc && width == w && height == h && bits) return true;
+        Release();
+        HDC surface = CreateCompatibleDC(target);
+        if (!surface) return false;
+        BITMAPINFO info{};
+        info.bmiHeader = {sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB};
+        void* pixels = nullptr;
+        HBITMAP created = CreateDIBSection(target, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+        if (!created || !pixels) {
+            if (created) DeleteObject(created);
+            DeleteDC(surface);
+            return false;
+        }
+        dc = surface;
+        bitmap = created;
+        bits = static_cast<uint32_t*>(pixels);
+        width = w;
+        height = h;
+        previous = SelectObject(dc, bitmap);
+        return true;
+    }
+
+    void Present(HDC target, const RECT& rc) {
+        BitBlt(target, rc.left, rc.top, width, height, dc, 0, 0, SRCCOPY);
+    }
+
+    void Release() {
+        if (dc && previous) SelectObject(dc, previous);
+        if (bitmap) DeleteObject(bitmap);
+        if (dc) DeleteDC(dc);
+        dc = nullptr;
+        bitmap = nullptr;
+        previous = nullptr;
+        bits = nullptr;
+        width = height = 0;
+    }
+};
+
+// The same rectangles WaveFills receives, written straight into a top-down DIB. FillRect excludes
+// the right and bottom edges, so each span ends at r.right/r.bottom exactly.
+class PixelFills {
+public:
+    PixelFills(uint32_t* bits, int width, int height, int left, int top, COLORREF background)
+        : bits_(bits), width_(width), height_(height), left_(left), top_(top) {
+        std::fill_n(bits_, (size_t)width_ * height_, DibColor(background));
+    }
+
+    void Add(COLORREF color, const RECT& r) {
+        int x0 = std::clamp((int)r.left - left_, 0, width_);
+        int x1 = std::clamp((int)r.right - left_, 0, width_);
+        int y0 = std::clamp((int)r.top - top_, 0, height_);
+        int y1 = std::clamp((int)r.bottom - top_, 0, height_);
+        if (x0 >= x1 || y0 >= y1) return;
+        const uint32_t c = DibColor(color);
+        for (int y = y0; y < y1; ++y) std::fill_n(bits_ + (size_t)y * width_ + x0, x1 - x0, c);
+    }
+
+private:
+    uint32_t* bits_;
+    int width_, height_, left_, top_;
+};
 
 }  // namespace
 
@@ -192,13 +373,16 @@ int WaveformPeak(double from, double to) {
     if (LiveWaveformShown() || !g_wave.ready || !WaveformShown() || !(to > from)) return 0;
     int first = std::clamp((int)(from * kPeakBuckets), 0, kPeakBuckets - 1);
     int last = std::clamp((int)(to * kPeakBuckets), first + 1, kPeakBuckets);
-    return Loudest(g_wave.peaks, {first, last});
+    return Loudest(g_wave.peaks.v, {first, last});
 }
 
 // Draws the waveform across the channel's width and the whole bar's height (`rc`, transposed for the
 // vertical seek bar). Columns 2 px wide with a 1 px gap; what has played carries the state color
-// (WaveformPlayedColor, app_fountain.cpp). With waveforms enabled, the spotlight, big mode and the
-// vertical bar keep flat columns until peaks are known.
+// (WaveformPlayedColor, app_fountain.cpp). Each column is the RMS level as a solid body with the
+// peak as a fainter edge around it (a live waveform has peaks only), shaded by WaveShades. The
+// split between the two colors is the playhead; a live waveform draws no line of its own. With
+// waveforms enabled, the spotlight, big mode and the vertical bar keep flat columns until peaks
+// are known.
 bool DrawWaveform(HDC dc, const RECT& rc, const RECT& channel, double frac) {
     if (!g.waveform) return false;
     const bool live = LiveWaveformShown();
@@ -209,38 +393,77 @@ bool DrawWaveform(HDC dc, const RECT& rc, const RECT& channel, double frac) {
     if (!known && g.size < ViewSize::Spotlight && !SeekVertical()) return false;
     // The bar isn't erased before this any more (WaveformTick), so the waveform paints the whole
     // control itself: the gaps between the columns are the bar's own background.
-    FillSolid(dc, rc, SurfaceColor());
+    COLORREF bg = SurfaceColor();
     int left = channel.left, width = channel.right - channel.left;
-    if (width <= 0) return false;
+    if (width <= 0) {
+        FillSolid(dc, rc, bg);
+        return false;
+    }
     int right = left + width;
     int cy = (rc.top + rc.bottom) / 2, half = std::max(1, (int)(rc.bottom - rc.top) / 2 - S(2));
     int col = std::max(2, S(2)), step = col + std::max(1, S(1));
     int playedX = left + (int)(width * frac);
-    COLORREF played = WaveformPlayedColor(), rest = WaveformRestColor();
-    for (int x = left; x < right; x += step) {
-        // The loudest bucket under this column (up to the next one), so short peaks aren't lost
-        // when columns are wide. The last column is clipped to the channel, leaving no gap there.
-        int end = std::min(x + col, right);
-        int v = 0;
-        if (live) {
-            int first = std::clamp((x - left) * 256 / width, 0, 255);
-            int last = std::clamp((x + step - left) * 256 / width, first + 1, 256);
-            for (int b = first; b < last; ++b) v = std::max<int>(v, livePeaks[b]);
-        } else if (known && g_wave.ready) v = Loudest(g_wave.peaks, BucketsFor(x, x + step, left, width));
-        int h = std::max(1, half * v / 255);
-        COLORREF color = x < playedX ? played : rest;
-        FillSolid(dc, {x, cy - h, end, cy + h + 1}, color);
-        // Fractional end pixels keep a quiet note's smooth fall visible in the slim player.
-        int alpha = live ? std::max(0, half * v - h * 255) : 0;
-        if (alpha) {
-            COLORREF bg = SurfaceColor();
-            COLORREF edge = RGB((GetRValue(color) * alpha + GetRValue(bg) * (255 - alpha)) / 255,
-                                (GetGValue(color) * alpha + GetGValue(bg) * (255 - alpha)) / 255,
-                                (GetBValue(color) * alpha + GetBValue(bg) * (255 - alpha)) / 255);
-            FillSolid(dc, {x, cy - h - 1, end, cy - h}, edge);
-            FillSolid(dc, {x, cy + h + 1, end, cy + h + 2}, edge);
+    const WaveShades playedShades = ShadesOf(WaveformPlayedColor(), bg), restShades = ShadesOf(WaveformRestColor(), bg);
+    // The rows of band `i`, counted from the center line out.
+    const int span = half + 1;
+    auto bandStart = [span](int i) { return i * span / WaveShades::kBands; };
+    auto columns = [&](auto& fills) {
+        for (int x = left; x < right; x += step) {
+            // The loudest bucket under this column (up to the next one), so short peaks aren't lost
+            // when columns are wide. The last column is clipped to the channel, leaving no gap there.
+            int end = std::min(x + col, right);
+            int v = 0, rms = 0;
+            if (live) {
+                int first = std::clamp((x - left) * 256 / width, 0, 255);
+                int last = std::clamp((x + step - left) * 256 / width, first + 1, 256);
+                for (int b = first; b < last; ++b) v = std::max<int>(v, livePeaks[b]);
+                rms = v;
+            } else if (known && g_wave.ready) {
+                BucketSpan buckets = BucketsFor(x, x + step, left, width);
+                for (int b = buckets.first; b < buckets.last; ++b) {
+                    v = std::max<int>(v, g_wave.peaks.v[b]);
+                    rms = std::max<int>(rms, g_wave.peaks.rms[b]);
+                }
+            }
+            int h = std::max(1, half * v / 255), body = std::clamp(half * rms / 255, 1, h);
+            const WaveShades& s = x < playedX ? playedShades : restShades;
+            // Upper half: row cy - d for d = 0..h. Lower half, the reflection: row cy + 1 + d for d < h.
+            for (int i = 0; i < WaveShades::kBands && bandStart(i) <= body; ++i) {
+                int d0 = bandStart(i), d1 = std::min(body + 1, bandStart(i + 1));
+                fills.Add(s.body[i], {x, cy - d1 + 1, end, cy - d0 + 1});
+                fills.Add(s.mirror[i], {x, cy + 1 + d0, end, cy + 1 + std::min(d1, body)});
+            }
+            if (h > body) {
+                fills.Add(s.edge, {x, cy - h, end, cy - body});
+                fills.Add(s.mirrorEdge, {x, cy + 1 + body, end, cy + 1 + h});
+            }
+            // Fractional end pixels keep a quiet note's smooth fall visible in the slim player.
+            int alpha = live ? std::max(0, half * v - h * 255) : 0;
+            if (alpha) {
+                int tip = std::min(WaveShades::kBands - 1, h * WaveShades::kBands / span);
+                fills.Add(Mix(bg, s.body[tip], alpha * 100 / 255), {x, cy - h - 1, end, cy - h});
+                fills.Add(Mix(bg, s.mirror[tip], alpha * 100 / 255), {x, cy + h + 1, end, cy + h + 2});
+            }
+        }
+    };
+    // Live frames are the only ones that arrive 30 times a second. A transformed DC, such as the
+    // upright seek bar's transpose, keeps the GDI path below.
+    if (live && PlainTarget(dc)) {
+        const int w = rc.right - rc.left, h = rc.bottom - rc.top;
+        static WaveDib dib;
+        if (w > 0 && h > 0 && dib.Ready(dc, w, h)) {
+            GdiFlush();  // the previous frame's BitBlt may still be reading these bits
+            PixelFills pixels(dib.bits, w, h, rc.left, rc.top, bg);
+            columns(pixels);
+            dib.Present(dc, rc);
+            return true;
         }
     }
+    FillSolid(dc, rc, bg);
+    static WaveFills fills;
+    fills.Reset();
+    columns(fills);
+    fills.Flush(dc);
     return true;
 }
 

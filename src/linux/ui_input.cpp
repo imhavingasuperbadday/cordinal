@@ -1,4 +1,6 @@
 // The Linux window's input: hit testing, the mouse, the keyboard and the drags that reorder tracks.
+#include "alternate_ui.h"
+#include "big_ui.h"
 #include "ui_internal.h"
 
 namespace lx {
@@ -38,9 +40,11 @@ int BarItemAt(float x, float y) {
 
 float Density() { return SDL_GetWindowPixelDensity(g.window); }
 
-double SeekValueAt(float x) {
+double SeekValueAt(float x, float y) {
     float inset = S(ui::kSliderInset);
-    return std::clamp((double)(x - L.seek.x - inset) / std::max(1.0f, L.seek.w - 2 * inset), 0.0, 1.0) * TrackDuration();
+    float value = SeekVertical() ? y - L.seek.y : x - L.seek.x;
+    float length = SeekVertical() ? L.seek.h : L.seek.w;
+    return std::clamp((double)(value - inset) / std::max(1.0f, length - 2 * inset), 0.0, 1.0) * TrackDuration();
 }
 
 std::string SectionTime(double seconds) {
@@ -54,7 +58,7 @@ void OpenSectionMenu(float x, float y) {
     double duration = TrackDuration();
     if (g.playing == kNone || duration <= 0) return;
     g_sectionMenuTrack = g.playing;
-    g_sectionMenuPos = SeekValueAt(x);
+    g_sectionMenuPos = SeekValueAt(x, y);
     PlaybackSection section = SectionOf(g.playing);
     bool marked = section.end - section.start > 0.05;
     std::string loop = marked ? "Loop " + SectionTime(section.start) + " to " + SectionTime(section.end) :
@@ -74,18 +78,18 @@ float VolumeAt(float x) {
 
 int ColumnEdgeAt(float x, float y) {
     if (!L.header.In(x, y)) return -1;
-    float cx = 0;
-    for (size_t i = 0; i < g.settings.columns.size(); ++i) {
-        cx += ColumnWidth(g.settings.columns[i]);
+    float cx = L.header.x;
+    for (size_t i = 0; i < ActiveColumnTypes().size(); ++i) {
+        cx += ColumnWidth(ActiveColumnTypes()[i]);
         if (std::fabs(x - cx) <= S(4) && i > 0) return (int)i;
     }
     return -1;
 }
 
 int ColumnAt(float x) {
-    float cx = 0;
-    for (size_t i = 0; i < g.settings.columns.size(); ++i) {
-        float w = ColumnWidth(g.settings.columns[i]);
+    float cx = L.header.x;
+    for (size_t i = 0; i < ActiveColumnTypes().size(); ++i) {
+        float w = ColumnWidth(ActiveColumnTypes()[i]);
         if (x >= cx && x < cx + w) return (int)i;
         cx += w;
     }
@@ -150,11 +154,11 @@ void MoveDraggedTracks() {
     const size_t n = pl.items.size();
     std::vector<size_t> order(n);
     std::iota(order.begin(), order.end(), 0);
-    if (pl.sortColumn > 0 && pl.sortColumn < ui::kColumnCount) {
+    if (pl.sortColumn > 0 && pl.sortColumn < ColumnTotal()) {
         std::unordered_map<TrackId, std::wstring> keys;
         for (TrackId id : pl.items) {
             if (!g_lib.Contains(id)) return;
-            keys.emplace(id, FormatTitle(kColumns[pl.sortColumn].sort, Lookup(id, false)));
+            keys.emplace(id, FormatTitle(ColumnAt(pl.sortColumn).sort, Lookup(id, false)));
         }
         std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
             int r = CompareNatural(keys[pl.items[a]], keys[pl.items[b]]);
@@ -248,6 +252,8 @@ void MouseDown(const SDL_MouseButtonEvent& e) {
         OpenBarMenu(bar);
         return;
     }
+    if (AlternateMouseDown(x, y, e.button, e.clicks)) return;
+    if (PresentationMouseDown(x, y, e.button, e.clicks)) return;
     bool wasSearch = g.searchFocused;
     g.searchFocused = L.search.In(x, y);
     if (g.searchFocused && InternetRadio().active) InternetRadio().filterFocus = 0;
@@ -261,13 +267,25 @@ void MouseDown(const SDL_MouseButtonEvent& e) {
         LyricsMouseDown(x, y);
         return;
     }
+    if (e.button == SDL_BUTTON_RIGHT && L.lyrics.In(x, y)) {
+        OpenLyricsMenu(x, y);
+        return;
+    }
+    if (L.upNext.In(x, y)) {
+        const auto tracks = UpNextTracks();
+        int row = (int)((y - L.upNext.y - S(38)) / S(42));
+        if (e.button == SDL_BUTTON_LEFT && e.clicks >= 2 && y >= L.upNext.y + S(38) &&
+            row >= 0 && row < (int)tracks.size()) PlayTracks({tracks[row]}, 0);
+        return;
+    }
     if (!L.browser.In(x, y)) BrowserBlur();
     if (e.button == SDL_BUTTON_RIGHT) {
         if (InternetRadio().active && L.list.In(x, y)) return;
+        if (L.player.In(x, y) && !L.seek.In(x, y)) { OpenLayout(); return; }
         if (L.seek.In(x, y) && g.playing != kNone) { OpenSectionMenu(x, y); return; }
         if (L.browser.In(x, y)) { BrowserMouseDown(L.browser, x, y, e.button, e.clicks, SDL_GetModState()); return; }
         if (CanvasActive() && L.list.In(x, y)) { CanvasMouseDown(L.list, x, y, e.button, e.clicks, SDL_GetModState()); return; }
-        int line = LineAt(y);
+        int line = L.rows.In(x, y) ? LineAt(y) : -1;
         if (line >= 0 && g_lines[line].row >= 0) {
             int row = g_lines[line].row;
             if (!g.selected[row]) SelectOnly(row);
@@ -280,7 +298,13 @@ void MouseDown(const SDL_MouseButtonEvent& e) {
     }
     if (e.button == SDL_BUTTON_MIDDLE && L.radioTab.In(x, y)) { CloseRadio(); return; }
     if (e.button != SDL_BUTTON_LEFT) return;
-    if (L.buttons[kBtnPrev].In(x, y)) Previous();
+    if (L.grip.In(x, y)) {
+        g_drag = Drag::Dock;
+        g_dragStart = x;
+        g_dragStartValue = y;
+        SDL_CaptureMouse(true);
+    }
+    else if (L.buttons[kBtnPrev].In(x, y)) Previous();
     else if (L.buttons[kBtnPlay].In(x, y)) TogglePause();
     else if (L.buttons[kBtnNext].In(x, y)) Next();
     else if (L.buttons[kBtnShuffle].In(x, y)) ToggleShuffle();
@@ -297,7 +321,7 @@ void MouseDown(const SDL_MouseButtonEvent& e) {
         SetVolume(VolumeAt(x));
     } else if (L.seek.In(x, y) && g.playing != kNone) {
         g_drag = Drag::Seek;
-        g_seekPreview = SeekValueAt(x);
+        g_seekPreview = SeekValueAt(x, y);
     } else if (L.radioTab.In(x, y)) {
         Rect close{L.radioTab.R() - S(22), L.radioTab.y + S(3), S(19), L.radioTab.h - S(6)};
         if (close.In(x, y)) CloseRadio(); else OpenRadio();
@@ -342,12 +366,12 @@ void MouseDown(const SDL_MouseButtonEvent& e) {
         g_dragStartValue = g.scroll;
     } else if (int edge = ColumnEdgeAt(x, y); edge >= 0) {
         g_drag = Drag::ColumnEdge;
-        g_dragColumn = g.settings.columns[edge];
+        g_dragColumn = ActiveColumnTypes()[edge];
         g_dragStart = x;
         g_dragStartValue = ColumnWidth(g_dragColumn) / g.scale;
     } else if (L.header.In(x, y)) {
         int col = ColumnAt(x);
-        if (col >= 0) SortBy(g.settings.columns[col]);
+        if (col >= 0) SortBy(ActiveColumnTypes()[col]);
     } else if (L.tabs.In(x, y)) {
         for (size_t i = 0; i < L.tabRects.size(); ++i)
             if (L.tabRects[i].In(x, y)) {
@@ -358,7 +382,7 @@ void MouseDown(const SDL_MouseButtonEvent& e) {
                 break;
             }
     } else if (L.rows.In(x, y)) {
-        int line = LineAt(y);
+        int line = L.rows.In(x, y) ? LineAt(y) : -1;
         SDL_Keymod mod = SDL_GetModState();
         if (line < 0) {
             SelectOnly(-1);
@@ -371,9 +395,9 @@ void MouseDown(const SDL_MouseButtonEvent& e) {
         }
         int row = g_lines[line].row;
         int column = ColumnAt(x);
-        if (column >= 0 && g.settings.columns[column] == ui::kColRating && !(mod & (SDL_KMOD_CTRL | SDL_KMOD_SHIFT))) {
-            float left = 0;
-            for (int i = 0; i < column; ++i) left += ColumnWidth(g.settings.columns[i]);
+        if (column >= 0 && ActiveColumnTypes()[column] == ui::kColRating && !(mod & (SDL_KMOD_CTRL | SDL_KMOD_SHIFT))) {
+            float left = L.rows.x;
+            for (int i = 0; i < column; ++i) left += ColumnWidth(ActiveColumnTypes()[i]);
             float width = std::max(TextWidth(Font::Normal, "\xE2\x98\x85"), 1.0f);
             double stars = (x - left - S(4)) / width;
             if (stars >= -0.2 && stars <= 5.4) {
@@ -439,9 +463,11 @@ void MouseMove(const SDL_MouseMotionEvent& e) {
         else if (int bar = BarItemAt(x, y); bar >= 0 && g_barOpen >= 0 && bar != g_barOpen) OpenBarMenu(bar);
         return;
     }
+    if (PresentationMouseMove(x, y, (e.state & SDL_BUTTON_LMASK) != 0)) return;
     switch (g_drag) {
+        case Drag::Dock: break;
         case Drag::Volume: SetVolume(VolumeAt(x)); break;
-        case Drag::Seek: g_seekPreview = SeekValueAt(x); break;
+        case Drag::Seek: g_seekPreview = SeekValueAt(x, y); break;
         case Drag::Scroll: {
             float thumbH = std::max(S(24), L.scrollbar.h * L.rows.h / std::max(1.0f, ContentHeight()));
             float room = std::max(1.0f, L.scrollbar.h - S(34) - thumbH);
@@ -450,7 +476,7 @@ void MouseMove(const SDL_MouseMotionEvent& e) {
             break;
         }
         case Drag::ColumnEdge:
-            if (g_dragColumn >= 0) g.settings.widths[g_dragColumn] = std::max(24, (int)std::lround(g_dragStartValue + (x - g_dragStart) / g.scale));
+            if (g_dragColumn >= 0) ActiveColumnWidths()[g_dragColumn] = std::max(24, (int)std::lround(g_dragStartValue + (x - g_dragStart) / g.scale));
             break;
         case Drag::Tracks: break;
         case Drag::Splitter: SetBrowserHeight(g_dragStartValue + y - g_dragStart); break;
@@ -481,6 +507,7 @@ void MouseUp(const SDL_MouseButtonEvent& e) {
         PanelMouseUp();
         return;
     }
+    if (PresentationMouseUp(e.x * Density(), e.y * Density())) return;
     if (e.button == SDL_BUTTON_LEFT && g_drag == Drag::Tracks) {
         g_trackDrag.target = TrackDropTarget(e.y * Density());
         MoveDraggedTracks();
@@ -489,6 +516,18 @@ void MouseUp(const SDL_MouseButtonEvent& e) {
     } else if (e.button == SDL_BUTTON_LEFT && g_trackDrag.pending) {
         if (g_trackDrag.collapseOnClick && g_trackDrag.clicked >= 0) SelectOnly(g_trackDrag.clicked);
         g_trackDrag = {};
+    }
+    if (g_drag == Drag::Dock) {
+        float x = e.x * Density(), y = e.y * Density();
+        if (std::hypot(x - g_dragStart, y - g_dragStartValue) < S(4)) OpenLayout();
+        else {
+            int w, h; SDL_GetRenderOutputSize(g.renderer, &w, &h);
+            double distances[] = {y / std::max(1, h), (h - y) / std::max(1, h),
+                x * 1.6 / std::max(1, w), (w - x) * 1.6 / std::max(1, w)};
+            g.settings.layout.dock = (int)(std::min_element(std::begin(distances), std::end(distances)) - distances);
+            SaveSettings();
+        }
+        SDL_CaptureMouse(false);
     }
     if (g_drag == Drag::Seek && g_seekPreview >= 0) SeekTo(g_seekPreview);
     if (g_drag == Drag::Volume || g_drag == Drag::ColumnEdge || g_drag == Drag::Splitter) SaveSettings();
@@ -511,6 +550,7 @@ void Wheel(const SDL_MouseWheelEvent& e) {
         return;
     }
     if (!g_popups.empty() || g_folders.open) return;
+    if (AlternateWheel(x, y, e.y)) return;
     if (InternetRadio().active && L.radioGrid.In(x, y)) {
         InternetRadio().scroll = std::clamp(InternetRadio().scroll - e.y * S(82), 0.0f, RadioMaxScroll());
         g.redraw = true; return;
@@ -556,7 +596,7 @@ void MenuKey(SDL_Keycode key) {
         HoverMenu(popup, item);
         g_popups.back().hover = 0;
     } else if ((key == SDLK_RIGHT || key == SDLK_LEFT) && g_barOpen >= 0 && (g_popups.size() == 1 || key == SDLK_RIGHT)) {
-        int count = (int)L.barItems.size();
+        int count = (int)BarMenus().size();
         OpenBarMenu((g_barOpen + (key == SDLK_RIGHT ? 1 : count - 1)) % count);
     } else if (key == SDLK_LEFT && g_popups.size() > 1) g_popups.pop_back();
     else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER || key == SDLK_SPACE) && p.hover >= 0) {
@@ -635,6 +675,13 @@ void Key(const SDL_KeyboardEvent& e) {
         MenuKey(e.key);
         return;
     }
+    if ((mod & SDL_KMOD_CTRL) && (e.key == SDLK_MINUS || e.key == SDLK_EQUALS)) {
+        int next = (int)g.settings.size + (e.key == SDLK_EQUALS ? 1 : -1);
+        if (next < 0) ToggleMini(); else SetViewSize((ViewSize)std::clamp(next, 0, 3));
+        return;
+    }
+    if (AlternateKey(e)) return;
+    if (PresentationKey(e)) return;
     if (PackKeyDown(e)) return;  // a pack's binding takes the key from cordinal's own
     if (e.key == SDLK_F10) {
         OpenBarMenu(0);
@@ -853,6 +900,7 @@ void TextInput(const SDL_TextInputEvent& e) {
                 if (((*p >= '0' && *p <= '9') || *p == ' ' || *p == '-') && g_web.fixed.size() < 24) g_web.fixed += *p;
         g.redraw = true; return;
     }
+    if (AlternateText(e.text)) return;
     if (InternetRadio().active && InternetRadio().filterFocus && !g.searchFocused && e.text) {
         auto& radio = InternetRadio();
         std::wstring* field = radio.filterFocus == 1 ? &radio.genre : radio.filterFocus == 2 ? &radio.country : &radio.region;

@@ -2,6 +2,7 @@
 // hand-off (NeedNext -> SetNext), each track's ReplayGain and the equalizer, and play and skip
 // counts. Playing from the Library or an auto-playlist copies what is shown into Now Playing
 // first, as on Windows.
+#include "headphones_ui.h"
 #include "app.h"
 #include "radio_ui.h"
 #include "ui.h"
@@ -527,6 +528,7 @@ void Stop() {
 
 ReplayGainOptions GainOptions() {
     auto options = g.settings.rg;
+    options.headroom = HeadphonesHeadroom();
     options.shuffleTracks = g.settings.shuffle == kShuffleTracks;
     return options;
 }
@@ -542,7 +544,7 @@ float GainForEstimate(TrackId id, double lufs) {
 // `includePlaying` is false for background measurements: the track being heard keeps its level
 // until it ends instead of jumping mid-song.
 void RefreshGains(bool includePlaying) {
-    g.engine.SetLimiter(g.settings.rg.on, g.settings.rg.headroom);
+    g.engine.SetLimiter(g.settings.rg.on, HeadphonesHeadroom());
     for (auto& [token, info] : g_tokens)
         if ((includePlaying || token != g.token) && info.id < g_lib.Count())
             g.engine.SetGain(token, info.estimated ? GainForEstimate(info.id, info.estimate) : GainFor(info.id));
@@ -582,6 +584,13 @@ std::vector<TrackId> UpcomingTracks() {
         }
         ids.push_back(q[shuffled ? g.shuffleOrder[at] : at]);
     }
+    return ids;
+}
+
+std::vector<TrackId> UpNextTracks() {
+    std::vector<TrackId> ids;
+    for (TrackId id : g.queue) if (g_lib.Contains(id) && id != g.playing) ids.push_back(id);
+    for (TrackId id : UpcomingTracks()) if (g_lib.Contains(id) && ids.size() < 16) ids.push_back(id);
     return ids;
 }
 

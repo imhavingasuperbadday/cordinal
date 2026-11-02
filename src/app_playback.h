@@ -50,6 +50,7 @@ void SeekBy(double seconds);
 void UpdateNowPlaying();
 void UpdateStatus();
 void ShowPlaybackTime(double pos, double duration);
+void PlayingRowTick();  // grows the playing row's underline (app_playlists.cpp)
 void PaintArt(HDC dc);
 void OnEngineEvent(EngineEvent e, unsigned long long token);
 void PrepareWaveform(TrackId id);

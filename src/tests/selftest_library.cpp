@@ -3,6 +3,8 @@
 // its own testlog group, in the order the groups appear in the log.
 #include "selftest_common.h"
 
+#include <ctime>
+
 // The original per-track search is the oracle for both correctness and the search benchmark.
 // It deliberately owns no state shared between tracks.
 bool ReferenceSearch(const Library& library, TrackId id, const std::vector<std::wstring>& words) {
@@ -761,6 +763,10 @@ void TestAutoPlaylists() {
         tr.added = now - s.ageDays * 86400;
         tr.lastPlayed = s.plays ? now - s.ageDays * 86400 : 0;
         tr.fileSize = s.seconds * 100000ull;  // 100 kB a second
+        tr.firstPlayed = tr.lastPlayed;
+        tr.sampleRate = ids.empty() ? 96000 : 44100;
+        tr.channels = s.seconds == 3600 ? 1 : 2;
+        tr.rgTrackGain = ids.empty() ? -750 : ids.size() == 1 ? 0 : kNoGain;  // Alpha -7.5 dB, Beta 0 dB
         ids.push_back(id);
     }
     auto titles = [&](const AutoPlaylist& a) {
@@ -803,6 +809,49 @@ void TestAutoPlaylists() {
     }
     a.root.rules = {{RuleField::Length, RuleOp::AtLeast, "5:00", ""}};
     check(L"length >= 5:00", a, {L"Delta", L"Epsilon"});
+    a.root.rules = {{RuleField::SampleRate, RuleOp::AtLeast, "88.2", ""}};
+    check(L"sample rate >= 88.2 kHz", a, {L"Alpha"});
+    a.root.rules = {{RuleField::Channels, RuleOp::Equals, "1", ""}};
+    check(L"mono", a, {L"Epsilon"});
+    a.root.rules = {{RuleField::FileSize, RuleOp::AtLeast, "300", ""}};
+    check(L"file size >= 300 MB", a, {L"Epsilon"});
+    a.root.rules = {{RuleField::TrackGain, RuleOp::IsEmpty, "", ""}};
+    check(L"unmeasured track gain (0 dB counts as measured)", a, {L"Delta", L"Epsilon", L"Gamma"});
+    a.root.rules = {{RuleField::TrackGain, RuleOp::AtMost, "-5", ""}};
+    check(L"track gain <= -5 dB skips unmeasured tracks", a, {L"Alpha"});
+    a.root.rules = {{RuleField::FirstPlayed, RuleOp::Never, "", ""}};
+    check(L"never first played", a, {L"Gamma"});
+    {
+        // Twenty days ago as a local calendar date: tracks added 1-10 days ago are on or after it.
+        std::time_t then = (std::time_t)now - 20 * 86400;
+        std::tm local{};
+        localtime_s(&local, &then);
+        char day[16];
+        std::strftime(day, sizeof day, "%Y-%m-%d", &local);
+        a.root.rules = {{RuleField::DateAdded, RuleOp::OnOrAfter, day, ""}};
+        check(L"added on or after a date", a, {L"Alpha", L"Epsilon", L"Gamma"});
+        a.root.rules = {{RuleField::DateAdded, RuleOp::Before, day, ""}};
+        check(L"added before a date", a, {L"Beta", L"Delta"});
+        a.root.rules = {{RuleField::LastPlayed, RuleOp::Before, "2200", ""}};
+        check(L"an invalid date selects nothing", a, {});
+        a.root.rules = {{RuleField::LastPlayed, RuleOp::Before, std::to_string(local.tm_year + 1901), ""}};
+        check(L"a year means its first day; never-played tracks have no date", a,
+              {L"Alpha", L"Beta", L"Delta", L"Epsilon"});
+    }
+    uint32_t day = 0;
+    rules.Add(ParseRuleDate("2026", day) && ParseRuleDate("2026-03", day) && ParseRuleDate(" 2026/3/14 ", day) &&
+                  !ParseRuleDate("2026-02-31", day) && !ParseRuleDate("2026-13", day) && !ParseRuleDate("26-1-1", day) &&
+                  !ParseRuleDate("2026-", day) && !ParseRuleDate("yesterday", day) && !ParseRuleDate("", day),
+              L"rule dates accept YYYY[-MM[-DD]] and reject impossible or partial dates");
+    {
+        AutoPlaylist saved, loaded;
+        saved.root.rules = {{RuleField::FirstPlayed, RuleOp::OnOrAfter, "2026-01-01", ""},
+                            {RuleField::TrackGain, RuleOp::Between, "-9", "-6"}};
+        rules.Add(ParseAutoPlaylist(SerializeAutoPlaylist(saved), loaded) && loaded.root.rules.size() == 2 &&
+                      loaded.root.rules[0].field == RuleField::FirstPlayed && loaded.root.rules[0].op == RuleOp::OnOrAfter &&
+                      loaded.root.rules[1].field == RuleField::TrackGain && loaded.root.rules[1].value2 == "-6",
+                  L"new fields and date operators survive saving");
+    }
     // ALL of (genre Rock) and ANY of (plays >= 10, rating 3 exactly)
     a.root.all = true;
     a.root.rules = {{RuleField::Genre, RuleOp::Is, "rock", ""}};

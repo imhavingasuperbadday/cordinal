@@ -50,7 +50,7 @@ $objDir = 'build\obj'
 $manifestPath = Join-Path $objDir 'build.json'
 # The packed player's size budget in decimal bytes (PRINCIPLES.md: fast and small are features). A
 # release build over it fails: a change that needs more raises this number and says why in docs\size.md.
-$SizeBudget = 1611000
+$SizeBudget = 1660000
 
 function Write-Step([string]$Text) { Write-Host "==> $Text" }
 function Fail([string]$Message) { throw $Message }
@@ -152,7 +152,10 @@ $hashes = @{}
 foreach ($file in $files) { $hashes[(Get-Relative $file.FullName)] = Get-ContentHash $file.FullName }
 
 # A header, toolset or build-script change can reach every translation unit, so it rebuilds them all.
-$headerHash = Get-SetHash @($hashes.Keys | Where-Object { $_ -like '*.h' } |
+# Headers and source fragments included by compiled files can change any layout or inline body, so
+# include .hpp and .inc here as well as .h.
+$headerHash = Get-SetHash @($hashes.Keys | Where-Object {
+    [IO.Path]::GetExtension($_) -in @('.h', '.hpp', '.inc') } |
     ForEach-Object { "$_=$($hashes[$_])" })
 $resourceExtensions = @('.rc', '.ico', '.manifest', '.png', '.ttf', '.wav', '.flac', '.txt')
 $resourceHash = Get-SetHash @($hashes.Keys |
@@ -217,6 +220,12 @@ Add-Group 'app' '' ($common + $size + $unicode + @('/Ob0', '/GL', '/MP')) $plain
 # Original built-in lossy encoders: source-only, baseline SSE2, one worker supplied by the caller.
 Add-Group 'encode' 'encode' ($common + $size + @('/Ob2', '/GL', '/MP', '/D_USE_MATH_DEFINES')) `
     (Get-ChildItem -LiteralPath 'src\encode' -Filter *.cpp -File)
+# Classic iPod sync: cordinal's adapter plus the size-trimmed pure C++ libgpod subset. The
+# vendored headers are internal; the adapter in src\ipod.h is the only interface the UI uses.
+$ipodSources = @(Get-ChildItem -LiteralPath 'src\ipod' -Filter *.cpp -File) +
+    @(Get-ChildItem -LiteralPath 'src\ipod\gpod\src' -Filter *.cpp -File)
+Add-Group 'ipod' 'ipod' ($common + $size + $unicode + @('/Ob0', '/GL', '/MP', '/I', 'src', '/I', 'src\ipod\gpod\include')) `
+    $ipodSources
 # Hot codec cores and the playback engine keep /O2 /Ob3; whole-program decisions would undo their
 # hot-loop inlining. The slow group favours size but keeps bit-reader inlining (/Ob2).
 Add-Group 'slow' '' ($common + $size + $unicode + @('/Ob2', '/GL', '/MP')) `
@@ -231,7 +240,7 @@ Add-Group 'avx' '' (@('/nologo', '/std:c++20', '/O2', '/Ob2', '/arch:AVX2', '/Gy
         '/EHsc', '/GR-', '/MT', '/utf-8', '/DNOMINMAX')) `
     @($appSources | Where-Object { $_.BaseName -eq 'audio_avx' })
 # Test code and the shipping forwarder get their own object folders; /I src resolves "app.h".
-Add-Group 'tests' 'tests' ($common + $size + $unicode + @('/Ob0', '/GL', '/MP', '/I', 'src')) `
+Add-Group 'tests' 'tests' ($common + $size + $unicode + @('/Ob0', '/GL', '/MP', '/I', 'src', '/I', 'src\ipod\gpod\include')) `
     (Get-ChildItem -LiteralPath 'src\tests' -Filter *.cpp -File)
 Add-Group 'stub' 'stub' ($common + $size + $unicode + @('/Ob0', '/GL', '/MP', '/I', 'src')) `
     (Get-ChildItem -LiteralPath 'src\stub' -Filter *.cpp -File)
@@ -282,7 +291,7 @@ if ($resourceStale) {
 if ($sourceSetChanged) { $appLinked = $true }
 
 $appObjects = @()
-foreach ($name in @('app', 'encode', 'slow', 'hot', 'mdct', 'avx')) {
+foreach ($name in @('app', 'ipod', 'encode', 'slow', 'hot', 'mdct', 'avx')) {
     $appObjects += Get-Objects $groups[$name].ObjDir $groups[$name].Sources
 }
 $chipObjects = Get-Objects $groups['chiptune'].ObjDir $groups['chiptune'].Sources

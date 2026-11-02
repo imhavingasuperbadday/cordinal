@@ -54,7 +54,7 @@ void AnnouncePoints(const PointsAward& award) {
         g_chip.popAt = SDL_GetTicks();
     }
     // With the chip hidden, points keep adding up quietly: no level-up message, toast or sound.
-    if (award.levelAfter > award.levelBefore && g.settings.pointsChip) {
+    if (award.levelAfter > award.levelBefore && g.settings.layout.points) {
         g_chip.levelUpFrames = 40;
         bool newRank = PointsRank(award.levelAfter) != std::wstring(PointsRank(award.levelBefore));
         std::wstring text = L"Level " + std::to_wstring(award.levelAfter) + L": " + PointsRank(award.levelAfter);
@@ -69,7 +69,7 @@ void AnnouncePoints(const PointsAward& award) {
 }
 
 bool PointsChipAnimating() {
-    return g.settings.pointsChip && (g_chip.levelUpFrames > 0 || (g_chip.popAt && SDL_GetTicks() - g_chip.popAt < 2200) || ToastShown());
+    return g.settings.layout.points && (g_chip.levelUpFrames > 0 || (g_chip.popAt && SDL_GetTicks() - g_chip.popAt < 2200) || ToastShown());
 }
 
 // Called each frame the chip is shown: steps the level-up glow.

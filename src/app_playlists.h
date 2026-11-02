@@ -29,7 +29,8 @@ void ToggleColumn(int type);
 void ResetColumns();
 void ShowColumns(const std::vector<int>& types);  // exactly these, left to right (a pack's column set)
 void ShowColumnMenu(POINT pt);
-void DrawStars(HDC dc, RECT r, uint8_t rating, bool selected);
+void DrawStars(HDC dc, RECT r, uint8_t rating, bool selected, bool hover);
+LONG CellTextRight(int row, int sub, LONG right);
 uint8_t RatingAt(int x, uint8_t current);
 void SetRating(const std::vector<TrackId>& ids, uint8_t rating);
 HMENU RatingMenu();
@@ -56,6 +57,7 @@ StringPool::Handle Split1(StringPool::Handle h);
 void CreateLibView(HWND parent);
 void LibViewRebuild();
 void LibViewInvalidate();
+void LibViewForgetCovers(const std::vector<TrackId>& ids);  // their covers changed on disk
 void LibViewBusyTick(bool any);
 void LibViewTheme();
 void LibViewDpiChanged();
@@ -128,6 +130,7 @@ void SetSortArrow(int column, bool ascending);
 void UpdateSearchCue();
 void SortByColumn(int column);
 void RefreshTabs();
+void FitTabs();  // shares the strip among the tabs (app_tabstrip.cpp)
 void ActivatePlaylist(int index);
 std::wstring UniquePlaylistName(const std::wstring& base);
 void NewPlaylist(const std::wstring& name);

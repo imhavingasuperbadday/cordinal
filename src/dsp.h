@@ -266,6 +266,8 @@ public:
     TruePeak();
     void Add(const float* stereo, size_t frames);
     float Peak() const { return (float)peak_; }
+    // End-of-file peak, including the delayed inter-sample positions. Leaves streaming state intact.
+    float FinalPeak() const;
     void Reset();
 
 private:

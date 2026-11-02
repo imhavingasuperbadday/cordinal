@@ -5,8 +5,8 @@
 // ends it with cordinal, so a helper that crashes or hangs costs one track or one tool run, never
 // the player. This file holds the parts that need no window: the manifest, command lines, child
 // processes, trust records, the decoder, tag reading and the visual feed. app_helpers.cpp turns
-// helpers on and off, runs their tools and starts their visualizers. The visual feed and the visualizers are
-// Windows only; on Linux a program is any executable file in the helper's folder, started with posix_spawn.
+// helpers on and off, runs their tools and starts their visualizers. On Linux a program is any executable
+// file in the helper's folder, started with posix_spawn; the visual feed is a read-only inherited descriptor.
 #pragma once
 #include "decoder.h"
 #include "tags.h"
@@ -136,6 +136,9 @@ private:
 
 // Ends every helper program still running (cordinal is closing).
 void StopHelperPrograms();
+#ifndef _WIN32
+void ReapHelperPrograms();  // nonblocking cleanup of stopped Linux children, called by the UI tick
+#endif
 // How long a helper may stay silent before cordinal gives up on it: 15 seconds. The self-test
 // shortens it.
 void SetHelperPatience(unsigned milliseconds);
@@ -168,7 +171,6 @@ void ParseHelperInfo(const std::string& text, TagData& out);
 // The same lines as a tag edit for a tool's proposal. `ignored` names the lines it can't use.
 void ParseHelperEdit(const std::string& text, TagEdit& edit, std::vector<std::wstring>& ignored);
 
-#ifdef _WIN32
 // The visual feed: what is playing, for a visualizer to draw in sync. It is shared memory the
 // visualizer maps read-only through the handle {feed} names; cordinal rewrites it about 60 times a
 // second while a visualizer runs. `sequence` is odd while cordinal writes: a reader copies the block
@@ -195,6 +197,7 @@ public:
     ~HelperFeedWriter() { Close(); }
     bool Open();
     // A read-only handle for one visualizer, inheritable; the caller closes it once it started.
+    // On Linux HANDLE carries a native fd via intptr_t; close(fd), never CloseHandle, releases it.
     HANDLE ReaderHandle() const;
     // Fills `block` through the callback, between the sequence's odd and even steps.
     void Publish(const std::function<void(HelperFeed& block)>& fill);
@@ -202,9 +205,12 @@ public:
     bool IsOpen() const { return view_ != nullptr; }
 
 private:
+#ifdef _WIN32
     HANDLE mapping_ = nullptr;
+#else
+    int mapping_ = -1;
+#endif
     HelperFeed* view_ = nullptr;
 };
 // The reader's side: a consistent copy of the block, false when cordinal kept writing through it.
 bool ReadHelperFeed(const HelperFeed* shared, HelperFeed& copy);
-#endif

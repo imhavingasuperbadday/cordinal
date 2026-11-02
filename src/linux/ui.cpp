@@ -18,6 +18,7 @@
 // uses native controls (menus, the search box, the scroll bar) this draws their Windows 11 look.
 // Seek and volume tracks and handles stay centred together, using ui_spec.h's slider measurements.
 // Features the Linux build doesn't have are left out of the menus rather than shown disabled.
+#include "alternate_ui.h"
 #include "ui.h"
 #include "ui_internal.h"
 
@@ -32,6 +33,7 @@
 #include "points.h"
 #include "radio_ui.h"
 #include "steam.h"
+
 #include "text.h"
 #include "titleformat.h"
 
@@ -200,6 +202,7 @@ const Palette& CurrentPalette() {
 
 void ApplyTheme() {
     InitText(g.renderer, g.scale, ThemeInfo(g.settings.theme));
+    AlternateThemeChanged();
     g.engine.SetScope(false);
     g_visuals = {};
     g.redraw = true;
@@ -209,8 +212,24 @@ bool UiAnimating() {
     return ((LiveWaveformShown() || LiveFountainShown()) && (g.playing != kNone || RadioPlaying()) &&
             !IsPaused() && L.seek.w > 0) ||
            (MiniActive() && g.playing != kNone && !IsPaused()) || PointsChipAnimating() || LyricsAnimating() ||
-           GamesAnimating() || (g.settings.theme == ThemeMode::Foobar &&
+           (FountainStyleShown() && FountainAppearance().motion && g.playing != kNone && !IsPaused()) ||
+           GamesAnimating() || ((g.settings.theme == ThemeMode::Foobar || g.settings.theme == ThemeMode::Apollo) &&
            (g.playing != kNone ? !IsPaused() : g_visuals.Moving()));
+}
+
+// True when the live seek bar is the only thing moving and the software renderer keeps its backbuffer
+// between presents. A full frame then costs one rectangle instead of the whole window; overlays and
+// every other animation still force a full frame, so nothing is drawn over.
+bool SeekAnimationOnly() {
+    if (g.settings.gpuDrawing) return false;
+    if (!((LiveWaveformShown() || LiveFountainShown()) && (g.playing != kNone || RadioPlaying()) &&
+          !IsPaused() && L.seek.w > 0)) return false;
+    if (g_drag != Drag::None || g.searchFocused || !g_popups.empty() || g_folders.open || g_aboutOpen ||
+        g_web.open || g_exclude.open || PanelOpen() || StartupReviewOpen() || MiniActive()) return false;
+    if (PointsChipAnimating() || LyricsAnimating() || GamesAnimating()) return false;
+    if (FountainStyleShown() && FountainAppearance().motion && g.playing != kNone && !IsPaused()) return false;
+    return !((g.settings.theme == ThemeMode::Foobar || g.settings.theme == ThemeMode::Apollo) &&
+             (g.playing != kNone ? !IsPaused() : g_visuals.Moving()));
 }
 
 void ShowMessage(const std::wstring& text) {
@@ -241,6 +260,47 @@ void ShutdownUi() {
     g_thumbs.clear();
 }
 
+// Release renderer-owned caches before replacing the renderer. CPU copies retain open editors and
+// games across the switch, and worker results upload against the current renderer on the UI thread.
+bool SetGpuDrawing(bool enabled) {
+    const bool previous = g.settings.gpuDrawing;
+    ShutdownText();
+    ResetPanelRenderer(false);
+    ShutdownUi();
+    ReleaseFountainTexture();
+    ReleaseAlternateTextures();
+    if (g_about.texture) SDL_DestroyTexture(g_about.texture);
+    g_about.texture = nullptr;
+    g_about.textureSize = 0;
+    g_coverWanted = g_coverFor = kNone;
+    g_thumbFor.clear();
+    g_thumbsPending = 0;
+    SDL_DestroyRenderer(g.renderer);
+    g.renderer = SDL_CreateRenderer(g.window, enabled ? nullptr : SDL_SOFTWARE_RENDERER);
+    bool applied = g.renderer && (!enabled || std::string_view(SDL_GetRendererName(g.renderer)) != SDL_SOFTWARE_RENDERER);
+    if (!applied) {
+        if (g.renderer) SDL_DestroyRenderer(g.renderer);
+        g.renderer = SDL_CreateRenderer(g.window, previous ? nullptr : SDL_SOFTWARE_RENDERER);
+        if (!g.renderer) g.renderer = SDL_CreateRenderer(g.window, SDL_SOFTWARE_RENDERER);
+    }
+    if (!g.renderer) {
+        // The display was lost; let normal shutdown preserve the library and settings.
+        g.quit = true;
+        return false;
+    }
+    SDL_SetRenderVSync(g.renderer, 1);
+    SDL_SetRenderDrawBlendMode(g.renderer, SDL_BLENDMODE_BLEND);
+    g.settings.gpuDrawing = std::string_view(SDL_GetRendererName(g.renderer)) != SDL_SOFTWARE_RENDERER;
+    if (!InitText(g.renderer, g.scale, ThemeInfo(g.settings.theme))) {
+        g.quit = true;
+        return false;
+    }
+    ResetPanelRenderer(true);
+    g.redraw = true;
+    if (!applied) ShowMessage(L"The graphics renderer is unavailable; kept the working drawing mode.");
+    return applied;
+}
+
 void OnScaleChanged() {
     g.scale = SDL_GetWindowDisplayScale(g.window);
     if (g.scale <= 0) g.scale = 1;
@@ -267,6 +327,17 @@ void SetCover(CoverImage* image) {
             SDL_SetTextureScaleMode(g_cover, SDL_SCALEMODE_LINEAR);
         }
     }
+    g.redraw = true;
+}
+
+void ForgetCoverArt() {
+    // Covers still on their way keep their slots; SetThumb fills them as usual.
+    for (auto it = g_thumbs.begin(); it != g_thumbs.end();) {
+        if (!it->second.done) { ++it; continue; }
+        if (it->second.texture) SDL_DestroyTexture(it->second.texture);
+        it = g_thumbs.erase(it);
+    }
+    g_coverWanted = kNone;  // the next frame asks for the now-playing cover again
     g.redraw = true;
 }
 
@@ -308,6 +379,26 @@ void Render() {
     g.redraw = false;
 }
 
+// The live seek bar's 60 Hz frame: the rest of the software backbuffer is still the last full frame,
+// so copy just this rectangle to the window instead of letting SDL update all of it.
+void RenderSeek() {
+    SDL_SetRenderClipRect(g.renderer, nullptr);
+    DrawLiveSeek(CurrentPalette());
+#if SDL_VERSION_ATLEAST(3, 1, 3)
+    SDL_Rect rect{(int)std::floor(L.seek.x), (int)std::floor(L.seek.y),
+                  (int)std::ceil(L.seek.w), (int)std::ceil(L.seek.h)};
+    int width = 0, height = 0;
+    SDL_GetWindowSizeInPixels(g.window, &width, &height);
+    if (rect.x < 0) rect.w += rect.x, rect.x = 0;
+    if (rect.y < 0) rect.h += rect.y, rect.y = 0;
+    rect.w = std::min(rect.w, width - rect.x);
+    rect.h = std::min(rect.h, height - rect.y);
+    if (rect.w > 0 && rect.h > 0 && SDL_FlushRenderer(g.renderer) &&
+        SDL_UpdateWindowSurfaceRects(g.window, &rect, 1)) return;
+#endif
+    SDL_RenderPresent(g.renderer);
+}
+
 void HandleEvent(const SDL_Event& e) {
     switch (e.type) {
         case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP: case SDL_EVENT_MOUSE_WHEEL:
@@ -335,7 +426,11 @@ void HandleEvent(const SDL_Event& e) {
         case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
         case SDL_EVENT_WINDOW_EXPOSED:
         case SDL_EVENT_SYSTEM_THEME_CHANGED: g.redraw = true; break;
+        case SDL_EVENT_DROP_TEXT:
+            CoverPanelDrop(e.drop.data, false);
+            break;
         case SDL_EVENT_DROP_FILE:
+            if (CoverPanelDrop(e.drop.data, true)) break;  // the cover picker takes it as an image
             if (e.drop.data) {
                 static uint64_t lastDrop = 0;  // a drop of many files arrives as many events: one plop
                 if (SDL_GetTicks() - lastDrop > 500) PlaySfx(Sfx::Drop, 1);

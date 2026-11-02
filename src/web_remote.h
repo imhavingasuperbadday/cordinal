@@ -19,14 +19,15 @@ constexpr const char* kLetsEncrypt = "https://acme-v02.api.letsencrypt.org/direc
 
 // One HTTP or HTTPS request. On Windows `session` (a HINTERNET) may be shared so another thread can
 // cancel it by closing it, and null opens a private session; on Linux it is a const std::atomic<bool>*
-// that cancels the request when set, or null. Header names in the reply are lowercase.
+// that cancels the request when set, or null. Header names in the reply are lowercase. A body longer
+// than `maxBody` fails the request (status 0).
 struct HttpReply {
     unsigned status = 0;  // 0 when the request didn't complete
     std::string body;
     std::map<std::string, std::string> headers;
 };
 HttpReply HttpFetch(void* session, const std::string& url, const char* method, const std::string& body = {},
-                    const std::string& headers = {}, unsigned timeoutMs = 10000);
+                    const std::string& headers = {}, unsigned timeoutMs = 10000, size_t maxBody = 1u << 20);
 
 // A small JSON reader for ACME replies: objects, arrays, strings, numbers and literals.
 struct JsonValue {

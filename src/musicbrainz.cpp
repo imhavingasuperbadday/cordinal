@@ -5,6 +5,7 @@
 
 #include "album_editions.h"
 #include "backup.h"
+#include "metadata_fetch.h"
 #include "web_remote.h"
 
 #include <algorithm>
@@ -192,13 +193,15 @@ std::string Fetch(const Candidate& candidate, bool& offline) {
     offline = false;
     std::string query = "releasegroup:\"" + candidate.title + "\" AND artist:\"" + candidate.artist + "\"";
     std::string url = "https://musicbrainz.org/ws/2/release-group?query=" + Encode(query) + "&fmt=json&limit=25";
-    std::string headers = "User-Agent: cordinal/0.1.2 (https://github.com/imhavingasuperbadday/cordinal)\r\n"
+    std::string headers = "User-Agent: cordinal/0.1.3 (https://github.com/imhavingasuperbadday/cordinal)\r\n"
                           "Accept: application/json\r\n";
 #ifdef _WIN32
     void* session = nullptr;
 #else
     void* session = (void*)&s.stop;
 #endif
+    // The cover search asks musicbrainz.org too; both keep to one request a second together.
+    if (!online::WaitTurn("musicbrainz.org", &s.stop)) return {};
     web::HttpReply reply = web::HttpFetch(session, url, "GET", {}, headers, 8000);
     if (reply.status == 0) {
         offline = true;

@@ -1,6 +1,6 @@
 // The Linux front end's window, split by responsibility: the state, types and declarations that
 // used to share one translation unit. The public surface stays in ui.h; this header is private to
-// the ui*.cpp files.
+// the UI implementation files, including panels.cpp.
 #pragma once
 
 #include "ui.h"
@@ -45,7 +45,7 @@ inline constexpr double kTempos[] = {0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0};
 // --- geometry ------------------------------------------------------------------------------------
 // The window's parts, from DoLayout. The names follow ui::kLayout.
 struct Layout {
-    Rect menuBar, grip, buttons[6], elapsed, seek, remaining, speaker, volume, cover, title, subtitle, chip, lyrics;
+    Rect player, upNext, menuBar, grip, buttons[6], elapsed, seek, remaining, speaker, volume, cover, title, subtitle, chip, lyrics;
     Rect tabs, radioTab, search, viewRow, browser, splitter, list, header, rows, scrollbar, status, visuals[2];
     Rect radioSaved, radioDiscover, radioGenre, radioCountry, radioState, radioSearch, radioGrid;
     std::vector<Rect> tabRects, barItems;
@@ -56,7 +56,7 @@ extern Layout L;
 enum Button { kBtnPrev, kBtnPlay, kBtnNext, kBtnShuffle, kBtnRepeat, kBtnResume };
 
 // What the mouse is doing.
-enum class Drag { None, Seek, Volume, Scroll, ColumnEdge, Tracks, Splitter };
+enum class Drag { None, Seek, Volume, Dock, Scroll, ColumnEdge, Tracks, Splitter };
 extern uint64_t g_lastInput;
 extern Drag g_drag;
 extern int g_dragColumn;
@@ -119,13 +119,15 @@ enum Action {
     kNewPl, kRenamePl, kClosePl, kDuplicatePl, kReopenPl, kMovePlLeft, kMovePlRight, kNextPl, kPrevPl, kReveal,
     kFolders, kRescan, kAcceptInbox, kAcceptAllInbox, kExcludeLibrary, kDuplicateAudio, kCancelDuplicates,
     kSteam, kCancelSteam, kWebServer, kExportCord, kCancelExport, kConvert, kConvertUndo, kCancelConvert, kOrganize, kOrganizeUndo, kCopyTo, kCancelCopy,
-    kTheme, kOpenRadio, kGroupAlbums, kStartOnLogin, kNameThatTrack, kWhichCameFirst, kPoints, kReview, kPalette, kLyrics, kLayout, kMini, kPacks, kPackPlaylist, kHelpers, kHelperTool, kHelperCancel,
+    kIpodSync, kCancelIpodSync,
+    kTheme, kOpenRadio, kGroupAlbums, kStartOnLogin, kNameThatTrack, kWhichCameFirst, kPoints, kReview, kPalette, kLyrics, kLayout, kViewSize, kBigPanel, kBigReset, kMini, kPacks, kPackPlaylist, kHelpers, kHelperTool, kHelperCancel,
     kAbout,
-    kPlay, kPlayNext, kAddToQueue, kClearQueue, kAddToNowPlaying, kAddToPlaylist, kRemoveFromNowPlaying, kOpenFolder, kColumnToggle,
+    kPlay, kPlayNext, kAddToQueue, kClearQueue, kAddToNowPlaying, kAddToPlaylist, kRemoveFromNowPlaying, kOpenFolder, kColumnToggle, kPackColumnSet,
     kSectionPlay, kSectionLoop, kSectionStart, kSectionEnd, kSectionClear,
     kRating, kEditTags, kUndoTags, kEqualizer, kPreferences, kListenBrainz, kRgEnable, kRgScanSel, kRgScanPl, kRgCancel, kRgClear, kRgWrite, kWriteStatistics,
     kNewAuto, kEditAuto, kChoice, kGroupEditions, kPreferredEdition, kRemoveEdition, kSplitEditions,
-    kAlbumEditions, kEditionVersions,
+    kAlbumEditions, kEditionVersions, kRgScanAll, kFindCover, kFetchCovers, kCancelFetchCovers,
+    kSaveLyricsTags, kSaveLyricsLrc, kArtistInfo, kRestoreCover,
 };
 extern std::function<void(int)> g_choicePick;  // the choice a panel's OpenChoice menu is for
 struct MenuItem {
@@ -264,6 +266,7 @@ bool SameAlbum(const Track& a, const Track& b);
 void BuildLines();
 bool GroupHidesCell(const Line& line, int column);
 float ColumnWidth(int column);
+float CellTextWidth(const Line& line, size_t index, float width);
 std::string TabName(size_t i);
 void DoLayout();
 float ContentHeight();
@@ -335,7 +338,8 @@ void AboutClick(float x, float y);
 void DrawMenuBar(const Palette& p);
 void DrawPopups(const Palette& p);
 void DrawBandButton(const Rect& r, Icon icon, const Palette& p, bool active = false, bool enabled = true);
-void DrawSlider(const Rect& r, double frac, bool enabled, bool hot, const Palette& p);
+void DrawSlider(const Rect& r, double frac, bool enabled, bool hot, const Palette& p, bool vertical = false,
+                double notch = 0);
 bool PeakSource(TrackId id, std::wstring& path, double& start, double& end);
 bool RequestPeaks(TrackId id, Peaks& peaks, uint32_t& request);
 bool LiveWaveformShown();
@@ -360,7 +364,8 @@ int MenuHit(float x, float y, int* popup);
 void HoverMenu(int popup, int item);
 int BarItemAt(float x, float y);
 float Density();
-double SeekValueAt(float x);
+bool SeekVertical();
+double SeekValueAt(float x, float y);
 std::string SectionTime(double seconds);
 void OpenSectionMenu(float x, float y);
 void SectionAction(int action);

@@ -23,6 +23,8 @@
 // Waveform colors: each player position (top, bottom, left, right) can replace the theme's played
 // and unplayed colors with its own (Waveform > Colors). Paused and warning keep their state colors.
 #include "app.h"
+
+#ifdef CORDINAL_EXTRA_THEMES
 #include "peaks.h"
 #include "resource.h"
 
@@ -597,3 +599,62 @@ bool WaveLookCommand(int id) {
 }
 
 }  // namespace app
+
+#else
+
+// The fountain styles are the DELTARUNE theme's and this build leaves that theme out. The plain
+// waveform still honors per-position colors saved by a theme build; the menu that edits them and
+// the fountain itself are not exposed.
+namespace app {
+
+namespace {
+
+constexpr Rgb kThemeColor = 0xFFFFFFFF;
+Rgb dockPlayed[(int)Dock::Count] = {kThemeColor, kThemeColor, kThemeColor, kThemeColor};
+Rgb dockRest[(int)Dock::Count] = {kThemeColor, kThemeColor, kThemeColor, kThemeColor};
+
+Rgb DockPlayed() { return g.size == ViewSize::Normal ? dockPlayed[(int)g.layout.player] : kThemeColor; }
+Rgb DockRest() { return g.size == ViewSize::Normal ? dockRest[(int)g.layout.player] : kThemeColor; }
+
+}  // namespace
+
+void LoadWaveLook() {
+    const wchar_t* names[] = {L"Top", L"Bottom", L"Left", L"Right"};
+    auto color = [](const std::wstring& key) {
+        std::wstring s = IniRead(L"Waveform", key.c_str(), L"");
+        wchar_t* end = nullptr;
+        unsigned long v = s.size() == 6 ? wcstoul(s.c_str(), &end, 16) : 0;
+        return end && *end == 0 ? (Rgb)v : kThemeColor;
+    };
+    for (int i = 0; i < (int)Dock::Count; ++i) {
+        dockPlayed[i] = color(std::wstring(names[i]) + L"Played");
+        dockRest[i] = color(std::wstring(names[i]) + L"Unplayed");
+    }
+}
+bool FountainShown() { return false; }
+void PaintFountain(HDC, const RECT&, int, int, double) {}
+void FountainWake() {}
+bool FountainStep(UINT_PTR) { return false; }
+void AppendWaveLookMenu(HMENU) {}
+void UpdateWaveLookMenu(HMENU) {}
+bool WaveLookCommand(int) { return false; }
+
+COLORREF WaveformPlayedColor() {
+    bool warn = g.playing != kNone && (g_lib[g.playing].Failed() || g.stopAfterCurrent);
+    if (warn) return Ref(P().error);
+    if (g.engine.Paused()) return Ref(P().amber);
+    Rgb own = DockPlayed();
+    Rgb theme = ThemeInfo(g.themeMode).wavePlayed;
+    return own != kThemeColor ? Ref(own) : theme != kNoRgb ? Ref(theme) : Ref(P().accent);
+}
+
+COLORREF WaveformRestColor() {
+    if (g.fullLiveWaveform && LiveWaveformShown()) return WaveformPlayedColor();
+    Rgb own = DockRest();
+    Rgb theme = ThemeInfo(g.themeMode).waveRest;
+    return own != kThemeColor ? Ref(own) : theme != kNoRgb ? Ref(theme) : Ref(g.dark ? P().faint : P().border);
+}
+
+}  // namespace app
+
+#endif

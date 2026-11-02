@@ -107,6 +107,9 @@ void TestScanner(const std::wstring& media, const std::wstring& scratch) {
     CopyFileW((media + L"\\sine.mp3").c_str(), (root + L"\\Album\\02.mp3").c_str(), FALSE);
     CopyFileW((media + L"\\sine.flac").c_str(), (root + L"\\cover.txt").c_str(), FALSE);  // not audio
 
+    const std::wstring placeholder = root + L"\\Album\\placeholder.ogg";
+    if (!Ready(WriteTestBytes(placeholder, ""), L"SCANNER an empty game-audio placeholder is prepared")) return;
+
     std::vector<ScanResult*> results;
     bool firstDone = false;
     static std::vector<ScanResult*>* s_results;
@@ -135,7 +138,8 @@ void TestScanner(const std::wstring& media, const std::wstring& scratch) {
 
     for (auto* r : results) delete r;
     results.clear();
-    CopyFileW((media + L"\\sine.ogg").c_str(), (root + L"\\Album\\03.ogg").c_str(), FALSE);
+    // A placeholder populated after the first scan becomes a normal watched track.
+    CopyFileW((media + L"\\sine.ogg").c_str(), placeholder.c_str(), FALSE);
     DeleteFileW((root + L"\\Album\\02.mp3").c_str());
     CreateDirectoryW((root + L"\\New").c_str(), nullptr);
     CopyFileW((media + L"\\sine.flac").c_str(), (root + L"\\New\\a.flac").c_str(), FALSE);
@@ -149,11 +153,19 @@ void TestScanner(const std::wstring& media, const std::wstring& scratch) {
     for (auto* r : results)
         for (auto& f : r->files) names.push_back(FileNameOf(f.path));
     std::sort(names.begin(), names.end());
-    bool watched = names == std::vector<std::wstring>{L"01.flac", L"03.ogg", L"a.flac"};
+    bool watched = names == std::vector<std::wstring>{L"01.flac", L"a.flac", L"placeholder.ogg"};
     Check(watched, L"SCANNER watch: %zu re-list(s) with %zu file(s) after add/delete/new folder", results.size(), names.size());
     scanner.Stop();
     for (auto* r : results) delete r;
     results.clear();
+
+    batch.Next(L"SCANNER empty game-audio placeholders stay out and can become ordinary tracks");
+    std::vector<ScanFile> populated, emptied;
+    bool restored = ListAudioFiles(root, populated) && populated.size() == 3;
+    bool emptiedFile = WriteTestBytes(placeholder, "");
+    bool ignored = ListAudioFiles(root, emptied) && emptied.size() == 2;
+    Check(initial && watched && restored && emptiedFile && ignored,
+          L"SCANNER ignores empty placeholders, notices populated files and leaves them out again when emptied");
 
     HANDLE blocked = CreateFileW((root + L"\\Album").c_str(), FILE_LIST_DIRECTORY, 0, nullptr,
                                  OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
@@ -163,7 +175,7 @@ void TestScanner(const std::wstring& media, const std::wstring& scratch) {
         bool incomplete = !ListAudioFiles(root, partial);
         CloseHandle(blocked);
         bool complete = ListAudioFiles(root, recovered);
-        Check(incomplete && complete && recovered.size() == 3,
+        Check(incomplete && complete && recovered.size() == 2,
               L"SCANNER an unreadable child makes the listing incomplete, and unlocking restores it");
     }
 

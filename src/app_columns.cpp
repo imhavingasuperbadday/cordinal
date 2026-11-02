@@ -204,8 +204,10 @@ int StarWidth(HDC dc) {
 }
 
 // Five stars from the left of `r`: filled ones in the accent color (or the selection text
-// color on a selected row), empty ones faint, a half star as a clipped filled star.
-void DrawStars(HDC dc, RECT r, uint8_t rating, bool selected) {
+// color on a selected row), empty ones faint, a half star as a clipped filled star. An unrated
+// track's row shows nothing until it is hovered or selected (ui::ShowEmptyStars).
+void DrawStars(HDC dc, RECT r, uint8_t rating, bool selected, bool hover) {
+    if (!ui::ShowEmptyStars(rating, hover, selected)) return;
     int w = StarWidth(dc);
     HGDIOBJ old = SelectObject(dc, g.fontSymbol);
     SetBkMode(dc, TRANSPARENT);

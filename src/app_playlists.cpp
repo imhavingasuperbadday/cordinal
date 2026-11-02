@@ -492,6 +492,10 @@ void ShowListContextMenu(POINT pt) {
     AppendMenuW(m, MF_POPUP | (en == MF_ENABLED && !ConvertBusy() ? MF_ENABLED : MF_GRAYED), (UINT_PTR)CordExportMenu(), L"&Export .cord");
     AppendMenuW(m, MF_STRING | (en == MF_ENABLED && !CopyBusy() ? MF_ENABLED : MF_GRAYED), IDM_COPY_TO, L"Cop&y to folder or device...");
     AppendMenuW(m, MF_STRING | en, IDM_PROPERTIES, L"Edit &tags...\tAlt+Enter");
+    AppendMenuW(m, MF_STRING | en, IDM_FIND_COVER, L"C&hange cover...");
+    if (en == MF_ENABLED && HasCustomCover(SelectedTracks()))
+        AppendMenuW(m, MF_STRING, IDM_RESTORE_COVER, L"Restore origi&nal cover");
+    AppendMenuW(m, MF_STRING | en, IDM_ARTIST_INFO, L"Arti&st info...");
     AppendHelperTools(m, en == MF_ENABLED);
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendEditionMenu(m);
@@ -561,6 +565,10 @@ std::wstring CellText(int row, int col) {
     return text;
 }
 
+// Where the playing row was last painted and how wide its underline was.
+RECT g_playedRow{};
+int g_playedWidth = -1;
+
 // Paints a whole track row: its background (selection, hover or the list's own), then every
 // column. The visual style would otherwise paint its own blue hover and a line at each column
 // edge; the list keeps the style for its scroll bars.
@@ -594,7 +602,7 @@ void DrawTrackRow(NMLVCUSTOMDRAW* cd, int row, TrackId id, bool playing) {
             continue;
         }
         if (type == kColRating) {
-            DrawStars(dc, r, g_lib[id].rating, selected);
+            DrawStars(dc, r, g_lib[id].rating, selected, hot);
             continue;
         }
         std::wstring s = CellText(row, sub);
@@ -605,6 +613,7 @@ void DrawTrackRow(NMLVCUSTOMDRAW* cd, int row, TrackId id, bool playing) {
         if (s.empty()) continue;
         int align = type >= 0 ? ColumnAt(type).align & LVCFMT_JUSTIFYMASK : LVCFMT_LEFT;
         if (apollo && type == 0) align = LVCFMT_RIGHT;
+        if (align == LVCFMT_LEFT && sub > 0) r.right = CellTextRight(row, sub, r.right);
         RECT tr{r.left + S(6), r.top, r.right - S(6), r.bottom};
         HGDIOBJ old = SelectObject(dc, font);
         SetTextColor(dc, text);
@@ -612,6 +621,13 @@ void DrawTrackRow(NMLVCUSTOMDRAW* cd, int row, TrackId id, bool playing) {
                   (align == LVCFMT_RIGHT ? DT_RIGHT : align == LVCFMT_CENTER ? DT_CENTER : DT_LEFT) | DT_VCENTER | DT_SINGLELINE |
                       DT_NOPREFIX | DT_END_ELLIPSIS);
         SelectObject(dc, old);
+    }
+    if (playing && !apollo && !FoobarMode()) {
+        // The playing row underlines how far the track has got, so the list shows it without a
+        // look up at the seek bar. PlayingRowTick grows it.
+        g_playedRow = rc;
+        g_playedWidth = ui::PlayedWidth(rc.right - rc.left, g.engine.Position(), CurrentDuration());
+        FillSolid(dc, {rc.left, rc.bottom - S(2), rc.left + g_playedWidth, rc.bottom}, Ref(P().playing));
     }
     if (g.showFocusBoxes && (cd->nmcd.uItemState & CDIS_FOCUS) && GetFocus() == g.list &&
         !(SendMessageW(g.list, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS)) {
@@ -795,8 +811,44 @@ void BeginTrackDrag(int row, POINT pt) {
 
 }  // namespace
 
+// Where a track's left-aligned text in `sub` (ending at `right`) may run to: on across the columns
+// after it, in header order, whose cells the album header already speaks for, so a long title uses
+// the blank Artist and Album cells beside it instead of ending in an ellipsis.
+LONG CellTextRight(int row, int sub, LONG right) {
+    int pos = ViewPosOfRow(row);
+    TrackId id = RowTrack(row);
+    int count = Header_GetItemCount(g.header);
+    if (pos < 0 || id == kNone || count <= 0) return right;
+    std::vector<int> order(count);
+    if (!Header_GetOrderArray(g.header, count, order.data())) return right;
+    auto at = std::find(order.begin(), order.end(), sub);
+    if (at == order.end()) return right;
+    for (++at; at != order.end(); ++at) {
+        int type = ColumnType(*at);
+        RECT next{};
+        if (*at == 0 || type < 0 || !GroupHidesCell(pos, type, id) || HasBadge(type, id) ||
+            !ListView_GetSubItemRect(g.list, row, *at, LVIR_BOUNDS, &next))
+            break;
+        right = next.right;
+    }
+    return right;
+}
+
 // The drag/drop handler above and the self-test both need the same occurrence remapping.
 void MoveTrackBlock(const std::vector<int>& sources, int target) { MoveTrackBlockImpl(sources, target); }
+
+// Repaints the strip under the playing row once its underline has grown by a pixel. The row last
+// painted may have scrolled since; repainting a strip of whatever is there now costs nothing, and
+// the row draws its own underline when it comes back into view.
+void PlayingRowTick() {
+    if (g_playedWidth < 0 || !g.list) return;
+    int width = g.playing == kNone ? -1
+                                   : ui::PlayedWidth(g_playedRow.right - g_playedRow.left, g.engine.Position(), CurrentDuration());
+    if (width == g_playedWidth) return;
+    RECT strip{g_playedRow.left, g_playedRow.bottom - S(2), g_playedRow.right, g_playedRow.bottom};
+    InvalidateRect(g.list, &strip, FALSE);
+    if (width < 0) g_playedWidth = -1;
+}
 
 // Mouse tracking for the track drag begun by LVN_BEGINDRAG. The list would otherwise keep the
 // messages (it captures the mouse itself), so the drag lives in this subclass.
@@ -879,10 +931,12 @@ LRESULT OnListNotify(NMHDR* hdr) {
         }
         case NM_CUSTOMDRAW: {
             auto* cd = reinterpret_cast<NMLVCUSTOMDRAW*>(hdr);
-            if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW | (FoobarMode() ? CDRF_NOTIFYPOSTPAINT : 0);
+            if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT;
             if (cd->nmcd.dwDrawStage == CDDS_POSTPAINT) {
-                // foobar2000's playlist is plain black past its last row (the dark list theme would
-                // draw its column lines there).
+                // Past the last row the list is plain background: the list theme would draw its
+                // column lines down an empty or short playlist. A drag's insertion mark after the
+                // last row is left alone.
+                if (g_trackDrag.active) return CDRF_DODEFAULT;
                 RECT client, last{};
                 GetClientRect(g.list, &client);
                 int n = ListView_GetItemCount(g.list);

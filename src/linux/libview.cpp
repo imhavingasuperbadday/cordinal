@@ -9,6 +9,7 @@
 // field among the tracks the panes to their left let through, with "All" on top. The views show what
 // the Library's list would show (browser and search applied), grouped; their selection lives in
 // g.selected like the list's, so menus and commands act on it.
+#include "alternate_ui.h"
 #include "libview.h"
 
 #include "album_editions.h"
@@ -584,8 +585,10 @@ float g_mx = -1, g_my = -1;
 Hit g_hover;
 
 // Five small stars 12 pixels apart, as Windows draws them (its symbol font's star is smaller than the
-// UI font's here): the rating's in the accent, a half star filled on its left, the rest faint.
-void DrawStars(const Rect& r, uint8_t rating, bool selected, const Palette& p) {
+// UI font's here): the rating's in the accent, a half star filled on its left, the rest faint. An
+// unrated track's row shows nothing until it is hovered or selected (ui::ShowEmptyStars).
+void DrawStars(const Rect& r, uint8_t rating, bool selected, bool hover, const Palette& p) {
+    if (!ui::ShowEmptyStars(rating, hover, selected)) return;
     const float w = F(12), outer = F(4.6f), inner = outer * 0.42f, cy = r.y + r.h / 2;
     SDL_Rect area{};
     const bool clipped = SDL_RenderClipEnabled(g.renderer);
@@ -629,7 +632,7 @@ void DrawTrackRow(const Album& a, int t, const Rect& r, bool hover, const Palett
     float right = r.R() - F(6);
     DrawText(Font::Small, Utf8(FormatDuration(tr.Duration())), right - F(48), TextY(r, Font::Small), sub, F(48), 2);
     right -= F(56);
-    DrawStars({right - F(64), r.y, F(64), r.h}, tr.rating, sel, p);
+    DrawStars({right - F(64), r.y, F(64), r.h}, tr.rating, sel, hover, p);
     right -= F(72);
     if (tr.artist && tr.artist != a.artist) {
         float aw = std::min(F(220), (right - r.x) * 0.4f);
@@ -769,6 +772,7 @@ void ToggleBrowser() {
 }
 
 bool BrowserShown() {
+    if (AlternateMode()) return false;
     return g.settings.browserVisible && !g.playlists.empty() && g.playlists[g.active].kind == PlaylistKind::Library;
 }
 
@@ -1009,6 +1013,7 @@ void BrowserWheel(const Rect& area, float x, float y, float dy) {
 
 // --- views ------------------------------------------------------------------------------------------
 bool CanvasActive() {
+    if (AlternateMode()) return false;
     return !g.playlists.empty() && g.playlists[g.active].kind == PlaylistKind::Library && g.settings.libraryMode != LibraryMode::Tracks;
 }
 

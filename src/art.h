@@ -12,8 +12,12 @@ struct ArtImage {
     bool Empty() const { return pixels.empty(); }
 };
 
-// Decodes and scales to fit `size` x `size`. Requires COM (WIC) on the calling thread.
-bool LoadAlbumArt(const std::wstring& mediaPath, int size, ArtImage& out);
+// Decodes and scales to fit `size` x `size`. Requires COM (WIC) on the calling thread. A cover
+// chosen in cordinal (customcover.h) comes first unless `custom` is false, as for the tag editor,
+// which shows what the file itself holds.
+bool LoadAlbumArt(const std::wstring& mediaPath, int size, ArtImage& out, bool custom = true);
 // Decodes any image WIC understands from a stream, scaled to fit `size` x `size`. Requires COM.
+// `sourceWidth`/`sourceHeight`, when given, receive the image's own size.
 struct IStream;
-bool DecodeImage(IStream* stream, int size, ArtImage& out, uint64_t maxPixels = 100000000);
+bool DecodeImage(IStream* stream, int size, ArtImage& out, uint64_t maxPixels = 100000000, int* sourceWidth = nullptr,
+                 int* sourceHeight = nullptr);

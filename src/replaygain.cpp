@@ -364,6 +364,19 @@ std::vector<TrackId> AutoMeasureTracks(const std::vector<TrackId>& upcoming, siz
     return ids;
 }
 
+std::vector<TrackId> LibraryTracks() {
+    std::vector<TrackId> ids;
+    for (TrackId id = 0; id < (TrackId)g_lib.Count(); ++id)
+        if (g_lib[id].InLibrary()) ids.push_back(id);
+    return ids;
+}
+
+bool HasLibraryTracks() {
+    for (TrackId id = 0; id < (TrackId)g_lib.Count(); ++id)
+        if (g_lib[id].InLibrary()) return true;
+    return false;
+}
+
 RgResult Measure(const TrackPath& item, uint64_t fileSize, uint64_t fileTime, const std::atomic<bool>& cancel,
                  std::atomic<std::shared_ptr<Decoder>>& current, BackgroundCpuBudget* budget) {
     std::wstring error;
@@ -381,7 +394,7 @@ RgResult Measure(const TrackPath& item, uint64_t fileSize, uint64_t fileTime, co
         while (!cancel) {
             size_t n = dec->Read(buf.data(), 4096);
             if (!n) {
-                complete = true;
+                complete = !dec->Failed();
                 break;
             }
             meter.Add(buf.data(), n);
@@ -390,13 +403,13 @@ RgResult Measure(const TrackPath& item, uint64_t fileSize, uint64_t fileTime, co
             if (budget) budget->Pace(cancel);
         }
         const double lufs = meter.Integrated();
-        if (complete && std::isfinite(lufs)) {
+        if (complete && !cancel && std::isfinite(lufs)) {
             // Only whole files: a sub-track's peaks depend on its range, which the seek bar asks for.
             Peaks wave{};
             if (item.Path().find(L'|') == std::wstring::npos && peaks.Finish(wave))
                 StorePeaks(item.Path(), fileSize, fileTime, 0, 0, wave);
             const double high = meter.HighLoudness();
-            result = {item.id, (float)(kReplayGainReference - lufs), truePeak.Peak(),
+            result = {item.id, (float)(kReplayGainReference - lufs), truePeak.FinalPeak(),
                       std::isfinite(high) ? (float)std::max(0.0, high - lufs) : 0.0f, true};
         }
     }

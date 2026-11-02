@@ -123,47 +123,50 @@ void TestGapless(const std::wstring& dir) {
 
 // Resampler: chunked pushes must match one whole push exactly, the length and a resampled 1 kHz tone
 // must be right, and every rate pair (up, down, equal, extreme) must preserve a stereo DC level.
+// Audible tones must survive conversion and frequencies above the output's Nyquist must not alias.
 void TestResampler() {
     testlog::Batch batch;
     if (nativeaudio::FastAudioKernels()) {
         // Reproduce the original lane arithmetic with scalar FMA. Synthetic rows
         // expose a misplaced coefficient even when a DC or tone check would pass.
         bool exact = true;
-        std::vector<float> table(257 * 32), history(256 * 2);
-        for (size_t i = 0; i < table.size(); ++i) table[i] = (float)((int)(i * 37 % 211) - 105) / 211;
-        for (size_t i = 0; i < history.size(); ++i) history[i] = (float)((int)(i * 73 % 509) - 254) / 127;
-        for (unsigned denominator : {1u, 6u, 147u, 160u, 256u, 257u}) {
-            auto prepared = table;
-            if (denominator <= 256) nativeaudio::AudioResamplePrepareAvx2(prepared.data(), denominator);
-            constexpr unsigned frames = 37;
-            float actual[frames * 2 + 2], expected[frames * 2];
-            std::fill_n(actual, frames * 2 + 2, 123.0f);
-            size_t index = 15, referenceIndex = index;
-            uint64_t numerator = denominator - 1, referenceNum = numerator;
-            const unsigned remainder = denominator / 2;
-            nativeaudio::AudioResampleAvx2(history.data(), prepared.data(), frames, 1, remainder, denominator,
-                                         index, numerator, actual + 1);
-            for (unsigned frame = 0; frame < frames; ++frame) {
-                const double phase = (unsigned)referenceNum * (256.0 / denominator);
-                const unsigned p = (unsigned)phase;
-                const float blend = (float)(phase - p);
-                float a[8]{}, b[8]{};
-                for (unsigned k = 0; k < 32; k += 8) for (unsigned lane = 0; lane < 8; ++lane) {
-                    const unsigned tap = k + lane / 2;
-                    const float lo = std::fma(table[(p + 1) * 32 + tap] - table[p * 32 + tap], blend, table[p * 32 + tap]);
-                    const float hi = std::fma(table[(p + 1) * 32 + tap + 4] - table[p * 32 + tap + 4], blend, table[p * 32 + tap + 4]);
-                    const size_t at = (referenceIndex - 15) * 2 + k * 2 + lane;
-                    a[lane] = std::fma(history[at], lo, a[lane]);
-                    b[lane] = std::fma(history[at + 8], hi, b[lane]);
+        for (unsigned taps : {128u, 144u, 512u, 3072u}) {
+            std::vector<float> table(257 * taps), history((taps + 256) * 2);
+            for (size_t i = 0; i < table.size(); ++i) table[i] = (float)((int)(i * 37 % 211) - 105) / 211;
+            for (size_t i = 0; i < history.size(); ++i) history[i] = (float)((int)(i * 73 % 509) - 254) / 127;
+            for (unsigned denominator : {1u, 6u, 147u, 160u, 256u, 257u}) {
+                auto prepared = table;
+                if (denominator <= 256) nativeaudio::AudioResamplePrepareAvx2(prepared.data(), taps, denominator);
+                constexpr unsigned frames = 37;
+                float actual[frames * 2 + 2], expected[frames * 2];
+                std::fill_n(actual, frames * 2 + 2, 123.0f);
+                size_t index = taps / 2 - 1, referenceIndex = index;
+                uint64_t numerator = denominator - 1, referenceNum = numerator;
+                const unsigned remainder = denominator / 2;
+                nativeaudio::AudioResampleAvx2(history.data(), prepared.data(), taps, frames, 1, remainder, denominator,
+                                             index, numerator, actual + 1);
+                for (unsigned frame = 0; frame < frames; ++frame) {
+                    const double phase = (unsigned)referenceNum * (256.0 / denominator);
+                    const unsigned p = (unsigned)phase;
+                    const float blend = (float)(phase - p);
+                    float a[8]{}, b[8]{};
+                    for (unsigned k = 0; k < taps; k += 8) for (unsigned lane = 0; lane < 8; ++lane) {
+                        const unsigned tap = k + lane / 2;
+                        const float lo = std::fma(table[(p + 1) * taps + tap] - table[p * taps + tap], blend, table[p * taps + tap]);
+                        const float hi = std::fma(table[(p + 1) * taps + tap + 4] - table[p * taps + tap + 4], blend, table[p * taps + tap + 4]);
+                        const size_t at = (referenceIndex - (taps / 2 - 1)) * 2 + k * 2 + lane;
+                        a[lane] = std::fma(history[at], lo, a[lane]);
+                        b[lane] = std::fma(history[at + 8], hi, b[lane]);
+                    }
+                    for (unsigned c = 0; c < 2; ++c)
+                        expected[frame * 2 + c] = ((a[c] + b[c]) + (a[c + 4] + b[c + 4])) +
+                                                  ((a[c + 2] + b[c + 2]) + (a[c + 6] + b[c + 6]));
+                    referenceNum += remainder; ++referenceIndex;
+                    if (referenceNum >= denominator) { referenceNum -= denominator; ++referenceIndex; }
                 }
-                for (unsigned c = 0; c < 2; ++c)
-                    expected[frame * 2 + c] = ((a[c] + b[c]) + (a[c + 4] + b[c + 4])) +
-                                              ((a[c + 2] + b[c + 2]) + (a[c + 6] + b[c + 6]));
-                referenceNum += remainder; ++referenceIndex;
-                if (referenceNum >= denominator) { referenceNum -= denominator; ++referenceIndex; }
+                exact &= memcmp(actual + 1, expected, sizeof expected) == 0 && index == referenceIndex &&
+                         numerator == referenceNum && actual[0] == 123 && actual[frames * 2 + 1] == 123;
             }
-            exact &= memcmp(actual + 1, expected, sizeof expected) == 0 && index == referenceIndex &&
-                     numerator == referenceNum && actual[0] == 123 && actual[frames * 2 + 1] == 123;
         }
         batch.Next(L"RESAMPLE prepared and interpolated AVX2 phases preserve exact FMA results, cursor and "
                    L"output guards");
@@ -192,7 +195,7 @@ void TestResampler() {
     Check(a == b, L"RESAMPLE chunked pushes produce identical output (%zu frames)", a.size() / 2);
     Check(std::fabs((double)a.size() / 2 - src.size() / 2.0 * out / in) <= 2 && snr > 80,
           L"RESAMPLE 44100->48000 frames=%zu snr=%.1f dB", a.size() / 2, snr);
-    testlog::Cases reuse, gain;
+    testlog::Cases reuse, gain, shortStreams, pending;
     for (auto rates : {std::pair{8000u,48000u},std::pair{48000u,8000u},std::pair{44100u,48000u},
                        std::pair{48000u,44100u},std::pair{44100u,96000u},std::pair{96000u,48000u},
                        std::pair{48000u,48000u},std::pair{192000u,8000u},
@@ -214,15 +217,100 @@ void TestResampler() {
         reused.Reset();reused.Process(dc.data(),dc.size()/2,block);reused.Flush(block);
         reuse.Add(same && block==expected,pair);
         bool dcGain=true;
-        size_t guard=(size_t)std::max(32.0,std::ceil(32.0*rates.second/rates.first));
+        size_t guard=(size_t)std::max(128.0,std::ceil(128.0*rates.second/rates.first));
         for (size_t i=guard;i+guard<expected.size()/2;++i)
             dcGain&=std::abs(expected[i*2]-0.25f)<1e-6f && std::abs(expected[i*2+1]+0.125f)<1e-6f;
         gain.Add(dcGain && std::abs(expected.size()/2.0-8191.0*rates.second/rates.first)<=2,
                  pair+L" "+std::to_wstring(expected.size()/2)+L" frames"+(dcGain?L"":L", DC off"));
+        for (size_t frames : {1u, 15u, 64u, 65u, 257u}) {
+            whole.Reset(); reused.Reset(); expected.clear(); actual.clear();
+            whole.Push(dc.data(), frames, expected);
+            const double total = (double)frames * rates.second / rates.first;
+            const double owed = whole.PendingOutput();
+            pending.Add(std::abs(owed + expected.size() / 2.0 - total) < 1e-8, pair);
+            whole.Flush(expected);
+            for (size_t pos = 0; pos < frames; pos += 3)
+                reused.Push(dc.data() + pos * 2, std::min<size_t>(3, frames - pos), actual);
+            reused.Flush(actual);
+            const size_t length = expected.size();
+            whole.Flush(expected);
+            shortStreams.Add(expected == actual && expected.size() == length &&
+                std::abs(expected.size() / 2.0 - total) < 1 && whole.PendingOutput() == 0,
+                pair + L" " + std::to_wstring(frames) + L" input frames");
+        }
     }
     Check(reuse.Passed(),L"RESAMPLE reused output, chunking and reset agree at every rate pair (up, down, equal, extreme)%ls",
           reuse.failed.c_str());
     Check(gain.Passed(),L"RESAMPLE duration and stereo DC gain hold at every rate pair%ls",gain.failed.c_str());
+    Check(shortStreams.Passed(), L"RESAMPLE streams shorter than the kernel flush once without losing samples%ls",
+          shortStreams.failed.c_str());
+    Check(pending.Passed(), L"RESAMPLE pending frames keep track boundaries at their exact rational positions%ls",
+          pending.failed.c_str());
+
+    batch.Next(L"RESAMPLE preserves the passband and rejects aliases and images at common and extreme rate pairs");
+    testlog::Cases passband, stopband;
+    double worstSnr = 200, worstRejection = 200, worstGain = 0;
+    for (auto rates : {std::pair{8000u,48000u}, std::pair{44100u,48000u}, std::pair{48000u,44100u}, std::pair{44100u,96000u},
+                       std::pair{96000u,48000u}, std::pair{192000u,48000u}, std::pair{48000u,8000u},
+                       std::pair{192000u,8000u}, std::pair{65792u,65536u}, std::pair{65536u,65792u}}) {
+        const unsigned low = std::min(rates.first, rates.second);
+        const std::wstring pair = std::to_wstring(rates.first) + L"->" + std::to_wstring(rates.second);
+        Resampler sampler;
+        sampler.Init(rates.first, rates.second);
+        // Compare to an analytic stereo tone, rather than another implementation of the filter.
+        // Trim both ends so starting and flushing the stream do not count as frequency response.
+        auto measure = [&](double hz, bool reject) {
+            const size_t frames = rates.first / 4;
+            std::vector<float> input(frames * 2), output;
+            constexpr double tau = 6.283185307179586;
+            for (size_t i = 0; i < frames; ++i) {
+                const double phase = tau * hz * i / rates.first;
+                input[i * 2] = (float)(0.5 * std::sin(phase));
+                input[i * 2 + 1] = (float)(0.25 * std::cos(phase));
+            }
+            sampler.Reset();
+            sampler.Push(input.data(), frames, output);
+            sampler.Flush(output);
+            const bool finite = std::all_of(output.begin(), output.end(), [](float v) { return std::isfinite(v); });
+            double signal = 0, error = 0, power = 0;
+            const size_t guard = (size_t)std::max(256.0, std::ceil(128.0 * rates.second / rates.first));
+            size_t count = 0;
+            for (size_t i = guard; i + guard < output.size() / 2; ++i) {
+                const double phase = tau * hz * i / rates.second;
+                const double ideal[2] = {0.5 * std::sin(phase), 0.25 * std::cos(phase)};
+                for (unsigned c = 0; c < 2; ++c) {
+                    const double value = output[i * 2 + c];
+                    signal += ideal[c] * ideal[c];
+                    error += (value - ideal[c]) * (value - ideal[c]);
+                    power += value * value;
+                }
+                ++count;
+            }
+            const std::wstring name = pair + L" " + std::to_wstring(hz) + L" Hz";
+            if (reject) {
+                const double db = -10 * std::log10(std::max(1e-30, power / std::max(1.0, count * 0.15625)));
+                worstRejection = std::min(worstRejection, db);
+                stopband.Add(finite && count > 0 && db > 90, name + L" rejection " + std::to_wstring(db) + L" dB");
+            } else {
+                const double snr = 10 * std::log10(signal / std::max(1e-30, error));
+                const double db = 10 * std::log10(std::max(1e-30, power / std::max(1e-30, signal)));
+                worstSnr = std::min(worstSnr, snr);
+                worstGain = std::max(worstGain, std::abs(db));
+                passband.Add(finite && count > 0 && snr > 85 && std::abs(db) < 0.01,
+                             name + L" SNR " + std::to_wstring(snr) + L" dB, gain " + std::to_wstring(db) + L" dB");
+            }
+        };
+        for (double fraction : {0.05, 0.2, 0.35, 0.4, 0.45}) measure(low * fraction, false);
+        if (rates.first > rates.second)
+            for (double fraction : {0.5, 0.51, 0.55, 0.65, 0.9})
+                if (rates.second * fraction < rates.first * 0.5) measure(rates.second * fraction, true);
+    }
+    fwprintf(g_log, L"  frequency response: worst passband SNR %.1f dB, gain error %.5f dB, rejection %.1f dB\n",
+             worstSnr, worstGain, worstRejection);
+    Check(passband.Passed(), L"RESAMPLE passband through 90%% of Nyquist: worst SNR %.1f dB, gain error %.4f dB%ls",
+          worstSnr, worstGain, passband.failed.c_str());
+    Check(stopband.Passed(), L"RESAMPLE stopband from Nyquist: worst rejection %.1f dB%ls",
+          worstRejection, stopband.failed.c_str());
 }
 
 // Range decoding on a synthetic ramp WAV: exact, fractional and open-ended [start, end) windows

@@ -40,18 +40,21 @@ struct GameResult {
 // A cover on the GPU; a null texture is a cover still loading or missing.
 struct Art {
     SDL_Texture* texture = nullptr;
-    void Set(const CoverImage& img) {
-        Clear();
+    CoverImage image;
+    void Upload() {
+        const auto& img = image;
         if (img.width <= 0) return;
         texture = SDL_CreateTexture(g.renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STATIC, img.width, img.height);
         if (!texture) return;
         SDL_UpdateTexture(texture, nullptr, img.rgba.data(), img.width * 4);
         SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_LINEAR);
     }
-    void Clear() {
+    void Set(const CoverImage& img) { Clear(); image = img; Upload(); }
+    void Release() {
         if (texture) SDL_DestroyTexture(texture);
         texture = nullptr;
     }
+    void Clear() { Release(); image = {}; }
 };
 
 struct Album {
@@ -692,6 +695,11 @@ void OnButton(int id) {
 
 // The panel opens on a game, and switching tabs keeps each game where it was.
 void ShowGame(int which) { SetTab(which == 0 ? Tab::NameThatTrack : Tab::WhichCameFirst); }
+
+void ResetGameRenderer(bool restore) {
+    for (Art* art : {&q.answerArt, &q.covers[0], &q.covers[1]})
+        if (restore) art->Upload(); else art->Release();
+}
 
 void CloseGames() {
     sfx::StopClip();

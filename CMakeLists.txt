@@ -5,7 +5,7 @@
 # Needs SDL3, SDL3_ttf, PipeWire (libpipewire-0.3), libsystemd (sd-bus), fontconfig and OpenSSL 3
 # (the web server's HTTPS away from home).
 cmake_minimum_required(VERSION 3.20)
-project(cordinal VERSION 0.1.2 LANGUAGES CXX)
+project(cordinal VERSION 0.1.3 LANGUAGES CXX)
 
 if(WIN32)
     message(FATAL_ERROR "On Windows, build with build.bat")
@@ -31,21 +31,23 @@ find_package(OpenSSL 3 REQUIRED)
 file(GLOB CHIPS CONFIGURE_DEPENDS src/chiptune/*.cpp)
 file(GLOB AUDIO CONFIGURE_DEPENDS src/audio_*.cpp)
 file(GLOB ENCODE CONFIGURE_DEPENDS src/encode/*.cpp)
+# Classic iPod support: the adapter and the pure C++ libgpod subset it drives.
+file(GLOB IPOD CONFIGURE_DEPENDS src/ipod/*.cpp src/ipod/gpod/src/*.cpp)
 set_source_files_properties(${ENCODE} PROPERTIES COMPILE_DEFINITIONS "_USE_MATH_DEFINES")
 set_source_files_properties(src/audio_avx.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mpclmul")
 
 # The portable core, compiled against the Windows API subset in src/linux/compat.
 add_library(cordinal_core STATIC
-    src/album_editions.cpp src/archive.cpp src/autoplaylist.cpp src/cue.cpp src/decoder.cpp src/dsp.cpp src/engine.cpp src/game_music.cpp src/inflate.cpp src/musicbrainz.cpp
+    src/album_editions.cpp src/archive.cpp src/autoplaylist.cpp src/cue.cpp src/decoder.cpp src/dsp.cpp src/engine.cpp src/game_music.cpp src/inflate.cpp src/musicbrainz.cpp src/metadata_fetch.cpp src/coverfetch.cpp src/customcover.cpp
     src/library.cpp src/librarydb.cpp src/listenbrainz.cpp src/migration.cpp src/backup.cpp src/playlog.cpp src/points.cpp src/radio.cpp src/radio_browser.cpp src/radio_stream.cpp src/radio_hls.cpp src/scanner.cpp src/sfx.cpp src/sort.cpp src/steam.cpp
-    src/helpers.cpp src/streamfile.cpp src/tags.cpp src/tagwriter.cpp src/tagwriter_flacogg.cpp src/tagwriter_mp3mp4.cpp
+    src/headsets.cpp src/helpers.cpp src/streamfile.cpp src/tags.cpp src/tagwriter.cpp src/tagwriter_flacogg.cpp src/tagwriter_mp3mp4.cpp
     src/tagwriter_cord.cpp src/tagundo.cpp src/playlist_files.cpp src/playlist.cpp src/md5.cpp src/cord_encode.cpp src/cord_export.cpp
     src/convert.cpp src/organize.cpp src/devicecopy.cpp src/linux/recycle.cpp
     src/titleformat.cpp src/peaks.cpp src/theme_palette.cpp src/replaygain.cpp src/eq_profile.cpp
     src/packs.cpp src/web_audio.cpp src/web_catalog.cpp src/web_http.cpp src/web_library.cpp src/web_server.cpp src/web_ui.cpp
     src/web_aac.cpp src/web_acme.cpp src/web_reach.cpp src/web_remote.cpp src/qr.cpp src/linux/tls_openssl.cpp
-    ${AUDIO} ${CHIPS} ${ENCODE} src/linux/compat/compat.cpp src/linux/audio_pipewire.cpp src/linux/sfx_pipewire.cpp)
-target_include_directories(cordinal_core PUBLIC src src/linux/compat)
+    ${AUDIO} ${CHIPS} ${ENCODE} ${IPOD} src/linux/compat/compat.cpp src/linux/audio_pipewire.cpp src/linux/sfx_pipewire.cpp)
+target_include_directories(cordinal_core PUBLIC src src/linux/compat src/ipod/gpod/include)
 target_compile_definitions(cordinal_core PUBLIC UNICODE _UNICODE NOMINMAX)
 # Releases ship Light and Dark only; ON compiles in the other themes and embeds their art (theme_palette.h).
 option(CORDINAL_EXTRA_THEMES "Include the themes beyond Light and Dark" OFF)
@@ -64,11 +66,14 @@ add_executable(cordinal
     src/linux/main.cpp src/linux/ui.cpp src/linux/radio_ui.cpp src/linux/text.cpp src/linux/settings.cpp src/linux/library_sync.cpp
     src/linux/playback.cpp src/linux/cover.cpp src/linux/mpris.cpp src/linux/web.cpp src/linux/replaygain.cpp
     src/linux/tagwrite.cpp src/linux/panels.cpp src/linux/cord_export.cpp src/linux/convert_run.cpp src/linux/expand.cpp
-    src/linux/organize_run.cpp src/linux/copy_run.cpp src/linux/libview.cpp src/linux/scrobble.cpp src/linux/sounds.cpp src/linux/points_ui.cpp src/linux/lyrics.cpp src/linux/mini.cpp src/linux/packs_ui.cpp src/linux/helpers_ui.cpp src/linux/preferences_ui.cpp src/linux/games.cpp src/linux/editions_ui.cpp
+    src/linux/organize_run.cpp src/linux/copy_run.cpp src/linux/ipod_run.cpp src/linux/libview.cpp src/linux/scrobble.cpp src/linux/sounds.cpp src/linux/points_ui.cpp src/linux/lyrics.cpp src/linux/mini.cpp src/linux/packs_ui.cpp src/linux/helpers_ui.cpp src/linux/preferences_ui.cpp src/linux/games.cpp src/linux/editions_ui.cpp src/linux/coverfetch_ui.cpp src/linux/artistinfo_ui.cpp
     src/linux/ui_model.cpp src/linux/ui_layout.cpp src/linux/ui_menus.cpp src/linux/ui_dialogs.cpp
     src/linux/ui_draw.cpp src/linux/ui_input.cpp src/linux/ui_files.cpp src/linux/ui_checks.cpp
-    src/tests/selftest_linux_packs.cpp)
-target_sources(cordinal PRIVATE src/linux/migration.cpp src/linux/fountain.cpp)
+    src/tests/selftest_linux_packs.cpp src/tests/selftest_linux_headsets.cpp
+    src/linux/headsets.cpp src/linux/headphones_ui.cpp src/linux/output_profiles.cpp
+    src/linux/helper_feed.cpp src/tests/selftest_linux_helpers.cpp)
+target_sources(cordinal PRIVATE src/linux/migration.cpp src/linux/fountain.cpp src/linux/alternate_ui.cpp src/tests/selftest_linux_alternate.cpp)
+target_sources(cordinal PRIVATE src/linux/big_ui.cpp src/tests/selftest_linux_big.cpp)
 
 # The Windows icon file, whose images are PNGs: the window's icon, the About box's and the web player's.
 # GENERATE preserves timestamps when bytes are unchanged, so repeated configuration does not
@@ -90,6 +95,13 @@ if(CORDINAL_EXTRA_THEMES)
     endforeach()
     file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/game_sounds.inc" CONTENT "${GAME_SOUNDS}")
 
+    set(APOLLO_IMAGES "")
+    foreach(image toolbar rebar_capacala rebar_apollo rebar_letters rebar_notes)
+        file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/apollo/${image}.png" IMAGE_HEX HEX)
+        string(REGEX REPLACE "(..)" "0x\\1," IMAGE_HEX "${IMAGE_HEX}")
+        string(APPEND APOLLO_IMAGES "static const unsigned char kApollo_${image}[] = {${IMAGE_HEX}};\n")
+    endforeach()
+    file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/apollo_images.inc" CONTENT "${APOLLO_IMAGES}")
     set(FOUNTAIN_IMAGES "")
     foreach(sprite edge basin texture)
         file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/deltarune/fountain_${sprite}.png" SPRITE_HEX HEX)
@@ -98,6 +110,11 @@ if(CORDINAL_EXTRA_THEMES)
     endforeach()
     file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/fountain_images.inc" CONTENT "${FOUNTAIN_IMAGES}")
 else()
+    set(APOLLO_IMAGES "")
+    foreach(image toolbar rebar_capacala rebar_apollo rebar_letters rebar_notes)
+        string(APPEND APOLLO_IMAGES "static const unsigned char kApollo_${image}[] = {0};\n")
+    endforeach()
+    file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/apollo_images.inc" CONTENT "${APOLLO_IMAGES}")
     # One zero byte in place of each asset, which nothing reads without the themes.
     file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/web_font.inc" CONTENT "static const unsigned char kWebFont[] = {0};\n")
     set(GAME_SOUNDS "")
@@ -119,3 +136,5 @@ install(TARGETS cordinal RUNTIME DESTINATION bin)
 install(FILES LICENSE DESTINATION share/licenses/cordinal)
 install(FILES linux/cordinal.desktop DESTINATION share/applications)
 install(FILES docs/icon.png DESTINATION share/icons/hicolor/512x512/apps RENAME cordinal.png)
+
+target_sources(cordinal PRIVATE src/tests/selftest_linux_layout.cpp)

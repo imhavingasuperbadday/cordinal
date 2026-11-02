@@ -34,8 +34,9 @@ constexpr unsigned kPruneEvery = 64;           // stores between directory scans
 constexpr auto kRequestDelay = std::chrono::milliseconds(400);  // let rapid track changes settle
 constexpr auto kProgressInterval = std::chrono::milliseconds(100);
 constexpr auto kPreviewBudget = std::chrono::milliseconds(35);
-constexpr char kMagic[4] = {'C', 'P', 'K', '1'};
-constexpr DWORD kFileSize = 4 + 8 + kPeakBuckets;
+// Version 2 added the RMS levels; a version 1 file is recomputed rather than read.
+constexpr char kMagic[4] = {'C', 'P', 'K', '2'};
+constexpr DWORD kFileSize = 4 + 8 + 2 * kPeakBuckets;
 
 // Cache key: FNV-1a over the lowercased path, then the file's identity and the range in ms.
 uint64_t KeyOf(const std::wstring& path, uint64_t fileSize, uint64_t fileTime, double start, double end) {
@@ -49,7 +50,7 @@ uint64_t KeyOf(const std::wstring& path, uint64_t fileSize, uint64_t fileTime, d
     return h;
 }
 
-// Stored as: magic, key (little endian), kPeakBuckets bytes. The key is checked on load so a
+// Stored as: magic, key (little endian), kPeakBuckets peak bytes, kPeakBuckets RMS bytes. The key is checked on load so a
 // hash collision or a damaged file is simply recomputed.
 bool ReadPeakFile(const std::wstring& file, uint64_t key, Peaks& out) {
     HANDLE h = CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -63,6 +64,7 @@ bool ReadPeakFile(const std::wstring& file, uint64_t key, Peaks& out) {
     for (int i = 7; i >= 0; --i) stored = stored << 8 | buf[4 + i];
     if (stored != key) return false;
     std::memcpy(out.v, buf + 12, kPeakBuckets);
+    std::memcpy(out.rms, buf + 12 + kPeakBuckets, kPeakBuckets);
     return true;
 }
 
@@ -71,6 +73,7 @@ bool WritePeakFile(const std::wstring& file, uint64_t key, const Peaks& p) {
     std::memcpy(buf, kMagic, 4);
     for (int i = 0; i < 8; ++i) buf[4 + i] = (unsigned char)(key >> (8 * i));
     std::memcpy(buf + 12, p.v, kPeakBuckets);
+    std::memcpy(buf + 12 + kPeakBuckets, p.rms, kPeakBuckets);
     // A temp name unique to this thread: two workers may store the same key at once.
     std::wstring tmp = file + L"." + std::to_wstring(GetCurrentThreadId()) + L".tmp";
     HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -122,7 +125,7 @@ void PruneCache(const std::wstring& dir) {
 bool PreviewPeaks(Decoder& dec, double start, double seconds, Peaks& out, const std::atomic<bool>* cancel) {
     if (!dec.CanPreview() || !dec.Rate() || !(seconds > 0) || !std::isfinite(seconds)) return false;
     constexpr int count = 32;
-    struct Sample { double at; uint8_t peak; };
+    struct Sample { double at; uint8_t peak, rms; };
     std::array<Sample, count> samples{};
     const auto deadline = std::chrono::steady_clock::now() + kPreviewBudget;
     float buf[4096 * 2];
@@ -142,8 +145,9 @@ bool PreviewPeaks(Decoder& dec, double start, double seconds, Peaks& out, const 
         size_t n = dec.Read(buf, frames);
         if (!n) continue;
         float peak = 0;
-        for (size_t j = 0; j < n * 2; ++j) peak = std::max(peak, std::fabs(buf[j]));
-        samples[sampled++] = {(position - start) / seconds, CompandPeak(peak)};
+        double squares = 0;
+        for (size_t j = 0; j < n * 2; ++j) peak = std::max(peak, std::fabs(buf[j])), squares += (double)buf[j] * buf[j];
+        samples[sampled++] = {(position - start) / seconds, CompandPeak(peak), CompandPeak((float)std::sqrt(squares / (n * 2)))};
     }
     if (sampled < 2 || (cancel && cancel->load(std::memory_order_relaxed))) return false;
     std::sort(samples.begin(), samples.begin() + sampled, [](const Sample& a, const Sample& b) { return a.at < b.at; });
@@ -155,6 +159,7 @@ bool PreviewPeaks(Decoder& dec, double start, double seconds, Peaks& out, const 
         const Sample& b = samples[right];
         double fraction = a.at == b.at ? 0 : std::clamp((at - a.at) / (b.at - a.at), 0.0, 1.0);
         out.v[i] = (uint8_t)std::lround(a.peak + (b.peak - a.peak) * fraction);
+        out.rms[i] = (uint8_t)std::lround(a.rms + (b.rms - a.rms) * fraction);
     }
     return true;
 }
@@ -198,6 +203,7 @@ static bool ComputePeaksImpl(const std::wstring& path, double start, double end,
                 if (sampled) {
                     int covered = std::min(kPeakBuckets, (int)std::ceil((long double)done * kPeakBuckets / limit));
                     std::copy(partial.v, partial.v + covered, preview.v);
+                    std::copy(partial.rms, partial.rms + covered, preview.rms);
                     (*progress)(preview);
                 } else (*progress)(partial);
             }
@@ -218,8 +224,11 @@ bool ComputePeaks(const std::wstring& path, double start, double end, Peaks& out
 void PeakAccumulator::Begin(uint64_t totalFrames) {
     maxima_.clear();
     maxima_.reserve(kMaxBlocks);
+    squares_.clear();
+    squares_.reserve(kMaxBlocks);
     inBlock_ = 0;
     blockMax_ = 0;
+    blockSquares_ = 0;
     totalFrames_ = totalFrames;
     // Start with about four blocks per bucket when the length is known.
     blockFrames_ = totalFrames ? std::max<uint64_t>(1, totalFrames / (kPeakBuckets * 4)) : 512;
@@ -228,6 +237,7 @@ void PeakAccumulator::Begin(uint64_t totalFrames) {
 bool PeakAccumulator::Preview(Peaks& out) const {
     if (!totalFrames_ || (maxima_.empty() && !inBlock_)) return false;
     std::memset(out.v, 0, sizeof(out.v));
+    std::memset(out.rms, 0, sizeof(out.rms));
     for (size_t i = 0; i < maxima_.size() + (inBlock_ != 0); ++i) {
         const uint64_t start = (uint64_t)i * blockFrames_;
         if (start >= totalFrames_) break;
@@ -236,7 +246,11 @@ bool PeakAccumulator::Preview(Peaks& out) const {
         const int first = std::min(kPeakBuckets - 1, (int)((long double)start * kPeakBuckets / totalFrames_));
         const int last = std::min(kPeakBuckets - 1, (int)std::ceil((long double)end * kPeakBuckets / totalFrames_) - 1);
         const uint8_t peak = CompandPeak(i < maxima_.size() ? maxima_[i] : blockMax_);
-        for (int bucket = first; bucket <= last; ++bucket) out.v[bucket] = std::max(out.v[bucket], peak);
+        const uint8_t rms = CompandPeak((float)std::sqrt(i < squares_.size() ? squares_[i] : blockSquares_ / inBlock_));
+        for (int bucket = first; bucket <= last; ++bucket) {
+            out.v[bucket] = std::max(out.v[bucket], peak);
+            out.rms[bucket] = std::max(out.rms[bucket], rms);
+        }
     }
     return true;
 }
@@ -246,9 +260,13 @@ void PeakAccumulator::Add(const float* stereo, size_t frames) {
         size_t count = (size_t)std::min<uint64_t>(frames, blockFrames_ - inBlock_);
         const float* end = stereo + count * 2;
         float maximum = blockMax_;
-        for (; stereo != end; stereo += 2)
+        double squares = 0;
+        for (; stereo != end; stereo += 2) {
             maximum = std::max(maximum, std::max(std::fabs(stereo[0]), std::fabs(stereo[1])));
+            squares += stereo[0] * stereo[0] + stereo[1] * stereo[1];
+        }
         blockMax_ = maximum;
+        blockSquares_ += squares * 0.5;
         inBlock_ += count;
         frames -= count;
         if (inBlock_ == blockFrames_) Push();
@@ -257,17 +275,23 @@ void PeakAccumulator::Add(const float* stereo, size_t frames) {
 
 void PeakAccumulator::Push() {
     maxima_.push_back(blockMax_);
+    squares_.push_back(blockSquares_ / inBlock_);
     blockMax_ = 0;
+    blockSquares_ = 0;
     inBlock_ = 0;
     if (maxima_.size() == kMaxBlocks) Merge();
 }
 
-// Halves the number of blocks by keeping the larger of each pair, so memory stays bounded.
+// Halves the number of blocks by keeping the larger peak and the mean power of each pair, so
+// memory stays bounded.
 void PeakAccumulator::Merge() {
     // Push only calls this with the even kMaxBlocks count.
-    for (size_t i = 0; i < kMaxBlocks / 2; ++i)
+    for (size_t i = 0; i < kMaxBlocks / 2; ++i) {
         maxima_[i] = std::max(maxima_[2 * i], maxima_[2 * i + 1]);
+        squares_[i] = (squares_[2 * i] + squares_[2 * i + 1]) / 2;
+    }
     maxima_.resize(kMaxBlocks / 2);
+    squares_.resize(kMaxBlocks / 2);
     blockFrames_ *= 2;
 }
 
@@ -278,10 +302,13 @@ bool PeakAccumulator::Finish(Peaks& out) {
     for (size_t i = 0; i < kPeakBuckets; ++i) {
         size_t lo = i * n / kPeakBuckets, hi = std::max(lo + 1, (i + 1) * n / kPeakBuckets);
         float m = 0;
-        for (size_t k = lo; k < hi; ++k) m = std::max(m, maxima_[k]);
+        double power = 0;
+        for (size_t k = lo; k < hi; ++k) m = std::max(m, maxima_[k]), power += squares_[k];
         out.v[i] = CompandPeak(m);
+        out.rms[i] = CompandPeak((float)std::sqrt(power / (hi - lo)));
     }
     maxima_.clear();
+    squares_.clear();
     return true;
 }
 

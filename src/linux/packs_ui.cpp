@@ -4,8 +4,10 @@
 // a folder, and shown with what it holds and what was left out. While a pack is on, its window title, status
 // bar and now playing patterns replace the user's own (which stay saved), its title functions ($define ...)
 // and fields join the built-in ones, and its themes with their sounds, auto-playlists, key bindings and EQ
-// presets are offered. Fonts load privately while their pack is on. Columns, global keys and layouts
-// are read and listed but not applied yet (docs/linux-parity.md).
+// presets are offered. Columns and column sets join the header menu; layout presets join Customize layout.
+// Fonts load privately while their pack is on; global keys use the desktop shortcut portal.
+#include "alternate_ui.h"
+#include "ui_internal.h"
 #include "draw.h"
 #include "dsp.h"
 #include "packs.h"
@@ -13,6 +15,7 @@
 #include "titleformat.h"
 
 #include <cwctype>
+#include <systemd/sd-bus.h>
 
 #include <deque>
 #include <filesystem>
@@ -126,6 +129,75 @@ std::vector<const PackTheme*> g_themes;
 std::vector<std::pair<std::wstring, std::wstring>> g_fields;  // a pack's %name% and its format; the later pack's wins
 std::vector<const PackAutoPlaylist*> g_autoPlaylists;
 bool g_themesApplied = false;
+std::vector<PackColumn> g_columns;
+std::vector<std::string> g_columnKeys;
+std::vector<const PackColumnSet*> g_columnSets;
+std::vector<const PackLayout*> g_layouts;
+
+// Encode the stable pack/key name so commas, colons and Unicode cannot break settings.ini.
+std::string ColumnKey(const Pack& pack, const PackColumn& column) {
+    std::string out = "p";
+    for (unsigned char c : ToUtf8(pack.id + L"/" + column.key)) {
+        out += "0123456789abcdef"[c >> 4];
+        out += "0123456789abcdef"[c & 15];
+    }
+    return out;
+}
+
+void ApplyColumns() {
+    const auto oldKeys = g_columnKeys;
+    const auto oldWidths = g.settings.widths;
+    auto oldColumns = g.settings.columns;
+    g_columns.clear();
+    g_columnKeys.clear();
+    g_columnSets.clear();
+    g_layouts.clear();
+    for (auto& p : g_packs) if (p->on) {
+        for (const auto& c : p->pack.columns) {
+            g_columns.push_back(c);
+            g_columnKeys.push_back(ColumnKey(p->pack, c));
+        }
+        for (const auto& set : p->pack.columnSets) g_columnSets.push_back(&set);
+        for (const auto& layout : p->pack.layouts) g_layouts.push_back(&layout);
+    }
+    g.settings.widths.assign(ColumnTotal(), 0);
+    auto remap = [&](int c) {
+        if (c < ui::kColumnCount) return c;
+        size_t i = (size_t)(c - ui::kColumnCount);
+        return i < oldKeys.size() ? PackColumnType(oldKeys[i]) : -1;
+    };
+    g.settings.columns.clear();
+    for (int c : oldColumns) {
+        int mapped = remap(c);
+        if (mapped >= 0) {
+            g.settings.columns.push_back(mapped);
+            g.settings.widths[mapped] = c < (int)oldWidths.size() ? oldWidths[c] : 0;
+        }
+    }
+    // LoadSettings runs before packs are known. Resolve its named columns only on the first apply.
+    if (!g.settings.savedPackColumns.empty()) {
+        std::string text = std::move(g.settings.savedPackColumns);
+        g.settings.savedPackColumns.clear();
+        std::vector<int> columns{0};
+        for (size_t at = 0; at < text.size();) {
+            size_t end = std::min(text.find(',', at), text.size());
+            std::string entry = text.substr(at, end - at);
+            size_t colon = entry.find(':');
+            std::string key = entry.substr(0, colon);
+            int c = key.starts_with("p") ? PackColumnType(key) : atoi(key.c_str());
+            if (c >= 0 && c < ColumnTotal()) {
+                if (c && std::find(columns.begin(), columns.end(), c) == columns.end()) columns.push_back(c);
+                if (colon != std::string::npos) g.settings.widths[c] = std::clamp(atoi(entry.c_str() + colon + 1), 0, 2000);
+            }
+            at = end + 1;
+        }
+        if (columns.size() > 1) g.settings.columns = std::move(columns);
+    }
+    for (auto& playlist : g.playlists) playlist.sortColumn = remap(playlist.sortColumn);
+    AlternateCatalogChanged();
+    InvalidateCellCache();
+    if (!g.playlists.empty()) RebuildRows();
+}
 
 std::wstring ThemeKeyOf(ThemeMode mode) {
     int k = (int)mode - (int)ThemeMode::Count;
@@ -229,8 +301,199 @@ int FindCommand(const std::vector<PaletteCommand>& commands, const std::wstring&
     return found;
 }
 
+// The portal owns desktop-wide grabs, including under Wayland. All calls are asynchronous and all
+// callbacks run on the UI thread. Disconnecting closes the session and any pending consent request.
+struct GlobalBinding {
+    const Loaded* owner;
+    std::string id, trigger;
+    std::wstring command;
+};
+std::vector<GlobalBinding> g_globalBindings;
+sd_bus* g_shortcutBus = nullptr;
+std::string g_shortcutSession, g_shortcutRequest, g_shortcutPrefix;
+bool g_creatingSession = false;
+bool g_shortcutsBound = false;
+std::vector<std::wstring> g_shortcutActivations;
+
+void GlobalWarning(const wchar_t* reason) {
+    for (const auto& b : g_globalBindings)
+        g_keyWarnings.push_back({b.owner, L"keys.ini: " + b.command + L": " + reason});
+    g.redraw = true;
+}
+
+void StringOption(sd_bus_message* m, const char* key, const std::string& value) {
+    sd_bus_message_open_container(m, 'e', "sv");
+    sd_bus_message_append(m, "s", key);
+    sd_bus_message_open_container(m, 'v', "s");
+    sd_bus_message_append(m, "s", value.c_str());
+    sd_bus_message_close_container(m);
+    sd_bus_message_close_container(m);
+}
+
+int ShortcutReply(sd_bus_message* m, void*, sd_bus_error*) {
+    if (sd_bus_message_is_method_error(m, nullptr)) {
+        GlobalWarning(L"the desktop global shortcut portal is unavailable");
+        g_shortcutRequest.clear();
+    }
+    return 0;
+}
+
+void SendShortcutRequest(sd_bus_message* m, const char* token) {
+    g_shortcutRequest = g_shortcutPrefix + token;
+    if (sd_bus_call_async(g_shortcutBus, nullptr, m, ShortcutReply, nullptr, 5000000) < 0) {
+        GlobalWarning(L"couldn't contact the desktop global shortcut portal");
+        g_shortcutRequest.clear();
+    }
+    sd_bus_message_unref(m);
+}
+
+void BindGlobalKeys() {
+    sd_bus_message* m = nullptr;
+    if (sd_bus_message_new_method_call(g_shortcutBus, &m, "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop", "org.freedesktop.portal.GlobalShortcuts", "BindShortcuts") < 0) return;
+    sd_bus_message_append(m, "o", g_shortcutSession.c_str());
+    sd_bus_message_open_container(m, 'a', "(sa{sv})");
+    for (const auto& b : g_globalBindings) {
+        sd_bus_message_open_container(m, 'r', "sa{sv}");
+        sd_bus_message_append(m, "s", b.id.c_str());
+        sd_bus_message_open_container(m, 'a', "{sv}");
+        StringOption(m, "description", ToUtf8(b.command));
+        StringOption(m, "preferred_trigger", b.trigger);
+        sd_bus_message_close_container(m);
+        sd_bus_message_close_container(m);
+    }
+    sd_bus_message_close_container(m);
+    sd_bus_message_append(m, "s", "");  // the portal may show its own shortcut chooser
+    sd_bus_message_open_container(m, 'a', "{sv}");
+    StringOption(m, "handle_token", "bind");
+    sd_bus_message_close_container(m);
+    SendShortcutRequest(m, "bind");
+}
+
+int ShortcutResponse(sd_bus_message* m, void*, sd_bus_error*) {
+    if (g_shortcutRequest != sd_bus_message_get_path(m)) return 0;
+    g_shortcutRequest.clear();
+    uint32_t response = 2;
+    if (sd_bus_message_read(m, "u", &response) < 0 || response != 0) {
+        GlobalWarning(L"the desktop did not approve these global shortcuts");
+        return 0;
+    }
+    if (!g_creatingSession) {
+        std::vector<std::string> accepted;
+        if (sd_bus_message_enter_container(m, 'a', "{sv}") > 0) {
+            while (sd_bus_message_enter_container(m, 'e', "sv") > 0) {
+                const char* key = nullptr;
+                sd_bus_message_read(m, "s", &key);
+                if (key && std::string_view(key) == "shortcuts" &&
+                    sd_bus_message_enter_container(m, 'v', "a(sa{sv})") > 0) {
+                    sd_bus_message_enter_container(m, 'a', "(sa{sv})");
+                    while (sd_bus_message_enter_container(m, 'r', "sa{sv}") > 0) {
+                        const char* id = nullptr;
+                        if (sd_bus_message_read(m, "s", &id) > 0) accepted.push_back(id);
+                        sd_bus_message_skip(m, "a{sv}");
+                        sd_bus_message_exit_container(m);
+                    }
+                    sd_bus_message_exit_container(m);
+                    sd_bus_message_exit_container(m);
+                } else sd_bus_message_skip(m, "v");
+                sd_bus_message_exit_container(m);
+            }
+        }
+        for (const auto& b : g_globalBindings)
+            if (std::find(accepted.begin(), accepted.end(), b.id) == accepted.end())
+                g_keyWarnings.push_back({b.owner, L"keys.ini: the desktop did not bind " + b.command});
+        std::erase_if(g_globalBindings, [&](const auto& b) {
+            return std::find(accepted.begin(), accepted.end(), b.id) == accepted.end();
+        });
+        g_shortcutsBound = !g_globalBindings.empty();
+        g.redraw = true;
+        return 0;
+    }
+    g_creatingSession = false;
+    if (sd_bus_message_enter_container(m, 'a', "{sv}") > 0) {
+        while (sd_bus_message_enter_container(m, 'e', "sv") > 0) {
+            const char* key = nullptr;
+            sd_bus_message_read(m, "s", &key);
+            if (key && std::string_view(key) == "session_handle") {
+                const char* session = nullptr;
+                if (sd_bus_message_enter_container(m, 'v', "s") > 0 &&
+                    sd_bus_message_read(m, "s", &session) > 0) {
+                    g_shortcutSession = session;
+                    sd_bus_message_exit_container(m);
+                }
+            } else sd_bus_message_skip(m, "v");
+            sd_bus_message_exit_container(m);
+        }
+    }
+    if (g_shortcutSession.empty()) GlobalWarning(L"the desktop returned no shortcut session");
+    else BindGlobalKeys();
+    return 0;
+}
+
+int ShortcutActivated(sd_bus_message* m, void*, sd_bus_error*) {
+    const char *session = nullptr, *id = nullptr;
+    if (sd_bus_message_read(m, "os", &session, &id) < 0 ||
+        !g_shortcutsBound || g_shortcutSession != session) return 0;
+    for (const auto& b : g_globalBindings) if (b.id == id) {
+        g_shortcutActivations.push_back(b.command);
+        break;
+    }
+    return 0;
+}
+
+std::string GlobalTrigger(const Binding& b) {
+    std::string key;
+    if ((b.key >= SDLK_A && b.key <= SDLK_Z) || (b.key >= SDLK_0 && b.key <= SDLK_9))
+        key = (char)b.key;
+    else {
+        const std::pair<SDL_Keycode, const char*> names[] = {
+            {SDLK_SPACE, "space"}, {SDLK_RETURN, "Return"}, {SDLK_TAB, "Tab"}, {SDLK_ESCAPE, "Escape"},
+            {SDLK_BACKSPACE, "BackSpace"}, {SDLK_DELETE, "Delete"}, {SDLK_INSERT, "Insert"},
+            {SDLK_HOME, "Home"}, {SDLK_END, "End"}, {SDLK_PAGEUP, "Prior"}, {SDLK_PAGEDOWN, "Next"},
+            {SDLK_UP, "Up"}, {SDLK_DOWN, "Down"}, {SDLK_LEFT, "Left"}, {SDLK_RIGHT, "Right"},
+            {SDLK_EQUALS, "equal"}, {SDLK_MINUS, "minus"}, {SDLK_COMMA, "comma"}, {SDLK_PERIOD, "period"},
+            {SDLK_MEDIA_PLAY_PAUSE, "XF86AudioPlay"}, {SDLK_MEDIA_NEXT_TRACK, "XF86AudioNext"},
+            {SDLK_MEDIA_PREVIOUS_TRACK, "XF86AudioPrev"}, {SDLK_MEDIA_STOP, "XF86AudioStop"},
+            {SDLK_VOLUMEUP, "XF86AudioRaiseVolume"}, {SDLK_VOLUMEDOWN, "XF86AudioLowerVolume"},
+            {SDLK_MUTE, "XF86AudioMute"}
+        };
+        for (auto [code, name] : names) if (b.key == code) key = name;
+        if (key.empty()) key = SDL_GetKeyName(b.key);  // F1 through F24
+    }
+    return (b.ctrl ? "CTRL+" : std::string{}) + (b.alt ? "ALT+" : "") + (b.shift ? "SHIFT+" : "") + key;
+}
+
+void StartGlobalKeys() {
+    if (g_globalBindings.empty()) return;
+    if (sd_bus_open_user(&g_shortcutBus) < 0) {
+        GlobalWarning(L"no desktop session bus is available");
+        return;
+    }
+    const char* unique = nullptr;
+    sd_bus_get_unique_name(g_shortcutBus, &unique);
+    std::string sender = unique ? unique + 1 : "";
+    std::replace(sender.begin(), sender.end(), '.', '_');
+    g_shortcutPrefix = "/org/freedesktop/portal/desktop/request/" + sender + "/";
+    sd_bus_match_signal_async(g_shortcutBus, nullptr, "org.freedesktop.portal.Desktop", nullptr,
+        "org.freedesktop.portal.Request", "Response", ShortcutResponse, nullptr, nullptr);
+    sd_bus_match_signal_async(g_shortcutBus, nullptr, "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop", "org.freedesktop.portal.GlobalShortcuts",
+        "Activated", ShortcutActivated, nullptr, nullptr);
+    sd_bus_message* m = nullptr;
+    if (sd_bus_message_new_method_call(g_shortcutBus, &m, "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop", "org.freedesktop.portal.GlobalShortcuts", "CreateSession") < 0) return;
+    sd_bus_message_open_container(m, 'a', "{sv}");
+    StringOption(m, "handle_token", "create");
+    StringOption(m, "session_handle_token", "cordinal");
+    sd_bus_message_close_container(m);
+    g_creatingSession = true;
+    SendShortcutRequest(m, "create");
+}
+
 // The bindings of the packs that are on (a later pack wins a key), and what was wrong with the rest.
 void ApplyKeys() {
+    StopPackGlobalKeys();
+    g_globalBindings.clear();
     g_bindings.clear();
     g_keyWarnings.clear();
     const auto commands = MenuCommands();
@@ -250,9 +513,18 @@ void ApplyKeys() {
                 g_bindings.push_back(std::move(b));
             }
         }
-        for (const PackKey& k : p->pack.globalKeys)
-            g_keyWarnings.push_back({p.get(), L"keys.ini: the global key " + k.keys + L" works only in the Windows build"});
+        for (const PackKey& k : p->pack.globalKeys) {
+            Binding b;
+            if (!ParseKeys(k.keys, b) || FindCommand(commands, k.command) < 0) {
+                g_keyWarnings.push_back({p.get(), L"keys.ini: invalid global shortcut " + k.keys + L" or command " + k.command});
+                continue;
+            }
+            std::string trigger = GlobalTrigger(b);
+            std::erase_if(g_globalBindings, [&](const auto& old) { return old.trigger == trigger; });
+            g_globalBindings.push_back({p.get(), ColumnKey(p->pack, PackColumn{k.keys}), trigger, k.command});
+        }
     }
+    StartGlobalKeys();
 }
 
 // Apply enabled packs and retain the chosen themes by name; a removed theme follows the system.
@@ -304,11 +576,132 @@ void ApplyAll() {
     g.settings.theme = resolve(now, g.settings.theme);
     g.settings.defaultTheme = resolve(def, g.settings.defaultTheme);
     if (g.window) ApplyTheme();
+    ApplyColumns();
+    AlternateThemeChanged();
     ClearTextCache();
     g.redraw = true;
 }
 
 }  // namespace
+
+void StopPackGlobalKeys() {
+    g_shortcutBus = sd_bus_flush_close_unref(g_shortcutBus);
+    g_shortcutSession.clear();
+    g_shortcutRequest.clear();
+    g_shortcutsBound = false;
+    g_shortcutActivations.clear();
+}
+
+bool PackGlobalKeysActive() { return g_shortcutBus != nullptr; }
+
+void TickPackGlobalKeys() {
+    if (!g_shortcutBus) return;
+    int result;
+    while ((result = sd_bus_process(g_shortcutBus, nullptr)) > 0) {}
+    if (result < 0) {
+        GlobalWarning(L"the desktop shortcut connection closed");
+        StopPackGlobalKeys();
+    }
+    auto activated = std::move(g_shortcutActivations);
+    g_shortcutActivations.clear();
+    for (const auto& command : activated) {
+        const auto commands = MenuCommands();
+        int index = FindCommand(commands, command);
+        if (index >= 0 && commands[index].enabled) RunMenuCommand(index);
+    }
+}
+
+int ColumnTotal() { return ui::kColumnCount + (int)g_columns.size(); }
+
+ui::Column ColumnAt(int type) {
+    if (type < 0 || type >= ColumnTotal()) return ui::kColumns[0];
+    if (type < ui::kColumnCount) return ui::kColumns[type];
+    const auto& c = g_columns[type - ui::kColumnCount];
+    return {c.title.c_str(), c.width, c.display.c_str(), c.sort.c_str(), c.right ? ui::kAlignRight : ui::kAlignLeft};
+}
+
+std::string PackColumnKey(int type) {
+    int i = type - ui::kColumnCount;
+    return i >= 0 && i < (int)g_columnKeys.size() ? g_columnKeys[i] : "";
+}
+
+int PackColumnType(const std::string& key) {
+    auto it = std::find(g_columnKeys.begin(), g_columnKeys.end(), key);
+    return it == g_columnKeys.end() ? -1 : ui::kColumnCount + (int)(it - g_columnKeys.begin());
+}
+
+std::vector<std::wstring> PackColumnSetNames() {
+    std::vector<std::wstring> names;
+    for (auto set : g_columnSets) names.push_back(set->name);
+    return names;
+}
+
+void ApplyPackColumnSet(size_t index) {
+    if (index >= g_columnSets.size()) return;
+    std::vector<int> columns{0};
+    for (const auto& name : g_columnSets[index]->show) {
+        for (int c = 1; c < ColumnTotal(); ++c) {
+            const std::wstring& key = c < ui::kColumnCount ? std::wstring(ColumnAt(c).name) : g_columns[c - ui::kColumnCount].key;
+            if (_wcsicmp(key.c_str(), name.c_str()) == 0 &&
+                std::find(columns.begin(), columns.end(), c) == columns.end()) {
+                columns.push_back(c);
+                break;
+            }
+        }
+    }
+    ActiveColumnTypes() = std::move(columns);
+    for (int c : ActiveColumnTypes()) ActiveColumnWidths()[c] = 0;
+    for (auto& pl : g.playlists)
+        if (std::find(g.settings.columns.begin(), g.settings.columns.end(), pl.sortColumn) == g.settings.columns.end())
+            pl.sortColumn = -1;
+    SaveSettings();
+    if (!g.playlists.empty()) RebuildRows();
+    g.redraw = true;
+}
+
+std::vector<std::wstring> PackLayoutNames() {
+    std::vector<std::wstring> names;
+    for (auto layout : g_layouts) names.push_back(layout->name);
+    return names;
+}
+
+void ApplyPackLayout(size_t index) {
+    if (index >= g_layouts.size()) return;
+    const auto& values = g_layouts[index]->values;
+    auto flag = [&](const wchar_t* key, bool def) {
+        const auto* v = values.Get(key);
+        return !v || v->empty() ? def : !(*v == L"0" || _wcsicmp(v->c_str(), L"no") == 0 ||
+            _wcsicmp(v->c_str(), L"off") == 0 || _wcsicmp(v->c_str(), L"false") == 0);
+    };
+    const wchar_t* keys[] = {L"transport", L"order", L"waveform", L"times", L"volume",
+        L"now_playing", L"tabs", L"search", L"view_buttons", L"status_bar"};
+    g.settings.layout = WindowLayout{};
+    for (unsigned i = 0; i < std::size(keys); ++i)
+        if (!flag(keys[i], true)) g.settings.layout.hiddenParts |= 1u << i;
+    auto& l = g.settings.layout;
+    l.points = flag(L"points", false);
+    l.waveOwnRow = flag(L"waveform_row", false);
+    l.largeCover = flag(L"large_cover", false);
+    l.upNext = flag(L"up_next", false);
+    l.panelsLeft = flag(L"side_panels_left", false);
+    l.menuBar = flag(L"menu_bar", true);
+    l.tabCounts = flag(L"tab_counts", false);
+    l.statusDetails = flag(L"status_details", false);
+    l.hints = flag(L"hints", false);
+    if (const auto* dock = values.Get(L"player")) {
+        const wchar_t* docks[] = {L"top", L"bottom", L"left", L"right"};
+        for (int i = 0; i < 4; ++i) if (_wcsicmp(dock->c_str(), docks[i]) == 0) l.dock = i;
+    }
+    if (const auto* size = values.Get(L"waveform_size")) {
+        const wchar_t* sizes[] = {L"slim", L"medium", L"tall"};
+        for (int i = 0; i < 3; ++i)
+            if (_wcsicmp(size->c_str(), sizes[i]) == 0) l.waveSize = i;
+    }
+    g.settings.bandWaveSize = 0;
+    SaveSettings();
+    g.redraw = true;
+    ShowMessage(L"Applied layout " + g_layouts[index]->name + L".");
+}
 
 // Reads the packs folder and applies the ones that are on.
 void LoadPacks() {

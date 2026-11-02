@@ -9,6 +9,7 @@
 // It applies only in the normal window size; the other sizes keep Cordinal's own arrangement.
 #include "app.h"
 
+#ifdef CORDINAL_EXTRA_THEMES
 #include <d2d1.h>
 
 namespace app {
@@ -794,3 +795,27 @@ void DrawFoobarCover(HDC dc, int row, RECT rc) {
 }
 
 }  // namespace app
+
+#else
+
+// The theme is hidden from this build, so its window code is not linked. These stubs keep the call
+// sites compiling and make every foobar2000-specific branch unreachable.
+namespace app {
+
+bool FoobarMode() { return false; }
+void FoobarSync() {}
+void LayoutFoobar(HDWP&, RECT) {}
+void PaintFoobarChrome(HDC) {}
+void PaintFoobarVisuals(HDC, RECT, RECT, const AudioVisuals&) {}
+void DrawFoobarButton(const DRAWITEMSTRUCT*) {}
+RECT FoobarSliderTrack(HWND) { return {}; }
+void FoobarTick() {}
+void FoobarTheme() {}
+void FoobarFoldersChanged() {}
+void DrawFoobarHeader(HDC, int, RECT) {}
+void DrawFoobarCover(HDC, int, RECT) {}
+uint32_t FoobarCoverRows() { return 0; }
+
+}  // namespace app
+
+#endif

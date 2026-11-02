@@ -1,4 +1,5 @@
 // The Linux window's list model: what the active tab shows, how it is sorted, selected and changed.
+#include "alternate_ui.h"
 #include "ui_internal.h"
 
 namespace lx {
@@ -22,7 +23,7 @@ FieldLookup Lookup(TrackId id, bool withPlayback) {
             out = FormatDuration(std::max(0.0, g.engine.Duration() - g.engine.Position()));
             return true;
         }
-        return LookupField(id, name, out) || PackField(id, name, out);
+        return LookupField(id, name, out) || AlternateField(id, name, out) || PackField(id, name, out);
     };
 }
 
@@ -31,9 +32,9 @@ const std::string& Cell(TrackId id, int column) {
         g_cells.clear();
         g_cellsRevision = g_lib.Revision();
     }
-    uint64_t key = (uint64_t)id * ui::kColumnCount + column;
+    uint64_t key = ((uint64_t)id << 32) | (unsigned)column;
     auto it = g_cells.find(key);
-    if (it == g_cells.end()) it = g_cells.emplace(key, Utf8(FormatTitle(kColumns[column].display, Lookup(id, false)))).first;
+    if (it == g_cells.end()) it = g_cells.emplace(key, Utf8(FormatTitle(ColumnAt(column).display, Lookup(id, false)))).first;
     return it->second;
 }
 
@@ -91,11 +92,11 @@ std::vector<TrackId> PlaylistTracks(const Playlist& pl) {
 }
 
 void SortPlaylistTracks(std::vector<TrackId>& tracks, const Playlist& pl) {
-    if (pl.sortColumn <= 0 || pl.sortColumn >= ui::kColumnCount) return;
+    if (pl.sortColumn <= 0 || pl.sortColumn >= ColumnTotal()) return;
     std::unordered_map<TrackId, std::wstring> keys;
     for (TrackId id : tracks) {
         if (!g_lib.Contains(id)) return;
-        keys.emplace(id, FormatTitle(kColumns[pl.sortColumn].sort, Lookup(id, false)));
+        keys.emplace(id, FormatTitle(ColumnAt(pl.sortColumn).sort, Lookup(id, false)));
     }
     std::stable_sort(tracks.begin(), tracks.end(), [&](TrackId a, TrackId b) {
         int r = CompareNatural(keys[a], keys[b]);
@@ -165,6 +166,16 @@ bool GroupHidesCell(const Line& line, int column) {
         case 5: return t.date == gr.date;
         default: return false;
     }
+}
+
+// How wide a track's left-aligned text in the index'th shown column (`width` wide) may run: on across
+// the columns after it whose cells the album header already speaks for, so a long title uses the
+// blank Artist and Album cells beside it instead of being cut short.
+float CellTextWidth(const Line& line, size_t index, float width) {
+    const auto& types = ActiveColumnTypes();
+    for (size_t k = index + 1; k < types.size() && types[k] > 0 && GroupHidesCell(line, types[k]); ++k)
+        width += ColumnWidth(types[k]);
+    return width;
 }
 
 std::vector<TrackId> SelectedTracks() {
@@ -395,18 +406,19 @@ void RebuildRows() {
     g.active = std::clamp(g.active, 0, (int)g.playlists.size() - 1);
     Playlist& pl = Active();
     std::vector<TrackId> source = PlaylistTracks(pl);
-    if (pl.kind == PlaylistKind::Library) FilterLibraryTracks(source);  // the column browser, before the search
+    if (pl.kind == PlaylistKind::Library && !AlternateMode()) FilterLibraryTracks(source);  // the column browser, before the search
+    if (pl.kind == PlaylistKind::Library) FilterAlternateLibraryTracks(source);
     g_sourceCount = source.size();
     // Use the Windows search matcher, including containing-folder paths and quoted phrases.
-    const auto words = FilterWords(g.search);
+    const auto words = FilterWords(AlternateMode() ? std::wstring{} : g.search);
     TrackMatcher matcher(g_lib, words);
     std::vector<size_t> occurrences;
     occurrences.reserve(source.size());
     for (size_t i = 0; i < source.size(); ++i)
         if (source[i] < g_lib.Count() && matcher.Matches(source[i])) occurrences.push_back(i);
     // A column's sort: its sort format compared naturally (ui_spec.h, as on Windows).
-    if (pl.sortColumn > 0 && pl.sortColumn < ui::kColumnCount) {
-        const wchar_t* format = kColumns[pl.sortColumn].sort;
+    if (pl.sortColumn > 0 && pl.sortColumn < ColumnTotal()) {
+        const wchar_t* format = ColumnAt(pl.sortColumn).sort;
         std::unordered_map<TrackId, std::wstring> keys;
         for (size_t i : occurrences) keys.emplace(source[i], FormatTitle(format, Lookup(source[i], false)));
         bool asc = pl.sortAscending;

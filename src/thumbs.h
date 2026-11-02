@@ -37,6 +37,9 @@ public:
     struct MemoryUsage { size_t pending, ready, readyBytes; };
     MemoryUsage Memory() const;
     void DropPending();  // e.g. after the view jumped somewhere else
+    // Deletes the cached thumbnails of `key` at every size: its cover changed without its file
+    // changing (a cover.jpg was saved next to it).
+    void Forget(uint64_t key);
     static uint64_t Key(const std::wstring& path, uint64_t fileTime);
 
 private:

@@ -555,6 +555,33 @@ void TestTruePeak() {
     one[100] = one[101] = 1.0f;
     impulse.Add(one.data(), 100);
     Check(std::fabs(impulse.Peak() - 1.0f) < 0.001f, L"TRUE PEAK impulse: %.4f", impulse.Peak());
+
+    batch.Next(L"TRUE PEAK final queries drain delayed samples without changing streaming state");
+    testlog::Cases endings;
+    for (size_t frames : {1u, 2u, 7u, 12u, 23u, 24u, 127u}) {
+        std::vector<float> terminal(frames * 2);
+        for (size_t i = 0; i < frames; ++i) {
+            terminal[i * 2] = (float)std::sin(i * 1.5707963267948966 + 0.7853981633974483);
+            terminal[i * 2 + 1] = -terminal[i * 2] * 0.5f;
+        }
+        TruePeak actual;
+        Reference oracle;
+        actual.Add(terminal.data(), frames); oracle.Add(terminal.data(), frames);
+        const float streaming = actual.Peak();
+        float zeros[24]{};
+        oracle.Add(zeros, 12);
+        const float final = actual.FinalPeak();
+        bool same = final == (float)oracle.peak && actual.Peak() == streaming && actual.FinalPeak() == final;
+        actual.Add(terminal.data(), frames);
+        Reference continued;
+        continued.Add(terminal.data(), frames); continued.Add(terminal.data(), frames);
+        same &= actual.Peak() == (float)continued.peak;
+        actual.Reset();
+        same &= actual.Peak() == 0 && actual.FinalPeak() == 0;
+        endings.Add(same, std::to_wstring(frames) + L" frames");
+    }
+    Check(endings.Passed(), L"TRUE PEAK final queries include the tail, are repeatable and preserve Add/Reset%ls",
+          endings.failed.c_str());
 }
 
 void TestPeakLimiter() {
@@ -682,6 +709,25 @@ void TestReplayGainModel() {
     g.rgKeep = 0.4f;
     g.rgPreamp = 0;
     g.rgPreampNoInfo = 0;
+    {
+        const auto before = replaygain::LibraryTracks();
+        const TrackId available = g_lib.Add(L"C:\\RgScope\\available.flac");
+        const TrackId measured = g_lib.Add(L"C:\\RgScope\\measured.flac");
+        const TrackId failed = g_lib.Add(L"C:\\RgScope\\retry.flac");
+        const TrackId missing = g_lib.Add(L"C:\\RgScope\\missing.flac");
+        const TrackId inbox = g_lib.Add(L"C:\\RgScope\\inbox.flac");
+        g_lib.Add(L"C:\\RgScope\\playlist-only.flac");
+        g_lib[available].flags = Track::kInLibrary;
+        g_lib[measured].flags = Track::kInLibrary | Track::kRgScanned;
+        g_lib[failed].flags = Track::kInLibrary | Track::kRgScanFailed;
+        g_lib[missing].flags = Track::kInLibrary | Track::kMissing;
+        g_lib[inbox].flags = Track::kInLibrary | Track::kInbox;
+        auto expected = before;
+        expected.insert(expected.end(), {available, measured, failed});
+        batch.Next(L"RG library scans include measured tracks and retries, while excluding missing and Inbox files");
+        Check(replaygain::HasLibraryTracks() && replaygain::LibraryTracks() == expected,
+              L"RG scan library covers the available library independently of measurement flags");
+    }
     auto make = [](const wchar_t* name, int16_t track, int16_t album, float peak) {
         TrackId id = g_lib.Add(std::wstring(L"C:\\RgModel\\") + name + L".flac");
         Track& t = g_lib[id];
@@ -853,6 +899,82 @@ void TestReplayGainModel() {
     g.rgHeadphoneHeadroom = originalHeadroom;
 }
 
+void TestReplayGainScan(const std::wstring& media, const std::wstring& scratch) {
+    testlog::Batch batch;
+    std::atomic<bool> cancel{false};
+    std::atomic<std::shared_ptr<Decoder>> current;
+    auto measure = [&](const std::wstring& path) {
+        TrackId id = g_lib.Add(path);
+        return replaygain::Measure(g_lib.SnapshotPath(id), 0, 0, cancel, current, nullptr);
+    };
+    batch.Next(L"RG scans complete files without changing their bytes or retaining an open decoder");
+    const std::wstring healthy = media + L"\\sine.flac";
+    const auto original = ReadTestBytes(healthy);
+    auto good = measure(healthy);
+    Check(good.ok && std::isfinite(good.trackGain) && good.trackPeak > 0 && !current.load() &&
+          ReadTestBytes(healthy) == original, L"RG accepts a complete scan and leaves the source unchanged");
+
+    batch.Next(L"RG rejects a damaged stream after good audio and preserves the previous measurement");
+    const std::wstring damaged = scratch + L"\\rg-damaged.flac";
+    auto bytes = original;
+    if (Ready(bytes.size() > 4096, L"the FLAC scan fixture has multiple audio frames")) {
+        std::fill_n(bytes.begin() + bytes.size() / 2, 32, '\xFF');
+        if (Ready(WriteTestBytes(damaged, bytes), L"the damaged scan fixture is written")) {
+            std::wstring error;
+            auto decoder = OpenDecoder(damaged, 48000, error);
+            float block[4096 * 2];
+            size_t frames = 0;
+            if (decoder) while (size_t n = decoder->Read(block, 4096)) frames += n;
+            if (Ready(decoder && decoder->Failed() && frames > decoder->Rate() / 2,
+                      L"the damaged fixture decodes measurable audio before reporting failure")) {
+                auto bad = measure(damaged);
+                g_lib[bad.id].rgTrackGain = -325;
+                g_lib[bad.id].rgTrackPeak = EncodeReplayPeak(0.5f);
+                replaygain::Apply(bad);
+                Check(!bad.ok && !current.load() && g_lib[bad.id].rgTrackGain == -325 &&
+                      g_lib[bad.id].rgTrackPeak == EncodeReplayPeak(0.5f) &&
+                      (g_lib[bad.id].flags & Track::kRgScanFailed) && ReadTestBytes(damaged) == bytes,
+                      L"RG never saves a partial decode as a complete measurement");
+            }
+        }
+    }
+
+    batch.Next(L"RG true peaks at the end of a file agree with the same audio followed by silence");
+    std::string terminal = MakeSineWav(1, 1);
+    auto word = [&](size_t offset, int16_t value) {
+        terminal[offset] = (char)(uint16_t)value;
+        terminal[offset + 1] = (char)((uint16_t)value >> 8);
+    };
+    for (size_t i = 44; i + 1 < terminal.size(); i += 2) {
+        int16_t value = (int16_t)((uint8_t)terminal[i] | (uint8_t)terminal[i + 1] << 8);
+        word(i, (int16_t)(value / 32));
+    }
+    // Eight fs/4 samples have a 0.707 sample peak and an inter-sample peak near full scale.
+    // The burst fits entirely inside the true-peak filter's delay at end of input.
+    for (size_t i = 0; i < 8; ++i) {
+        const int16_t value = i % 4 < 2 ? 23170 : -23170;
+        word(terminal.size() - 32 + i * 4, value);
+        word(terminal.size() - 30 + i * 4, (int16_t)-value);
+    }
+    std::string padded = terminal + std::string(4096 * 4, '\0');
+    auto length = [&](size_t at, uint32_t value) {
+        for (unsigned byte = 0; byte < 4; ++byte) padded[at + byte] = (char)(value >> (byte * 8));
+    };
+    length(4, (uint32_t)padded.size() - 8);
+    length(40, (uint32_t)padded.size() - 44);
+    const std::wstring end = scratch + L"\\rg-terminal.wav", after = scratch + L"\\rg-padded.wav";
+    if (Ready(WriteTestBytes(end, terminal) && WriteTestBytes(after, padded), L"terminal peak fixtures are written")) {
+        const auto last = measure(end), continued = measure(after);
+        fwprintf(g_log, L"  terminal true peak %.6f, padded reference %.6f\n", last.trackPeak, continued.trackPeak);
+        Check(last.ok && continued.ok && last.trackPeak > 0.95f &&
+              std::abs(last.trackPeak - continued.trackPeak) < 1e-6f && ReadTestBytes(end) == terminal,
+              L"RG includes the final inter-sample peaks instead of only the stored sample peak");
+    }
+    batch.Next(L"RG cancelled scans return no measurement and release the decoder");
+    cancel = true;
+    Check(!measure(healthy).ok && !current.load(), L"RG cancellation cannot produce a measurement");
+}
+
 // 16-bit stereo WAV: a 1 kHz sine at half scale until `silentFrom` seconds, silence after.
 std::string MakeSineWav(double seconds, double silentFrom) {
     const uint32_t rate = 48000, frames = (uint32_t)(seconds * rate);
@@ -905,6 +1027,10 @@ void TestPeaks(const std::wstring& scratch) {
     bool ok = ComputePeaks(sine, 0, 0, sinePeaks, nullptr);
     span(sinePeaks, 0, kPeakBuckets, lo, hi);
     Check(ok && lo >= 179 && hi <= 181, L"PEAKS sine at half scale: %d..%d (expected 180 in every bucket)", lo, hi);
+    // Its RMS is half scale over the square root of two: sqrt(0.354) * 255 = 152.
+    int rmsLo = 255, rmsHi = 0;
+    for (int i = 0; i < kPeakBuckets; ++i) rmsLo = std::min(rmsLo, (int)sinePeaks.rms[i]), rmsHi = std::max(rmsHi, (int)sinePeaks.rms[i]);
+    Check(ok && rmsLo >= 150 && rmsHi <= 154, L"PEAKS sine RMS at half scale: %d..%d (expected 152 in every bucket)", rmsLo, rmsHi);
 
     ok = ComputePeaks(half, 0, 0, halfPeaks, nullptr);
     span(halfPeaks, 0, kPeakBuckets / 2, lo, hi);
@@ -964,7 +1090,9 @@ void TestPeaks(const std::wstring& scratch) {
     Peaks accPeaks{};
     ok = acc.Finish(accPeaks);
     span(accPeaks, 0, kPeakBuckets, lo, hi);
-    Check(ok && lo >= 179 && hi <= 181, L"PEAKS accumulator, unknown length, 20 s: %d..%d", lo, hi);
+    bool accRms = std::all_of(accPeaks.rms, accPeaks.rms + kPeakBuckets, [](uint8_t v) { return v >= 150 && v <= 154; });
+    Check(ok && lo >= 179 && hi <= 181 && accRms, L"PEAKS accumulator, unknown length, 20 s: %d..%d, RMS %d (expected 152 after merges)",
+          lo, hi, (int)accPeaks.rms[kPeakBuckets / 2]);
 
     // A partial decode stays in its place on the full track, including after the blocks merge.
     PeakAccumulator previewAcc;

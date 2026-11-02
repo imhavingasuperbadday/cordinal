@@ -298,14 +298,14 @@ void TestSteam(const std::wstring& scratch) {
     std::atomic<bool> cancelled{true};
     Check(FindSteamMusicFoldersIn(lib, &cancelled).empty(), L"STEAM cancellation discards all discovered roots");
     std::vector<ScanFile> files;
-    bool imported = ListAudioFiles(ost, files) && files.size() == 2;
+    bool imported = ListAudioFiles(ost, files) && files.size() == 1;
     int read = 0, rejected = 0;
     for (const auto& file : files) {
         TagData tags;
         if (ReadTags(file.path, tags)) ++read; else ++rejected;
     }
-    Check(imported && read == 1 && rejected == 1,
-          L"STEAM a soundtrack with valid audio and an empty placeholder scans without crashing");
+    Check(imported && read == 1 && rejected == 0,
+          L"STEAM a soundtrack scan keeps valid audio and leaves out its empty placeholder");
     const std::wstring copy = ost + L"\\track1-copy.wav";
     if (!Ready(WriteTestBytes(copy, wav), L"the copied soundtrack file is prepared")) return;
     Library library;
@@ -408,7 +408,7 @@ void TestCrashDump(const std::wstring& scratch) {
 void TestListenBrainz(const std::wstring& scratch) {
     using namespace listenbrainz;
     const std::string info = "\"media_player\":\"cordinal\",\"submission_client\":\"cordinal\","
-                             "\"submission_client_version\":\"0.1.2\"";
+                             "\"submission_client_version\":\"0.1.3\"";
 
     Listen a;
     a.listenedAt = 1700000000;

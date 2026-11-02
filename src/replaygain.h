@@ -65,6 +65,9 @@ AlbumRefresh RefreshAlbums(uint32_t& revision);
 void ForgetAlbumDynamics(bool keepMeasurements);
 // A bounded background batch: the upcoming tracks first, then their albums, then the library.
 std::vector<TrackId> AutoMeasureTracks(const std::vector<TrackId>& upcoming, size_t limit);
+// Every available library track, independent of the current playlist, search, selection or scan flags.
+std::vector<TrackId> LibraryTracks();
+bool HasLibraryTracks();
 
 // Worker thread: measures one track (a CUE track: just its range) and stores its waveform peaks.
 // `current` holds the open decoder so another thread can abort it; `budget` paces a background

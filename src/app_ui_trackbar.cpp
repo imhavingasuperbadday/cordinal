@@ -35,6 +35,45 @@ RECT PlayerBarThumb(HWND bar) {
     int cx = track.left + (int)std::lround(frac * (track.right - track.left)), cy = client.bottom / 2;
     return {cx - w / 2, cy - h / 2, cx - w / 2 + w, cy - h / 2 + h};
 }
+
+// The live waveform covers every pixel of its bar, so one compatible surface and its DC can be
+// kept across frames instead of creating and deleting both thirty times a second.
+struct BarSurface {
+    HDC dc = nullptr;
+    HBITMAP bitmap = nullptr;
+    HGDIOBJ previous = nullptr;
+    int width = 0, height = 0;
+
+    bool Ready(HDC target, int w, int h) {
+        if (dc && width == w && height == h) return true;
+        Reset();
+        HDC created = CreateCompatibleDC(target);
+        if (!created) return false;
+        HBITMAP bmp = CreateCompatibleBitmap(target, std::max(1, w), std::max(1, h));
+        if (!bmp) {
+            DeleteDC(created);
+            return false;
+        }
+        previous = SelectObject(created, bmp);
+        dc = created;
+        bitmap = bmp;
+        width = w;
+        height = h;
+        return true;
+    }
+
+    void Reset() {
+        if (dc && previous) SelectObject(dc, previous);
+        if (bitmap) DeleteObject(bitmap);
+        if (dc) DeleteDC(dc);
+        dc = nullptr;
+        bitmap = nullptr;
+        previous = nullptr;
+        width = height = 0;
+    }
+};
+
+BarSurface liveBarSurface;
 }  // namespace
 
 // The seek bar's waveform with its section over it; false while there is none to
@@ -60,10 +99,13 @@ void PaintPlayerBar(HWND bar, HDC printDC = nullptr) {
     int lo = (int)SendMessageW(bar, TBM_GETRANGEMIN, 0, 0), hi = (int)SendMessageW(bar, TBM_GETRANGEMAX, 0, 0);
     int pos = (int)SendMessageW(bar, TBM_GETPOS, 0, 0);
     double frac = hi > lo ? (double)(pos - lo) / (hi - lo) : 0;
-    // Drawn off screen and copied once: the Dark Fountain repaints 30 times a second.
-    HDC mem = CreateCompatibleDC(dc);
-    HBITMAP bmp = CreateCompatibleBitmap(dc, std::max(1, (int)client.right), std::max(1, (int)client.bottom));
-    HGDIOBJ oldBmp = SelectObject(mem, bmp);
+    // Drawn off screen and copied once: the Dark Fountain repaints 30 times a second. The live
+    // waveform paints every pixel of its bar, so that surface is kept instead of created each frame.
+    const bool reusable = !printDC && bar == g.seek && LiveWaveformShown() && !FountainShown() &&
+                          !SeekVertical() && liveBarSurface.Ready(dc, (int)client.right, (int)client.bottom);
+    HDC mem = reusable ? liveBarSurface.dc : CreateCompatibleDC(dc);
+    HBITMAP bmp = reusable ? nullptr : CreateCompatibleBitmap(dc, std::max(1, (int)client.right), std::max(1, (int)client.bottom));
+    HGDIOBJ oldBmp = reusable ? nullptr : SelectObject(mem, bmp);
     if (bar == g.volume || (!SeekVertical() && !FountainShown())) {
         // Paint the whole control so the native trackbar cannot leave chrome behind: its own
         // background fill kept the palette brush of the theme it started in (black after a switch
@@ -121,9 +163,11 @@ void PaintPlayerBar(HWND bar, HDC printDC = nullptr) {
         DrawSeekWaveform(mem, client, channel, frac);
     }
     BitBlt(dc, 0, 0, client.right, client.bottom, mem, 0, 0, SRCCOPY);
-    SelectObject(mem, oldBmp);
-    DeleteObject(bmp);
-    DeleteDC(mem);
+    if (!reusable) {
+        SelectObject(mem, oldBmp);
+        DeleteObject(bmp);
+        DeleteDC(mem);
+    }
     if (!printDC) EndPaint(bar, &ps);
 }
 
@@ -248,6 +292,17 @@ LRESULT DrawTrackbar(NMCUSTOMDRAW* cd) {
             f.right = f.left + (int)((f.right - f.left) * frac);
         }
         if (f.right > f.left && f.bottom > f.top) FillSolid(dc, f, fill);
+        if (bar == g.seek && !vert && IsWindowEnabled(bar)) {
+            // A long track's channel is cut at round times (ui::SeekNotchSeconds), so "the start
+            // of the third hour" is somewhere the eye and the mouse can find.
+            double dur = CurrentDuration();
+            int step = ui::SeekNotchSeconds(dur), width = t.right - t.left;
+            if (step > 0 && width * step / dur >= S(16))
+                for (int s = step; s < dur; s += step) {
+                    int x = t.left + (int)(width * (s / dur));
+                    FillSolid(dc, {x, t.top, x + std::max(1, S(1)), t.bottom}, SurfaceColor());
+                }
+        }
         return CDRF_SKIPDEFAULT;
     }
     if (cd->dwItemSpec == TBCD_THUMB) {
@@ -341,6 +396,7 @@ LRESULT CALLBACK TrackbarSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_P
         return 0;
     } else if (msg == WM_NCDESTROY) {
         if (s_barDrag == h) s_barDrag = nullptr;
+        if (h == g.seek) liveBarSurface.Reset();
         RemoveWindowSubclass(h, TrackbarSubclass, 0);
     }
     LRESULT result = DefSubclassProc(h, msg, wp, lp);

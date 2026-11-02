@@ -1,8 +1,12 @@
 // Where cordinal keeps things on Linux, and its settings file.
 //   $XDG_DATA_HOME/cordinal/library.cdb      the library (the same format as on Windows)
 //   $XDG_CONFIG_HOME/cordinal/settings.ini   settings, as key=value lines
+#include "alternate_ui.h"
+#include "big_ui.h"
+#include "headphones_ui.h"
 #include "app.h"
 #include "listenbrainz.h"
+#include "metadata_fetch.h"
 #include "backup.h"
 #include "points.h"
 
@@ -149,6 +153,9 @@ void InitPaths() {
 void LoadSettings() {
     auto v = ReadIni(g.settingsPath);
     Settings& s = g.settings;
+    LoadAlternateSettings(v);
+    LoadBigLayout(v.contains("big_layout") ? v["big_layout"] : "");
+    LoadCompactPlacement(v.contains("compact_placement") ? v["compact_placement"] : "");
     int port = ToInt(v, "web_port", 8787);
     s.webPort = port >= 1 && port <= 65535 ? (uint16_t)port : 8787;
     s.webStart = ToInt(v, "web_start", 0) != 0;
@@ -161,7 +168,7 @@ void LoadSettings() {
     if (auto it = v.find("web_code"); it != v.end() && web::CheckFixedCode(it->second, s.webCode)) s.webCode.clear();
     if (auto it = v.find("web_hosts"); it != v.end()) s.webHosts = it->second;
     if (auto it = v.find("output_device"); it != v.end()) s.outputDevice = it->second;
-    s.pointsChip = ToInt(v, "points_chip", 0) != 0;
+    s.layout.points = ToInt(v, "points_chip", 0) != 0;
     s.lyricsPanel = ToInt(v, "lyrics_panel", 0) != 0;
     s.nttGuesses.clear();
     if (auto it = v.find("games_ntt_guesses"); it != v.end())
@@ -181,7 +188,18 @@ void LoadSettings() {
     if (auto it = v.find("helpers_on"); it != v.end()) s.helpersOn = it->second;
     for (const auto& [key, value] : v)
         if (key.starts_with("helper_trust.")) s.helperTrust[key.substr(13)] = value;
-    s.hiddenParts = (unsigned)std::clamp(ToInt(v, "layout_hidden", 0), 0, 1023);
+    s.layout.dock = std::clamp(ToInt(v, "layout_dock", 0), 0, 3);
+    s.layout.waveSize = std::clamp(ToInt(v, "layout_wave_size", 0), 0, 2);
+    s.layout.waveOwnRow = ToInt(v, "layout_wave_row", 0) != 0;
+    s.layout.largeCover = ToInt(v, "layout_large_cover", 0) != 0;
+    s.layout.upNext = ToInt(v, "layout_up_next", 0) != 0;
+    s.layout.panelsLeft = ToInt(v, "layout_panels_left", 0) != 0;
+    s.layout.menuBar = ToInt(v, "layout_menu_bar", 1) != 0;
+    s.layout.tabCounts = ToInt(v, "layout_tab_counts", 0) != 0;
+    s.layout.statusDetails = ToInt(v, "layout_status_details", 0) != 0;
+    s.layout.hints = ToInt(v, "layout_hints", 0) != 0;
+    s.defaultSize = s.size = (ViewSize)std::clamp(ToInt(v, "view_size", 1), 0, 3);
+    s.layout.hiddenParts = (unsigned)std::clamp(ToInt(v, "layout_hidden", 0), 0, 1023);
     s.timeRemaining = ToInt(v, "time_remaining", 1) != 0;
     s.waveform = ToInt(v, "waveform", 1) != 0;
     s.liveWaveform = ToInt(v, "live_waveform", 0) != 0;
@@ -250,6 +268,17 @@ void LoadSettings() {
                                                  : kOldThemes[std::clamp(ToInt(v, "theme", 0), 0, 3)]);
     s.groupAlbums = ToInt(v, "group_albums", 1) != 0;
     s.musicBrainzLookup = ToInt(v, "musicbrainz_lookup", 0) != 0;
+    // Online sources keep the Windows names (Preferences > Online); every one is off by default.
+    online::Settings& net = online::Config();
+    net.covers[0] = ToInt(v, "online_covers_deezer", 0) != 0;
+    net.covers[1] = ToInt(v, "online_covers_itunes", 0) != 0;
+    net.covers[2] = ToInt(v, "online_covers_musicbrainz", 0) != 0;
+    net.coverFirst = std::clamp(ToInt(v, "online_cover_first", 0), 0, online::kCoverSources - 1);
+    net.coverSave = std::clamp(ToInt(v, "online_cover_save", 2), 0, 2);
+    net.coverOverwrite = ToInt(v, "online_cover_overwrite", 0) != 0;
+    net.lyrics[0] = ToInt(v, "online_lyrics_lrclib", 0) != 0;
+    net.lyrics[1] = ToInt(v, "online_lyrics_ovh", 0) != 0;
+    net.artistInfo = ToInt(v, "online_artist_info", 0) != 0;
     s.convertRecycle = ToInt(v, "convert_recycle", 1) != 0;
     s.convertShowOriginals = ToInt(v, "convert_show_originals", 0) != 0;
     s.convertMemory = (uint8_t)std::clamp(ToInt(v, "convert_undo_days", 3), 0, (int)std::size(kConvertMemoryDays) - 1);
@@ -299,12 +328,13 @@ void LoadSettings() {
     // "column:width,column:width" in ui::kColumns ids (the older "columns" key used ids of its own,
     // so it is left for the defaults). Column 0, the playing mark, always comes first.
     if (auto it = v.find("list_columns"); it != v.end() && !it->second.empty()) {
+        s.savedPackColumns = it->second;
         std::vector<int> columns{0};
         for (size_t i = 0; i < it->second.size();) {
             size_t j = it->second.find(',', i);
             if (j == std::string::npos) j = it->second.size();
             std::string part = it->second.substr(i, j - i);
-            int c = atoi(part.c_str()), w = 0;
+            int c = part.starts_with("p") ? -1 : atoi(part.c_str()), w = 0;
             if (size_t colon = part.find(':'); colon != std::string::npos) w = atoi(part.c_str() + colon + 1);
             if (c >= 0 && c < ui::kColumnCount) {
                 if (c && std::find(columns.begin(), columns.end(), c) == columns.end()) columns.push_back(c);
@@ -314,11 +344,15 @@ void LoadSettings() {
         }
         if (columns.size() > 1) s.columns = columns;
     }
+    s.defaultLayout = s.layout;
 }
 
 void SaveSettings() {
+    SaveHeadphoneProfiles();
     const Settings& s = g.settings;
     std::string text = "# cordinal settings\n";
+    text += AlternateSettingsText();
+    text += "big_layout=" + BigLayoutText() + "\ncompact_placement=" + CompactPlacementText() + "\n";
     text += "web_port=" + std::to_string(s.webPort) + "\nweb_start=" + std::to_string(s.webStart) + "\n";
     text += "web_away=" + std::to_string(s.webAway) + "\nweb_away_agreed=" + std::to_string(s.webAwayAgreed) +
             "\nweb_away_port=" + std::to_string(s.webAwayPort) + "\nweb_code=" + s.webCode + "\nweb_hosts=" + s.webHosts + "\n";
@@ -350,12 +384,30 @@ void SaveSettings() {
             "\nsuggestion_last_review=" + std::to_string(s.suggestionLastReview) + "\n";
     text += "group_albums=" + std::to_string(s.groupAlbums) + "\n";
     text += "musicbrainz_lookup=" + std::to_string(s.musicBrainzLookup) + "\n";
+    const online::Settings& net = online::Config();
+    text += "online_covers_deezer=" + std::to_string(net.covers[0]) + "\nonline_covers_itunes=" +
+            std::to_string(net.covers[1]) + "\nonline_covers_musicbrainz=" + std::to_string(net.covers[2]) +
+            "\nonline_cover_first=" + std::to_string(net.coverFirst) + "\nonline_cover_save=" +
+            std::to_string(net.coverSave) + "\nonline_cover_overwrite=" + std::to_string(net.coverOverwrite) +
+            "\nonline_lyrics_lrclib=" + std::to_string(net.lyrics[0]) + "\nonline_lyrics_ovh=" + std::to_string(net.lyrics[1]) +
+            "\nonline_artist_info=" + std::to_string(net.artistInfo) + "\n";
     text += "output_device=" + s.outputDevice + "\n";
-    text += "layout_hidden=" + std::to_string(s.hiddenParts) + "\n";
+    text += "view_size=" + std::to_string((int)s.defaultSize) + "\n";
+    text += "layout_dock=" + std::to_string(s.defaultLayout.dock) + "\n";
+    text += "layout_wave_size=" + std::to_string(s.defaultLayout.waveSize) + "\n";
+    text += "layout_wave_row=" + std::to_string(s.defaultLayout.waveOwnRow) + "\n";
+    text += "layout_large_cover=" + std::to_string(s.defaultLayout.largeCover) + "\n";
+    text += "layout_up_next=" + std::to_string(s.defaultLayout.upNext) + "\n";
+    text += "layout_panels_left=" + std::to_string(s.defaultLayout.panelsLeft) + "\n";
+    text += "layout_menu_bar=" + std::to_string(s.defaultLayout.menuBar) + "\n";
+    text += "layout_tab_counts=" + std::to_string(s.defaultLayout.tabCounts) + "\n";
+    text += "layout_status_details=" + std::to_string(s.defaultLayout.statusDetails) + "\n";
+    text += "layout_hints=" + std::to_string(s.defaultLayout.hints) + "\n";
+    text += "layout_hidden=" + std::to_string(s.defaultLayout.hiddenParts) + "\n";
     text += "packs_on=" + s.packsOn + "\nhelpers_on=" + s.helpersOn + "\n";
     for (const auto& [id, record] : s.helperTrust) text += "helper_trust." + id + "=" + record + "\n";
     text += "lyrics_panel=" + std::to_string(s.lyricsPanel) + "\n";
-    text += "points_chip=" + std::to_string(s.pointsChip) + "\n";
+    text += "points_chip=" + std::to_string(s.defaultLayout.points) + "\n";
     text += "games_ntt_guesses=";
     for (size_t i = 0; i < s.nttGuesses.size(); ++i) text += (i ? "," : "") + std::to_string(s.nttGuesses[i]);
     text += "\ngames_ntt_streak=" + std::to_string(s.nttStreak) + "\ngames_ntt_best=" + std::to_string(s.nttBest) +
@@ -387,13 +439,16 @@ void SaveSettings() {
     text += "rg_enabled=" + std::to_string(s.rg.on) + "\nrg_mode=" + std::to_string((int)s.rg.mode) + "\nrg_preamp=" + FloatText(s.rg.preamp) +
             "\nrg_preamp_noinfo=" + FloatText(s.rg.preampNoInfo) + "\nrg_keep=" + FloatText(s.rg.keep) +
             "\nrg_autoscan=" + std::to_string(s.rgAutoScan) + "\nrg_estimate=" + std::to_string(s.rgEstimate) + "\n";
-    text += EqText(s.eq);
+    text += EqText(HeadphonesGlobalEq());
     text += "reverb=" + std::to_string((int)s.reverb.preset) + "\nreverb_amount=" + FloatText(s.reverb.mix) +
             "\nloudness_compensation=" + std::to_string(s.loudnessComp) + "\nnight_mode=" + std::to_string(s.nightMode) +
             "\nloops=" + std::to_string(s.loops) + "\n";
     text += "list_columns=";
-    for (size_t i = 0; i < s.columns.size(); ++i)
-        text += (i ? "," : "") + std::to_string(s.columns[i]) + ":" + std::to_string(s.widths[s.columns[i]]);
+    for (size_t i = 0; i < s.columns.size(); ++i) {
+        const int column = s.columns[i];
+        const std::string key = column < ui::kColumnCount ? std::to_string(column) : PackColumnKey(column);
+        text += (i ? "," : "") + key + ":" + std::to_string(s.widths[column]);
+    }
     text += "\n";
     std::string path = compat::Narrow(g.settingsPath.c_str()), temp = path + ".tmp";
     if (FILE* f = fopen(temp.c_str(), "w")) {

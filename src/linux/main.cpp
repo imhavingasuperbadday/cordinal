@@ -6,7 +6,12 @@
 //                                    controls the running cordinal (through MPRIS)
 //   cordinal --check-layout          compares the window's layout with the Windows build's (ui_spec.h)
 //   cordinal --capture-ui DIR        renders every theme and menu into DIR (linux/capture-ui.sh)
+#include "alternate_ui.h"
+#include "big_ui.h"
+#include "headphones_ui.h"
 #include "app.h"
+#include "customcover.h"
+#include "metadata_fetch.h"
 #include "musicbrainz.h"
 #include "radio_ui.h"
 #include "cover.h"
@@ -55,6 +60,9 @@ void Dispatch(const Message& m) {
         case WM_APP_EXPAND: OnExpanded(); break;
         case WM_APP_ORGANIZE: OnOrganizeDone(); break;
         case WM_APP_COPY: OnCopyMessage(m.wp, m.lp); break;
+        case WM_APP_IPOD: OnIpodMessage(m.wp, m.lp); break;
+        case WM_APP_COVERFETCH: OnCoverFetchMessage(m.wp, m.lp); break;
+        case WM_APP_ARTISTINFO: OnArtistInfoMessage(m.lp); break;
         case WM_APP_PLAYLIST_FILE: OnPlaylistFile(m.wp, m.lp); break;
         case WM_APP_LISTENBRAINZ: OnListenBrainzMessage(m.wp, m.lp); break;
         case WM_APP_LYRICS: OnLyricsLoaded(m.lp); break;
@@ -107,6 +115,8 @@ void CapturePump() {
     while (SDL_GetTicks() - start < 30000) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {}
+        TickPackGlobalKeys();
+        TickHelperVisualizers();
         DrainMessages();
         if (g.rowsRevision != g_lib.Revision()) RebuildRows();
         bool tags;
@@ -198,7 +208,7 @@ int Run(int argc, char** argv) {
         if (!full.empty()) paths.push_back(full);
     }
 
-    SDL_SetAppMetadata("cordinal", "0.1.2", "cordinal");
+    SDL_SetAppMetadata("cordinal", "0.1.3", "cordinal");
     SDL_SetHint(SDL_HINT_VIDEO_WAYLAND_PREFER_LIBDECOR, "1");
     if (parity) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
@@ -210,7 +220,9 @@ int Run(int argc, char** argv) {
     LoadSettings();
     StartTagWorker();
     LoadLibraryFile();
+    customcover::Start(g.dataDir);  // before any cover is decoded
     musicbrainz::Start(g.dataDir, g.settings.musicBrainzLookup);
+    online::Start(g.dataDir);
 
     Settings& s = g.settings;
     if (parity) {
@@ -218,6 +230,11 @@ int Run(int argc, char** argv) {
         s.windowH = ui::kMenuBarHeight + (checkLayout ? ui::kLayoutHeight : 662);
         s.maximized = false;
     }
+    // The software renderer draws into SDL's window surface, so keep that surface native. SDL
+    // otherwise emulates it with an OpenGL texture, which pulls the GPU driver and its 16 workers
+    // into the process and sends every present through the GPU even when drawing is software.
+    // Hardware drawing owns its OpenGL context and never asks for the window surface.
+    if (!parity) SDL_SetHint(SDL_HINT_FRAMEBUFFER_ACCELERATION, "0");
     g.window = SDL_CreateWindow("cordinal", s.windowW, s.windowH, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY |
                                                                      (s.maximized ? SDL_WINDOW_MAXIMIZED : 0));
     if (!g.window) {
@@ -281,10 +298,12 @@ int Run(int argc, char** argv) {
     // peaks.cpp tells a window when a waveform is done; any handle reaches this thread's queue here.
     StartPeaks(reinterpret_cast<HWND>(&g), WM_APP_PEAKS, compat::Widen((cacheDir + "/cordinal/peaks").c_str()));
     StartMpris();
+    if (!parity) StartHeadphones();
     InitConvert();
     StartScanner();
     g.active = std::clamp(s.activeTab, 0, (int)g.playlists.size() - 1);
     InitUi();
+    if (!parity) InitializePresentation();
     if (g.settings.alwaysOnTop) SDL_SetWindowAlwaysOnTop(g.window, true);
     SetActiveTab(g.active);
     LoadPacks();
@@ -317,8 +336,10 @@ int Run(int argc, char** argv) {
         // Wake for the clock while something plays (and the search box's caret blinks).
         int timeout = (g.playing != kNone || RadioPlaying()) && !IsPaused() ? 250 : g.searchFocused ? 530 : 2000;
         if (InternetRadio().browser && InternetRadio().browser->Searching()) timeout = std::min(timeout, 250);
+        if (HelperVisualizersRunning()) timeout = std::min(timeout, 16);
         if (UiAnimating()) timeout = ui::kFoobarFrameMs;
         if (PlaylistImportPending()) timeout = 0;
+        if (PackGlobalKeysActive()) timeout = std::min(timeout, 100);
         if (WebRunning()) timeout = std::min(timeout, 20);
         if (PanelReplanPending()) {  // the organize preview, once typing pauses
             timeout = std::min(timeout, 100);
@@ -335,14 +356,17 @@ int Run(int argc, char** argv) {
                 else if (e.type != g_wakeEvent) HandleEvent(e);
             } while (SDL_PollEvent(&e));
         }
+        TickPackGlobalKeys();
+        TickHelperVisualizers();
         DrainMessages();
         TickPlaylistImport();
         RadioTick();
-        if (UiAnimating()) g.redraw = true;
         if (WebRunning()) TickWeb();
         uint64_t now = SDL_GetTicks();
         if (now - lastTick >= 250) {
             lastTick = now;
+            TickAlternate();
+            HeadphonesTick();
             PlaybackTick();
             PreferenceTick(LastInputTicks());
             if (musicbrainz::Tick()) {
@@ -355,15 +379,15 @@ int Run(int argc, char** argv) {
             if (g.playing != kNone || RadioPlaying() || g.searchFocused || now < g.messageUntil + 300) g.redraw = true;
         }
         if (g.libraryDirty && now - g.lastSave > 5 * 60 * 1000) SaveLibraryFile(false);
+        const bool seekOnly = SeekAnimationOnly();
+        if (UiAnimating() && !seekOnly) g.redraw = true;
         if (g.redraw) Render();
+        else if (seekOnly) RenderSeek();
     }
 
     // Window size and the rest, then the library (play counts, playlists).
-    SDL_WindowFlags flags = SDL_GetWindowFlags(g.window);
     LeaveMini();  // the window size to remember is the full window's
-    flags = SDL_GetWindowFlags(g.window);
-    s.maximized = flags & SDL_WINDOW_MAXIMIZED;
-    if (!s.maximized) SDL_GetWindowSize(g.window, &s.windowW, &s.windowH);
+    SavePresentationWindow();
     SaveSettings();
     StopPlaylistFiles();
     StopMigration();
@@ -371,10 +395,16 @@ int Run(int argc, char** argv) {
     StopConverter();
     StopOrganizer();
     StopCopier();
+    StopIpod();
+    StopArtistInfo();
+    StopCoverFetch();
     StopExpanders();
     FlushAutomaticPreferences();
     StopWeb();
     StopScrobble();
+    StopPackGlobalKeys();
+    StopAlternate();
+    StopHeadphones();
     StopHelpers();
     ShutdownSounds();
     StopReplayGain();

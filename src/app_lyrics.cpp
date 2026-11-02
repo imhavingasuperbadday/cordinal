@@ -2,7 +2,15 @@
 // (what the tag editor writes) or a .lrc file next to it. Timed lyrics ("[01:12.30] line", LRC)
 // follow the song: the current line is highlighted and kept in the middle, and clicking a line
 // seeks to it. Plain lyrics scroll with the wheel.
+//
+// When a song has neither and a lyrics source is on (Preferences > Online), the same worker asks
+// LrcLib, then lyrics.ovh (metadata_fetch.h), and the panel names where the lyrics came from.
+// Fetched lyrics are written nowhere until the user chooses Save lyrics to tags or Save as .lrc
+// file from the panel's right-click menu. A new song cancels a fetch still in flight.
 #include "app.h"
+
+#include "metadata_fetch.h"
+#include "tagwriter.h"
 
 namespace app {
 
@@ -22,6 +30,8 @@ struct Loaded {
     uint64_t generation;
     std::vector<Line> lines;
     bool synced = false;
+    std::wstring source;  // the host fetched lyrics came from; empty for the song's own
+    std::string fetched;  // fetched lyrics as received, for saving
 };
 
 struct Panel {
@@ -37,6 +47,9 @@ struct Panel {
     double scroll = 0, target = 0;  // pixels; synced lyrics glide toward `target`
     int current = -1;
     bool userScrolled = false;  // plain lyrics: the wheel moved them
+    std::shared_ptr<online::Cancel> cancel;  // the fetch in flight, when lyrics sources are on
+    std::wstring source;
+    std::string fetched;
 } p;
 
 double ParseStamp(const std::wstring& s) {
@@ -117,10 +130,12 @@ std::wstring ReadTextFile(const std::wstring& path) {
     return FromUtf8(bytes);
 }
 
-// Runs on a worker: a .lrc next to the file wins (it's usually timed), then the tags.
-void Load(TrackId id, std::wstring path, HWND notify, uint64_t generation) {
+// Runs on a worker: a .lrc next to the file wins (it's usually timed), then the tags, then the
+// lyrics sources when they are on.
+void Load(TrackId id, std::wstring path, HWND notify, uint64_t generation, online::LyricsQuery query,
+          std::shared_ptr<online::Cancel> cancel) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    auto* out = new Loaded{id, generation, {}, false};
+    auto* out = new Loaded{id, generation, {}, false, {}, {}};
     std::wstring audio = AudioFileOf(path);
     size_t dot = audio.find_last_of(L'.'), slash = audio.find_last_of(L"\\/");
     std::wstring text;
@@ -128,6 +143,12 @@ void Load(TrackId id, std::wstring path, HWND notify, uint64_t generation) {
     if (text.empty()) {
         std::string lyrics;
         if (ReadLyrics(path, lyrics)) text = FromUtf8(lyrics);
+    }
+    online::LyricsFound found;
+    if (text.empty() && cancel && online::FetchLyrics(query, *cancel, found)) {
+        text = FromUtf8(found.text);
+        out->source = online::LyricsSourceHost(found.source);
+        out->fetched = std::move(found.text);
     }
     for (auto& [time, line] : ParseLyrics(text, out->synced)) out->lines.push_back({time, std::move(line)});
     CoUninitialize();
@@ -139,7 +160,42 @@ void Load(TrackId id, std::wstring path, HWND notify, uint64_t generation) {
 void StartLoad() {
     if (p.loading || p.stopping || !p.shown || p.requested == kNone || p.requested >= g_lib.Count()) return;
     p.loading = true;
-    p.worker = std::thread(Load, p.requested, g_lib.Path(p.requested), p.hwnd, p.generation);
+    const Track& t = g_lib[p.requested];
+    online::LyricsQuery query{ToUtf8(g_lib.Str(t.artist ? t.artist : t.albumArtist)), ToUtf8(g_lib.Str(t.album)),
+                              ToUtf8(g_lib.Str(t.title)), (t.durationMs + 500) / 1000};
+    p.cancel = online::AnyLyricsSource() ? std::make_shared<online::Cancel>() : nullptr;
+    p.worker = std::thread(Load, p.requested, g_lib.Path(p.requested), p.hwnd, p.generation, std::move(query), p.cancel);
+}
+
+// A fetch for a song no longer shown ends at once, so the next song's lyrics needn't wait for it.
+void CancelFetch() {
+    if (p.cancel) p.cancel->Stop();
+    p.source.clear();
+    p.fetched.clear();
+}
+
+// The right-click menu: fetched lyrics can be kept in the file's tags (one undoable tag edit) or as
+// a .lrc file beside it; neither happens without this choice.
+void ShowLyricsMenu(POINT screen) {
+    const bool fetched = !p.fetched.empty() && p.loadedFor != kNone && g_lib.Contains(p.loadedFor);
+    const std::wstring path = fetched ? g_lib.Path(p.loadedFor) : std::wstring();
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING | (fetched && CanWriteTags(path) ? 0 : MF_GRAYED), 1, L"Save lyrics to &tags");
+    AppendMenuW(menu, MF_STRING | (fetched && !IsSubtrack(path) ? 0 : MF_GRAYED), 2, L"Save as .&lrc file");
+    int command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, 0, p.hwnd, nullptr);
+    DestroyMenu(menu);
+    if (command == 1) {
+        TagEdit edit;
+        edit.lyrics = p.fetched;
+        SubmitTagWrites({{p.loadedFor, edit}}, true, true);
+    } else if (command == 2) {
+        std::wstring error;
+        switch (online::WriteLrcFile(AudioFileOf(path), p.fetched, error)) {
+            case online::FolderWrite::Written: ShowMessage(L"Saved the lyrics as a .lrc file beside the song."); break;
+            case online::FolderWrite::Exists: ShowMessage(L"A .lrc file with this name is already there; it was kept."); break;
+            case online::FolderWrite::Failed: ShowMessage(L"Couldn't save the .lrc file: " + error + L"."); break;
+        }
+    }
 }
 
 // Measures each line once per width (using the bold font, so highlighting a line never changes its
@@ -201,7 +257,7 @@ void PaintContent(HDC mem, RECT rc) {
     IntersectClipRect(mem, body.left, body.top, body.right, body.bottom);
     if (p.lines.empty()) {
         const wchar_t* hint = g.playing == kNone ? L"Lyrics of the playing song show here."
-                              : p.loading        ? L""
+                              : p.loading        ? (p.cancel ? L"Looking for lyrics online..." : L"")
                                                  : L"No lyrics for this song.\n\nAdd them in the tag editor (Alt+Enter), or put a "
                                                    L".lrc file with the same name next to it for lyrics that follow the song.";
         RECT hr{pad, body.top + S(24), rc.right - pad, rc.bottom};
@@ -220,6 +276,14 @@ void PaintContent(HDC mem, RECT rc) {
             SetTextColor(mem, !p.synced ? TextColor() : cur ? Ref(P().accent) : i < p.current ? SubColor() : TextColor());
             DrawTextW(mem, l.text.c_str(), (int)l.text.size(), &r, DT_WORDBREAK | DT_NOPREFIX | (p.synced ? DT_CENTER : DT_LEFT));
         }
+        if (!p.source.empty()) {
+            // Where fetched lyrics came from, after the last line.
+            RECT from{pad, y0 + p.contentHeight + S(10), pad + width, y0 + p.contentHeight + S(30)};
+            SelectObject(mem, g.font);
+            SetTextColor(mem, SubColor());
+            std::wstring text = L"Lyrics from " + p.source;
+            DrawTextW(mem, text.c_str(), -1, &from, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS | (p.synced ? DT_CENTER : DT_LEFT));
+        }
     }
     SelectObject(mem, old);
 }
@@ -231,7 +295,7 @@ int BodyHeight() {
 }
 
 void ClampScroll() {
-    double maxScroll = std::max(0, p.contentHeight + S(24) - BodyHeight());
+    double maxScroll = std::max(0, p.contentHeight + S(24) + (p.source.empty() ? 0 : S(30)) - BodyHeight());
     p.scroll = std::clamp(p.scroll, 0.0, maxScroll);
     p.target = std::clamp(p.target, 0.0, maxScroll);
 }
@@ -266,6 +330,12 @@ LRESULT CALLBACK LyricsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 }
             return 0;
         }
+        case WM_RBUTTONUP: {
+            POINT screen{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            ClientToScreen(h, &screen);
+            ShowLyricsMenu(screen);
+            return 0;
+        }
         case WM_SETCURSOR:
             SetCursor(LoadCursorW(nullptr, p.synced && g.playing == p.loadedFor ? IDC_HAND : IDC_ARROW));
             return TRUE;
@@ -283,6 +353,8 @@ LRESULT CALLBACK LyricsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             p.loadedFor = r->id;
             p.lines = std::move(r->lines);
             p.synced = r->synced;
+            p.source = std::move(r->source);
+            p.fetched = std::move(r->fetched);
             p.layoutWidth = -1;
             p.scroll = p.target = 0;
             p.current = -1;
@@ -315,6 +387,7 @@ void ToggleLyricsPanel() {
         ++p.generation;
         p.requested = p.loadedFor = kNone;
         p.lines.clear();
+        CancelFetch();
     }
     IniWrite(L"Window", L"Lyrics", p.shown ? L"1" : L"0");
     ShowWindow(p.hwnd, p.shown ? SW_SHOWNA : SW_HIDE);
@@ -328,9 +401,16 @@ void LyricsLibraryChanged() {
     ++p.generation;
     p.requested = p.loadedFor = kNone;
     p.lines.clear();
+    CancelFetch();
     p.synced = false;
     p.current = -1;
     p.layoutWidth = -1;
+}
+
+void LyricsSourcesChanged() {
+    if (!LyricsPanelShown() || (!p.lines.empty() && p.fetched.empty())) return;  // the song's own lyrics stay
+    p.requested = kNone;
+    LyricsTrackChanged();
 }
 
 void LyricsTrackChanged() {
@@ -338,6 +418,7 @@ void LyricsTrackChanged() {
     p.requested = g.playing;
     ++p.generation;
     p.lines.clear();
+    CancelFetch();
     p.loadedFor = g.playing;
     p.current = -1;
     p.scroll = p.target = 0;
@@ -350,6 +431,7 @@ void LyricsTrackChanged() {
 
 void StopLyrics() {
     p.stopping = true;
+    CancelFetch();
     if (p.worker.joinable()) p.worker.join();
     MSG message;
     while (p.hwnd && PeekMessageW(&message, p.hwnd, WM_APP_LYRICS, WM_APP_LYRICS, PM_REMOVE))

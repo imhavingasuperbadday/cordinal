@@ -290,6 +290,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP_COPY:
             OnCopyMessage(wp, lp);
             return 0;
+        case WM_APP_IPOD:
+            OnIpodMessage(wp, lp);
+            return 0;
+        case WM_APP_COVERFETCH:
+            OnCoverFetchMessage(wp, lp);
+            return 0;
         case WM_APP_GROUP_ART:
             OnGroupArt();
             return 0;

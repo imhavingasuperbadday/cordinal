@@ -4,11 +4,13 @@
 // cordinal then keeps a record of its files in settings.ini and turns it off again, saying so, when one of them
 // changes. Edit > Run and the track list's right-click menu run the tools of the helpers that are on, one run at a
 // time on a worker thread. A program is any executable file in the helper's folder, started with posix_spawn in
-// a process group of its own that closing cordinal ends. Visualizers need the Windows visual feed and are listed
-// but not started. A cordinal running as root starts no helper program.
+// a process group of its own that closing cordinal ends. Visualizers inherit a read-only visual-feed fd;
+// the feed and its private writer exist only while a visualizer runs. A root process starts no helper program.
 #include "app.h"
 #include "cue.h"
 #include "helpers.h"
+#include "ui_internal.h"
+#include <unistd.h>
 
 #include <filesystem>
 #include <fstream>
@@ -38,12 +40,20 @@ struct ToolDone {
     bool cancelled = false;
 };
 
+struct ShownVisualizer {
+    size_t helper, index;
+    std::unique_ptr<HelperProcess> process;
+};
 struct State {
     std::vector<std::shared_ptr<Helper>> helpers;  // every helper folder, in name order
     std::vector<bool> on;
     std::vector<std::wstring> why;  // why a helper the user turned on is off now
     std::wstring off;               // why no helper runs at all, or empty
     std::vector<std::pair<size_t, size_t>> tools;  // (helper, index), in menu order
+    std::vector<std::pair<size_t, size_t>> visualizers;
+    std::vector<ShownVisualizer> shown;
+    HelperFeedWriter feed;
+    uint64_t feedAt = 0;
     std::thread worker;
     std::atomic<bool> cancel{false};
     std::wstring running;  // the label of the tool that runs
@@ -73,14 +83,25 @@ void SaveOn() {
     SaveSettings();
 }
 
+void CloseHelperVisualizers(size_t helper = SIZE_MAX) {
+    std::erase_if(s.shown, [&](auto& shown) {
+        if (helper != SIZE_MAX && shown.helper != helper) return false;
+        shown.process->Stop();
+        return true;
+    });
+    if (s.shown.empty()) s.feed.Close();
+}
+
 // Hands the helpers that are on to the decoder, scanner and tag reader, and their tools to the menus.
 void ApplyHelpers() {
     std::vector<std::shared_ptr<const Helper>> on;
     s.tools.clear();
+    s.visualizers.clear();
     for (size_t i = 0; i < s.helpers.size(); ++i) {
         if (!s.on[i] || !s.off.empty()) continue;
         on.push_back(s.helpers[i]);
         for (size_t t = 0; t < s.helpers[i]->tools.size(); ++t) s.tools.push_back({i, t});
+        for (size_t v = 0; v < s.helpers[i]->visualizers.size(); ++v) s.visualizers.push_back({i, v});
     }
     SetActiveHelpers(std::move(on));
     g.redraw = true;
@@ -90,6 +111,7 @@ void ApplyHelpers() {
 
 // Reads the helpers folder; a helper that is on but whose files changed since the user turned it on is turned off.
 void LoadHelpers() {
+    CloseHelperVisualizers();
     std::error_code ec;
     fs::create_directories(HelpersDir(), ec);
     s.off = HelpersOffReason(false, ProcessElevated());
@@ -146,6 +168,7 @@ void ToggleHelper(size_t i) {
     const Helper& h = *s.helpers[i];
     if (!h.error.empty() || !s.off.empty()) return;
     if (s.on[i]) {
+        CloseHelperVisualizers(i);
         s.on[i] = false;
         g.settings.helperTrust.erase(ToUtf8(TrustKey(h)));
     } else {
@@ -198,6 +221,96 @@ std::vector<std::wstring> HelperToolLabels() {
     std::vector<std::wstring> labels;
     for (auto& [h, t] : s.tools) labels.push_back(s.helpers[h]->tools[t].label);
     return labels;
+}
+
+std::vector<std::wstring> HelperVisualizerLabels() {
+    std::vector<std::wstring> labels;
+    for (const auto& [h, v] : s.visualizers) labels.push_back(s.helpers[h]->visualizers[v].label);
+    return labels;
+}
+
+bool HelperVisualizerRunning(size_t index) {
+    if (index >= s.visualizers.size()) return false;
+    const auto [h, v] = s.visualizers[index];
+    return std::any_of(s.shown.begin(), s.shown.end(), [&](const auto& shown) { return shown.helper == h && shown.index == v; });
+}
+
+bool HelperVisualizersRunning() { return !s.shown.empty(); }
+
+void ToggleHelperVisualizer(size_t index) {
+    if (index >= s.visualizers.size() || !s.off.empty()) return;
+    const auto [h, v] = s.visualizers[index];
+    const auto& helper = *s.helpers[h];
+    const auto& visualizer = helper.visualizers[v];
+    auto shown = std::find_if(s.shown.begin(), s.shown.end(), [&](const auto& old) { return old.helper == h && old.index == v; });
+    if (shown != s.shown.end()) {
+        shown->process->Stop();
+        s.shown.erase(shown);
+        if (s.shown.empty()) s.feed.Close();
+        ShowMessage(L"Closed " + visualizer.label + L".");
+        return;
+    }
+    if (!s.on[h]) return;
+    HANDLE reader = s.feed.Open() ? s.feed.ReaderHandle() : nullptr;
+    HelperValues values;
+    values.feed = std::to_wstring((intptr_t)reader);
+    auto process = std::make_unique<HelperProcess>();
+    std::wstring error = L"cordinal couldn't share what is playing";
+    bool started = reader && process->Start(helper.dir + L"/" + visualizer.command.program,
+        HelperArguments(visualizer.command, values), helper.dir, error, reader, true);
+    if (reader) close((int)(intptr_t)reader);
+    if (!started) {
+        if (s.shown.empty()) s.feed.Close();
+        ShowMessage(L"Couldn't start " + visualizer.label + L": " + error + L".");
+        return;
+    }
+    s.shown.push_back({h, v, std::move(process)});
+    ShowMessage(L"Started " + visualizer.label + L".");
+}
+
+void OpenHelperVisualizers(float x, float y) {
+    auto labels = HelperVisualizerLabels();
+    std::vector<std::string> choices;
+    for (size_t i = 0; i < labels.size(); ++i)
+        choices.push_back((HelperVisualizerRunning(i) ? "Close " : "Start ") + ToUtf8(labels[i]));
+    if (choices.empty()) { ShowMessage(L"No enabled helper offers a visualizer."); return; }
+    OpenChoice(x, y, choices, -1, [](int index) { ToggleHelperVisualizer(index); });
+}
+
+void TickHelperVisualizers() {
+    ReapHelperPrograms();
+    if (s.shown.empty()) return;
+    uint64_t now = SDL_GetTicks();
+    if (now - s.feedAt < 16) return;
+    s.feedAt = now;
+    std::erase_if(s.shown, [&](auto& shown) {
+        auto complaint = shown.process->Complaint();  // drains bounded stderr even while the child runs
+        if (shown.process->Running()) return false;
+        const auto& label = s.helpers[shown.helper]->visualizers[shown.index].label;
+        ShowMessage(complaint.empty() ? label + L" closed." : label + L" closed: " + complaint + L".");
+        return true;
+    });
+    if (s.shown.empty()) { s.feed.Close(); return; }
+    const bool playing = g.playing != kNone || RadioPlaying(), paused = playing && IsPaused();
+    s.feed.Publish([&](HelperFeed& feed) {
+        feed.state = !playing ? 0 : paused ? 2 : 1;
+        feed.rate = g.engine.Rate();
+        feed.position = playing ? g.engine.Position() : 0;
+        feed.duration = playing ? g.engine.Duration() : 0;
+        const auto& p = CurrentPalette();
+        const uint32_t colors[] = {p.bg, p.text, p.sub, p.accent};
+        std::copy(std::begin(colors), std::end(colors), feed.colors);
+        if (paused) return;
+        double clock = -1;
+        if (playing && g.engine.VisualSamples(feed.wave, HelperFeed::kFrames, clock) == HelperFeed::kFrames) {
+            feed.clock = clock;
+            SpectrumLevels(feed.wave, feed.rate, feed.levels, HelperFeed::kBands);
+        } else {
+            feed.clock = -1;
+            std::fill(std::begin(feed.wave), std::end(feed.wave), 0.0f);
+            std::fill(std::begin(feed.levels), std::end(feed.levels), 0.0f);
+        }
+    });
 }
 
 int RunningHelperTool() { return s.running.empty() ? -1 : s.runningTool; }
@@ -410,9 +523,81 @@ void OnHelperMessage(WPARAM wp, LPARAM lp) {
 }
 
 void StopHelpers() {
+    CloseHelperVisualizers();
     s.cancel = true;
     StopHelperPrograms();
     if (s.worker.joinable()) s.worker.join();
+}
+
+// Uses only a generated helper in an isolated profile; no installed program or user trust choice changes.
+int CheckHelperVisualizerLifecycle() {
+    if (ProcessElevated() || access("/usr/bin/python3", X_OK) != 0) {
+        printf("skip helper visualizer UI lifecycle: needs a non-root session and the Python fixture interpreter\n");
+        return 0;
+    }
+    if (!s.shown.empty() || s.worker.joinable()) {
+        printf("skip helper visualizer UI lifecycle: a user helper is already running\n");
+        return 0;
+    }
+    char temporary[] = "/tmp/cordinal-helper-visualizer-XXXXXX";
+    if (!mkdtemp(temporary)) return 1;
+    fs::path root(temporary), dir = root / "helpers/feed";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    auto write = [](const fs::path& file, const std::string& bytes) {
+        std::ofstream out(file); out << bytes; out.close(); return !out.fail();
+    };
+    bool ready = !ec && write(dir / "helper.ini",
+        "[helper]\nname=Feed fixture\n[visualizer]\nlabel=Feed fixture\ncommand=reader.py {feed}\n") &&
+        write(dir / "reader.py", R"PY(#!/usr/bin/python3
+import mmap, pathlib, struct, sys, time
+fd = int(sys.argv[1])
+block = mmap.mmap(fd, 16616, access=mmap.ACCESS_READ)
+assert block[:4] == b'CDVF'
+pathlib.Path('ready').write_text('ready')
+while True:
+    time.sleep(0.02)
+)PY");
+    fs::permissions(dir / "reader.py", fs::perms::owner_read | fs::perms::owner_write | fs::perms::owner_exec, ec);
+    auto helpers = std::move(s.helpers);
+    auto on = std::move(s.on);
+    auto why = std::move(s.why);
+    auto off = std::move(s.off);
+    const Settings settings = g.settings;
+    const auto dataDir = g.dataDir, settingsPath = g.settingsPath;
+    g.dataDir = FromUtf8(root.string());
+    g.settingsPath = g.dataDir + L"/settings.ini";
+    g.settings.helpersOn = "feed";
+    g.settings.helperTrust.clear();
+    g.settings.helperTrust["feed"] = ToUtf8(MakeHelperTrust(FromUtf8(dir.string())));
+    LoadHelpers();
+    bool discovered = ready && HelperVisualizerLabels().size() == 1 && !HelperVisualizerRunning(0);
+    if (discovered) ToggleHelperVisualizer(0);
+    uint64_t deadline = SDL_GetTicks() + 3000;
+    while (HelperVisualizersRunning() && !fs::exists(dir / "ready", ec) && SDL_GetTicks() < deadline) {
+        TickHelperVisualizers();
+        SDL_Delay(10);
+    }
+    bool running = HelperVisualizerRunning(0) && fs::exists(dir / "ready", ec);
+    if (running) ToggleHelperVisualizer(0);
+    bool closed = !HelperVisualizersRunning() && !s.feed.IsOpen();
+    if (discovered) ToggleHelperVisualizer(0);
+    if (HelperVisualizersRunning()) ToggleHelper(0);  // disabling a trusted fixture needs no confirmation
+    bool disabled = !HelperVisualizersRunning() && !s.feed.IsOpen() && !HelperAt(0).on;
+    CloseHelperVisualizers();
+    s.helpers = std::move(helpers);
+    s.on = std::move(on);
+    s.why = std::move(why);
+    s.off = std::move(off);
+    g.settings = settings;
+    g.dataDir = dataDir;
+    g.settingsPath = settingsPath;
+    ApplyHelpers();
+    fs::remove_all(root, ec);
+    bool passed = discovered && running && closed && disabled && !ec;
+    printf("%s enabled helper visualizers start, close, release their feed and stop when their helper is disabled\n",
+        passed ? "ok  " : "FAIL");
+    return !passed;
 }
 
 }  // namespace lx

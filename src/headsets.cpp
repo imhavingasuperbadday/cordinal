@@ -1,8 +1,10 @@
-// Recognizes named outputs and talks directly to supported USB headsets using Windows HID.
+// Shared output recognition and headset wire protocol, with the Windows HID controller below.
+// Linux uses the same protocol from linux/headsets.cpp.
 // BlackShark wire facts: https://github.com/openrazer/openrazer/pull/2862 (1125585244f3).
 // Only explicit commands change persistent hardware settings; discovery queries status alone.
 #include "headsets.h"
 #include <windows.h>
+#ifdef _WIN32
 #include <mmdeviceapi.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <initguid.h>
@@ -11,6 +13,7 @@
 #include <hidsdi.h>
 #include <hidpi.h>
 #include <wrl/client.h>
+#endif
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -21,7 +24,9 @@
 #include <utility>
 #include <vector>
 
+#ifdef _WIN32
 using Microsoft::WRL::ComPtr;
+#endif
 
 std::wstring RecognizeHeadphones(std::wstring_view name) {
     std::wstring folded;
@@ -48,7 +53,7 @@ std::wstring OutputProfileSection(std::wstring_view id) {
     uint64_t hash = 14695981039346656037ull;
     for (wchar_t c : id) { hash ^= (uint16_t)c; hash *= 1099511628211ull; }
     wchar_t section[40];
-    swprintf_s(section, L"OutputEQ-%016llx", (unsigned long long)hash);
+    swprintf(section, std::size(section), L"OutputEQ-%016llx", (unsigned long long)hash);
     return section;
 }
 
@@ -84,6 +89,7 @@ bool ValidHeadsetChanges(const HeadsetChanges& c) {
             (c.preset >= 250 && c.preset <= 255));
 }
 
+#ifdef _WIN32
 namespace {
 struct Endpoint { HeadsetInfo info; GUID container{}; };
 Endpoint DefaultOutput(IMMDeviceEnumerator* enumerator) {
@@ -347,3 +353,5 @@ bool HeadsetController::Apply(const std::wstring& id, const HeadsetChanges& chan
     impl_->wake.notify_all();
     return true;
 }
+
+#endif  // _WIN32

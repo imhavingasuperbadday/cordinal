@@ -443,6 +443,18 @@ void TestNativeCodecs(const std::wstring& root, const std::wstring& scratch) {
     TestPcmBlocks(scratch);
     TestCrc16();
     TestMp4TimeScales(root, scratch);
+    batch.Next(L"empty audio placeholders report their actual problem instead of a codec failure");
+    const std::wstring empty = scratch + L"\\empty.ogg";
+    if (Ready(WriteTestBytes(empty, ""), L"an empty audio placeholder is prepared")) {
+        std::wstring error;
+        auto decoder = OpenDecoder(empty, 48000, error);
+        Check(!decoder && error == L"Couldn't play empty.ogg: the file is empty.",
+              L"DECODER an empty file is reported explicitly");
+        std::wstring missing;
+        Check(!OpenDecoder(scratch + L"\\not-present.ogg", 48000, missing) &&
+                  missing.find(L"the file is empty") == std::wstring::npos,
+              L"DECODER an unreadable file is not reported as empty");
+    }
     testlog::Cases failures;
     failures.Add(TestFlacFixed(scratch), L"FLAC truncated at a frame boundary");
     batch.Next(L"WavPack correction files are noticed and container priming is consumed once while explicit "

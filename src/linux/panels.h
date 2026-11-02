@@ -15,11 +15,15 @@ std::vector<PaletteCommand> MenuCommands();  // ui.cpp: every item of the menu b
 void RunMenuCommand(size_t index);           // ui.cpp: runs the index-th item of the last MenuCommands()
 
 // What a file chosen in a dialog is for (WM_APP_FILE's wParam).
-enum FilePurpose : int { kFileCover = 1, kFileAutoEq = 2, kFileOrganizeRoot = 3, kFileCopyDest = 4, kFilePack = 5, kFileHelper = 6 };
+enum FilePurpose : int {
+    kFileCover = 1, kFileAutoEq = 2, kFileOrganizeRoot = 3, kFileCopyDest = 4, kFilePack = 5, kFileHelper = 6,
+    kFileCoverPick = 7  // the cover picker's From file...
+};
 
 void OpenEqualizer();
 void OpenTagEditor(const std::vector<TrackId>& ids);
 void OpenPreferences();
+int CheckPreferences();  // headless control geometry, state and keyboard checks; saves no images
 void OpenRules(int playlist);  // -1: a new auto-playlist; else that auto-playlist's rules
 void OpenOutputDevice();  // choose the PipeWire sink to play on (Preferences > Output)
 void OpenPoints();  // cordinal points (View > Games and stats, or the chip)
@@ -29,6 +33,8 @@ void OpenReview();  // Your year in music
 void OpenGames(int which);
 bool GamesOpen();
 void ShowGame(int which);
+void ResetGameRenderer(bool restore);
+void ResetPanelRenderer(bool restore);
 void CloseGames();  // from ClosePanel: stops the clip, joins the workers and lets the covers go
 void DrawGames(const Palette& p, float mouseX, float mouseY);
 void GamesMouseDown(float x, float y);
@@ -61,6 +67,45 @@ void OpenOrganize(std::vector<TrackId> ids);  // the tracks given, or the whole 
 // copies it owns), empty for a selection.
 void OpenCopy(const std::vector<TrackId>& ids, const std::wstring& playlist);
 bool PanelReplanPending();  // the organize preview waits to be replanned once typing pauses
+// coverfetch_ui.cpp: covers, as app_coverfetch.cpp does on Windows. The picker (Change cover...) and
+// the review of Library > Fetch missing covers are panels; the tag editor opens the picker over
+// itself and gets the chosen image back. The picker takes a file chosen for it and a dropped file,
+// image or address (false when it isn't open to take one); custom covers are restored per track.
+void OpenCoverSearch(const std::vector<TrackId>& ids);
+void OpenCoverSearchForTags(const std::vector<TrackId>& ids, std::function<void(const std::string&)> pick);
+void CoverPanelFile(const std::wstring& path);
+bool CoverPanelDrop(const char* data, bool file);
+bool HasCustomCover(const std::vector<TrackId>& ids);
+void RestoreOriginalCovers(const std::vector<TrackId>& ids);
+void FetchMissingCovers();
+void CancelCoverFetch();
+bool CoverFetchBusy();
+void OnCoverFetchMessage(WPARAM wp, LPARAM lp);  // WM_APP_COVERFETCH
+void StopCoverFetch();
+void DrawCoverPanel(const Palette& p, float mouseX, float mouseY);
+void CoverPanelMouseDown(float x, float y, int button, int clicks);
+void CoverPanelKey(const SDL_KeyboardEvent& e);
+void CoverPanelText(const char* text);
+void CoverPanelWheel(float x, float y, float dy);
+bool CoverPanelWantsText(float x, float y);
+void CoverPanelClose();               // from ClosePanel: stops the search and lets the images go
+void CoverPanelRenderer(bool restore);  // the renderer is being replaced
+// panels.cpp: shows the cover panel (over the tag editor when `overTags`), and leaves it, back to
+// the tag editor that opened it or closed.
+void ShowCoverPanel(bool overTags);
+void CoverPanelDone();
+// artistinfo_ui.cpp: Artist info (View > Artist info...), a panel like the others; panels.cpp shows it.
+void OpenArtistInfo();
+void OnArtistInfoMessage(LPARAM lp);  // WM_APP_ARTISTINFO
+void StopArtistInfo();
+void DrawArtistPanel(const Palette& p);
+void ArtistPanelMouseDown(float x, float y);
+void ArtistPanelKey(const SDL_KeyboardEvent& e);
+void ArtistPanelWheel(float x, float y, float dy);
+void ArtistPanelClose();
+void ShowArtistPanel();  // panels.cpp
+// ui.cpp: drops the decoded covers of the views and the now-playing pane, after covers changed on disk.
+void ForgetCoverArt();
 // ui.cpp: the window's own panels, which Preferences links to.
 void OpenLibraryFolders();
 void OpenWebServer();
