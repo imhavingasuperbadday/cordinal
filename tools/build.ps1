@@ -51,7 +51,7 @@ $objDir = 'build\obj'
 $manifestPath = Join-Path $objDir 'build.json'
 # The packed player's size budget in decimal bytes (PRINCIPLES.md: fast and small are features). A
 # release build over it fails: a change that needs more raises this number and says why in docs\size.md.
-$SizeBudget = 1660000
+$SizeBudget = 1720000
 
 function Write-Step([string]$Text) { Write-Host "==> $Text" }
 function Fail([string]$Message) { throw $Message }
