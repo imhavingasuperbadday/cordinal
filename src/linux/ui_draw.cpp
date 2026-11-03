@@ -42,66 +42,96 @@ std::string Plain(const wchar_t* label) {  // a Windows menu label without its m
     return Utf8(s);
 }
 
-// The transport glyphs, in the thin line style of Segoe MDL2 Assets, `s` pixels tall at the center
-// of `r`.
+// The transport glyphs, in the thin line style of Segoe MDL2 Assets. The Windows build draws them
+// from that font at 13, 17 or 21 pixels depending on the button height, so match those sizes and
+// the even stroke weight instead of drawing the same 12-pixel hairlines in every mode.
 void DrawIcon(Icon icon, const Rect& r, uint32_t rgb) {
-    float s = S(12), cx = std::round(r.x + r.w / 2), cy = std::round(r.y + r.h / 2), t = std::max(1.0f, S(1));
+    float s = S(r.h >= S(46) ? 21 : r.h >= S(34) ? 17 : 13);
+    float cx = std::round(r.x + r.w / 2), cy = std::round(r.y + r.h / 2);
+    float t = std::max(1.0f, std::round(s * 0.15f));
     auto line = [&](float x1, float y1, float x2, float y2) { ThickLine(x1, y1, x2, y2, t, rgb); };
-    auto triangle = [&](float x1, float x2, float h) {  // outline, pointing from x1 to x2
-        line(x1, cy - h, x2, cy);
-        line(x2, cy, x1, cy + h);
-        line(x1, cy - h - t / 2, x1, cy + h + t / 2);
+    auto head = [&](float x, float y, float dx, float dy) {  // a filled head at (x, y), pointing (dx, dy)
+        float len = std::max(0.001f, std::hypot(dx, dy)), ux = dx / len, uy = dy / len;
+        Polygon({{x, y},
+                 {x - ux * s * 0.26f - uy * s * 0.17f, y - uy * s * 0.26f + ux * s * 0.17f},
+                 {x - ux * s * 0.26f + uy * s * 0.17f, y - uy * s * 0.26f - ux * s * 0.17f}}, rgb);
+    };
+    auto ring = [&](float outer, float inner, float from, float to, bool headAtEnd) {  // an open ring with a head
+        constexpr int kSteps = 48;
+        std::vector<SDL_Vertex> v;
+        std::vector<int> idx;
+        for (int i = 0; i <= kSteps; ++i) {  // a single annulus, so the stroke has no seams
+            float a = from + (to - from) * (float)i / kSteps;
+            v.push_back({{cx + std::cos(a) * outer, cy + std::sin(a) * outer}, FColor(rgb), {0, 0}});
+            v.push_back({{cx + std::cos(a) * inner, cy + std::sin(a) * inner}, FColor(rgb), {0, 0}});
+        }
+        for (int i = 0; i < kSteps; ++i) {
+            int b = i * 2;
+            idx.insert(idx.end(), {b, b + 1, b + 2, b + 2, b + 1, b + 3});
+        }
+        SDL_RenderGeometry(g.renderer, nullptr, v.data(), (int)v.size(), idx.data(), (int)idx.size());
+        float a = headAtEnd ? to : from, dir = headAtEnd ? 1 : -1;
+        float mid = (outer + inner) / 2, half = (outer - inner) * 0.95f;
+        SDL_FPoint p{cx + std::cos(a) * mid, cy + std::sin(a) * mid};
+        SDL_FPoint tan{-std::sin(a) * dir, std::cos(a) * dir}, rad{std::cos(a), std::sin(a)};
+        Polygon({{p.x + tan.x * half * 2.0f, p.y + tan.y * half * 2.0f},
+                 {p.x + rad.x * half, p.y + rad.y * half},
+                 {p.x - rad.x * half, p.y - rad.y * half}}, rgb);
     };
     float h = s * 0.38f;
     switch (icon) {
         case Icon::Prev:
-            line(cx - s * 0.36f, cy - h, cx - s * 0.36f, cy + h);
-            triangle(cx + s * 0.34f, cx - s * 0.22f, h);
+            line(cx - s * 0.34f, cy - h, cx - s * 0.34f, cy + h);
+            Polygon({{cx + s * 0.34f, cy - h}, {cx + s * 0.34f, cy + h}, {cx - s * 0.18f, cy}}, rgb);
             break;
         case Icon::Next:
-            line(cx + s * 0.36f, cy - h, cx + s * 0.36f, cy + h);
-            triangle(cx - s * 0.34f, cx + s * 0.22f, h);
+            line(cx + s * 0.34f, cy - h, cx + s * 0.34f, cy + h);
+            Polygon({{cx - s * 0.34f, cy - h}, {cx - s * 0.34f, cy + h}, {cx + s * 0.18f, cy}}, rgb);
             break;
-        case Icon::Play: triangle(cx - s * 0.3f, cx + s * 0.38f, s * 0.42f); break;
+        case Icon::Play: {
+            float x = cx - s * 0.26f, w = s * 0.64f, hh = s * 0.42f;
+            line(x, cy - hh, x + w, cy);
+            line(x + w, cy, x, cy + hh);
+            line(x, cy + hh, x, cy - hh);
+            for (float yy : {cy - hh, cy + hh}) Fill({x - t / 2, yy - t / 2, t, t}, rgb);
+            Fill({x + w - t / 2, cy - t / 2, t, t}, rgb);
+            break;
+        }
         case Icon::Pause:
-            line(cx - s * 0.18f, cy - h, cx - s * 0.18f, cy + h);
-            line(cx + s * 0.18f, cy - h, cx + s * 0.18f, cy + h);
+            line(cx - s * 0.17f, cy - h, cx - s * 0.17f, cy + h);
+            line(cx + s * 0.17f, cy - h, cx + s * 0.17f, cy + h);
             break;
         case Icon::Shuffle: {
-            float x0 = cx - s * 0.46f, x1 = cx + s * 0.46f, y0 = cy - s * 0.26f, y1 = cy + s * 0.26f;
-            line(x0, y0, cx - s * 0.12f, y0);
-            line(cx - s * 0.12f, y0, cx + s * 0.16f, y1);
-            line(cx + s * 0.16f, y1, x1, y1);
-            line(x0, y1, cx - s * 0.12f, y1);
-            line(cx - s * 0.12f, y1, cx + s * 0.16f, y0);
-            line(cx + s * 0.16f, y0, x1, y0);
-            for (float y : {y0, y1}) {
-                line(x1 - s * 0.16f, y - s * 0.16f, x1, y);
-                line(x1 - s * 0.16f, y + s * 0.16f, x1, y);
-            }
+            float x0 = cx - s * 0.46f, x1 = cx + s * 0.32f, y0 = cy - s * 0.26f, y1 = cy + s * 0.26f;
+            line(x0, y0, cx - s * 0.14f, y0);
+            line(cx - s * 0.14f, y0, cx + s * 0.12f, y1);
+            line(cx + s * 0.12f, y1, x1, y1);
+            line(x0, y1, cx - s * 0.14f, y1);
+            line(cx - s * 0.14f, y1, cx + s * 0.12f, y0);
+            line(cx + s * 0.12f, y0, x1, y0);
+            head(x1, y0, 1, 0);
+            head(x1, y1, 1, 0);
             break;
         }
         case Icon::Repeat:
         case Icon::RepeatOne:
         case Icon::Resume: {
-            // A circle of arrows: an open ring with a head at its gap. Resume (history) adds hands.
-            float rr = s * 0.42f;
-            std::vector<SDL_FPoint> arc;
-            float from = icon == Icon::Resume ? -2.3f : -1.2f, to = icon == Icon::Resume ? 3.4f : 4.6f;
-            for (int i = 0; i <= 20; ++i) {
-                float a = from + (to - from) * i / 20;
-                arc.push_back({cx + std::cos(a) * rr, cy + std::sin(a) * rr});
+            // A ring with a head at its gap; Resume (history) runs the other way and adds hands.
+            const bool resume = icon == Icon::Resume;
+            float mid = s * 0.39f, thick = std::max(1.6f, s * 0.16f);
+            float outer = mid + thick / 2, inner = mid - thick / 2;
+            if (resume) {
+                ring(outer, inner, 0.6f, 5.5f, false);
+                line(cx, cy - mid * 0.5f, cx, cy);
+                line(cx, cy, cx + mid * 0.4f, cy + mid * 0.28f);
+            } else {
+                ring(outer, inner, 5.4f, 4.2f + 6.2831853f, true);  // gap at the top, head pointing clockwise
             }
-            for (size_t i = 0; i + 1 < arc.size(); ++i) line(arc[i].x, arc[i].y, arc[i + 1].x, arc[i + 1].y);
-            SDL_FPoint tip = icon == Icon::Resume ? arc.front() : arc.back();
-            float dir = icon == Icon::Resume ? -1 : 1;
-            line(tip.x, tip.y, tip.x - dir * s * 0.2f, tip.y - s * 0.02f);
-            line(tip.x, tip.y, tip.x + s * 0.02f, tip.y - dir * s * 0.2f);
-            if (icon == Icon::Resume) {
-                line(cx, cy - rr * 0.6f, cx, cy);
-                line(cx, cy, cx + rr * 0.45f, cy + rr * 0.3f);
+            if (icon == Icon::RepeatOne) {  // a "1" is smaller than a font size here
+                ThickLine(cx, cy - mid * 0.5f, cx, cy + mid * 0.5f, 1.0f, rgb);
+                ThickLine(cx, cy - mid * 0.5f, cx - mid * 0.3f, cy - mid * 0.24f, 1.0f, rgb);
+                ThickLine(cx - mid * 0.18f, cy + mid * 0.5f, cx + mid * 0.18f, cy + mid * 0.5f, 1.0f, rgb);
             }
-            if (icon == Icon::RepeatOne) DrawText(Font::Small, "1", cx - TextWidth(Font::Small, "1") / 2, cy - LineHeight(Font::Small) / 2, rgb);
             break;
         }
         case Icon::Speaker: {
@@ -110,8 +140,8 @@ void DrawIcon(Icon icon, const Rect& r, uint32_t rgb) {
                      {sx + s * 0.22f, cy + s * 0.3f}, {sx, cy + s * 0.12f}, {sx - s * 0.2f, cy + s * 0.12f}}, rgb);
             for (float k : {0.38f, 0.58f}) {
                 std::vector<SDL_FPoint> arc;
-                for (int i = 0; i <= 8; ++i) {
-                    float a = -0.8f + 1.6f * i / 8;
+                for (int i = 0; i <= 16; ++i) {
+                    float a = -0.8f + 1.6f * i / 16;
                     arc.push_back({sx + std::cos(a) * s * k, cy + std::sin(a) * s * k});
                 }
                 for (size_t i = 0; i + 1 < arc.size(); ++i) line(arc[i].x, arc[i].y, arc[i + 1].x, arc[i + 1].y);

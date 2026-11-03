@@ -235,8 +235,11 @@ int Run(int argc, char** argv) {
     // The software renderer draws into SDL's window surface, so keep that surface native. SDL
     // otherwise emulates it with an OpenGL texture, which pulls the GPU driver and its 16 workers
     // into the process and sends every present through the GPU even when drawing is software.
-    // Hardware drawing owns its OpenGL context and never asks for the window surface.
-    if (!parity) SDL_SetHint(SDL_HINT_FRAMEBUFFER_ACCELERATION, "0");
+    // Hardware drawing owns its OpenGL context and never asks for the window surface. Wayland has
+    // no native surface at all: there the emulated one is the only way software drawing can work,
+    // and without it SDL_CreateRenderer fails with "Window framebuffer support not available".
+    const bool wayland = std::string_view(SDL_GetCurrentVideoDriver()) == "wayland";
+    if (!parity) SDL_SetHint(SDL_HINT_FRAMEBUFFER_ACCELERATION, wayland ? "1" : "0");
     g.window = SDL_CreateWindow("cordinal", s.windowW, s.windowH, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY |
                                                                      (s.maximized ? SDL_WINDOW_MAXIMIZED : 0));
     if (!g.window) {
@@ -256,11 +259,24 @@ int Run(int argc, char** argv) {
     }
     // Software keeps the GPU driver's memory and threads out of the process; a full redraw fits in a
     // frame, and frames are drawn only when something changes. Preferences can choose the GPU instead.
-    g.renderer = SDL_CreateRenderer(g.window, parity || !s.gpuDrawing ? SDL_SOFTWARE_RENDERER : nullptr);
+    // Native Wayland has no window surface, so SDL's software renderer cannot start there. Try the
+    // chosen mode first and the other one second, rather than leaving the user with no window at all.
+    const bool software = parity || !s.gpuDrawing;
+    g.renderer = SDL_CreateRenderer(g.window, software ? SDL_SOFTWARE_RENDERER : nullptr);
+    if (!g.renderer && !parity) {
+        std::string chosen = SDL_GetError();
+        g.renderer = SDL_CreateRenderer(g.window, software ? nullptr : SDL_SOFTWARE_RENDERER);
+        if (g.renderer)
+            fprintf(stderr, "cordinal: %s; falling back to %s drawing\n", chosen.c_str(),
+                    software ? "graphics card" : "software");
+    }
     if (!g.renderer) {
         fprintf(stderr, "cordinal: %s\n", SDL_GetError());
         return 1;
     }
+    // The preference follows the renderer that actually started, so the next launch does not retry
+    // a mode this display cannot run.
+    if (!parity) s.gpuDrawing = std::string_view(SDL_GetRendererName(g.renderer)) != SDL_SOFTWARE_RENDERER;
     SDL_SetRenderVSync(g.renderer, 1);
     SDL_SetRenderDrawBlendMode(g.renderer, SDL_BLENDMODE_BLEND);
     g.scale = parity ? 1 : SDL_GetWindowDisplayScale(g.window);
