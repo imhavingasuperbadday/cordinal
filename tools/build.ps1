@@ -15,9 +15,10 @@
 #   build\cordinal.exe                 the published pair: packed, or copied for "unpacked"
 #
 # Incremental model: build\obj\build.json records the SHA-256 of every source, this script and the
-# MSVC toolset. A .cpp recompiles when its hash changes; any header change, a new build script version
-# or a new toolset rebuilds everything. There is no timestamp or shadow-directory state to go stale.
-# The record is written only after a successful build, so a failed build repeats its work.
+# MSVC toolset, and the repository headers each .cpp included last time (cl /sourceDependencies). A
+# .cpp recompiles when its hash or the hash of one of those headers changes; a new build script
+# version, toolset or theme set rebuilds everything. There is no timestamp or shadow-directory state to
+# go stale. The record is written only after a successful build, so a failed build repeats its work.
 #
 # To add a source file: drop a .cpp in src\ (or src\chiptune, src\tests). It is picked up by the globs
 # below and compiled with the default app flags. Only the codecs in $SlowCodecs / $HotCodecs and the
@@ -151,23 +152,22 @@ $files = @(Get-ChildItem -LiteralPath 'src' -Recurse -File)
 $hashes = @{}
 foreach ($file in $files) { $hashes[(Get-Relative $file.FullName)] = Get-ContentHash $file.FullName }
 
-# A header, toolset or build-script change can reach every translation unit, so it rebuilds them all.
-# Headers and source fragments included by compiled files can change any layout or inline body, so
-# include .hpp and .inc here as well as .h.
-$headerHash = Get-SetHash @($hashes.Keys | Where-Object {
-    [IO.Path]::GetExtension($_) -in @('.h', '.hpp', '.inc') } |
-    ForEach-Object { "$_=$($hashes[$_])" })
+# cordinal.rc includes resource.h, so that header belongs to the resources as well as to the code.
 $resourceExtensions = @('.rc', '.ico', '.manifest', '.png', '.ttf', '.wav', '.flac', '.txt')
 $resourceHash = Get-SetHash @($hashes.Keys |
-    Where-Object { $resourceExtensions -contains [IO.Path]::GetExtension($_) } |
+    Where-Object { $resourceExtensions -contains [IO.Path]::GetExtension($_) -or $_ -eq 'src/resource.h' } |
     ForEach-Object { "$_=$($hashes[$_])" })
 
 $old = $null
 $oldFiles = @{}
+$oldDeps = @{}
 if (Test-Path -LiteralPath $manifestPath) {
     $old = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     if ($old.files) {
         foreach ($property in $old.files.PSObject.Properties) { $oldFiles[$property.Name] = $property.Value }
+    }
+    if ($old.deps) {
+        foreach ($property in $old.deps.PSObject.Properties) { $oldDeps[$property.Name] = @($property.Value | Where-Object { $_ }) }
     }
 }
 
@@ -176,7 +176,7 @@ $reason = 'requested on the command line'
 if (!$rebuildAll -and !$old) { $rebuildAll = $true; $reason = 'no record of a previous build' }
 if (!$rebuildAll -and $old.script -ne $scriptHash) { $rebuildAll = $true; $reason = 'build.ps1 changed' }
 if (!$rebuildAll -and $old.toolset -ne $toolset) { $rebuildAll = $true; $reason = 'MSVC toolset changed' }
-if (!$rebuildAll -and $old.headers -ne $headerHash) { $rebuildAll = $true; $reason = 'a header changed' }
+if (!$rebuildAll -and !$old.deps) { $rebuildAll = $true; $reason = 'no record of header dependencies' }
 if (!$rebuildAll -and [bool]$old.themes -ne [bool]$Themes) { $rebuildAll = $true; $reason = 'the theme set changed' }
 if ($rebuildAll) { Write-Step "Rebuilding everything: $reason." }
 
@@ -255,8 +255,30 @@ $sourceSetChanged = $sourceSetHash -ne $(if ($old) { $old.sources } else { '' })
 function Test-Stale([string]$SourceRel, [string]$Object) {
     if ($rebuildAll) { return $true }
     if (!(Test-Path -LiteralPath $Object)) { return $true }
-    if (!$oldFiles.ContainsKey($SourceRel)) { return $true }
-    return $oldFiles[$SourceRel] -ne $hashes[$SourceRel]
+    if (!$oldFiles.ContainsKey($SourceRel) -or !$oldDeps.ContainsKey($SourceRel)) { return $true }
+    if ($oldFiles[$SourceRel] -ne $hashes[$SourceRel]) { return $true }
+    # A header that changed or disappeared since the last compile; a newly included header arrives
+    # through an edit to a file already listed here, so it is caught by that edit.
+    foreach ($header in $oldDeps[$SourceRel]) {
+        if (!$hashes.ContainsKey($header) -or $oldFiles[$header] -ne $hashes[$header]) { return $true }
+    }
+    return $false
+}
+
+# cl /sourceDependencies writes <source>.cpp.json beside the objects, listing every file the source
+# included, lower-cased and absolute. Only files under src\ are kept; system headers change with the
+# toolset, which rebuilds everything anyway.
+$srcPrefix = (Join-Path $root 'src').ToLowerInvariant() + '\'
+$relativeByLower = @{}
+foreach ($key in $hashes.Keys) { $relativeByLower[$key.ToLowerInvariant()] = $key }
+$deps = @{}
+function Read-Dependencies([string]$DepDir, $Source) {
+    $json = Join-Path $DepDir ($Source.Name + '.json')
+    if (!(Test-Path -LiteralPath $json)) { Fail "cl.exe wrote no dependency record for $($Source.Name)." }
+    $includes = (Get-Content -LiteralPath $json -Raw | ConvertFrom-Json).Data.Includes
+    return @($includes | Where-Object { $_.StartsWith($srcPrefix) } | ForEach-Object {
+        $relativeByLower[('src/' + $_.Substring($srcPrefix.Length)).Replace('\', '/')]
+    } | Where-Object { $_ } | Sort-Object -Unique)
 }
 function Get-Objects([string]$ObjDir, $Sources) {
     return @($Sources | ForEach-Object { Join-Path $ObjDir ($_.BaseName + '.obj') })
@@ -270,12 +292,19 @@ foreach ($name in $groups.Keys) {
     $stale = @($group.Sources | Where-Object {
         Test-Stale (Get-Relative $_.FullName) (Join-Path $group.ObjDir ($_.BaseName + '.obj'))
     })
+    foreach ($source in $group.Sources) {
+        $rel = Get-Relative $source.FullName
+        if ($oldDeps.ContainsKey($rel)) { $deps[$rel] = $oldDeps[$rel] }
+    }
     if (!$stale) { continue }
 
     Initialize-Msvc
     Write-Host ("Compiling {0} file(s) [{1}]" -f $stale.Count, $name)
-    Invoke-Tool 'cl.exe' (@($group.Flags) + @('/c', "/Fo$($group.ObjDir)\") +
+    $depDir = Join-Path $group.ObjDir 'deps'
+    New-Item -ItemType Directory -Force -Path $depDir | Out-Null
+    Invoke-Tool 'cl.exe' (@($group.Flags) + @('/c', "/Fo$($group.ObjDir)\", '/sourceDependencies', $depDir) +
         @($stale | ForEach-Object { Get-NativeRelative $_.FullName }))
+    foreach ($source in $stale) { $deps[(Get-Relative $source.FullName)] = @(Read-Dependencies $depDir $source) }
     if ($name -eq 'tests') { $testLinked = $true } else { $appLinked = $true }
 }
 
@@ -305,6 +334,8 @@ $libraries = @('ucrt.lib', 'user32.lib', 'gdi32.lib', 'comctl32.lib', 'comdlg32.
 $appExe = 'build\unpacked\cordinal.exe'
 $testExe = 'build\unpacked\cordinal-test.exe'
 
+# The two links run one after the other: side by side, their whole-program code generation competes
+# and both take longer (measured November 3, 2026: 28 s together against 16 s in turn).
 if ($appLinked -or !(Test-Path -LiteralPath $appExe)) {
     Initialize-Msvc
     Write-Host 'Linking cordinal.exe'
@@ -352,16 +383,16 @@ foreach ($exe in @('build\cordinal.exe', 'build\cordinal-test.exe', 'build\unpac
 
 # Record only what a complete build produced. A failure above leaves the previous record in place.
 [ordered]@{
-    version = 2
+    version = 3
     script = $scriptHash
     toolset = $toolset
     mode = $mode
     themes = [bool]$Themes
     packing = $packingHash
-    headers = $headerHash
     resources = $resourceHash
     sources = $sourceSetHash
     files = $hashes
+    deps = $deps
 } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
 
 if (Test-Path -LiteralPath 'build\cordinal.exe') {

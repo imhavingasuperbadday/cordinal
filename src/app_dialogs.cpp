@@ -15,7 +15,7 @@ std::vector<std::wstring> PickPaths(bool folders) {
     dlg->GetOptions(&options);
     dlg->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_ALLOWMULTISELECT | (folders ? FOS_PICKFOLDERS : 0));
     std::wstring spec = OpenFileFilterSpec();
-    COMDLG_FILTERSPEC filters[] = {{L"Audio files", spec.c_str()}, {L"Playlists", L"*.m3u;*.m3u8"}, {L"All files", L"*.*"}};
+    COMDLG_FILTERSPEC filters[] = {{L"Audio files", spec.c_str()}, {L"Playlists", L"*.m3u;*.m3u8;*.pls"}, {L"All files", L"*.*"}};
     if (!folders) dlg->SetFileTypes((UINT)std::size(filters), filters);
     dlg->SetTitle(folders ? L"Add folders to playlist" : L"Add files to playlist");
     if (FAILED(dlg->Show(g.hwnd))) return result;
@@ -37,7 +37,7 @@ std::vector<std::wstring> PickPaths(bool folders) {
 void ImportPlaylistFile() {
     ComPtr<IFileOpenDialog> dlg;
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg)))) return;
-    COMDLG_FILTERSPEC filters[] = {{L"M3U playlists", L"*.m3u;*.m3u8"}};
+    COMDLG_FILTERSPEC filters[] = {{L"Playlists", L"*.m3u;*.m3u8;*.pls"}};
     dlg->SetFileTypes(1, filters);
     ComPtr<IShellItem> item;
     PWSTR path = nullptr;
@@ -52,8 +52,8 @@ void ImportPlaylistFile() {
 void ExportPlaylistFile() {
     ComPtr<IFileSaveDialog> dlg;
     if (FAILED(CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg)))) return;
-    COMDLG_FILTERSPEC filters[] = {{L"M3U8 playlist", L"*.m3u8"}};
-    dlg->SetFileTypes(1, filters);
+    COMDLG_FILTERSPEC filters[] = {{L"M3U8 playlist", L"*.m3u8"}, {L"PLS playlist", L"*.pls"}};
+    dlg->SetFileTypes(2, filters);
     dlg->SetDefaultExtension(L"m3u8");
     dlg->SetFileName(Active().name.c_str());
     ComPtr<IShellItem> item;
@@ -168,7 +168,7 @@ void PaintAbout(HDC dc, RECT rc) {
     const int right = a.width - a.pad;
     if (a.icon) DrawIconEx(dc, a.iconRect.left, a.iconRect.top, a.icon, a.iconSize, a.iconSize, 0, nullptr, DI_NORMAL);
     DrawAboutText(dc, a.titleFont, TextColor(), L"cordinal", a.textLeft, a.titleTop, right - a.textLeft, DT_SINGLELINE);
-    DrawAboutText(dc, g.font, SubColor(), L"Version 0.1.3", a.textLeft, a.versionTop, right - a.textLeft, DT_SINGLELINE);
+    DrawAboutText(dc, g.font, SubColor(), L"Version 0.1.4", a.textLeft, a.versionTop, right - a.textLeft, DT_SINGLELINE);
     DrawAboutText(dc, g.font, TextColor(), kAboutTagline, a.textLeft, a.taglineTop, right - a.textLeft, DT_WORDBREAK);
     FillSolid(dc, {a.pad, a.ruleY, right, a.ruleY + 1}, Ref(P().border));
     int y = a.rowsTop;

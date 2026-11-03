@@ -1,6 +1,7 @@
 // The Linux window's drawing: the shared shapes and glyphs, the menu bar and popups, and every window part.
 #include "alternate_ui.h"
 #include "big_ui.h"
+#include "discart.h"
 #include "ui_internal.h"
 
 #include <array>
@@ -401,10 +402,21 @@ double TrackDuration() {
     return dur;
 }
 
+// The palette the player draws with: in the normal window its surface is the player's own
+// background, washed with the cover's hue (PlayerSurface; app_playback.cpp, RefreshPlayerTint).
+Palette PlayerPalette(const Palette& base) {
+    Palette p = base;
+    TrackId shown = g.playing != kNone ? g.playing : g.settings.resumeOn ? g.resumeTrack : kNone;
+    if (g.settings.size == ViewSize::Normal)
+        p.surface = PlayerSurface(base, g_lib.Contains(shown) && !RadioPlaying() ? g_coverHue : -1);
+    return p;
+}
+
 // The seek bar alone: the live waveform/fountain, or the regular slider. It fills its own background
 // first, so a partial frame repaints every pixel in this rectangle and leaves the rest untouched.
-void DrawLiveSeek(const Palette& p) {
+void DrawLiveSeek(const Palette& base) {
     if (L.seek.w <= 0) return;
+    const Palette p = PlayerPalette(base);
     bool live = RadioPlaying(), playing = g.playing != kNone || live;
     double dur = TrackDuration();
     double pos = playing ? (g_seekPreview >= 0 ? g_seekPreview : g.engine.Position()) : 0;
@@ -416,7 +428,8 @@ void DrawLiveSeek(const Palette& p) {
     DrawSection(L.seek, dur, p);
 }
 
-void DrawBand(const Palette& p) {
+void DrawBand(const Palette& base) {
+    const Palette p = PlayerPalette(base);
     Fill(L.player, p.surface);
     // The handle: a few dots.
     float dot = std::max(2.0f, S(2)), step = dot + std::max(2.0f, S(2));
@@ -450,6 +463,17 @@ void DrawBand(const Palette& p) {
     TrackId shown = playing ? g.playing : g.settings.resumeOn ? g.resumeTrack : kNone;
     if (!live && g_lib.Contains(shown) && g_cover && g_coverFor == shown) {
         SDL_FRect dst{L.cover.x, L.cover.y, L.cover.w, L.cover.h};
+        // Disc art peeks out from behind the cover, which moves left and shrinks to make room.
+        if (int side = DiscCoverSide((int)L.cover.w); side && g_disc) {
+            Fill(L.cover, p.surface);  // the player's own background, under the disc's corners
+            float c = (float)side, top = L.cover.y + (L.cover.h - c) / 2;
+            float tw = 0, th = 0;
+            SDL_GetTextureSize(g_disc, &tw, &th);
+            float w = tw >= th ? c : c * tw / th, h = th >= tw ? c : c * th / tw;
+            SDL_FRect disc{L.cover.R() - c + (c - w) / 2, top + (c - h) / 2, w, h};
+            SDL_RenderTexture(g.renderer, g_disc, nullptr, &disc);
+            dst = {L.cover.x, top, c, c};
+        }
         SDL_RenderTexture(g.renderer, g_cover, nullptr, &dst);
     }
     std::string title, sub;
@@ -794,6 +818,7 @@ void DrawList(const Palette& p) {
         bool sel = ln.row < (int)g.selected.size() && g.selected[ln.row];
         if (sel) Fill(r, p.select);
         else if (line == hover) Fill(r, p.hover);
+        else if (line % 2) Fill(r, RowStripe(p));  // every other row a shade off (DrawTrackRow)
         bool isPlaying = g.playing == id && npTab && ln.row < (int)g.rowItems.size() && g.rowItems[ln.row] == (size_t)g.queuePos;
         const Track& t = g_lib[id];
         uint32_t color = sel ? p.selectText : isPlaying ? p.playing : (t.flags & (Track::kMissing | Track::kFailed)) ? p.faint : p.text;

@@ -121,7 +121,7 @@ std::wstring ResolveAudio(const std::wstring& name, const std::wstring& cueDir) 
     size_t dot = full.find_last_of(L'.');
     if (dot != std::wstring::npos && (slash == std::wstring::npos || dot > slash)) {
         std::wstring stem = full.substr(0, dot);
-        for (const wchar_t* ext : {L"flac", L"wav", L"ape", L"wv", L"aiff", L"aif", L"mp3", L"m4a", L"ogg", L"opus", L"wma", L"cord"}) {
+        for (const wchar_t* ext : {L"flac", L"wav", L"ape", L"wv", L"mpc", L"aiff", L"aif", L"mp3", L"m4a", L"ogg", L"opus", L"wma", L"cord"}) {
             std::wstring candidate = stem + L"." + ext;
             if (FileExistsW(candidate)) return candidate;
         }

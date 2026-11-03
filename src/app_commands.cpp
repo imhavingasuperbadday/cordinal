@@ -247,6 +247,8 @@ void OnCommand(int id, int code, HWND ctl) {
         {IDM_NEW_AUTO, [] { ShowAutoPlaylistEditor(-1); }},
         {IDM_ORGANIZE_UNDO, UndoOrganize},
         {IDM_TAG_UNDO, UndoLastTagEdit},
+        {IDM_UNDO, UndoLatest},
+        {IDM_REDO, [] { StepPlaylistEdit(true); }},
         {IDC_VIEW4, ToggleBrowser},
         {IDM_LIBRARY_FOLDERS, ShowLibraryFolders},
         {IDM_REMOVE_MISSING, RemoveMissingTracks},
@@ -341,7 +343,11 @@ void OnCommand(int id, int code, HWND ctl) {
         case IDM_CLEAR:
             if (!Active().Editable()) break;
             RemapOccurrences(g.active, std::vector<uint32_t>(Active().items.size(), UINT32_MAX));
-            std::vector<TrackId>().swap(Active().items);
+            {
+                std::vector<TrackId> before;
+                before.swap(Active().items);
+                RecordPlaylistEdit(Active(), std::move(before), L"clear");
+            }
             g.compactPending = true;
             ClearSelection();
             RebuildView();

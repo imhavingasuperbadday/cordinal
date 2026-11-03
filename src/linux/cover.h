@@ -14,6 +14,8 @@ struct CoverImage {
     int width, height;          // 0 when the track has no cover
     std::vector<uint8_t> rgba;  // width * height * 4
     std::string file;           // the encoded image, saved for MPRIS (mpris:artUrl); "" if none
+    int discWidth = 0, discHeight = 0;  // the playing cover's disc art (discart.h), with alpha
+    std::vector<uint8_t> discRgba;
 };
 
 void StartCovers();

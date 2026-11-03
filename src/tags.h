@@ -13,8 +13,9 @@ enum class Codec : uint8_t {
     SPC, NSF, GBS, VGM,  // game music (game_music.h); append only, values are stored in the library
     Cord,                // cordinal's own format (cord.h)
     DSD, SID, Module, MIDI,
+    Musepack,
 };
-constexpr Codec kLastCodec = Codec::MIDI;  // what a stored codec may be
+constexpr Codec kLastCodec = Codec::Musepack;  // what a stored codec may be
 const wchar_t* CodecName(Codec c);
 
 struct TagData {

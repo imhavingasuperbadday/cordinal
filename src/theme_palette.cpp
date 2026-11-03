@@ -132,6 +132,69 @@ double Contrast(Rgb a, Rgb b) {
 
 Rgb TextOn(Rgb fill) { return Contrast(fill, 0xFFFFFF) >= Contrast(fill, 0x000000) ? 0xFFFFFF : 0x000000; }
 
+Rgb HsvColor(double h, double s, double v) {
+    h = std::fmod(std::fmod(h, 360) + 360, 360);
+    double c = v * s, x = c * (1 - std::fabs(std::fmod(h / 60, 2) - 1)), m = v - c;
+    double red = 0, green = 0, blue = 0;
+    if (h < 60) red = c, green = x;
+    else if (h < 120) red = x, green = c;
+    else if (h < 180) green = c, blue = x;
+    else if (h < 240) green = x, blue = c;
+    else if (h < 300) red = x, blue = c;
+    else red = c, blue = x;
+    auto byte = [&](double u) { return (Rgb)std::lround((u + m) * 255); };
+    return byte(red) << 16 | byte(green) << 8 | byte(blue);
+}
+
+namespace {
+// `t` of the way from `a` to `b`, channel by channel.
+Rgb Blend(Rgb a, Rgb b, double t) {
+    Rgb out = 0;
+    for (int shift : {16, 8, 0}) {
+        double x = a >> shift & 0xFF, y = b >> shift & 0xFF;
+        out |= (Rgb)std::lround(x + (y - x) * t) << shift;
+    }
+    return out;
+}
+
+bool Tinted(const Palette& p) { return &p == &LightPalette() || &p == &DarkPalette(); }
+}  // namespace
+
+// Twelve 30-degree hue bins, each pixel weighted by how vivid it is; the winning bin's mean hue,
+// when that bin holds enough color to read (a few percent of a fully vivid picture).
+double CoverHue(const uint8_t* pixels, size_t count, bool bgr) {
+    if (!pixels || !count) return -1;
+    double weight[12] = {}, sx[12] = {}, sy[12] = {};
+    size_t step = std::max<size_t>(1, count / 4096), samples = 0;
+    for (size_t i = 0; i < count; i += step, ++samples) {
+        const uint8_t* px = pixels + i * 4;
+        double r = px[bgr ? 2 : 0], g = px[1], b = px[bgr ? 0 : 2];
+        double hi = std::max({r, g, b}), lo = std::min({r, g, b});
+        if (hi < 40) continue;
+        double s = (hi - lo) / hi, v = hi / 255;
+        if (s < 0.2) continue;
+        double h = hi == r ? std::fmod((g - b) / (hi - lo) + 6, 6) : hi == g ? (b - r) / (hi - lo) + 2 : (r - g) / (hi - lo) + 4;
+        h *= 60;
+        int bin = std::min(11, (int)(h / 30));
+        double w = s * s * v;
+        weight[bin] += w;
+        sx[bin] += w * std::cos(h * 3.14159265358979 / 180);
+        sy[bin] += w * std::sin(h * 3.14159265358979 / 180);
+    }
+    int best = (int)(std::max_element(std::begin(weight), std::end(weight)) - std::begin(weight));
+    if (weight[best] < 0.03 * (double)samples) return -1;
+    return std::fmod(std::atan2(sy[best], sx[best]) * 180 / 3.14159265358979 + 360, 360);
+}
+
+Rgb PlayerSurface(const Palette& p, double hue) {
+    if (!Tinted(p)) return p.surface;
+    Rgb base = p.dark ? Blend(p.surface, p.text, 0.025) : p.surface;
+    if (hue < 0) return base;
+    return p.dark ? Blend(base, HsvColor(hue, 0.5, 0.45), 0.09) : Blend(base, HsvColor(hue, 0.4, 0.9), 0.12);
+}
+
+Rgb RowStripe(const Palette& p) { return Tinted(p) ? Blend(p.bg, p.text, p.dark ? 0.022 : 0.02) : p.bg; }
+
 // Body text at WCAG AAA, secondary and selected text at AA, and the accent and status colors at the
 // 3:1 that UI marks need, on the surfaces they sit on.
 std::wstring PaletteLegibility(const Palette& p) {

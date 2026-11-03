@@ -371,7 +371,7 @@ void DrawPointsChip(HDC dc, RECT r) {
     HBITMAP bmp = CreateCompatibleBitmap(dc, r.right - r.left, r.bottom - r.top);
     HGDIOBJ oldBmp = SelectObject(mem, bmp);
     RECT rc{0, 0, r.right - r.left, r.bottom - r.top};
-    FillSolid(mem, rc, SurfaceColor());
+    FillSolid(mem, rc, PlayerColor());
     SetBkMode(mem, TRANSPARENT);
     LevelInfo l = Level();
     bool glow = chip.levelUpFrames > 0 && (chip.levelUpFrames / 5) % 2 == 0;

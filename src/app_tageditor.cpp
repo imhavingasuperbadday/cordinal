@@ -556,6 +556,19 @@ bool CanUndoTagEdit(std::wstring& description) {
     return true;
 }
 
+uint64_t NewestTagEditTime() {
+    std::wstring file;
+    uint32_t files = 0;
+    uint64_t time = 0;
+    return FindNewestTagJournal(TagUndoDir(), file, files, &time) ? time : 0;
+}
+
+void UndoLatest() {
+    uint64_t tagTime = NewestTagEditTime();
+    if (CanStepPlaylistEdit(false) && (!tagTime || Active().history.undo.back().when >= tagTime)) StepPlaylistEdit(false);
+    else UndoLastTagEdit();
+}
+
 void UndoLastTagEdit() {
     std::wstring file;
     uint32_t count = 0;

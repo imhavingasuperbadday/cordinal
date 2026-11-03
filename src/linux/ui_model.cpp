@@ -257,7 +257,7 @@ void ConfirmExclude(bool confirm) {
     ShowMessage(L"Removed from the library. The files were kept.");
 }
 
-size_t RemoveOccurrences(const std::vector<char>& remove, int index) {
+size_t RemoveOccurrences(const std::vector<char>& remove, int index, const wchar_t* what) {
     if (index < 0) index = g.active;
     if (index < 0 || index >= (int)g.playlists.size() || !g.playlists[index].Editable()) return 0;
     auto& playlist = g.playlists[index];
@@ -274,6 +274,7 @@ size_t RemoveOccurrences(const std::vector<char>& remove, int index) {
     size_t removed = items.size() - kept.size();
     if (!removed) return 0;
     items.swap(kept);
+    RecordPlaylistEdit(playlist, std::move(kept), what);
     if (playlist.kind == PlaylistKind::NowPlaying) RemapNowPlaying(mapping);
     g.libraryDirty = true;
     if (index == g.active) {
@@ -293,7 +294,7 @@ void RemoveFromPlaylist(bool all, bool keepSelected) {
             if (!all) remove[g.rowItems[i]] = keepSelected ? 0 : 1;
         }
     if (keepSelected && !anySelected) return;
-    RemoveOccurrences(remove);
+    RemoveOccurrences(remove, -1, all ? L"clear" : keepSelected ? L"keep only selected" : L"remove");
 }
 
 void RemoveDuplicateTracks() {
@@ -301,8 +302,40 @@ void RemoveDuplicateTracks() {
     std::unordered_set<TrackId> seen;
     std::vector<char> remove(Active().items.size(), 0);
     for (size_t i = 0; i < remove.size(); ++i) remove[i] = !seen.insert(Active().items[i]).second;
-    size_t count = RemoveOccurrences(remove);
+    size_t count = RemoveOccurrences(remove, -1, L"remove duplicates");
     ShowMessage(L"Removed " + std::to_wstring(count) + L" duplicate(s).");
+}
+
+bool CanStepPlaylistEdit(bool redo, std::wstring* description) {
+    const auto& stack = redo ? Active().history.redo : Active().history.undo;
+    if (!Active().Editable() || stack.empty()) return false;
+    if (description) *description = (redo ? L"Redo " : L"Undo ") + stack.back().what;
+    return true;
+}
+
+// Puts the active playlist back as it was before (or after) its last change; Now Playing's
+// position follows its track into the restored list.
+void StepPlaylistEdit(bool redo) {
+    std::wstring description;
+    if (!CanStepPlaylistEdit(redo, &description)) return;
+    Playlist& pl = Active();
+    std::vector<uint32_t> mapping;
+    if (!(redo ? RedoPlaylistEdit(pl, mapping) : UndoPlaylistEdit(pl, mapping))) return;
+    if (pl.kind == PlaylistKind::NowPlaying) {
+        std::vector<size_t> moved(mapping.size());
+        for (size_t i = 0; i < mapping.size(); ++i) moved[i] = mapping[i] == UINT32_MAX ? SIZE_MAX : mapping[i];
+        RemapNowPlaying(moved);
+    }
+    g.libraryDirty = true;
+    g.rows.clear(); g.rowItems.clear(); g.selected.clear(); g.focus = g.anchor = -1;
+    RebuildRows();
+    ShowMessage(description + L".");
+}
+
+void UndoLatest() {
+    uint64_t tagTime = NewestTagEditTime();
+    if (CanStepPlaylistEdit(false) && (!tagTime || Active().history.undo.back().when >= tagTime)) StepPlaylistEdit(false);
+    else UndoLastTagEdit();
 }
 
 void CheckDeadItems() {

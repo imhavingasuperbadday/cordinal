@@ -4,6 +4,7 @@
 
 #include "app.h"
 #include "customcover.h"
+#include "discart.h"
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -28,6 +29,7 @@ std::mutex g_mx;
 std::condition_variable g_cv;
 TrackId g_wanted = kNone;
 std::wstring g_wantedPath;
+unsigned g_wantedDisc = 0, g_wantedDiscTotal = 0;
 struct Thumb {
     TrackId id;
     std::wstring path;
@@ -131,6 +133,7 @@ void Worker() {
         TrackId id;
         std::wstring path;
         int thumb = 0;
+        unsigned disc = 0, discTotal = 0;
         {
             std::unique_lock lock(g_mx);
             g_cv.wait(lock, [] { return g_quit || g_wanted != kNone || !g_thumbs.empty(); });
@@ -138,6 +141,8 @@ void Worker() {
             if (g_wanted != kNone) {
                 id = std::exchange(g_wanted, kNone);
                 path = g_wantedPath;
+                disc = g_wantedDisc;
+                discTotal = g_wantedDiscTotal;
             } else {
                 id = g_thumbs.front().id;
                 path = std::move(g_thumbs.front().path);
@@ -149,6 +154,13 @@ void Worker() {
         std::string bytes = CoverBytes(path);
         if (!thumb && !bytes.empty()) img->file = SaveForWidgets(bytes);
         Decode(bytes, *img, thumb ? thumb : 512);
+        if (!thumb && img->width > 0) {
+            CoverImage art{};
+            if (std::wstring file = FindDiscArt(path, disc, discTotal); !file.empty()) Decode(ReadWhole(file), art, 512);
+            img->discWidth = art.width;
+            img->discHeight = art.height;
+            img->discRgba = std::move(art.rgba);
+        }
         if (!PostMessageW(nullptr, thumb ? WM_APP_THUMB : WM_APP_COVER, 0, (LPARAM)img)) delete img;
     }
 }
@@ -220,6 +232,8 @@ void RequestCover(TrackId id) {
         std::lock_guard lock(g_mx);
         g_wanted = id;
         g_wantedPath = g_lib.Path(id);
+        g_wantedDisc = g_lib[id].disc;
+        g_wantedDiscTotal = g_lib[id].discTotal;
     }
     g_cv.notify_one();
 }

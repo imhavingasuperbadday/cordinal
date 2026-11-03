@@ -124,7 +124,7 @@ enum Action {
     kAbout,
     kPlay, kPlayNext, kAddToQueue, kClearQueue, kAddToNowPlaying, kAddToPlaylist, kRemoveFromNowPlaying, kOpenFolder, kColumnToggle, kPackColumnSet,
     kSectionPlay, kSectionLoop, kSectionStart, kSectionEnd, kSectionClear,
-    kRating, kEditTags, kUndoTags, kEqualizer, kPreferences, kListenBrainz, kRgEnable, kRgScanSel, kRgScanPl, kRgCancel, kRgClear, kRgWrite, kWriteStatistics,
+    kRating, kEditTags, kUndoTags, kUndo, kRedo, kEqualizer, kPreferences, kListenBrainz, kRgEnable, kRgScanSel, kRgScanPl, kRgCancel, kRgClear, kRgWrite, kWriteStatistics,
     kNewAuto, kEditAuto, kChoice, kGroupEditions, kPreferredEdition, kRemoveEdition, kSplitEditions,
     kAlbumEditions, kEditionVersions, kRgScanAll, kFindCover, kFetchCovers, kCancelFetchCovers,
     kSaveLyricsTags, kSaveLyricsLrc, kArtistInfo, kRestoreCover,
@@ -163,6 +163,7 @@ struct PlaylistFile {
     std::vector<SteamSong> steamSongs;
     SteamImport steam;
     std::vector<TrackId> snapshot;
+    std::vector<TrackId> undoBefore;  // an import's target before its first batch, for Undo
     std::vector<std::pair<TrackId, std::wstring>> checkedPaths, missing;
     std::vector<std::pair<uint64_t, TrackId>> hashes;
     std::vector<std::vector<TrackId>> duplicateGroups;
@@ -218,7 +219,9 @@ struct Wave {
 extern Wave g_wave;
 
 extern SDL_Texture* g_cover;
+extern SDL_Texture* g_disc;
 extern TrackId g_coverFor, g_coverWanted;
+extern double g_coverHue;
 extern uint32_t g_lastRebuild;
 extern size_t g_sourceCount;  // active tab's tracks before the search
 extern std::unordered_map<uint64_t, std::string> g_cells;  // formatted cells by track and column
@@ -296,8 +299,13 @@ void InsertIntoNowPlaying(const std::vector<TrackId>& ids, bool next);
 void AddToPlaylist(int index, const std::vector<TrackId>& ids);
 void AddDropped(const std::vector<std::wstring>& files);
 void OpenChoice(float x, float y, const std::vector<std::string>& labels, int selected, std::function<void(int)> pick);
-size_t RemoveOccurrences(const std::vector<char>& remove, int index = -1);
+size_t RemoveOccurrences(const std::vector<char>& remove, int index = -1, const wchar_t* what = L"remove");
 void RemoveFromPlaylist(bool all, bool keepSelected = false);
+// Undo / redo of the active playlist's contents; `description` names the step ("Undo remove").
+bool CanStepPlaylistEdit(bool redo, std::wstring* description = nullptr);
+void StepPlaylistEdit(bool redo);
+// Ctrl+Z: undoes whichever came last, a change to the active playlist or a tag edit.
+void UndoLatest();
 void RemoveDuplicateTracks();
 void CheckDeadItems();
 void FindDuplicateAudio();

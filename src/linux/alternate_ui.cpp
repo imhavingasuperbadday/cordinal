@@ -91,8 +91,8 @@ struct ColorDialog {
     int focus = 0;
 } color;
 int Mode() {
-    if (!kExtraThemes || g.settings.size != ViewSize::Normal || InternetRadio().active) return 0;
-    return g.settings.theme == ThemeMode::Foobar ? 1 : g.settings.theme == ThemeMode::Apollo ? 2 : 0;
+    if (g.settings.size != ViewSize::Normal || InternetRadio().active) return 0;
+    return kExtraThemes && g.settings.theme == ThemeMode::Foobar ? 1 : g.settings.theme == ThemeMode::Apollo ? 2 : 0;
 }
 std::wstring Lower(std::wstring text) {
     for (auto& ch : text) ch = (wchar_t)towlower(ch);
@@ -330,7 +330,7 @@ ApolloFileInfo ProbeApolloFile(const std::wstring& path, Codec codec) {
     ApolloFileInfo info;
     switch (codec) {
         case Codec::MP3: case Codec::MP2: case Codec::AAC: case Codec::WMA:
-        case Codec::Vorbis: case Codec::Opus: case Codec::AC3: info.bits = 16; break;
+        case Codec::Vorbis: case Codec::Opus: case Codec::AC3: case Codec::Musepack: info.bits = 16; break;
         default: break;
     }
     std::ifstream stream(ToUtf8(path), std::ios::binary);
@@ -419,7 +419,7 @@ bool AlternateField(TrackId id, const std::wstring& name, std::wstring& out) {
         int bits = cached.info.bits;
         if (!bits) switch (track.codec) {
             case Codec::MP3: case Codec::MP2: case Codec::AAC: case Codec::WMA:
-            case Codec::Vorbis: case Codec::Opus: case Codec::AC3: bits = 16; break;
+            case Codec::Vorbis: case Codec::Opus: case Codec::AC3: case Codec::Musepack: bits = 16; break;
             default: break;
         }
         std::wstring channels = track.channels == 1 ? L"mono" : track.channels == 2 ? L"stereo" :

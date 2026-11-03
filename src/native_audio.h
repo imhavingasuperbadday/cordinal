@@ -18,6 +18,7 @@ std::unique_ptr<Decoder> OpenWmaDecoder(const std::wstring& path);
 std::unique_ptr<Decoder> OpenOpusDecoder(const std::wstring& path);
 std::unique_ptr<Decoder> OpenWavPackDecoder(const std::wstring& path);
 std::unique_ptr<Decoder> OpenApeDecoder(const std::wstring& path);
+std::unique_ptr<Decoder> OpenMusepackDecoder(const std::wstring& path);
 std::unique_ptr<Decoder> OpenAc3Decoder(const std::wstring& path);
 std::unique_ptr<Decoder> OpenMatroskaDecoder(const std::wstring& path);
 // cordinal's own format (cord.h), version 1.

@@ -15,6 +15,7 @@ struct CoverTile {
     Rgb tile, ink;
 };
 CoverTile CoverTileFor(const std::wstring& name);
+double CoverTileHue(const std::wstring& name);  // the tile's hue, -1 for the plain one
 // The first letter or digit of `name` (skipping emoji and punctuation), uppercased, or a note.
 std::wstring CoverInitial(const std::wstring& name);
 // GDI: `art` filling `r`, cropped to a square from its middle; the tile above in its place; and a
@@ -22,7 +23,14 @@ std::wstring CoverInitial(const std::wstring& name);
 void DrawCoverArt(HDC dc, const RECT& r, const ArtImage& art);
 void DrawCoverPlaceholder(HDC dc, const RECT& r, const std::wstring& name);
 void DrawCoverFrame(HDC dc, const RECT& r);
+// Disc art (premultiplied alpha), fitted and centred in `r`, over what is there.
+void DrawDiscArt(HDC dc, const RECT& r, const ArtImage& disc);
 void ApplyTheme();
+// Washes the docked player's background with the now playing cover's hue (the placeholder tile's
+// without art) and repaints it; also after a theme change. The player's controls paint on
+// ControlBg, everything else on the surface.
+void RefreshPlayerTint();
+COLORREF ControlBg(HWND h);
 bool HandleDarkMenuBar(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& result);
 FieldLookup Lookup(TrackId id, bool withPlayback);
 void SetTextIfChanged(HWND h, const std::wstring& text);

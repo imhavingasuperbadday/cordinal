@@ -4,11 +4,17 @@
 IDI_APP ICON "cordinal.ico"
 1 24 "cordinal.manifest"
 
-// The extra themes' art and sounds, embedded only in a build with them (build.bat themes).
-#ifdef CORDINAL_EXTRA_THEMES
+// The Apollo theme's icons, toolbar strip and rebar backgrounds (see resource.h).
 IDI_APOLLO ICON "apollo/apollo.ico"
 IDI_APOLLO_TRACK ICON "apollo/track.ico"
+IDR_APOLLO_TOOLBAR RCDATA "apollo/toolbar.png"
+231 RCDATA "apollo/rebar_capacala.png"
+232 RCDATA "apollo/rebar_apollo.png"
+233 RCDATA "apollo/rebar_letters.png"
+234 RCDATA "apollo/rebar_notes.png"
 
+// The other extra themes' art and sounds, embedded only in a build with them (build.bat themes).
+#ifdef CORDINAL_EXTRA_THEMES
 // DELTARUNE assets: the Dark Fountain's sprites and the game's dialogue font (see resource.h).
 IDR_FOUNTAIN_EDGE RCDATA "deltarune/fountain_edge.png"
 IDR_FOUNTAIN_BASIN RCDATA "deltarune/fountain_basin.png"
@@ -25,18 +31,11 @@ IDR_SND_SWING RCDATA "deltarune/snd_swing.flac"
 IDR_SND_LEVELUP RCDATA "deltarune/snd_levelup.flac"
 IDR_SND_TXTQ RCDATA "deltarune/snd_txtq.flac"
 IDR_SND_QUEEN_BITCRUSHLAUGH RCDATA "deltarune/snd_queen_bitcrushlaugh.flac"
-
-// Apollo 37zz's toolbar strip and rebar backgrounds for the Apollo theme (see resource.h).
-IDR_APOLLO_TOOLBAR RCDATA "apollo/toolbar.png"
-231 RCDATA "apollo/rebar_capacala.png"
-232 RCDATA "apollo/rebar_apollo.png"
-233 RCDATA "apollo/rebar_letters.png"
-234 RCDATA "apollo/rebar_notes.png"
 #endif
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 0,1,3,0
-PRODUCTVERSION 0,1,3,0
+FILEVERSION 0,1,4,0
+PRODUCTVERSION 0,1,4,0
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -47,9 +46,9 @@ BEGIN
             VALUE "CompanyName", "imhavingasuperbadday"
             VALUE "LegalCopyright", "Copyright (C) 2026 imhavingasuperbadday. GPL-3.0-or-later."
             VALUE "FileDescription", "cordinal music player"
-            VALUE "FileVersion", "0.1.3"
+            VALUE "FileVersion", "0.1.4"
             VALUE "ProductName", "cordinal"
-            VALUE "ProductVersion", "0.1.3"
+            VALUE "ProductVersion", "0.1.4"
             VALUE "OriginalFilename", "cordinal.exe"
         END
     END

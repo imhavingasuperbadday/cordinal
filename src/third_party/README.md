@@ -7,6 +7,8 @@ stb_vorbis and Nuked OPN2 sources have been removed from the source tree and bui
   models and reference SILK resampler filter-design coefficients.
 - `wma-numeric-data-LICENSE.txt` preserves LGPL-2.1 terms for WMA numeric arrays
   published by the FFmpeg Project (copyright 2002).
+- `musepack-numeric-data-LICENSE.txt` preserves the BSD terms of the Musepack codebooks
+  (The Musepack Development Team, 2005-2009) in `src/audio_mpc_tables.h`.
 
 Cordinal decoder routines live in `src/audio_*`; emulator routines in `src/chiptune`.
 

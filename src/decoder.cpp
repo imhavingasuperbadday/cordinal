@@ -188,6 +188,7 @@ std::unique_ptr<Decoder> OpenDecoder(const std::wstring& path, unsigned fallback
     else if (ext == L"ac3") d = OpenAc3Decoder(path);
     else if (ext == L"mka") d = OpenMatroskaDecoder(path);
     else if (ext == L"ape") d = OpenApeDecoder(path);
+    else if (ext == L"mpc" || ext == L"mp+" || ext == L"mpp") d = OpenMusepackDecoder(path);
     else if (ext == L"ogg" || ext == L"oga") {
         d = OpenVorbisDecoder(path);
         if (!d) d = OpenOpusDecoder(path);

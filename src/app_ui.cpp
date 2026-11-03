@@ -14,6 +14,14 @@ LRESULT FieldControlColor(HDC dc) {
     return (LRESULT)g.fieldBrush;
 }
 
+COLORREF ControlBg(HWND h) {
+    for (HWND player : {g.seek, g.volume, g.npTitle, g.npSub, g.elapsed, g.time, g.speaker, g.pointsChip})
+        if (h == player) return PlayerColor();
+    for (HWND b : g.buttons)
+        if (h == b) return PlayerColor();
+    return SurfaceColor();
+}
+
 LRESULT SurfaceControlColor(HDC dc, COLORREF text) {
     SetTextColor(dc, text);
     SetBkColor(dc, SurfaceColor());
@@ -126,28 +134,18 @@ void FillSolid(HDC dc, const RECT& r, COLORREF c) {
     FillRect(dc, &r, (HBRUSH)GetStockObject(DC_BRUSH));
 }
 
-namespace {
-// `h` 0..360, `s` and `v` 0..1.
-Rgb Hsv(double h, double s, double v) {
-    double c = v * s, x = c * (1 - std::fabs(std::fmod(h / 60, 2) - 1)), m = v - c;
-    double red = 0, green = 0, blue = 0;
-    if (h < 60) red = c, green = x;
-    else if (h < 120) red = x, green = c;
-    else if (h < 180) green = c, blue = x;
-    else if (h < 240) green = x, blue = c;
-    else if (h < 300) red = x, blue = c;
-    else red = c, blue = x;
-    auto byte = [&](double u) { return (Rgb)std::lround((u + m) * 255); };
-    return byte(red) << 16 | byte(green) << 8 | byte(blue);
-}
-}  // namespace
-
-CoverTile CoverTileFor(const std::wstring& name) {
-    if (name.empty()) return {P().surface2, P().faint};
+double CoverTileHue(const std::wstring& name) {
+    if (name.empty()) return -1;
     uint32_t hash = 2166136261u;  // FNV-1a over the lowercased name
     for (wchar_t c : name) hash = (hash ^ (uint32_t)towlower(c)) * 16777619u;
-    double hue = hash % 360;
-    return P().dark ? CoverTile{Hsv(hue, 0.38, 0.30), Hsv(hue, 0.28, 0.86)} : CoverTile{Hsv(hue, 0.20, 0.90), Hsv(hue, 0.50, 0.42)};
+    return hash % 360;
+}
+
+CoverTile CoverTileFor(const std::wstring& name) {
+    double hue = CoverTileHue(name);
+    if (hue < 0) return {P().surface2, P().faint};
+    return P().dark ? CoverTile{HsvColor(hue, 0.38, 0.30), HsvColor(hue, 0.28, 0.86)}
+                    : CoverTile{HsvColor(hue, 0.20, 0.90), HsvColor(hue, 0.50, 0.42)};
 }
 
 std::wstring CoverInitial(const std::wstring& name) {
@@ -165,6 +163,27 @@ void DrawCoverArt(HDC dc, const RECT& r, const ArtImage& art) {
     // source y counts from.
     StretchDIBits(dc, r.left, r.top, r.right - r.left, r.bottom - r.top, (art.width - side) / 2, (art.height - side) / 2,
                   side, side, art.pixels.data(), &bi, DIB_RGB_COLORS, SRCCOPY);
+}
+
+void DrawDiscArt(HDC dc, const RECT& r, const ArtImage& disc) {
+    if (disc.Empty()) return;
+    BITMAPINFO bi{};
+    bi.bmiHeader = {sizeof(bi.bmiHeader), disc.width, -disc.height, 1, 32};
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!bmp) return;
+    memcpy(bits, disc.pixels.data(), disc.pixels.size() * sizeof(uint32_t));
+    HDC mem = CreateCompatibleDC(dc);
+    HGDIOBJ old = SelectObject(mem, bmp);
+    // Kept to its own shape: a disc that isn't square sits centred in the square it was given.
+    int side = std::min(r.right - r.left, r.bottom - r.top);
+    int w = disc.width >= disc.height ? side : MulDiv(side, disc.width, disc.height);
+    int h = disc.height >= disc.width ? side : MulDiv(side, disc.height, disc.width);
+    BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    GdiAlphaBlend(dc, r.left + (side - w) / 2, r.top + (side - h) / 2, w, h, mem, 0, 0, disc.width, disc.height, blend);
+    SelectObject(mem, old);
+    DeleteDC(mem);
+    DeleteObject(bmp);
 }
 
 void DrawCoverPlaceholder(HDC dc, const RECT& r, const std::wstring& name) {
@@ -212,6 +231,7 @@ void ApplyTheme() {
         if (*b) DeleteObject(*b);
     g.fieldBrush = CreateSolidBrush(Ref(P().surface2));
     g.surfaceBrush = CreateSolidBrush(SurfaceColor());
+    RefreshPlayerTint();
     if (!g.hwnd) return;
     // A theme with a font of its own changes every font, and the layout with them.
     const bool fontsChanged = ThemeInfo(g.themeMode).font != s_fontFace;

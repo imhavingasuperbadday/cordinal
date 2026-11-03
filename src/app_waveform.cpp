@@ -393,7 +393,7 @@ bool DrawWaveform(HDC dc, const RECT& rc, const RECT& channel, double frac) {
     if (!known && g.size < ViewSize::Spotlight && !SeekVertical()) return false;
     // The bar isn't erased before this any more (WaveformTick), so the waveform paints the whole
     // control itself: the gaps between the columns are the bar's own background.
-    COLORREF bg = SurfaceColor();
+    COLORREF bg = PlayerColor();
     int left = channel.left, width = channel.right - channel.left;
     if (width <= 0) {
         FillSolid(dc, rc, bg);

@@ -71,10 +71,25 @@ int CheckLinuxAlternateThemes() {
     const bool appearanceItem = std::any_of(viewMenu.begin(), viewMenu.end(),
         [](const MenuItem& item) { return item.label == "Waveform appearance" && !item.sub.empty(); });
     check(appearanceItem == kExtraThemes, "View offers waveform appearance only when its private controls exist");
+    // Apollo is part of every build.
+    const auto baseColumns = g.settings.columns;
+    for (float factor : {1.f, 2.f}) {
+        g.scale = factor;
+        g.settings.theme = ThemeMode::Apollo;
+        ApplyTheme(); DoLayout();
+        check(AlternateMode() && L.menuBar.h == 0 && L.tabs.h == 0 && L.list.x > 0 &&
+            L.visuals[0].w > 0 && L.visuals[1].w > 0 && ActiveColumnWidths()[ui::kColApolloTitle] >= 80 &&
+            ActiveColumnTypes()[1] == ui::kColApolloTitle && DrawAlternate(CurrentPalette()) &&
+            DrawAlternateStatus(CurrentPalette()) && g.settings.columns == baseColumns,
+            factor == 1 ? "Apollo draws its rebar, classic toolbar and fitted playlist at 100 percent" :
+                "Apollo's toolbar and playlist remain usable at 200 percent");
+    }
+    g.scale = scale;
+    g.settings.theme = ThemeMode::Light;
+    ApplyTheme(); DoLayout();
     if (!kExtraThemes) {
         check(WaveAppearanceMenu().empty(), "public builds offer no private waveform menu");
     } else {
-        const auto baseColumns = g.settings.columns;
         for (float factor : {1.f, 2.f}) {
             g.scale = factor;
             g.settings.theme = ThemeMode::Foobar;
@@ -85,14 +100,6 @@ int CheckLinuxAlternateThemes() {
                 g.settings.columns == baseColumns && DrawAlternate(CurrentPalette()),
                 factor == 1 ? "foobar layout has its Album List, toolbar and dedicated columns at 100 percent" :
                     "foobar layout retains separate columns and usable geometry at 200 percent");
-            g.settings.theme = ThemeMode::Apollo;
-            ApplyTheme(); DoLayout();
-            check(AlternateMode() && L.menuBar.h == 0 && L.tabs.h == 0 && L.list.x > 0 &&
-                L.visuals[0].w > 0 && L.visuals[1].w > 0 && ActiveColumnWidths()[ui::kColApolloTitle] >= 80 &&
-                ActiveColumnTypes()[1] == ui::kColApolloTitle && DrawAlternate(CurrentPalette()) &&
-                DrawAlternateStatus(CurrentPalette()) && g.settings.columns == baseColumns,
-                factor == 1 ? "Apollo draws its rebar, classic toolbar and fitted playlist at 100 percent" :
-                    "Apollo's toolbar and playlist remain usable at 200 percent");
         }
         g.scale = scale;
         g.settings.theme = ThemeMode::Deltarune;

@@ -559,8 +559,14 @@ void LoadCompactPlacement(const std::string& text) {
             rest.remove_prefix(1);
         }
     }
-    if (!rest.empty() || p.w < 300 || p.w > 16384 || p.h < 260 || p.h > 16384) return;
+    // Wider than a compact window should be (as one saved at the full window's width): the default instead.
+    if (!rest.empty() || p.w < 300 || p.w > 640 || p.h < 260 || p.h > 16384) return;
     p.valid = true; compact = p;
+}
+
+void ApplyWindowMinimum() {
+    const bool compactSize = g.settings.size == ViewSize::Compact;
+    SDL_SetWindowMinimumSize(g.window, compactSize ? 300 : 520, compactSize ? 260 : 320);
 }
 
 std::string CompactPlacementText() {
@@ -584,11 +590,15 @@ void SetViewSize(ViewSize size) {
         if (!compact.valid) {
             compact.x = full.x; compact.y = full.y; compact.w = 440; compact.h = 600; compact.valid = true;
         }
-        SDL_SetWindowMinimumSize(g.window, 300, 260); Restore(compact);
+        g.settings.size = size;
+        ApplyWindowMinimum();
+        Restore(compact);
     } else {
-        if (g.settings.size == ViewSize::Compact) RememberCompact();
-        SDL_SetWindowMinimumSize(g.window, 520, 320);
-        if (g.settings.size == ViewSize::Compact) Restore(full);
+        bool wasCompact = g.settings.size == ViewSize::Compact;
+        if (wasCompact) RememberCompact();
+        g.settings.size = size;
+        ApplyWindowMinimum();
+        if (wasCompact) Restore(full);
         if (size >= ViewSize::Spotlight && !(SDL_GetWindowFlags(g.window) & SDL_WINDOW_MAXIMIZED)) {
             int w = 0, h = 0; SDL_GetWindowSize(g.window, &w, &h);
             SDL_Rect usable{};
@@ -608,6 +618,7 @@ void InitializePresentation() {
     full = Capture();
     g.settings.size = ViewSize::Normal;
     SetViewSize(requested);
+    ApplyWindowMinimum();
 }
 void SavePresentationWindow() {
     if (MiniActive()) return;

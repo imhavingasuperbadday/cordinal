@@ -7,6 +7,8 @@
 #include "audio_packets.h"
 #include "testlog.h"
 #include "selftest_common.h"
+#include "mpc_vectors.h"
+#include "tags.h"
 #include <cmath>
 #include <limits>
 #include <cstring>
@@ -437,8 +439,55 @@ void TestCrc16() {
                    cases.failed.c_str());
 }
 
+// Musepack: no encoder can run here, so two small embedded clips stand in (mpc_vectors.h). Their
+// sine must come out at its level and pitch, at its exact length, seek exactly, and show its tags.
+void TestMusepack(const std::wstring& scratch) {
+    testlog::Batch batch;
+    batch.Next(L"Musepack SV7 and SV8 decode their sine at its level, pitch and length, seek exactly and read "
+               L"tags");
+    struct Clip { const wchar_t* name; const uint8_t* data; size_t size; };
+    const Clip clips[] = {{L"sv7.mpc", kMusepackSv7, sizeof kMusepackSv7}, {L"sv8.mpc", kMusepackSv8, sizeof kMusepackSv8}};
+    for (const Clip& clip : clips) {
+        const std::wstring path = scratch + L"\\" + clip.name;
+        if (!Ready(WriteTestBytes(path, std::string_view((const char*)clip.data, clip.size)), L"Musepack clip is written"))
+            continue;
+        std::wstring error;
+        auto d = OpenDecoder(path, 48000, error);
+        const bool opened = d && error.empty() && d->Rate() == 44100 && d->Duration() == 0.25;
+        Check(opened, L"%ls opens through dispatch at its exact length", clip.name);
+        if (!opened) continue;
+        std::vector<float> pcm(11025 * 2 + 64);
+        size_t total = 0;
+        while (size_t n = d->Read(pcm.data() + total * 2, 1000)) total += n;
+        double power = 0;
+        unsigned crossings = 0;
+        bool finite = true;
+        // The middle 0.2 s, away from the encoder's fade-in and the end.
+        for (size_t i = 1102; i < 9922; ++i) {
+            finite &= std::isfinite(pcm[i * 2]) && pcm[i * 2] == pcm[i * 2 + 1];
+            power += pcm[i * 2] * pcm[i * 2];
+            crossings += (pcm[i * 2 - 2] < 0) != (pcm[i * 2] < 0);
+        }
+        const double rms = std::sqrt(power / 8820);
+        Check(total == 11025 && finite && !d->Failed(), L"%ls gives 11025 finite, identical stereo frames", clip.name);
+        // The source's RMS over the same span is 0.031317.
+        Check(std::abs(rms / 0.031317 - 1) < 0.01 && crossings >= 396 && crossings <= 404,
+              L"%ls is the 1 kHz sine at its level (rms %.6f, %u crossings in 0.2 s)", clip.name, rms, crossings);
+        float again[256];
+        bool exact = d->Seek(5000.25 / 44100) && d->Read(again, 128) == 128;
+        for (size_t i = 0; exact && i < 256; ++i) exact = again[i] == pcm[5000 * 2 + i];
+        Check(exact, L"%ls seeks to the exact samples of a straight read", clip.name);
+        TagData tags;
+        Check(ReadTags(path, tags) && tags.codec == Codec::Musepack && tags.title == "Tiny Sine" &&
+                  tags.artist == "cordinal" &&
+                  tags.sampleRate == 44100 && tags.channels == 2 && std::abs(tags.duration - 0.25) < 0.001,
+              L"%ls tags: APEv2 title and artist, rate, channels and length", clip.name);
+    }
+}
+
 void TestNativeCodecs(const std::wstring& root, const std::wstring& scratch) {
     testlog::Batch batch;
+    TestMusepack(scratch);
     TestWaveformPreviews(root, scratch);
     TestPcmBlocks(scratch);
     TestCrc16();

@@ -248,11 +248,12 @@ bool SaveTagJournal(const std::wstring& dir, TagJournal& journal, std::wstring& 
     return true;
 }
 
-bool FindNewestTagJournal(const std::wstring& dir, std::wstring& file, uint32_t& fileCount) {
+bool FindNewestTagJournal(const std::wstring& dir, std::wstring& file, uint32_t& fileCount, uint64_t* time) {
     fileCount = 0;
     auto journals = ListJournals(dir);
     if (journals.empty()) return false;
     file = journals.back().second;
+    if (time) *time = journals.back().first;
     HANDLE h = CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
     unsigned char head[kHeaderBytes];

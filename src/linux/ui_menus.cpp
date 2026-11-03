@@ -99,7 +99,13 @@ std::vector<MenuItem> BarMenu(int m) {
                     Item("Preferences...", kPreferences, "Ctrl+,"), Separator(), Item("Exit", kExit)};
         case 1: {
             bool library = Active().kind == PlaylistKind::Library || Active().kind == PlaylistKind::Inbox;
-            std::vector<MenuItem> items{Item("Select all", kSelectAll, "Ctrl+A", false, any), Item("Remove", kRemove, "Del", false, (editable || library) && any),
+            std::wstring undo, redo;
+            bool canUndo = CanStepPlaylistEdit(false, &undo), canRedo = CanStepPlaylistEdit(true, &redo);
+            if (canUndo && CanUndoTagEdit() && Active().history.undo.back().when < NewestTagEditTime()) undo = L"Undo tag edit";
+            else if (!canUndo && CanUndoTagEdit()) { canUndo = true; undo = L"Undo tag edit"; }
+            std::vector<MenuItem> items{Item(canUndo ? ToUtf8(undo) : "Undo", kUndo, "Ctrl+Z", false, canUndo),
+                    Item(canRedo ? ToUtf8(redo) : "Redo", kRedo, "Ctrl+Y", false, canRedo), Separator(),
+                    Item("Select all", kSelectAll, "Ctrl+A", false, any), Item("Remove", kRemove, "Del", false, (editable || library) && any),
                     Item("Keep only selected tracks", kKeepSelected, {}, false, editable && !SelectedTracks().empty()),
                     Item("Clear playlist", kClear, {}, false, editable && any), Separator(),
                     Item("Reload selected metadata", kReloadTags, {}, false, !SelectedTracks().empty() && !TagWriteBusy()),
@@ -107,8 +113,8 @@ std::vector<MenuItem> BarMenu(int m) {
                     Item("Remove dead items", kRemoveDead, {}, false, editable && any && !g_playlistFileBusy && !g_playlistImport),
                     Separator(), Item("Search", kFind, "Ctrl+F"), Separator(),
                     Item("Edit tags...", kEditTags, "Alt+Enter", false, g.focus >= 0 && any),
-                    Item("Undo last tag edit", kUndoTags, "Ctrl+Z", false, CanUndoTagEdit())};
-            if (g_checkingDead && g_playlistFileBusy) items.insert(items.begin() + 8, Item("Cancel checking dead items", kCancelDead));
+                    Item("Undo last tag edit", kUndoTags, {}, false, CanUndoTagEdit())};
+            if (g_checkingDead && g_playlistFileBusy) items.insert(items.begin() + 11, Item("Cancel checking dead items", kCancelDead));
             if (auto labels = HelperToolLabels(); !labels.empty()) {  // the tools of the helpers that are on
                 std::vector<MenuItem> run;
                 for (size_t k = 0; k < labels.size(); ++k) {
@@ -214,8 +220,7 @@ std::vector<MenuItem> BarMenu(int m) {
             for (ThemeMode t : {ThemeMode::Light, ThemeMode::Dark, ThemeMode::System})
                 themes.push_back(Radio(t == ThemeMode::System ? "Follow the system" : Plain(ThemeInfo(t).name), kTheme, (int)t,
                                        g.settings.theme == t));
-            if (kExtraThemes || ThemeTotal() > (int)ThemeMode::Count)
-                themes.push_back(Separator());
+            themes.push_back(Separator());
             for (int t = (int)ThemeMode::Deltarune; t < ThemeTotal(); ++t)
                 if (ThemeAvailable((ThemeMode)t)) themes.push_back(Radio(Plain(ThemeInfo((ThemeMode)t).name), kTheme, t, (int)g.settings.theme == t));
             std::vector<MenuItem> view = {Submenu("Theme", std::move(themes)), Item("Radio", kOpenRadio, "Ctrl+Shift+R"), Item("Lyrics panel", kLyrics, "Ctrl+L", LyricsShown()), Item("Artist info...", kArtistInfo), Item("Customize layout...", kLayout),
@@ -584,6 +589,8 @@ void RunAction(const MenuItem& item) {
             break;
         case kEditTags: OpenTagEditor(SelectedTracks()); break;
         case kUndoTags: UndoLastTagEdit(); break;
+        case kUndo: UndoLatest(); break;
+        case kRedo: StepPlaylistEdit(true); break;
         case kEqualizer: OpenEqualizer(); break;
         case kRgEnable: SetReplayGain(!g.settings.rg.on); break;
         case kRgScanSel: ScanReplayGain(SelectedTracks()); break;
@@ -657,7 +664,9 @@ void InsertIntoNowPlaying(const std::vector<TrackId>& ids, bool next) {
     size_t at = next && g.queuePos >= 0 && g.queuePos < (int)items.size() ? (size_t)g.queuePos + 1 : items.size();
     std::vector<size_t> mapping(items.size());
     for (size_t i = 0; i < mapping.size(); ++i) mapping[i] = i < at ? i : i + ids.size();
+    std::vector<TrackId> before = items;
     items.insert(items.begin() + (ptrdiff_t)at, ids.begin(), ids.end());
+    RecordPlaylistEdit(g.playlists[np], std::move(before), L"add");
     RemapNowPlaying(mapping);
     g.libraryDirty = true;
     if (g.active == np) RebuildRows();
@@ -667,7 +676,9 @@ void InsertIntoNowPlaying(const std::vector<TrackId>& ids, bool next) {
 void AddToPlaylist(int index, const std::vector<TrackId>& ids) {
     if (index < 0 || index >= (int)g.playlists.size() || g.playlists[index].kind != PlaylistKind::Static || ids.empty()) return;
     auto& items = g.playlists[index].items;
+    std::vector<TrackId> before = items;
     items.insert(items.end(), ids.begin(), ids.end());
+    RecordPlaylistEdit(g.playlists[index], std::move(before), L"add");
     g.libraryDirty = true;
     if (index == g.active) RebuildRows();
     ShowMessage(std::to_wstring(ids.size()) + (ids.size() == 1 ? L" track added to " : L" tracks added to ") + g.playlists[index].name + L".");

@@ -381,6 +381,8 @@ bool SubmitTagWrites(const std::vector<std::pair<TrackId, TagEdit>>& items, bool
 void WriteStatisticsTags(const std::vector<TrackId>& ids);
 void UndoLastTagEdit();
 bool CanUndoTagEdit();
+// Unix time of the newest tag edit that can be undone, 0 without one.
+uint64_t NewestTagEditTime();
 void OnTagWriteMessage(WPARAM wp, LPARAM lp);
 void FlushDeferredTags();
 void StopTagWriter();
@@ -496,6 +498,8 @@ bool MiniActive();
 void ToggleMini();
 void LeaveMini();
 bool MiniEvent(const SDL_Event& e);
+// The window's smallest size for its view size; leaving the mini player sets it again.
+void ApplyWindowMinimum();
 
 // Helpers (helpers_ui.cpp, View > Helpers): separate programs that decode, tag or run on tracks.
 struct HelperRow {

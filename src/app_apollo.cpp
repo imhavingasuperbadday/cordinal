@@ -16,7 +16,6 @@
 // the other sizes keep Cordinal's own arrangement in Apollo's colors.
 #include "app.h"
 
-#ifdef CORDINAL_EXTRA_THEMES
 #include <wincodec.h>
 
 namespace app {
@@ -1143,6 +1142,7 @@ const Probe& ProbeFile(TrackId id) {
     p.fileTime = t.fileTime;
     switch (t.codec) {
         case Codec::MP3: case Codec::MP2: case Codec::AAC: case Codec::WMA: case Codec::Vorbis: case Codec::Opus: case Codec::AC3:
+        case Codec::Musepack:
             p.bits = 16;
             break;
         default: break;
@@ -1211,29 +1211,3 @@ bool ApolloField(TrackId id, const std::wstring& name, std::wstring& out) {
 }
 
 }  // namespace app
-
-#else
-
-// The theme is hidden from this build, so its window code is not linked. These stubs keep the call
-// sites compiling and make every Apollo-specific branch unreachable.
-namespace app {
-
-bool ApolloMode() { return false; }
-void ApolloSync() {}
-void LayoutApollo(HDWP&, RECT) {}
-void PaintApolloChrome(HDC) {}
-void ApolloTheme() {}
-void ApolloTick() {}
-void ApolloStatus() {}
-std::wstring ApolloWindowTitle() { return {}; }
-bool ApolloContextMenu(HWND, POINT) { return false; }
-LRESULT ApolloDrawTrackbar(NMCUSTOMDRAW*) { return 0; }
-void ApolloPaintHeader(HWND, HDC) {}
-void ApolloDrawStatusPart(const DRAWITEMSTRUCT*) {}
-void ApolloDrawTrackIcon(HDC, const RECT&) {}
-bool ApolloField(TrackId, const std::wstring&, std::wstring&) { return false; }
-void ForgetApolloProbes() {}
-
-}  // namespace app
-
-#endif

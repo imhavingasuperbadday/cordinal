@@ -7,7 +7,7 @@ program of about 1.5 MB: no installer, no runtime, nothing else to install. It p
 audio file with its own decoders, keeps your ratings and listening history, and leaves your music
 where it is.
 
-Current release: **0.1.3**. Download `cordinal.exe` from
+Current release: **0.1.4**. Download `cordinal.exe` from
 [Releases](https://github.com/imhavingasuperbadday/cordinal/releases/latest) and run it.
 
 ## What it does
@@ -37,9 +37,11 @@ Current release: **0.1.3**. Download `cordinal.exe` from
   stars or more, not played this month", "added since 2026-01-01 and never played"). Rules cover
   tags, path, codec, ratings, play and skip counts, recent plays, dates added and played, length,
   bitrate, sample rate, channels, BPM, file size and measured track gain, in nested ALL/ANY groups
-  with an optional limit. A play queue, Play next, and M3U/M3U8 import and export.
+  with an optional limit. A play queue, Play next, and M3U/M3U8 and PLS import and export.
+  Ctrl+Z undoes changes to a playlist (adding, removing, moving, sorting, clearing) and Ctrl+Y
+  redoes them, for the session; Ctrl+Z takes back a tag edit instead when that came last.
 - **Almost any format, built in.** FLAC, WAV, AIFF, MP3, MP4/M4A, Ogg Vorbis, Opus, AAC, ALAC, WMA, APE,
-  WavPack, AC3, Matroska audio, DSD, CUE sheets, tracker modules, MIDI and video game music (NES,
+  WavPack, Musepack, AC3, Matroska audio, DSD, CUE sheets, tracker modules, MIDI and video game music (NES,
   SNES, Game Boy, Genesis, Commodore 64), plus cordinal's own lossless `.cord`. No codecs to install.
 - **Sound.** Gapless playback, ReplayGain with a built-in loudness scanner, a ten-band equalizer
   with headphone (AutoEq) profiles and crossfeed, exclusive bit-perfect output, speed and tempo,
@@ -70,6 +72,8 @@ Current release: **0.1.3**. Download `cordinal.exe` from
   source is off until you turn it on in **Preferences ▸ Online**, where every one says what it
   sends: the album's artist and title, and for MusicBrainz the release it finds to the Cover Art
   Archive. cordinal never contacts Google itself.
+  An album with disc art (`cd.png`, `cd2.png` for disc 2, `disc.png` or `vinyl.png` in its folder or
+  its Artwork or Scans folder, as fanart.tv names them) shows the disc peeking out behind the cover.
 - **Lyrics for songs that have none.** With a lyrics source on in **Preferences ▸ Online**, the
   lyrics panel (View ▸ Lyrics panel) asks LrcLib, then lyrics.ovh, when a song has no lyrics in its
   tags and no .lrc file beside it. Timed lyrics are preferred, only lyrics for the same title are
@@ -98,7 +102,7 @@ Current release: **0.1.3**. Download `cordinal.exe` from
   playlist of a mounted iPod and keeps a copy of its previous iTunesDB. It accepts MP3, AAC,
   ALAC, WAV, AIFF and audiobook files. iOS devices and protected purchases are not handled;
   play protected purchases in their authorized app.
-- **Make it yours.** Light, dark or follow Windows; window sizes from a big player down to a mini
+- **Make it yours.** Light, dark, the Apollo look or follow Windows; window sizes from a big player down to a mini
   player; columns and title formats; a command palette (Ctrl+Shift+P) that finds any command or
   setting. Every setting lives in Preferences (Ctrl+,).
   **Preferences ▸ View ▸ Waveform playback bar** switches between a waveform and a regular progress
@@ -139,7 +143,7 @@ Nothing you do in cordinal is locked inside it:
 | Ctrl+Enter / Ctrl+Q | Play next / add to queue |
 | Ctrl+F | Search |
 | Alt+Enter | Edit tags |
-| Ctrl+Z | Undo the last tag edit |
+| Ctrl+Z / Ctrl+Y | Undo the last playlist change or tag edit / redo a playlist change |
 | Ctrl+S | Save the playlist as M3U8 |
 | Ctrl+N / F2 / Ctrl+W | New / rename / close playlist |
 | Ctrl+E | Equalizer |

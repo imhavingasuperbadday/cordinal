@@ -49,7 +49,7 @@ void ChooseImportFolder() {
 void ChooseFiles() {
     auto request = NewPathImport();
     if (!request) return;
-    static const SDL_DialogFileFilter filter{"Audio files", "flac;mp3;m4a;mp4;aac;ogg;oga;opus;wav;aiff;aif;wv;ape;mka;mpc;cord;cue;m3u;m3u8"};
+    static const SDL_DialogFileFilter filter{"Audio files", "flac;mp3;m4a;mp4;aac;ogg;oga;opus;wav;aiff;aif;wv;ape;mka;mpc;cord;cue;m3u;m3u8;pls"};
     std::string music = MusicFolder();
     SDL_ShowOpenFileDialog(FilesChosen, request.release(), g.window, &filter, 1, music.c_str(), true);
 }
@@ -72,12 +72,12 @@ void ChoosePlaylistFile(bool save) {
         SortPlaylistTracks(snapshot.items, snapshot);
         if (!CaptureM3U(snapshot, request->entries)) { ShowMessage(L"The playlist contains an unknown track."); return; }
     }
-    static const SDL_DialogFileFilter filter{"M3U playlists", "m3u;m3u8"};
+    static const SDL_DialogFileFilter filters[] = {{"Playlists", "m3u;m3u8;pls"}, {"PLS playlist", "pls"}};
     std::string location = MusicFolder();
     if (save) {
-        location += "/playlist.m3u8";
-        SDL_ShowSaveFileDialog(PlaylistFileChosen, request.release(), g.window, &filter, 1, location.c_str());
-    } else SDL_ShowOpenFileDialog(PlaylistFileChosen, request.release(), g.window, &filter, 1, location.c_str(), false);
+        location += "/playlist.m3u8";  // a name ending in .pls saves a PLS instead
+        SDL_ShowSaveFileDialog(PlaylistFileChosen, request.release(), g.window, filters, 2, location.c_str());
+    } else SDL_ShowOpenFileDialog(PlaylistFileChosen, request.release(), g.window, filters, 1, location.c_str(), false);
 }
 
 void EndRename(bool commit) {
@@ -370,7 +370,7 @@ void OnPlaylistFile(WPARAM kind, LPARAM value) {
         for (const auto& [id, path] : request->missing) missing.insert(id);
         std::vector<char> remove(target->items.size(), 0);
         for (size_t i = 0; i < remove.size(); ++i) remove[i] = missing.contains(target->items[i]);
-        size_t count = RemoveOccurrences(remove, (int)(target - g.playlists.begin()));
+        size_t count = RemoveOccurrences(remove, (int)(target - g.playlists.begin()), L"remove dead items");
         ShowMessage(L"Removed " + std::to_wstring(count) + L" dead item(s).");
         return;
     }
@@ -395,6 +395,7 @@ void TickPlaylistImport() {
         ShowMessage(L"Playlist import stopped because its tab was closed.");
         return;
     }
+    if (request.done == 0 && found->kind != PlaylistKind::Library) request.undoBefore = found->items;
     size_t end = std::min(request.paths.size(), request.done + 256);
     std::vector<TrackId> unread;
     std::vector<TrackId> joined;
@@ -416,6 +417,8 @@ void TickPlaylistImport() {
     AnnouncePoints(AwardLibraryAdds(joined));
     g.libraryDirty = true;
     if (request.done == request.paths.size()) {
+        // The whole import is one step to undo, however many batches it took.
+        if (found->kind != PlaylistKind::Library) RecordPlaylistEdit(*found, std::move(request.undoBefore), L"add");
         size_t count = request.added, failed = request.failedInputs;
         bool added = request.addToExisting;
         if ((int)(found - g.playlists.begin()) == g.active) RebuildRows();

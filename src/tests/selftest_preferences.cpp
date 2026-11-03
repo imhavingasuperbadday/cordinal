@@ -99,7 +99,7 @@ void TestWaveform(const std::wstring& scratch) {
                     int length = vertical ? client.bottom : client.right, cross = vertical ? client.right : client.bottom;
                     int along = inset + (int)std::lround((length - 2 * inset) * 0.625);
                     int across = cross / 2 - S(ui::kSliderThumbHeight) / 2;
-                    regularDrawn = GetPixel(dc, vertical ? across : along, vertical ? along : across) != SurfaceColor();
+                    regularDrawn = GetPixel(dc, vertical ? across : along, vertical ? along : across) != PlayerColor();
                 }
                 regular.Add(regularDrawn && !LiveWaveformShown() && !WaveformShown() && !FountainShown() && g.liveWaveform &&
                                 SendMessageW(g.seek, TBM_GETPOS, 0, 0) == 625,
@@ -155,7 +155,7 @@ void TestWaveform(const std::wstring& scratch) {
         if (noLine) for (bool full : {false, true}) {
             g.fullLiveWaveform = full;
             noLine = DrawWaveform(dc, {0, 0, 120, 26}, {4, 0, 116, 26}, 0.001) &&
-                GetPixel(dc, 4, S(2)) == SurfaceColor() && noLine;
+                GetPixel(dc, 4, S(2)) == PlayerColor() && noLine;
         }
         Check(noLine, L"live waveforms have no upright playhead line with either color choice");
         if (old) SelectObject(dc, old);
@@ -220,7 +220,7 @@ void TestWaveform(const std::wstring& scratch) {
         HGDIOBJ old = bitmap ? SelectObject(dc, bitmap) : nullptr;
         const bool columns = dc && bitmap && !LiveWaveformShown() &&
                              DrawWaveform(dc, {0, 0, 120, 26}, {4, 0, 116, 26}, 0.625) &&
-                             GetPixel(dc, 4, 13) != SurfaceColor() && GetPixel(dc, 4, 2) == SurfaceColor();
+                             GetPixel(dc, 4, 13) != PlayerColor() && GetPixel(dc, 4, 2) == PlayerColor();
         batch.Next(L"whole-track columns appear while an uncached song loads and refresh from completed cache data");
         Check(waiting && columns, L"whole-track waveform columns appear while an uncached song is loading");
         if (old) SelectObject(dc, old);
@@ -900,6 +900,41 @@ void TestThemes() {
               TextOn(foobar.playing) == 0,
           L"foobar2000 keeps the reference's black plots, gray chrome and green trace and playback fill");
 
+    // The player's background takes the cover's hue and the list stripes every other row, in Light and
+    // Dark only and never at the cost of legibility.
+    auto cover = [](std::initializer_list<Rgb> colors) {
+        std::vector<uint8_t> px;
+        for (Rgb c : colors)
+            for (int i = 0; i < 100; ++i) px.insert(px.end(), {(uint8_t)(c >> 16), (uint8_t)(c >> 8), (uint8_t)c, 255});
+        return CoverHue(px.data(), px.size() / 4, false);
+    };
+    double red = cover({0xC02020, 0x101010, 0x101010}), blue = cover({0x2040D0, 0x3050E0, 0xD0D0D0}), gray = cover({0x808080, 0x202020});
+    batch.Next(L"a cover's hue is its vivid pixels' and a gray cover has none");
+    Check(red >= 0 && (red < 10 || red > 350) && blue > 220 && blue < 235 && gray < 0,
+          L"a cover's hue is its vivid pixels' (red %.0f, blue %.0f) and a gray cover has none (%.0f)", red, blue, gray);
+    bool legible = true, tinted = true;
+    for (const Palette* p : {&LightPalette(), &DarkPalette()}) {
+        for (double hue = 0; hue < 360; hue += 15) {
+            Rgb s = PlayerSurface(*p, hue);
+            legible = legible && Contrast(p->text, s) >= 7 && Contrast(p->sub, s) >= 4.5 && Contrast(p->accent, s) >= 3;
+            tinted = tinted && s != PlayerSurface(*p, -1);
+        }
+        Rgb stripe = RowStripe(*p);
+        legible = legible && stripe != p->bg && Contrast(p->text, stripe) >= 7 && Contrast(p->sub, stripe) >= 4.5 &&
+                  Contrast(p->playing, stripe) >= 3 && Contrast(p->faint, stripe) >= Contrast(p->faint, p->bg) * 0.9;
+    }
+    batch.Next(L"the player's tint and the row stripes keep Light and Dark legible, and other themes keep their own");
+    Check(legible && tinted && PlayerSurface(foobar, 0) == foobar.surface && RowStripe(foobar) == foobar.bg,
+          L"the player's tint and the row stripes keep Light and Dark legible, and other themes keep their own");
+    batch.Next(L"a release offers Light, Dark, Apollo and the system theme; a saved theme it lacks opens as Light or Dark");
+    bool offered = true;
+    for (ThemeMode t : {ThemeMode::System, ThemeMode::Light, ThemeMode::Dark, ThemeMode::Apollo})
+        offered = offered && ThemeAvailable(t) && AvailableTheme(t) == t;
+    for (ThemeMode t : {ThemeMode::Deltarune, ThemeMode::Foobar, ThemeMode::Paper, ThemeMode::Midnight, ThemeMode::Terminal})
+        offered = offered && (kExtraThemes ? AvailableTheme(t) == t
+                                           : !ThemeAvailable(t) && AvailableTheme(t) == (ThemeInfo(t).palette->dark ? ThemeMode::Dark : ThemeMode::Light));
+    Check(offered, L"a release offers Light, Dark, Apollo and the system theme; a saved theme it lacks opens as Light or Dark");
+
     const ThemeMode original = g.themeMode;
     auto face = [] {
         LOGFONTW lf{};
@@ -908,19 +943,18 @@ void TestThemes() {
     };
     OnCommand(IDM_THEME_BASE + (int)ThemeMode::Dark, 0, nullptr);
     if (!kExtraThemes) {
-        testlog::Skip(L"the themes' own faces and Apollo's window: this build leaves out the extra themes");
-        OnCommand(IDM_THEME_BASE + (int)original, 0, nullptr);
-        return;
+        testlog::Skip(L"the themes' own faces: this build leaves out the extra themes");
+    } else {
+        const std::wstring system = face();
+        bool fonts = true;
+        for (ThemeMode t : {ThemeMode::Paper, ThemeMode::Midnight, ThemeMode::Terminal}) {
+            OnCommand(IDM_THEME_BASE + (int)t, 0, nullptr);
+            fonts = fonts && g.themeMode == t && face() == ThemeInfo(t).font && g.pal == ThemeInfo(t).palette;
+        }
+        OnCommand(IDM_THEME_BASE + (int)ThemeMode::Dark, 0, nullptr);
+        batch.Next(L"Paper, Midnight and Terminal bring their own face and Dark restores the system one");
+        Check(fonts && face() == system, L"Paper, Midnight and Terminal bring their own face and Dark restores the system one");
     }
-    const std::wstring system = face();
-    bool fonts = true;
-    for (ThemeMode t : {ThemeMode::Paper, ThemeMode::Midnight, ThemeMode::Terminal}) {
-        OnCommand(IDM_THEME_BASE + (int)t, 0, nullptr);
-        fonts = fonts && g.themeMode == t && face() == ThemeInfo(t).font && g.pal == ThemeInfo(t).palette;
-    }
-    OnCommand(IDM_THEME_BASE + (int)ThemeMode::Dark, 0, nullptr);
-    batch.Next(L"Paper, Midnight and Terminal bring their own face and Dark restores the system one");
-    Check(fonts && face() == system, L"Paper, Midnight and Terminal bring their own face and Dark restores the system one");
 
     // Apollo's window in the normal size: no menu bar, Apollo's columns under its own headings, no
     // album groups and no album canvas; leaving it brings the menu bar and Cordinal's columns back.

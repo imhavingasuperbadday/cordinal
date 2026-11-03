@@ -7,7 +7,9 @@
 #include "sort.h"
 
 #include <algorithm>
+#include <ctime>
 #include <cwctype>
+#include <unordered_map>
 
 void ShuffleByListening(std::vector<uint32_t>& order, const std::vector<TrackId>& items, std::mt19937& rng) {
     auto weights = ListeningWeights(items);
@@ -204,4 +206,56 @@ void SanitizePlaylistPosition(Playlist& pl) {
     std::sort(pos.selected.begin(), pos.selected.end());
     pos.selected.erase(std::unique(pos.selected.begin(), pos.selected.end()), pos.selected.end());
     pos.canvasScroll = std::clamp(pos.canvasScroll, 0, INT_MAX / 2);
+}
+
+// The undo history keeps at most this many item ids across all of one playlist's states (about
+// 16 MB), so editing a huge playlist many times can't grow memory without bound.
+static constexpr size_t kPlaylistUndoItems = 4'000'000;
+
+bool RecordPlaylistEdit(Playlist& pl, std::vector<TrackId> before, std::wstring what) {
+    if (before == pl.items) return false;
+    auto& h = pl.history;
+    h.undo.push_back({std::move(before), std::move(what), (uint64_t)std::time(nullptr)});
+    h.redo.clear();
+    size_t stored = 0;
+    for (const auto& e : h.undo) stored += e.items.size();
+    size_t drop = 0;
+    while (h.undo.size() - drop > 1 && (h.undo.size() - drop > kPlaylistUndoLevels || stored > kPlaylistUndoItems))
+        stored -= h.undo[drop++].items.size();
+    h.undo.erase(h.undo.begin(), h.undo.begin() + (ptrdiff_t)drop);
+    return true;
+}
+
+std::vector<uint32_t> OccurrenceMapping(const std::vector<TrackId>& from, const std::vector<TrackId>& to) {
+    // The n-th occurrence of a track in `from` becomes its n-th occurrence in `to`.
+    std::unordered_map<TrackId, std::vector<uint32_t>> places;
+    for (uint32_t i = (uint32_t)to.size(); i-- > 0;) places[to[i]].push_back(i);
+    std::vector<uint32_t> mapping(from.size(), UINT32_MAX);
+    for (size_t i = 0; i < from.size(); ++i) {
+        auto it = places.find(from[i]);
+        if (it == places.end() || it->second.empty()) continue;
+        mapping[i] = it->second.back();
+        it->second.pop_back();
+    }
+    return mapping;
+}
+
+// Undo and redo are the same move between the two stacks.
+static bool StepPlaylistEdit(Playlist& pl, std::vector<PlaylistEdit>& from, std::vector<PlaylistEdit>& to,
+                             std::vector<uint32_t>& mapping) {
+    if (from.empty()) return false;
+    PlaylistEdit state = std::move(from.back());
+    from.pop_back();
+    mapping = OccurrenceMapping(pl.items, state.items);
+    std::swap(pl.items, state.items);
+    to.push_back(std::move(state));
+    return true;
+}
+
+bool UndoPlaylistEdit(Playlist& pl, std::vector<uint32_t>& mapping) {
+    return StepPlaylistEdit(pl, pl.history.undo, pl.history.redo, mapping);
+}
+
+bool RedoPlaylistEdit(Playlist& pl, std::vector<uint32_t>& mapping) {
+    return StepPlaylistEdit(pl, pl.history.redo, pl.history.undo, mapping);
 }

@@ -286,49 +286,96 @@ bool LoadPlaylists(const std::wstring& file, std::vector<Playlist>& playlists) {
     return true;
 }
 
-// Reads an M3U/M3U8 into audio paths (appended only on success). .m3u8 is strict UTF-8; .m3u may
-// fall back to the ANSI code page. file: URLs and relative paths resolve against the playlist's
-// own folder; network URLs are skipped.
+namespace {
+// One playlist entry, as written in the file, into local audio paths. file: URLs and relative
+// paths resolve against the playlist's own folder; network URLs are skipped.
+void AddPlaylistEntry(std::wstring line, const std::wstring& base, std::vector<std::wstring>& imported) {
+    if (line.size() >= 2 && line.front() == L'"' && line.back() == L'"') line = line.substr(1, line.size() - 2);
+    if (_wcsnicmp(line.c_str(), L"file:", 5) == 0) {
+        std::wstring local(line.size() + 1, L'\0');
+        DWORD len = (DWORD)local.size();
+        if (FAILED(PathCreateFromUrlW(line.c_str(), local.data(), &len, 0))) return;
+        local.resize(wcslen(local.c_str()));
+        line = std::move(local);
+    } else if (line.find(L"://") != std::wstring::npos ||
+               (line.find(L':') != std::wstring::npos && line.find(L':') != 1)) {
+        return;  // Network streams are not local playlist entries.
+    } else if (PathIsRelativeW(line.c_str())) {
+        if (line.size() < 2 || line[1] != L':') line = base.empty() ? line : base + kPathSep + line;
+    } else if (line.size() > 1 && (line[0] == L'\\' || line[0] == L'/') && line[1] != L'\\' && line[1] != L'/' &&
+               base.size() >= 2 && base[1] == L':') {
+        line = base.substr(0, 2) + line;
+    }
+    line = NormalizeMediaPath(line);
+    if (IsCueFile(line)) { ExpandCueFile(line, imported); return; }
+    if (line.empty() || !IsSupportedAudioFile(line)) return;
+    auto tracks = IsSubtrack(line) ? std::vector<std::wstring>{} : ExpandSubtracks(line);
+    if (tracks.empty()) imported.push_back(std::move(line));
+    else imported.insert(imported.end(), std::make_move_iterator(tracks.begin()), std::make_move_iterator(tracks.end()));
+}
+
+// A line as text: UTF-8, or the ANSI code page for legacy files unless `strict`. False when a
+// strict line isn't UTF-8.
+bool DecodeLine(std::string_view raw, bool strict, std::wstring& line) {
+    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, raw.data(), (int)raw.size(), nullptr, 0);
+    if (!n && strict && !raw.empty()) return false;
+    UINT cp = n > 0 ? CP_UTF8 : CP_ACP;
+    if (!n) n = MultiByteToWideChar(cp, 0, raw.data(), (int)raw.size(), nullptr, 0);
+    line.resize(n);
+    if (n) MultiByteToWideChar(cp, 0, raw.data(), (int)raw.size(), line.data(), n);
+    return true;
+}
+
+std::string_view Trim(std::string_view raw) {
+    size_t first = raw.find_first_not_of(" \t");
+    if (first == std::string_view::npos) return {};
+    raw.remove_prefix(first);
+    return raw.substr(0, raw.find_last_not_of(" \t") + 1);
+}
+
+// A PLS playlist: "[playlist]", then FileN=, TitleN= and LengthN= keys. Entries play in the
+// order of N, which need not be the order of the lines.
+bool ImportPLS(const std::wstring& file, std::vector<std::wstring>& paths) {
+    std::wstring base = DirectoryOf(NormalizeMediaPath(file));
+    std::vector<std::pair<uint32_t, std::wstring>> entries;
+    bool ok = ForEachLine(file, [&](std::string_view raw) {
+        raw = Trim(raw);
+        size_t eq = raw.find('=');
+        if (eq < 5 || _strnicmp(raw.data(), "file", 4) != 0) return;
+        std::string_view digits = Trim(raw.substr(4, eq - 4));
+        uint32_t number = 0;
+        for (char c : digits) {
+            if (c < '0' || c > '9' || number > 100'000'000) return;
+            number = number * 10 + (uint32_t)(c - '0');
+        }
+        std::wstring line;
+        if (!digits.empty() && DecodeLine(Trim(raw.substr(eq + 1)), false, line) && !line.empty())
+            entries.emplace_back(number, std::move(line));
+    });
+    if (!ok) return false;
+    std::stable_sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::vector<std::wstring> imported;
+    for (auto& [number, line] : entries) AddPlaylistEntry(std::move(line), base, imported);
+    paths.insert(paths.end(), std::make_move_iterator(imported.begin()), std::make_move_iterator(imported.end()));
+    return true;
+}
+}  // namespace
+
+// Reads an M3U/M3U8 or PLS into audio paths (appended only on success). .m3u8 is strict UTF-8;
+// .m3u and .pls may fall back to the ANSI code page.
 bool ImportM3U(const std::wstring& file, std::vector<std::wstring>& paths) {
+    if (ExtOf(file) == L"pls") return ImportPLS(file, paths);
     std::wstring base = DirectoryOf(NormalizeMediaPath(file));
     std::vector<std::wstring> imported;
     bool valid = true;
     bool strict = ExtOf(file) == L"m3u8";
     bool ok = ForEachLine(file, [&](std::string_view raw) {
         if (!valid) return;
-        size_t first = raw.find_first_not_of(" \t");
-        if (first == std::string_view::npos || raw[first] == '#') return;
-        raw.remove_prefix(first);
-        raw = raw.substr(0, raw.find_last_not_of(" \t") + 1);
+        raw = Trim(raw);
+        if (raw.empty() || raw[0] == '#') return;
         std::wstring line;
-        int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, raw.data(), (int)raw.size(), nullptr, 0);
-        if (!n && strict) { valid = false; return; }
-        UINT cp = n > 0 ? CP_UTF8 : CP_ACP;  // legacy .m3u files use the ANSI code page
-        if (!n) n = MultiByteToWideChar(cp, 0, raw.data(), (int)raw.size(), nullptr, 0);
-        line.resize(n);
-        MultiByteToWideChar(cp, 0, raw.data(), (int)raw.size(), line.data(), n);
-        if (line.size() >= 2 && line.front() == L'"' && line.back() == L'"') line = line.substr(1, line.size() - 2);
-        if (_wcsnicmp(line.c_str(), L"file:", 5) == 0) {
-            std::wstring local(line.size() + 1, L'\0');
-            DWORD len = (DWORD)local.size();
-            if (FAILED(PathCreateFromUrlW(line.c_str(), local.data(), &len, 0))) return;
-            local.resize(wcslen(local.c_str()));
-            line = std::move(local);
-        } else if (line.find(L"://") != std::wstring::npos ||
-                   (line.find(L':') != std::wstring::npos && line.find(L':') != 1)) {
-            return;  // Network streams are not local playlist entries.
-        } else if (PathIsRelativeW(line.c_str())) {
-            if (line.size() < 2 || line[1] != L':') line = base.empty() ? line : base + kPathSep + line;
-        } else if (line.size() > 1 && (line[0] == L'\\' || line[0] == L'/') && line[1] != L'\\' && line[1] != L'/' &&
-                   base.size() >= 2 && base[1] == L':') {
-            line = base.substr(0, 2) + line;
-        }
-        line = NormalizeMediaPath(line);
-        if (IsCueFile(line)) { ExpandCueFile(line, imported); return; }
-        if (line.empty() || !IsSupportedAudioFile(line)) return;
-        auto tracks = IsSubtrack(line) ? std::vector<std::wstring>{} : ExpandSubtracks(line);
-        if (tracks.empty()) imported.push_back(std::move(line));
-        else imported.insert(imported.end(), std::make_move_iterator(tracks.begin()), std::make_move_iterator(tracks.end()));
+        if (!DecodeLine(raw, strict, line)) { valid = false; return; }
+        AddPlaylistEntry(std::move(line), base, imported);
     });
     if (ok && valid) paths.insert(paths.end(), std::make_move_iterator(imported.begin()), std::make_move_iterator(imported.end()));
     return ok && valid;
@@ -342,7 +389,8 @@ std::string ExtInf(TrackId id) {
     std::string display = t.artist ? std::string(g_lib.View(t.artist)) + " - " + ToUtf8(title) : ToUtf8(title);
     for (char& c : display)
         if (c == '\t' || c == '\n' || c == '\r' || c == '\0') c = ' ';
-    return "#EXTINF:" + std::to_string(t.durationMs / 1000) + "," + display;
+    // -1 is how M3U and PLS say "length unknown"; 0 would claim an empty track.
+    return "#EXTINF:" + (t.durationMs ? std::to_string(t.durationMs / 1000) : std::string("-1")) + "," + display;
 }
 }  // namespace
 
@@ -366,6 +414,32 @@ bool CaptureM3U(const Playlist& playlist, std::vector<M3UExportEntry>& entries) 
 // so a worker can save the selected playlist even while the library changes.
 bool ExportM3U(const std::wstring& file, const std::vector<M3UExportEntry>& entries) {
     LineWriter w(file);
+    if (ExtOf(file) == L"pls") {
+        // PLS has no BOM; players read its keys as UTF-8. The length and title come from #EXTINF.
+        w.Raw("[playlist]");
+        w.End();
+        for (size_t i = 0; i < entries.size(); ++i) {
+            const std::string n = std::to_string(i + 1);
+            std::string_view info = entries[i].info;
+            if (info.starts_with("#EXTINF:")) info.remove_prefix(8);
+            size_t comma = info.find(',');
+            w.Raw("File" + n + "=");
+            w.Put(entries[i].path);
+            w.End();
+            if (comma == std::string_view::npos) continue;
+            w.Raw("Title" + n + "=");
+            w.Put(info.substr(comma + 1));
+            w.End();
+            w.Raw("Length" + n + "=");
+            w.Put(info.substr(0, comma));
+            w.End();
+        }
+        w.Raw("NumberOfEntries=" + std::to_string(entries.size()));
+        w.End();
+        w.Raw("Version=2");
+        w.End();
+        return w.Commit();
+    }
     w.Raw("\xEF\xBB\xBF#EXTM3U");
     w.End();
     for (const auto& entry : entries) {
@@ -378,15 +452,6 @@ bool ExportM3U(const std::wstring& file, const std::vector<M3UExportEntry>& entr
 }
 
 bool ExportM3U(const std::wstring& file, const Playlist& playlist) {
-    for (TrackId id : playlist.items) if (!g_lib.Contains(id)) return false;
-    LineWriter w(file);
-    w.Raw("\xEF\xBB\xBF#EXTM3U");
-    w.End();
-    for (TrackId id : playlist.items) {
-        w.Raw(ExtInf(id));
-        w.End();
-        w.Put(ToUtf8(g_lib.Path(id)));
-        w.End();
-    }
-    return w.Commit();
+    std::vector<M3UExportEntry> entries;
+    return CaptureM3U(playlist, entries) && ExportM3U(file, entries);
 }

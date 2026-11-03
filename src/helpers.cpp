@@ -42,7 +42,7 @@ const wchar_t kSlashStar[] = L"/*";
 #endif
 
 // File types that are never a helper's besides cordinal's own audio: lists, sheets and packs.
-const wchar_t* const kReserved[] = {L"cue", L"m3u", L"m3u8", L"zip", L"cordpack", L"lrc"};
+const wchar_t* const kReserved[] = {L"cue", L"m3u", L"m3u8", L"pls", L"zip", L"cordpack", L"lrc"};
 
 std::atomic<unsigned> g_patience{15000};
 

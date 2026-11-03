@@ -138,7 +138,7 @@ void PaintPlayerBar(HWND bar, HDC printDC = nullptr) {
         if (fountain) {
             DrawRegion(mem, rc, ch);
         } else if (!DrawSeekWaveform(mem, rc, ch, frac)) {
-            FillSolid(mem, rc, SurfaceColor());
+            FillSolid(mem, rc, PlayerColor());
             // The same regular bar turned upright for a side dock; its endpoints match BarFracAt.
             int cy = rc.bottom / 2, h = S(ui::kSliderTrackHeight);
             RECT track{ch.left, cy - h / 2, ch.right, cy - h / 2 + h};
@@ -255,7 +255,7 @@ LRESULT DrawTrackbar(NMCUSTOMDRAW* cd) {
         // Paint the bar's own background: the channel item is the only thing repainted over an
         // invalidated bar, so a track whose waveform has gone (or isn't known yet) would
         // otherwise leave the previous track's columns standing outside the slim channel.
-        FillSolid(dc, all, SurfaceColor());
+        FillSolid(dc, all, ControlBg(bar));
         COLORREF fill = Ref(P().accent);
         if (!IsWindowEnabled(bar)) fill = Ref(P().faint);
         // Slim flat channel, centered.
@@ -300,7 +300,7 @@ LRESULT DrawTrackbar(NMCUSTOMDRAW* cd) {
             if (step > 0 && width * step / dur >= S(16))
                 for (int s = step; s < dur; s += step) {
                     int x = t.left + (int)(width * (s / dur));
-                    FillSolid(dc, {x, t.top, x + std::max(1, S(1)), t.bottom}, SurfaceColor());
+                    FillSolid(dc, {x, t.top, x + std::max(1, S(1)), t.bottom}, ControlBg(bar));
                 }
         }
         return CDRF_SKIPDEFAULT;

@@ -5,7 +5,7 @@
 # Needs SDL3, SDL3_ttf, PipeWire (libpipewire-0.3), libsystemd (sd-bus), fontconfig and OpenSSL 3
 # (the web server's HTTPS away from home).
 cmake_minimum_required(VERSION 3.20)
-project(cordinal VERSION 0.1.3 LANGUAGES CXX)
+project(cordinal VERSION 0.1.4 LANGUAGES CXX)
 
 if(WIN32)
     message(FATAL_ERROR "On Windows, build with build.bat")
@@ -38,7 +38,7 @@ set_source_files_properties(src/audio_avx.cpp PROPERTIES COMPILE_OPTIONS "-mavx2
 
 # The portable core, compiled against the Windows API subset in src/linux/compat.
 add_library(cordinal_core STATIC
-    src/album_editions.cpp src/archive.cpp src/autoplaylist.cpp src/cue.cpp src/decoder.cpp src/dsp.cpp src/engine.cpp src/game_music.cpp src/inflate.cpp src/musicbrainz.cpp src/metadata_fetch.cpp src/coverfetch.cpp src/customcover.cpp
+    src/album_editions.cpp src/archive.cpp src/autoplaylist.cpp src/cue.cpp src/decoder.cpp src/dsp.cpp src/engine.cpp src/game_music.cpp src/inflate.cpp src/musicbrainz.cpp src/metadata_fetch.cpp src/coverfetch.cpp src/customcover.cpp src/discart.cpp
     src/library.cpp src/librarydb.cpp src/listenbrainz.cpp src/migration.cpp src/backup.cpp src/playlog.cpp src/points.cpp src/radio.cpp src/radio_browser.cpp src/radio_stream.cpp src/radio_hls.cpp src/scanner.cpp src/sfx.cpp src/sort.cpp src/steam.cpp
     src/headsets.cpp src/helpers.cpp src/streamfile.cpp src/tags.cpp src/tagwriter.cpp src/tagwriter_flacogg.cpp src/tagwriter_mp3mp4.cpp
     src/tagwriter_cord.cpp src/tagundo.cpp src/playlist_files.cpp src/playlist.cpp src/md5.cpp src/cord_encode.cpp src/cord_export.cpp
@@ -49,7 +49,7 @@ add_library(cordinal_core STATIC
     ${AUDIO} ${CHIPS} ${ENCODE} ${IPOD} src/linux/compat/compat.cpp src/linux/audio_pipewire.cpp src/linux/sfx_pipewire.cpp)
 target_include_directories(cordinal_core PUBLIC src src/linux/compat src/ipod/gpod/include)
 target_compile_definitions(cordinal_core PUBLIC UNICODE _UNICODE NOMINMAX)
-# Releases ship Light and Dark only; ON compiles in the other themes and embeds their art (theme_palette.h).
+# Releases ship Light, Dark and Apollo; ON compiles in the other themes and embeds their art (theme_palette.h).
 option(CORDINAL_EXTRA_THEMES "Include the themes beyond Light and Dark" OFF)
 if(CORDINAL_EXTRA_THEMES)
     target_compile_definitions(cordinal_core PUBLIC CORDINAL_EXTRA_THEMES)
@@ -81,6 +81,14 @@ target_sources(cordinal PRIVATE src/linux/big_ui.cpp src/tests/selftest_linux_bi
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/cordinal.ico" APP_ICON HEX)
 string(REGEX REPLACE "(..)" "0x\\1," APP_ICON "${APP_ICON}")
 file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/app_icon.inc" CONTENT "static const unsigned char kAppIcon[] = {${APP_ICON}};\n")
+# The Apollo theme's art is part of every build.
+set(APOLLO_IMAGES "")
+foreach(image toolbar rebar_capacala rebar_apollo rebar_letters rebar_notes)
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/apollo/${image}.png" IMAGE_HEX HEX)
+    string(REGEX REPLACE "(..)" "0x\\1," IMAGE_HEX "${IMAGE_HEX}")
+    string(APPEND APOLLO_IMAGES "static const unsigned char kApollo_${image}[] = {${IMAGE_HEX}};\n")
+endforeach()
+file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/apollo_images.inc" CONTENT "${APOLLO_IMAGES}")
 if(CORDINAL_EXTRA_THEMES)
     # Embed the existing source font; neither executable needs a loose asset at runtime.
     file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/deltarune/deltarune.ttf" WEB_FONT HEX)
@@ -95,13 +103,6 @@ if(CORDINAL_EXTRA_THEMES)
     endforeach()
     file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/game_sounds.inc" CONTENT "${GAME_SOUNDS}")
 
-    set(APOLLO_IMAGES "")
-    foreach(image toolbar rebar_capacala rebar_apollo rebar_letters rebar_notes)
-        file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/apollo/${image}.png" IMAGE_HEX HEX)
-        string(REGEX REPLACE "(..)" "0x\\1," IMAGE_HEX "${IMAGE_HEX}")
-        string(APPEND APOLLO_IMAGES "static const unsigned char kApollo_${image}[] = {${IMAGE_HEX}};\n")
-    endforeach()
-    file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/apollo_images.inc" CONTENT "${APOLLO_IMAGES}")
     set(FOUNTAIN_IMAGES "")
     foreach(sprite edge basin texture)
         file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/deltarune/fountain_${sprite}.png" SPRITE_HEX HEX)
@@ -110,11 +111,6 @@ if(CORDINAL_EXTRA_THEMES)
     endforeach()
     file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/fountain_images.inc" CONTENT "${FOUNTAIN_IMAGES}")
 else()
-    set(APOLLO_IMAGES "")
-    foreach(image toolbar rebar_capacala rebar_apollo rebar_letters rebar_notes)
-        string(APPEND APOLLO_IMAGES "static const unsigned char kApollo_${image}[] = {0};\n")
-    endforeach()
-    file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/apollo_images.inc" CONTENT "${APOLLO_IMAGES}")
     # One zero byte in place of each asset, which nothing reads without the themes.
     file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/web_font.inc" CONTENT "static const unsigned char kWebFont[] = {0};\n")
     set(GAME_SOUNDS "")

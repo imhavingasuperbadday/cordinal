@@ -4,6 +4,7 @@
 // OnEngineEvent, and UI ticks call UpdateStatus/WaveformTick from MainTick.
 #include "app.h"
 #include "cue.h"
+#include "discart.h"
 #include "game_music.h"
 #include "peaks.h"
 #include "playlog.h"
@@ -983,20 +984,46 @@ void ShowPlaybackTime(double pos, double duration) {
     SetTextIfChanged(g.time, g.timeRemaining ? L"-" + FormatDuration(std::max(0.0, duration - pos)) : FormatDuration(duration));
 }
 
+namespace {
+// What names the now playing tile when there is no art: the album, or the title for a single.
+std::wstring CoverTileName() {
+    TrackId id = g.playing != kNone ? g.playing : g.resumeOn ? g.resumeTrack : kNone;
+    std::wstring name;
+    if (id != kNone && id < g_lib.Count()) {
+        name = FormatTitle(L"[%album%]", Lookup(id, false));
+        if (name.empty()) name = FormatTitle(L"[%title%]", Lookup(id, false));
+    }
+    return name;
+}
+}  // namespace
+
+void RefreshPlayerTint() {
+    g.playerHue = !g.art.Empty() ? CoverHue((const uint8_t*)g.art.pixels.data(), g.art.pixels.size(), true)
+                                 : CoverTileHue(CoverTileName());
+    Rgb surface = PlayerSurface(P(), g.playerHue);
+    if (g.playerBrush && surface == g.playerSurface) return;
+    if (g.playerBrush) DeleteObject(g.playerBrush);
+    g.playerSurface = surface;
+    g.playerBrush = CreateSolidBrush(Ref(surface));
+    if (g.hwnd && !IsRectEmpty(&g.playerRect))
+        RedrawWindow(g.hwnd, &g.playerRect, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+}
+
 // The now playing cover, filling its square; without art, the album's own tile (the title's for a
 // single), or a plain note before anything has played.
 void PaintArt(HDC dc) {
     RECT r = g.artRect;
+    // Disc art peeks out from behind the cover, which moves left and shrinks to make room.
+    if (int cover = g.art.Empty() ? 0 : DiscCoverSide(r.right - r.left); cover && !g.disc.Empty()) {
+        FillRect(dc, &r, PlayerBrush());  // the player's background, under the disc's corners
+        int top = r.top + (r.bottom - r.top - cover) / 2;
+        DrawDiscArt(dc, {r.right - cover, top, r.right, top + cover}, g.disc);
+        r = {r.left, top, r.left + cover, top + cover};
+    }
     if (!g.art.Empty()) {
         DrawCoverArt(dc, r, g.art);
     } else {
-        TrackId id = g.playing != kNone ? g.playing : g.resumeOn ? g.resumeTrack : kNone;
-        std::wstring name;
-        if (id != kNone && id < g_lib.Count()) {
-            name = FormatTitle(L"[%album%]", Lookup(id, false));
-            if (name.empty()) name = FormatTitle(L"[%title%]", Lookup(id, false));
-        }
-        DrawCoverPlaceholder(dc, r, name);
+        DrawCoverPlaceholder(dc, r, CoverTileName());
     }
     DrawCoverFrame(dc, r);
 }

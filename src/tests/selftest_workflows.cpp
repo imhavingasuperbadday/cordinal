@@ -1,6 +1,7 @@
 // Seeded properties and feature workflows use independent reference results, not implementation
 // details. Failure messages include the seed and case so a rare permutation can be reproduced.
 #include "selftest_common.h"
+#include "discart.h"
 #include "playlist_shuffle.h"
 #include "sort.h"
 #include <memory>
@@ -232,6 +233,76 @@ void TestPlaylistFiles(const std::wstring& scratch) {
     Check(WriteTestBytes(relative, "second.mp3\n" + std::string("bad\0name.flac", 13)) &&
         !ImportM3U(relative, paths) && paths == std::vector<std::wstring>{L"sentinel"},
         L"invalid input after a valid entry never appends partial import results");
+
+    batch.Next(L"PLS playlists export and import in entry order");
+    const auto pls = scratch + L"\\mixed.pls";
+    paths.clear();
+    Check(ExportM3U(pls, playlist) && ImportM3U(pls, paths) &&
+          paths == std::vector<std::wstring>{g_lib.Path(a), g_lib.Path(b), g_lib.Path(a)},
+          L"a PLS round trip keeps order, duplicates and Unicode");
+    const std::string text = ReadTestBytes(pls);
+    Check(text.starts_with("[playlist]\n") && text.find("Length1=2\n") != std::string::npos &&
+          text.find("NumberOfEntries=3\nVersion=2\n") != std::string::npos,
+          L"PLS output has the section header, lengths, entry count and version");
+    Check(text.find("Length2=-1\n") != std::string::npos && ReadTestBytes(file).find("#EXTINF:-1,") != std::string::npos,
+          L"a track of unknown length is written as -1, not as an empty track");
+    Ready(WriteTestBytes(pls, "[playlist]\r\nFile2=" + localUrl + "\r\nTitle2=ignored\r\nfile1 = second.mp3\r\n"
+                         "File3=https://example.invalid/stream\r\nNumberOfEntries=3\r\n"), L"out-of-order PLS fixture is written");
+    paths.clear();
+    Check(ImportM3U(pls, paths) && paths == std::vector<std::wstring>{g_lib.Path(b), g_lib.Path(a)},
+          L"PLS entries play in number order, keys ignore case and streams are skipped");
+}
+
+// Playlist undo restores whole states, follows duplicate occurrences and bounds its history.
+void TestPlaylistUndo() {
+    testlog::Batch batch;
+    batch.Next(L"undo and redo restore exact playlist states");
+    Playlist pl{L"Undo", {1, 2, 3, 2}};
+    Check(!RecordPlaylistEdit(pl, pl.items, L"select"), L"a change that leaves the items alone is not recorded");
+    std::vector<TrackId> before = pl.items;
+    pl.items = {2, 3};
+    Check(RecordPlaylistEdit(pl, before, L"remove"), L"a removal is recorded");
+    std::vector<uint32_t> mapping;
+    Check(UndoPlaylistEdit(pl, mapping) && pl.items == std::vector<TrackId>{1, 2, 3, 2} &&
+          mapping == std::vector<uint32_t>{1, 2}, L"undo restores the removed items and maps survivors by occurrence");
+    Check(RedoPlaylistEdit(pl, mapping) && pl.items == std::vector<TrackId>{2, 3} &&
+          mapping == std::vector<uint32_t>{UINT32_MAX, 0, 1, UINT32_MAX},
+          L"redo repeats the removal, and the removed occurrences map nowhere");
+    Check(!RedoPlaylistEdit(pl, mapping) && pl.history.undo.size() == 1 && pl.history.undo.back().what == L"remove",
+          L"there is nothing further to redo and the undo names the change");
+    Check(UndoPlaylistEdit(pl, mapping) && pl.history.redo.size() == 1, L"undo again offers a redo");
+    before = pl.items;
+    pl.items.push_back(9);
+    RecordPlaylistEdit(pl, before, L"add");
+    Check(pl.history.redo.empty(), L"a new change drops the redo");
+    batch.Next(L"duplicate occurrences and history limits");
+    Check(OccurrenceMapping({5, 6, 5}, {5, 5, 6}) == std::vector<uint32_t>{0, 2, 1},
+          L"repeated tracks keep their order among themselves");
+    Playlist many{L"Many", {0}};
+    for (TrackId i = 1; i <= kPlaylistUndoLevels + 5; ++i) {
+        before = many.items;
+        many.items.push_back(i);
+        RecordPlaylistEdit(many, before, L"add");
+    }
+    Check(many.history.undo.size() == kPlaylistUndoLevels && many.history.undo.front().items.size() == 6,
+          L"the oldest states go once the history holds its maximum number of steps");
+}
+
+// Disc art is found beside the music, in its Artwork folder, or for a per-disc folder above it.
+void TestDiscArt(const std::wstring& scratch) {
+    testlog::Batch batch;
+    batch.Next(L"disc art beside the music, by disc number and in the album above");
+    const std::wstring album = scratch + L"\\discs", disc2 = album + L"\\CD2";
+    for (const auto& dir : {album, album + L"\\Artwork", disc2}) CreateDirectoryW(dir.c_str(), nullptr);
+    const std::wstring one = album + L"\\01.flac", two = disc2 + L"\\01.flac";
+    Check(FindDiscArt(one, 1, 1).empty(), L"an album without disc art has none");
+    Ready(WriteTestBytes(album + L"\\Artwork\\CD.PNG", "png") && WriteTestBytes(album + L"\\Artwork\\cd2.png", "png") &&
+          WriteTestBytes(album + L"\\vinyl.png", "png"), L"disc art fixtures are written");
+    Check(FindDiscArt(one, 1, 1) == album + L"\\vinyl.png", L"the album's own folder comes before its Artwork folder");
+    Check(FindDiscArt(two, 2, 2) == album + L"\\Artwork\\cd2.png",
+          L"a per-disc folder finds its numbered disc in the album's Artwork folder");
+    Check(FindDiscArt(two, 1, 2) == album + L"\\Artwork\\CD.PNG", L"names match without case and keep their spelling");
+    Check(DiscCoverSide(100) == 82 && DiscCoverSide(30) == 0, L"small covers show no disc");
 }
 
 // An imported folder that no library folder covers is remembered once, so Library > Watch imported

@@ -101,6 +101,7 @@ void AppendFiles(int playlist, const std::vector<std::wstring>& files, bool play
     if (files.size() > (size_t)INT_MAX - g.playlists[playlist].items.size()) { ShowMessage(L"The playlist is full."); return; }
     bool toLibrary = g.playlists[playlist].kind == PlaylistKind::Library;
     auto& items = g.playlists[playlist].items;
+    std::vector<TrackId> before = toLibrary ? std::vector<TrackId>() : items;
     int first = (int)items.size();
     std::vector<TrackId> unloaded, joined;
     size_t addedCount = 0;
@@ -121,6 +122,7 @@ void AppendFiles(int playlist, const std::vector<std::wstring>& files, bool play
         if (!t.Loaded()) unloaded.push_back(id);
     }
     QueueTags(unloaded);
+    if (!toLibrary) RecordPlaylistEdit(g.playlists[playlist], std::move(before), L"add");
     if (playlist == g.active) RebuildView(true);
     RefreshTabs();
     RefreshNext();

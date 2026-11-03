@@ -5,6 +5,7 @@
 #include "art.h"
 
 #include "customcover.h"
+#include "discart.h"
 #include "library.h"
 #include "tags.h"
 
@@ -18,7 +19,8 @@ using Microsoft::WRL::ComPtr;
 
 // Rejects absurd declared sizes and target sizes up front, so a corrupt or hostile image can't
 // trigger a huge allocation before it fails.
-bool DecodeImage(IStream* stream, int size, ArtImage& out, uint64_t maxPixels, int* sourceWidth, int* sourceHeight) {
+bool DecodeImage(IStream* stream, int size, ArtImage& out, uint64_t maxPixels, int* sourceWidth, int* sourceHeight,
+                 bool keepAlpha) {
     ComPtr<IWICImagingFactory> wic;
     if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic)))) return false;
     ComPtr<IWICBitmapDecoder> decoder;
@@ -40,7 +42,7 @@ bool DecodeImage(IStream* stream, int size, ArtImage& out, uint64_t maxPixels, i
             return false;
         source = scaler;
     }
-    // Output is always 32bpp (alpha ignored), matching ArtImage's pixel layout.
+    // Output is always 32bpp premultiplied, matching ArtImage's pixel layout once alpha is dropped.
     ComPtr<IWICFormatConverter> conv;
     if (FAILED(wic->CreateFormatConverter(&conv)) ||
         FAILED(conv->Initialize(source.Get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0,
@@ -53,7 +55,21 @@ bool DecodeImage(IStream* stream, int size, ArtImage& out, uint64_t maxPixels, i
         out.pixels.clear();
         return false;
     }
-    for (auto& p : out.pixels) p &= 0xFFFFFF;  // premultiplied on black
+    if (!keepAlpha)
+        for (auto& p : out.pixels) p &= 0xFFFFFF;  // premultiplied on black
+    return true;
+}
+
+bool LoadDiscArt(const std::wstring& mediaPath, unsigned disc, unsigned discTotal, int size, ArtImage& out) {
+    out = ArtImage{};
+    std::wstring file = FindDiscArt(mediaPath, disc, discTotal);
+    ComPtr<IStream> s;
+    if (file.empty() ||
+        FAILED(SHCreateStreamOnFileEx(file.c_str(), STGM_READ | STGM_SHARE_DENY_NONE, 0, FALSE, nullptr, &s)) ||
+        !DecodeImage(s.Get(), size, out, 100000000, nullptr, nullptr, true)) {
+        out = ArtImage{};
+        return false;
+    }
     return true;
 }
 

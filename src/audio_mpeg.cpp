@@ -7,6 +7,7 @@
 #include "audio_kernels.h"
 #include "audio_mpeg_tables.h"
 #include "audio_mpeg_alloc.h"
+#include "audio_polyphase.h"
 #include <array>
 #include <cmath>
 #include <bit>
@@ -448,6 +449,10 @@ public:
     void Reset() { memset(overlap_,0,sizeof overlap_); memset(v_,0,sizeof v_); head_[0] = head_[1] = active_[0] = active_[1] = 0; }
     void Hybrid(Granule& g,unsigned channel,float* pcm);
     void Subband(const float* in,unsigned channel,float* out) { Synthesis(in,channel,out); }
+    void Subbands18(const float* in,unsigned channel,float* out) {
+        if (fast_) AudioMpegSynthesis18Avx2(in,v_[channel],head_[channel],synthesisCos_,out);
+        else for (unsigned i = 0; i < 18; ++i) Synthesis(in+i*32,channel,out+i*32);
+    }
 private:
     void Synthesis(const float* in,unsigned channel,float* out);
     void Dct18(const float* in,float* out);
@@ -1006,6 +1011,14 @@ bool MpegDecoder::Seek(double seconds) {
     return true;
 }
 } // namespace
+
+struct nativeaudio::Polyphase::Impl { Filterbank filters; };
+nativeaudio::Polyphase::Polyphase() : impl_(std::make_unique<Impl>()) {}
+nativeaudio::Polyphase::~Polyphase() = default;
+void nativeaudio::Polyphase::Reset() { impl_->filters.Reset(); }
+void nativeaudio::Polyphase::Synthesize18(const float* in, unsigned channel, float* out) {
+    impl_->filters.Subbands18(in, channel & 1, out);
+}
 
 std::unique_ptr<Decoder> OpenMpegDecoder(const std::wstring& path) {
     auto d = std::make_unique<MpegDecoder>();

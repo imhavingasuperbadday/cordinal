@@ -117,7 +117,9 @@ WebPanel g_web;
 Wave g_wave;
 
 SDL_Texture* g_cover = nullptr;
+SDL_Texture* g_disc = nullptr;  // the cover's disc art, when its album has some
 TrackId g_coverFor = kNone, g_coverWanted = kNone;
+double g_coverHue = -1;  // the cover's hue (CoverHue), which the player's background takes on
 uint32_t g_lastRebuild = 0;
 size_t g_sourceCount = 0;  // active tab's tracks before the search
 std::unordered_map<uint64_t, std::string> g_cells;  // formatted cells by track and column
@@ -254,7 +256,8 @@ void ShutdownUi() {
     for (auto& [key, texture] : g_radioArt) if (texture) SDL_DestroyTexture(texture);
     g_radioArt.clear();
     if (g_cover) SDL_DestroyTexture(g_cover);
-    g_cover = nullptr;
+    if (g_disc) SDL_DestroyTexture(g_disc);
+    g_cover = g_disc = nullptr;
     for (auto& [key, t] : g_thumbs)
         if (t.texture) SDL_DestroyTexture(t.texture);
     g_thumbs.clear();
@@ -317,14 +320,24 @@ void SetCover(CoverImage* image) {
     std::unique_ptr<CoverImage> owned(image);
     if (image->id != g_coverWanted) return;
     if (g_cover) SDL_DestroyTexture(g_cover);
-    g_cover = nullptr;
+    if (g_disc) SDL_DestroyTexture(g_disc);
+    g_cover = g_disc = nullptr;
     g_coverFor = image->id;
+    g_coverHue = image->width > 0 ? CoverHue(image->rgba.data(), (size_t)image->width * image->height, false) : -1;
     MprisSetArt(image->id, image->file);
     if (image->width > 0) {
         g_cover = SDL_CreateTexture(g.renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STATIC, image->width, image->height);
         if (g_cover) {
             SDL_UpdateTexture(g_cover, nullptr, image->rgba.data(), image->width * 4);
             SDL_SetTextureScaleMode(g_cover, SDL_SCALEMODE_LINEAR);
+        }
+    }
+    if (image->discWidth > 0) {
+        g_disc = SDL_CreateTexture(g.renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STATIC, image->discWidth, image->discHeight);
+        if (g_disc) {
+            SDL_UpdateTexture(g_disc, nullptr, image->discRgba.data(), image->discWidth * 4);
+            SDL_SetTextureScaleMode(g_disc, SDL_SCALEMODE_LINEAR);
+            SDL_SetTextureBlendMode(g_disc, SDL_BLENDMODE_BLEND);
         }
     }
     g.redraw = true;

@@ -35,6 +35,17 @@ bool SystemUsesDarkTheme();
 double Contrast(Rgb a, Rgb b);
 // Black or white, whichever reads better on `fill` (text and glyphs drawn on the accent).
 Rgb TextOn(Rgb fill);
+// `h` 0..360, `s` and `v` 0..1.
+Rgb HsvColor(double h, double s, double v);
+// The hue (0..360) a cover reads as: the one its vivid pixels gather around most, or -1 for a gray,
+// dark or washed-out picture. `pixels` holds `count` four-byte pixels, red first, or blue first
+// when `bgr` (Windows' 0x00RRGGBB).
+double CoverHue(const uint8_t* pixels, size_t count, bool bgr);
+// The docked player's background: in Light and Dark, the surface faintly washed with `hue` (-1:
+// none) and, in Dark, a step lighter than the chrome around it; any other palette's own surface.
+Rgb PlayerSurface(const Palette& p, double hue);
+// Every other playlist row is drawn this much off the list's background, Light and Dark only.
+Rgb RowStripe(const Palette& p);
 // The first legibility rule `p` breaks (PRINCIPLES.md, "Legible in every theme"), in words such as
 // "sub on bg is 3.9:1, needs 4.5:1", or empty when it keeps them all. Built-in and pack themes are
 // held to the same rules through this one function.
@@ -69,16 +80,16 @@ void SetPackThemes(std::vector<Theme> themes);
 int ThemeTotal();  // built-in and pack themes
 inline bool PackThemeMode(ThemeMode mode) { return (int)mode >= (int)ThemeMode::Count; }
 
-// A release ships Light, Dark and following the system. The other built-in themes, and the art and
-// sounds they embed, are compiled in only with CORDINAL_EXTRA_THEMES (build.bat themes). Pack themes
-// are always available.
+// A release ships Light, Dark, Apollo and following the system. The other built-in themes, and the
+// art and sounds they embed, are compiled in only with CORDINAL_EXTRA_THEMES (build.bat themes).
+// Pack themes are always available.
 #ifdef CORDINAL_EXTRA_THEMES
 constexpr bool kExtraThemes = true;
 #else
 constexpr bool kExtraThemes = false;
 #endif
 inline bool ThemeAvailable(ThemeMode mode) {
-    return kExtraThemes || (int)mode <= (int)ThemeMode::Dark || PackThemeMode(mode);
+    return kExtraThemes || (int)mode <= (int)ThemeMode::Dark || mode == ThemeMode::Apollo || PackThemeMode(mode);
 }
 // A saved theme this build leaves out opens as Light or Dark, whichever its palette is.
 inline ThemeMode AvailableTheme(ThemeMode mode) {

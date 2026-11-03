@@ -6,6 +6,7 @@
 #include <vector>
 
 // A decoded image: 0x00RRGGBB pixels (alpha already flattened onto black), packed rows top-down.
+// Disc art keeps its alpha instead: premultiplied 0xAARRGGBB.
 struct ArtImage {
     int width = 0, height = 0;
     std::vector<uint32_t> pixels;  // 0x00RRGGBB, composited on black
@@ -20,4 +21,6 @@ bool LoadAlbumArt(const std::wstring& mediaPath, int size, ArtImage& out, bool c
 // `sourceWidth`/`sourceHeight`, when given, receive the image's own size.
 struct IStream;
 bool DecodeImage(IStream* stream, int size, ArtImage& out, uint64_t maxPixels = 100000000, int* sourceWidth = nullptr,
-                 int* sourceHeight = nullptr);
+                 int* sourceHeight = nullptr, bool keepAlpha = false);
+// The disc image FindDiscArt names for a track (discart.h), with its transparency. Requires COM.
+bool LoadDiscArt(const std::wstring& mediaPath, unsigned disc, unsigned discTotal, int size, ArtImage& out);

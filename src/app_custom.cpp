@@ -226,6 +226,7 @@ RECT LayoutBand(HDWP& dwp, RECT r) {
             y = r.top + S(4);
         }
         if (art) y += PlaceNowPlaying(dwp, r, y) + S(ui::kBandGap);
+        g.playerRect = {r.left, r.top, r.right, y};
         r.top = y;
         return r;
     }
@@ -240,6 +241,7 @@ RECT LayoutBand(HDWP& dwp, RECT r) {
         PlaceBandRow(dwp, r, y, rowH);
         if (ownRow) waveRow(y + rowH + S(4));
     }
+    g.playerRect = {r.left, top + 1, r.right, r.bottom};
     r.bottom = top;
     return r;
 }
@@ -253,6 +255,7 @@ RECT LayoutColumn(HDWP& dwp, RECT r) {
     if (left) r.left = col.right + 1;
     else r.right = col.left - 1;
     g.dividers.push_back(left ? RECT{col.right, col.top, col.right + 1, col.bottom} : RECT{col.left - 1, col.top, col.left, col.bottom});
+    g.playerRect = col;
     int in = S(12), x0 = col.left + in, w = colW - 2 * in;
     g.gripRect = {col.left, col.top, col.right, col.top + S(kGrip)};
     int y = col.top + S(kGrip) + S(2);

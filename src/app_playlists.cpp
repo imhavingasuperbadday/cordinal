@@ -345,7 +345,9 @@ void SortByColumn(int subitem) {
     } else {
         CapturePlaylistPosition();
         std::vector<uint32_t> mapping;
+        std::vector<TrackId> before = pl.items;
         SortItems(pl.items, column, g.sortAscending, &mapping);
+        RecordPlaylistEdit(pl, std::move(before), L"sort");
         RemapOccurrences(g.active, mapping);
         auto remap = [&](uint32_t& i) { i = i < mapping.size() ? mapping[i] : UINT32_MAX; };
         for (auto& i : pl.position.selected) remap(i);
@@ -373,6 +375,7 @@ void RemoveTracks(bool keepSelected) {
     if (selected.empty()) return;
     if (!Active().Editable()) return;
     auto& items = Active().items;
+    std::vector<TrackId> before = items;
     std::vector<char> sel(items.size(), 0);
     for (int i : selected) sel[i] = 1;
     std::vector<TrackId> kept;
@@ -382,6 +385,7 @@ void RemoveTracks(bool keepSelected) {
         if ((sel[i] != 0) == keepSelected) { mapping[i] = (uint32_t)kept.size(); kept.push_back(items[i]); }
     RemapOccurrences(g.active, mapping);
     items.swap(kept);
+    RecordPlaylistEdit(Active(), std::move(before), keepSelected ? L"keep only selected" : L"remove");
     g.compactPending = true;
     int focus = ViewPosNear(ListView_GetNextItem(g.list, -1, LVNI_FOCUSED));
     ClearSelection();
@@ -397,6 +401,7 @@ void RemoveTracks(bool keepSelected) {
 void RemoveDuplicates() {
     if (!Active().Editable()) return;
     auto& items = Active().items;
+    std::vector<TrackId> previous = items;
     std::unordered_set<TrackId> seen;  // the library already maps equal paths to one id
     size_t before = items.size();
     std::vector<uint32_t> mapping(before, UINT32_MAX);
@@ -405,6 +410,7 @@ void RemoveDuplicates() {
         if (seen.insert(items[i]).second) { mapping[i] = (uint32_t)write; items[write++] = items[i]; }
     items.resize(write);
     RemapOccurrences(g.active, mapping);
+    RecordPlaylistEdit(Active(), std::move(previous), L"remove duplicates");
     g.compactPending = true;
     ClearSelection();
     RebuildView();
@@ -418,6 +424,7 @@ void RemoveDuplicates() {
 void RemoveDeadItems() {
     if (!Active().Editable()) return;
     auto& items = Active().items;
+    std::vector<TrackId> previous = items;
     size_t before = items.size();
     std::vector<uint32_t> mapping(before, UINT32_MAX);
     std::unordered_map<TrackId, bool> missing;
@@ -433,12 +440,36 @@ void RemoveDeadItems() {
     }
     items.resize(write);
     RemapOccurrences(g.active, mapping);
+    RecordPlaylistEdit(Active(), std::move(previous), L"remove dead items");
     g.compactPending = true;
     ClearSelection();
     RebuildView();
     RefreshNext();
     g.dirty = true;
     ShowMessage(L"Removed " + std::to_wstring(before - items.size()) + L" dead item(s).");
+}
+
+bool CanStepPlaylistEdit(bool redo, std::wstring* description) {
+    const auto& stack = redo ? Active().history.redo : Active().history.undo;
+    if (!Active().Editable() || stack.empty()) return false;
+    if (description) *description = (redo ? L"Redo " : L"Undo ") + stack.back().what;
+    return true;
+}
+
+// Puts the active playlist back as it was before (or after) its last change. Playback keeps its
+// place: the playing occurrence follows its track to wherever it is in the restored list.
+void StepPlaylistEdit(bool redo) {
+    std::wstring description;
+    if (!CanStepPlaylistEdit(redo, &description)) return;
+    std::vector<uint32_t> mapping;
+    if (!(redo ? ::RedoPlaylistEdit(Active(), mapping) : ::UndoPlaylistEdit(Active(), mapping))) return;
+    RemapOccurrences(g.active, mapping);
+    g.compactPending = true;
+    ClearSelection();
+    RebuildView();
+    RefreshNext();
+    g.dirty = true;
+    ShowMessage(description + L".");
 }
 
 // Takes tracks out of the library without touching the files. They stay out on later scans.
@@ -581,7 +612,8 @@ void DrawTrackRow(NMLVCUSTOMDRAW* cd, int row, TrackId id, bool playing) {
     // Apollo's list is a Windows 2000 one: no hover, the selection the face color while the list
     // isn't focused, and the playing row only in bold.
     bool faded = apollo && selected && GetFocus() != g.list;
-    COLORREF bg = faded ? SurfaceColor() : selected ? Ref(P().select) : hot ? Ref(P().hover) : WindowBg();
+    // Every other row is a shade off the background (RowStripe), so the eye keeps to a row across.
+    COLORREF bg = faded ? SurfaceColor() : selected ? Ref(P().select) : hot ? Ref(P().hover) : row % 2 ? Ref(RowStripe(P())) : WindowBg();
     COLORREF text = faded ? TextColor() : selected ? Ref(P().selectText) : playing && !apollo ? Ref(P().playing)
                     : g_lib[id].Failed() ? Ref(P().faint) : TextColor();
     if (FoobarMode() && playing) {
@@ -705,6 +737,7 @@ void MoveTrackBlockImpl(const std::vector<int>& sources, int target) {
     int first = sources.front(), last = sources.back();
     if (last - first + 1 == (int)sources.size() && target >= first && target <= last + 1) return;
     auto& items = Active().items;
+    std::vector<TrackId> before = Active().Editable() ? items : std::vector<TrackId>();
     int insert = target;
     for (int s : sources) insert -= s < target ? 1 : 0;
     insert = std::clamp(insert, 0, (int)items.size() - (int)sources.size());
@@ -736,6 +769,7 @@ void MoveTrackBlockImpl(const std::vector<int>& sources, int target) {
         SetSortArrow(g.sortColumn, g.sortAscending);
     }
     items.swap(kept);
+    if (Active().Editable()) RecordPlaylistEdit(Active(), std::move(before), L"move");
     RemapOccurrences(g.active, mapping);
     ClearSelection();
     RebuildView();
@@ -951,7 +985,7 @@ LRESULT OnListNotify(NMHDR* hdr) {
             }
             if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
                 // Every row is painted here, in palette colors in both themes: album headers by
-                // DrawGroupRow, tracks by DrawTrackRow (uniform rows, no zebra).
+                // DrawGroupRow, tracks by DrawTrackRow (every other one striped).
                 int row = (int)cd->nmcd.dwItemSpec;
                 if (HeaderGroupOfRow(row) >= 0) {
                     DrawGroupRow(cd->nmcd.hdc, row, cd->nmcd.rc);

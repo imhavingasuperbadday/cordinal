@@ -21,6 +21,7 @@ void ArtWorker(HWND hwnd) {
         auto result = std::make_unique<ArtResult>();
         result->generation = request.generation;
         LoadAlbumArt(request.path, request.size, result->image);
+        if (!request.path.empty()) LoadDiscArt(request.path, request.disc, request.discTotal, request.size, result->disc);
         {
             std::lock_guard<std::mutex> lock(g.artMx);
             if (g.artQuit || (g.artReady && g.artRequest.generation > request.generation)) continue;
@@ -41,15 +42,20 @@ void LoadArtFor(TrackId id, bool refresh) {
     if (g.artFor == id && !refresh) return;
     if (id != kNone && !g.closing && !g.artWorker.joinable()) g.artWorker = std::thread(ArtWorker, g.hwnd);
     g.artFor = id;
-    g.art = ArtImage{};
+    g.art = g.disc = ArtImage{};
     ++g.artGeneration;
     {
         std::lock_guard<std::mutex> lock(g.artMx);
         g.artRequest = {g.artGeneration, id == kNone ? L"" : g_lib.Path(id), S(176)};
+        if (id != kNone) {
+            g.artRequest.disc = g_lib[id].disc;
+            g.artRequest.discTotal = g_lib[id].discTotal;
+        }
         g.artReady = id != kNone && !g.closing;
     }
     g.artCv.notify_one();
     InvalidateRect(g.hwnd, &g.artRect, FALSE);
+    if (id == kNone) RefreshPlayerTint();  // otherwise once the art arrives, to change only once
 }
 
 // UI thread, from WM_APP_ART. Frees the slot, then adopts the bitmap only if it belongs to the
@@ -60,7 +66,9 @@ void OnArtResult(LPARAM lp) {
     g.artCv.notify_one();
     if (!result || result->generation != g.artGeneration || g.closing) return;
     g.art = std::move(result->image);
+    g.disc = std::move(result->disc);
     InvalidateRect(g.hwnd, &g.artRect, FALSE);
+    RefreshPlayerTint();
     PlatformTrackChanged();
     MiniPlayerTick();
     PanelsTick();

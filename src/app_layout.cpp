@@ -160,7 +160,7 @@ void Layout() {
     RECT rc;
     GetClientRect(g.hwnd, &rc);
     int W = rc.right;
-    g.gripRect = {};
+    g.gripRect = g.playerRect = {};
     g.dividers.clear();
     AlignTimes(false);  // the player column centers them (LayoutNormal)
     ShowWindow(g.seek, SW_SHOWNA);  // the normal window can hide it

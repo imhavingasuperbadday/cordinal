@@ -151,7 +151,7 @@ enum : int {
     IDM_BACKUP, IDM_RESTORE_BACKUP, IDM_IMPORT_STATISTICS,
     IDM_CANCEL_BACKUP, IDM_OPEN_RADIO, IDM_WRITE_STATISTICS, IDM_RG_SCAN_ALL,
     IDM_DUPLICATE_PL = 4000, IDM_REOPEN_PL, IDM_MOVE_PL_LEFT, IDM_MOVE_PL_RIGHT, IDM_PLAYING_PL,
-    IDM_RELOAD_TAGS, IDM_CANCEL_IMPORT, IDM_WATCH_IMPORTED, IDM_CANCEL_STEAM, IDM_SELECT_PL_BASE = 4020,
+    IDM_RELOAD_TAGS, IDM_CANCEL_IMPORT, IDM_WATCH_IMPORTED, IDM_CANCEL_STEAM, IDM_UNDO, IDM_REDO, IDM_SELECT_PL_BASE = 4020,
     // Album editions (album_editions.h): manual grouping, preferred choice and comparison.
     IDM_EDITION_GROUP = 4100, IDM_EDITION_MANAGER, IDM_EDITION_PREFERRED, IDM_EDITION_REMOVE,
     IDM_EDITION_SPLIT, IDM_EDITION_COMPARE, IDM_EDITION_VERSIONS, IDM_EDITION_ART, IDM_EDITION_CLEAR_ART,
@@ -315,8 +315,8 @@ struct ImportBatch {
     bool playFirst = false, final = false, cancelled = false;
     size_t added = 0, errors = 0;
 };
-struct ArtRequest { uint64_t generation = 0; std::wstring path; int size = 64; };
-struct ArtResult { uint64_t generation; ArtImage image; };
+struct ArtRequest { uint64_t generation = 0; std::wstring path; int size = 64; unsigned disc = 0, discTotal = 0; };
+struct ArtResult { uint64_t generation; ArtImage image, disc; };
 struct ClosedPlaylist { Playlist playlist; int index; };
 
 
@@ -409,6 +409,10 @@ struct App {
     MainLayout layout;
     RECT gripRect{};               // the normal window's player handle: drag to dock, click for the layout menu
     std::vector<RECT> dividers;    // lines between the docked player and the rest, painted by the window
+    RECT playerRect{};             // the docked player's column or band, on its own background
+    double playerHue = -1;         // the hue the player's background is washed with (CoverHue), or -1
+    Rgb playerSurface = 0;         // that background (PlayerSurface), and its brush
+    HBRUSH playerBrush = nullptr;
     bool stripHover = false;  // its buttons, times and volume are showing
     WINDOWPLACEMENT fullPlacement{};  // where the full-size window goes back to
     HWND pointsChip = nullptr;
@@ -463,6 +467,7 @@ struct App {
     bool loudnessComp = false, nightMode = false;
 
     ArtImage art;
+    ArtImage disc;  // the playing album's disc art, with alpha (discart.h); usually empty
     TrackId artFor = kNone;
     uint64_t artGeneration = 0;
     std::thread artWorker;
@@ -548,6 +553,9 @@ inline COLORREF WindowBg() { return Ref(P().bg); }
 inline COLORREF TextColor() { return Ref(P().text); }
 inline COLORREF SubColor() { return Ref(P().sub); }
 inline COLORREF SurfaceColor() { return Ref(P().surface); }
+// The docked player's own background in the normal window (RefreshPlayerTint), else the surface.
+inline COLORREF PlayerColor() { return g.size == ViewSize::Normal ? Ref(g.playerSurface) : SurfaceColor(); }
+inline HBRUSH PlayerBrush() { return g.size == ViewSize::Normal && g.playerBrush ? g.playerBrush : g.surfaceBrush; }
 
 struct Region {
     double start = 0, end = 0;

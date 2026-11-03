@@ -195,7 +195,7 @@ Light FrameLight() {
     if (l.warn) l.col = Mix(l.col, FromRgb(P().error), 0.6f);
     if (!look.glow) l.backdrop = {0, 0, 0};
     Rgb rest = DockRest();
-    l.surround = look.black ? Color{0, 0, 0} : FromRef(SurfaceColor());
+    l.surround = look.black ? Color{0, 0, 0} : FromRef(PlayerColor());
     l.rest = rest == kThemeColor ? Color{0.42f, 0.42f, 0.42f} : FromRgb(rest);
     return l;
 }

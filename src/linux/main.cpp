@@ -103,7 +103,9 @@ void OpenFiles(const std::vector<std::wstring>& files, bool play) {
     const int np = EnsureNowPlayingTab();
     auto& items = g.playlists[np].items;
     int first = (int)items.size();
+    std::vector<TrackId> before = items;
     items.insert(items.end(), ids.begin(), ids.end());
+    RecordPlaylistEdit(g.playlists[np], std::move(before), L"add");
     g.libraryDirty = true;
     SetActiveTab(np);
     if (play) PlayFromQueue(first);
@@ -208,7 +210,7 @@ int Run(int argc, char** argv) {
         if (!full.empty()) paths.push_back(full);
     }
 
-    SDL_SetAppMetadata("cordinal", "0.1.3", "cordinal");
+    SDL_SetAppMetadata("cordinal", "0.1.4", "cordinal");
     SDL_SetHint(SDL_HINT_VIDEO_WAYLAND_PREFER_LIBDECOR, "1");
     if (parity) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {

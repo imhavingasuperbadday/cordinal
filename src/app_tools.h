@@ -64,6 +64,8 @@ bool TagEditorDialogMessage(MSG* msg);
 void WriteTagsInBackground(const std::vector<TrackId>& ids, const TagEdit& edit, bool announce = true);
 bool CanUndoTagEdit(std::wstring& description);
 void UndoLastTagEdit();
+// Unix time of the newest tag edit that can be undone, 0 without one.
+uint64_t NewestTagEditTime();
 bool TagWriteBusy();
 bool TagWriteUsing(TrackId id);
 bool TagWriterRetainsTracks();

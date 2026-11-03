@@ -250,6 +250,7 @@ void DuplicatePlaylist() {
     copy.kind = PlaylistKind::Static;
     SanitizePlaylistPosition(copy);
     copy.rules.clear();
+    copy.history = {};  // a new list starts with nothing to undo
     copy.identity = g.nextPlaylistIdentity++;
     int target = g.active + 1;
     InsertPlaylist(target, std::move(copy));

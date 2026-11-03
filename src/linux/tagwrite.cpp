@@ -147,6 +147,13 @@ bool CanUndoTagEdit() {
     return FindNewestTagJournal(TagUndoDir(), file, files);
 }
 
+uint64_t NewestTagEditTime() {
+    std::wstring file;
+    uint32_t files = 0;
+    uint64_t time = 0;
+    return FindNewestTagJournal(TagUndoDir(), file, files, &time) ? time : 0;
+}
+
 // Puts back what the newest journal recorded. The undo itself is not journaled, and the journal
 // goes once its writes are queued, so a second undo reaches the edit before it.
 void UndoLastTagEdit() {

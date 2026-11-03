@@ -190,6 +190,7 @@ void MoveDraggedTracks() {
         items.push_back(pl.items[kept[i]]);
     }
     pl.items.swap(items);
+    RecordPlaylistEdit(pl, std::move(items), L"move");
     pl.sortColumn = -1;
     pl.sortAscending = true;
     if (pl.kind == PlaylistKind::NowPlaying) RemapNowPlaying(mapping);
@@ -741,7 +742,13 @@ void Key(const SDL_KeyboardEvent& e) {
             case SDLK_COMMA: OpenPreferences(); return;
             case SDLK_Z:
                 if (!g.searchFocused) {
-                    UndoLastTagEdit();
+                    UndoLatest();
+                    return;
+                }
+                break;
+            case SDLK_Y:
+                if (!g.searchFocused) {
+                    StepPlaylistEdit(true);
                     return;
                 }
                 break;

@@ -143,6 +143,11 @@ void RemoveTracks(bool keepSelected);
 void MoveTrackBlock(const std::vector<int>& sources, int target);
 void RemoveDuplicates();
 void RemoveDeadItems();
+// Undo / redo of the active playlist's contents. `description` names the step ("Undo remove").
+bool CanStepPlaylistEdit(bool redo, std::wstring* description = nullptr);
+void StepPlaylistEdit(bool redo);
+// Ctrl+Z: undoes whichever came last, a change to the active playlist or a tag edit.
+void UndoLatest();
 void ShowListContextMenu(POINT pt);
 void ShowTabContextMenu(POINT pt);
 LRESULT OnListNotify(NMHDR* hdr);

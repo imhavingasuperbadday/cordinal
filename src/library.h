@@ -280,6 +280,17 @@ struct PlaylistPosition {
     int canvasScroll = 0;  // at 96 DPI
 };
 
+// Undo and redo for an editable playlist's contents, kept for this session only. Each state is
+// the whole item list, so restoring one is exact whatever the change was.
+struct PlaylistEdit {
+    std::vector<TrackId> items;
+    std::wstring what;  // "Remove", "Sort"...: what undoing or redoing this state reverses
+    uint64_t when = 0;  // unix seconds of the change, to compare with a tag edit's journal
+};
+struct PlaylistHistory {
+    std::vector<PlaylistEdit> undo, redo;  // oldest first
+};
+
 struct Playlist {
     std::wstring name;
     std::vector<TrackId> items;
@@ -291,6 +302,7 @@ struct Playlist {
     uint32_t builtRevision = 0;
     PlaylistPosition position;
     uint64_t identity = 0;
+    PlaylistHistory history;  // not saved
     bool Editable() const { return kind == PlaylistKind::Static || kind == PlaylistKind::NowPlaying; }
     bool IsView() const { return kind == PlaylistKind::Library || kind == PlaylistKind::Inbox || kind == PlaylistKind::Auto; }
 };
@@ -307,7 +319,7 @@ bool IsNativeAudioType(const std::wstring& ext);
 bool IsSupportedAudioFile(const std::wstring& path);
 bool IsPlaylistFile(const std::wstring& path);
 std::wstring OpenFileFilterSpec();
-// Expands files, folders (recursively) and M3U playlists into audio file paths.
+// Expands files, folders (recursively) and M3U/PLS playlists into audio file paths.
 bool CollectAudioFiles(const std::wstring& path, std::vector<std::wstring>& out,
                        const std::atomic<bool>* cancel = nullptr);
 
@@ -318,10 +330,12 @@ bool SaveLibrary(const std::wstring& file, const std::vector<Playlist>& playlist
 // file is kept beside itself as <file>.bad-... and its name is returned in `preserved`.
 bool LoadLibrary(const std::wstring& file, std::vector<Playlist>& playlists, std::wstring* preserved = nullptr);
 bool LoadPlaylists(const std::wstring& file, std::vector<Playlist>& playlists);
+// Reads an M3U, M3U8 or PLS playlist (by extension) into audio paths.
 bool ImportM3U(const std::wstring& file, std::vector<std::wstring>& paths);
 struct M3UExportEntry { std::string info, path; };
 // Capture on the library's owner thread; the immutable entries can be written on a worker.
 bool CaptureM3U(const Playlist& playlist, std::vector<M3UExportEntry>& entries);
+// Writes M3U8, or PLS when `file` ends in .pls.
 bool ExportM3U(const std::wstring& file, const std::vector<M3UExportEntry>& entries);
 bool ExportM3U(const std::wstring& file, const Playlist& playlist);
 // An .m3u8 for another device, as text: each track at the location given (relative to the
@@ -357,3 +371,14 @@ private:
     Field edition_;
 };
 void SanitizePlaylistPosition(Playlist& playlist);
+
+// Makes the change from `before` to playlist.items undoable under `what`, dropping any redo.
+// Nothing is recorded when the items stayed the same (a change of selection alone is not undone).
+// The oldest states go first beyond kPlaylistUndoLevels or a few million stored items.
+constexpr size_t kPlaylistUndoLevels = 30;
+bool RecordPlaylistEdit(Playlist& playlist, std::vector<TrackId> before, std::wstring what);
+// Swap playlist.items with the newest undo (redo) state. `mapping` takes each old item position to
+// its new one, matching duplicates by occurrence, or UINT32_MAX where the item is gone.
+bool UndoPlaylistEdit(Playlist& playlist, std::vector<uint32_t>& mapping);
+bool RedoPlaylistEdit(Playlist& playlist, std::vector<uint32_t>& mapping);
+std::vector<uint32_t> OccurrenceMapping(const std::vector<TrackId>& from, const std::vector<TrackId>& to);

@@ -59,7 +59,7 @@ void TestPlayerSliders() {
                         const int y = cy - S(ui::kSliderThumbHeight) / 2, w = std::max(2, S(ui::kSliderThumbWidth));
                         int first = client.right, last = -1;
                         for (int x = 0; x < client.right; ++x)
-                            if (GetPixel(dc, x, y) != SurfaceColor()) { first = std::min(first, x); last = x; }
+                            if (GetPixel(dc, x, y) != ControlBg(bar)) { first = std::min(first, x); last = x; }
                         bool fill = percent == 0 || GetPixel(dc, cx - w, cy) == Ref(P().accent);
                         bool rest = percent == 100 || GetPixel(dc, cx + w, cy) == Ref(P().border);
                         positions.Add(first == cx - w / 2 && last == first + w - 1 && fill && rest &&
@@ -839,6 +839,32 @@ void TestUiControls(const std::wstring& scratch) {
         SetWindowPos(g.hwnd, nullptr, 0, 0, S(kUiWidth), S(kUiHeight), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
         Layout();
     }
+    {
+        // A compact size remembered at the full window's width (an earlier build saved one) is not a
+        // compact window: Smaller opens the 440 x 600 default from the full window's corner instead, and
+        // Larger gives back the full window.
+        batch.Next(L"UI: an oversized remembered compact size gives way to the compact default");
+        const ViewSize savedSize = g.size;
+        const WINDOWPLACEMENT savedFull = g.fullPlacement;
+        SetViewSize(ViewSize::Normal);
+        SetWindowPos(g.hwnd, nullptr, 120, 80, S(900), S(600), SWP_NOZORDER | SWP_NOACTIVATE);
+        RECT full{}, compact{}, back{};
+        GetWindowRect(g.hwnd, &full);
+        IniWrite(L"Window", L"CompactPlacement", JoinInts({120, 80, 120 + S(1300), 80 + S(700)}));
+        SetViewSize(ViewSize::Compact);
+        GetWindowRect(g.hwnd, &compact);
+        const bool own = g.size == ViewSize::Compact && compact.left == full.left && compact.top == full.top &&
+                         compact.right - compact.left == S(440) && compact.bottom - compact.top == S(600);
+        SetViewSize(ViewSize::Normal);
+        GetWindowRect(g.hwnd, &back);
+        Check(own && EqualRect(&back, &full),
+              L"UI: the compact window opens at its default size, not a remembered full-width one, and Larger "
+              L"restores the full window");
+        g.fullPlacement = savedFull;
+        SetViewSize(savedSize);
+        SetWindowPos(g.hwnd, nullptr, 0, 0, S(kUiWidth), S(kUiHeight), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        Layout();
+    }
     g.layout = MainLayout{};
     g.layout.player = Dock::Right;
     Layout();
@@ -1036,12 +1062,11 @@ void TestUiControls(const std::wstring& scratch) {
         g.layout = savedLayout;
         Layout();
     }
-    if (!kExtraThemes) {
-        testlog::Skip(L"UI: Radio in the alternate themes: this build leaves them out");
-    } else {
+    {
         ThemeMode original = g.themeMode;
         testlog::Cases layouts;
         for (ThemeMode theme : {ThemeMode::Foobar, ThemeMode::Apollo}) {
+            if (!ThemeAvailable(theme)) continue;
             OnCommand(IDM_THEME_BASE + (int)theme, 0, nullptr);
             ActivateRadio();
             bool alternateRadioVisible = RadioActive() && (GetWindowLongPtrW(RadioView(), GWL_STYLE) & WS_VISIBLE) &&

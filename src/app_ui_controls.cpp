@@ -167,7 +167,7 @@ void DrawToolbarButton(const DRAWITEMSTRUCT* di) {
         DrawFoobarButton(di);
         return;
     }
-    FillSolid(di->hDC, r, pressed ? Ref(P().select) : hot ? Ref(P().hover) : SurfaceColor());
+    FillSolid(di->hDC, r, pressed ? Ref(P().select) : hot ? Ref(P().hover) : ControlBg(di->hwndItem));
     if (pressed || hot) {
         HGDIOBJ ob = SelectObject(di->hDC, GetStockObject(NULL_BRUSH));
         HGDIOBJ op = SelectObject(di->hDC, GetStockObject(DC_PEN));

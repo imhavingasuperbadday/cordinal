@@ -182,6 +182,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             RECT rc;
             GetClientRect(hwnd, &rc);
             FillRect((HDC)wp, &rc, g.surfaceBrush);
+            FillRect((HDC)wp, &g.playerRect, PlayerBrush());
             return 1;
         }
         case WM_PAINT: {
@@ -202,6 +203,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             RECT client;
             GetClientRect(hwnd, &client);
             FillRect(dc, &client, g.surfaceBrush);
+            FillRect(dc, &g.playerRect, PlayerBrush());
             if (g.size == ViewSize::Big) PaintBig(dc);
             else if (!IsRectEmpty(&g.artRect)) PaintArt(dc);
             if (FoobarMode()) PaintFoobarChrome(dc);
@@ -213,9 +215,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_CTLCOLORSTATIC: {
             HDC dc = (HDC)wp;
             HWND ctl = (HWND)lp;
-            SetBkColor(dc, SurfaceColor());
+            COLORREF bg = ControlBg(ctl);
+            SetBkColor(dc, bg);
             SetTextColor(dc, ctl == g.npSub || ctl == g.time || ctl == g.elapsed || ctl == g.speaker ? SubColor() : TextColor());
-            return (LRESULT)g.surfaceBrush;
+            return (LRESULT)(bg == SurfaceColor() ? g.surfaceBrush : PlayerBrush());
         }
         case WM_CTLCOLOREDIT:
             if ((HWND)lp == g.rename) {

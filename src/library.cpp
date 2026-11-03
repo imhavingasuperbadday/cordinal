@@ -755,7 +755,7 @@ bool LookupField(TrackId id, const std::wstring& name, std::wstring& out) {
 
 namespace {
 const wchar_t* const kAudioExt[] = {L"mp3", L"mp2", L"mp1", L"m4a", L"m4b", L"mp4", L"aac", L"adts", L"flac", L"fla", L"wav", L"wave",
-                                    L"wma", L"asf", L"ogg", L"oga", L"opus", L"aif", L"aiff", L"aifc", L"ac3", L"ape", L"wv",
+                                    L"wma", L"asf", L"ogg", L"oga", L"opus", L"aif", L"aiff", L"aifc", L"ac3", L"ape", L"wv", L"mpc", L"mp+", L"mpp",
                                     L"mka", L"alac", L"spc", L"nsf", L"nsfe", L"gbs", L"vgm", L"vgz", L"gym", L"sid", L"cord",
                                     L"dsf", L"dff", L"mod", L"s3m", L"xm", L"it", L"mid", L"midi", L"kar", L"rmi"};
 
@@ -817,7 +817,7 @@ bool IsSupportedAudioFile(const std::wstring& path) {
 
 bool IsPlaylistFile(const std::wstring& path) {
     std::wstring ext = ExtOf(path);
-    return ext == L"m3u" || ext == L"m3u8";
+    return ext == L"m3u" || ext == L"m3u8" || ext == L"pls";
 }
 
 std::wstring OpenFileFilterSpec() {

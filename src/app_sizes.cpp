@@ -18,12 +18,14 @@ namespace {
 HMENU g_menuBar = nullptr;  // detached but for the normal size
 
 // The compact window's normal-position rectangle (workspace coordinates, like WINDOWPLACEMENT):
-// where it was last time, else the full window's top left corner.
+// where it was last time, else the full window's top left corner. A remembered rectangle wider than
+// a compact window should be (as one saved at the full window's width) is dropped for the default.
 RECT CompactRect(const RECT& full) {
     auto v = ParseInts(IniRead(L"Window", L"CompactPlacement", L""));
     if (v.size() == 4) {
         RECT r{v[0], v[1], v[2], v[3]};
-        if (r.right - r.left >= S(300) && r.bottom - r.top >= S(260) && MonitorFromRect(&r, MONITOR_DEFAULTTONULL)) return r;
+        const LONG w = r.right - r.left, h = r.bottom - r.top;
+        if (w >= S(300) && w <= S(640) && h >= S(260) && MonitorFromRect(&r, MONITOR_DEFAULTTONULL)) return r;
     }
     return {full.left, full.top, full.left + S(440), full.top + S(600)};
 }

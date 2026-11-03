@@ -150,6 +150,7 @@ void LeaveMini() {
     SDL_SetWindowBordered(g.window, true);
     SDL_SetWindowResizable(g.window, true);
     SDL_SetWindowAlwaysOnTop(g.window, g.settings.alwaysOnTop);
+    ApplyWindowMinimum();
     SDL_SetWindowSize(g.window, g_savedW, g_savedH);
     SDL_SetWindowPosition(g.window, g_savedX, g_savedY);
     if (g_savedMaximized) SDL_MaximizeWindow(g.window);

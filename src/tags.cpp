@@ -639,6 +639,60 @@ bool ParseMpegAudio(const File& f, uint64_t start, uint64_t audioEnd, TagData& t
     return false;
 }
 
+// Musepack: the stream header's rate, channels and length, and the APEv2 tag at the end (with an
+// ID3v1 tag after it, as some taggers leave).
+bool ReadMusepack(const File& f, TagData& t, ArtSink& art) {
+    static constexpr uint32_t rates[4] = {44100, 48000, 37800, 32000};
+    t.codec = Codec::Musepack;
+    uint64_t samples = 0;
+    std::string h = f.Read(0, 32);
+    if (h.compare(0, 3, "MP+") == 0 && h.size() >= 24) {
+        uint32_t frames = LE32(h, 4), flags = LE32(h, 8), gapless = LE32(h, 20), last = (gapless >> 20) & 2047;
+        t.sampleRate = rates[(flags >> 16) & 3];
+        t.channels = 2;
+        samples = frames ? (gapless >> 31) && last ? (uint64_t)(frames - 1) * 1152 + last : (uint64_t)frames * 1152 : 0;
+    } else {
+        // SV8: the first packets, for the stream header (SH): sizes and counts are 7-bit varints.
+        for (uint64_t at = 4; at < f.Size() && at < 65536 && !t.sampleRate;) {
+            std::string p = f.Read(at, 64);
+            if (p.size() < 3) break;
+            uint64_t length = 0;
+            size_t i = 2;
+            for (; i < p.size() && i < 11; ++i) {
+                length = (length << 7) | (U8(p, i) & 127);
+                if (!(U8(p, i) & 128)) { ++i; break; }
+            }
+            if (length < i) break;
+            if (p.compare(0, 2, "SH") == 0) {
+                size_t j = i + 5;  // past the CRC and the stream version
+                auto number = [&] {
+                    uint64_t v = 0;
+                    for (int n = 0; n < 9 && j < p.size(); ++n) {
+                        uint8_t byte = U8(p, j++);
+                        v = (v << 7) | (byte & 127);
+                        if (!(byte & 128)) break;
+                    }
+                    return v;
+                };
+                samples = number();
+                uint64_t silence = number();
+                samples = samples > silence ? samples - silence : 0;
+                t.sampleRate = rates[(U8(p, j) >> 5) & 3];
+                t.channels = ((U8(p, j + 1) >> 4) & 15) + 1;
+            }
+            at += length;
+        }
+    }
+    if (!t.sampleRate) return false;
+    t.duration = (double)samples / t.sampleRate;
+    uint64_t end = f.Size();
+    std::string tail = f.Read(end >= 128 ? end - 128 : 0, 128);
+    if (tail.size() == 128 && tail.compare(0, 3, "TAG") == 0) end -= 128;
+    ParseApe(f, end, t, art);
+    if (t.duration > 0) t.bitrate = (uint32_t)(f.Size() * 8 / t.duration / 1000 + 0.5);
+    return true;
+}
+
 bool ReadMpeg(const File& f, TagData& t, ArtSink& art) {
     uint64_t start = 0, end = f.Size();
     std::string h = f.Read(0, 10);
@@ -1412,6 +1466,8 @@ bool ReadAny(const std::wstring& path, TagData& t, ArtSink& art) {
         uint64_t skip = 10 + Syncsafe(m, 6) + ((U8(m, 5) & 0x10) ? 10 : 0);
         ParseId3v2File(f, 0, t, art);
         ok = ReadFlac(f, skip + 4, t, art);
+    } else if (m.substr(0, 4) == "MPCK" || (m.substr(0, 3) == "MP+" && (U8(m, 3) & 15) == 7)) {
+        ok = ReadMusepack(f, t, art);
     } else ok = ReadMpeg(f, t, art);
     return ok;
 }
@@ -1454,7 +1510,7 @@ const wchar_t* CodecName(Codec c) {
     static const wchar_t* const names[] = {
         L"", L"MP3", L"MP2", L"FLAC", L"AAC", L"ALAC", L"PCM", L"WMA", L"Vorbis", L"Opus", L"AC3",
         L"H.264", L"HEVC", L"VP8", L"VP9", L"AV1", L"MPEG-4", L"MPEG-2", L"WMV", L"Theora", L"Video",
-        L"SPC", L"NSF", L"GBS", L"VGM", L"Cord", L"DSD", L"SID", L"Module", L"MIDI",
+        L"SPC", L"NSF", L"GBS", L"VGM", L"Cord", L"DSD", L"SID", L"Module", L"MIDI", L"Musepack",
     };
     size_t i = (size_t)c;
     return i < std::size(names) ? names[i] : L"";

@@ -28,7 +28,8 @@ bool CaptureTagUndo(const std::wstring& path, const TagEdit& edit, TagUndoFile& 
 
 // Writes a journal into `dir` and prunes older ones. `journal.time` is the name it was saved under.
 bool SaveTagJournal(const std::wstring& dir, TagJournal& journal, std::wstring& error);
-// The newest journal in `dir`: its file, and how many files it covers (from the header alone).
-bool FindNewestTagJournal(const std::wstring& dir, std::wstring& file, uint32_t& fileCount);
+// The newest journal in `dir`: its file, how many files it covers (from the header alone) and,
+// when asked, its unix time.
+bool FindNewestTagJournal(const std::wstring& dir, std::wstring& file, uint32_t& fileCount, uint64_t* time = nullptr);
 bool LoadTagJournal(const std::wstring& file, TagJournal& journal);
 void DeleteTagJournal(const std::wstring& file);

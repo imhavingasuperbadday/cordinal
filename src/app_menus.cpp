@@ -70,6 +70,9 @@ HMENU BuildMenu() {
     AppendMenuW(file, MF_STRING, IDM_EXIT, L"E&xit");
 
     HMENU edit = CreatePopupMenu();
+    AppendMenuW(edit, MF_STRING, IDM_UNDO, L"&Undo\tCtrl+Z");
+    AppendMenuW(edit, MF_STRING, IDM_REDO, L"Re&do\tCtrl+Y");
+    AppendMenuW(edit, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(edit, MF_STRING, IDM_SELECT_ALL, L"Select &all\tCtrl+A");
     AppendMenuW(edit, MF_STRING, IDM_REMOVE, L"&Remove\tDel");
     AppendMenuW(edit, MF_STRING, IDM_CROP, L"&Keep only selected tracks");
@@ -82,7 +85,7 @@ HMENU BuildMenu() {
     AppendMenuW(edit, MF_STRING, IDM_FIND, L"&Search\tCtrl+F");
     AppendMenuW(edit, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(edit, MF_STRING, IDM_PROPERTIES, L"Edit &tags...\tAlt+Enter");
-    AppendMenuW(edit, MF_STRING, IDM_TAG_UNDO, L"&Undo last tag edit\tCtrl+Z");
+    AppendMenuW(edit, MF_STRING, IDM_TAG_UNDO, L"Undo last ta&g edit");
     AppendHelperTools(edit, true);  // the tools of the helpers that are on, when there are any
 
     HMENU playback = CreatePopupMenu();
@@ -185,11 +188,9 @@ HMENU BuildMenu() {
     HMENU themes = CreatePopupMenu();
     for (ThemeMode t : {ThemeMode::Light, ThemeMode::Dark, ThemeMode::System})
         AppendMenuW(themes, MF_STRING, IDM_THEME_BASE + (int)t, ThemeInfo(t).name);
-    if (kExtraThemes) {
-        AppendMenuW(themes, MF_SEPARATOR, 0, nullptr);
-        for (int t = (int)ThemeMode::Deltarune; t < (int)ThemeMode::Count; ++t)
-            AppendMenuW(themes, MF_STRING, IDM_THEME_BASE + t, ThemeInfo((ThemeMode)t).name);
-    }
+    AppendMenuW(themes, MF_SEPARATOR, 0, nullptr);
+    for (int t = (int)ThemeMode::Deltarune; t < (int)ThemeMode::Count; ++t)
+        if (ThemeAvailable((ThemeMode)t)) AppendMenuW(themes, MF_STRING, IDM_THEME_BASE + t, ThemeInfo((ThemeMode)t).name);
     AppendPackThemes(themes);
     AppendMenuW(view, MF_POPUP, (UINT_PTR)themes, L"&Theme");
     AppendMenuW(view, MF_POPUP, (UINT_PTR)PacksMenu(), L"Pac&ks");
@@ -257,7 +258,8 @@ HACCEL BuildAccelerators() {
         {FCONTROL | FVIRTKEY, '9', IDM_SELECT_PL_BASE + 8},
         {FCONTROL | FVIRTKEY, 'O', IDM_ADD_FILES},
         {FALT | FVIRTKEY, VK_RETURN, IDM_PROPERTIES},
-        {FCONTROL | FVIRTKEY, 'Z', IDM_TAG_UNDO},
+        {FCONTROL | FVIRTKEY, 'Z', IDM_UNDO},
+        {FCONTROL | FVIRTKEY, 'Y', IDM_REDO},
         {FCONTROL | FVIRTKEY, VK_RETURN, IDM_QUEUE_NEXT},
         {FCONTROL | FVIRTKEY, 'Q', IDM_QUEUE_ADD},
         {FCONTROL | FSHIFT | FVIRTKEY, 'O', IDM_ADD_FOLDER},
@@ -341,6 +343,16 @@ void UpdateMainMenu(HMENU m) {
         {IDM_RG_WRITE_TAGS, selected && !manualScan},
     };
     for (const auto& item : enables) EnableMenuItem(m, item.id, MF_BYCOMMAND | (item.enabled ? MF_ENABLED : MF_GRAYED));
+    // Undo names what it will undo: the newer of the active playlist's last change and a tag edit.
+    std::wstring playlistUndo, redo;
+    bool canUndo = CanStepPlaylistEdit(false, &playlistUndo), canRedo = CanStepPlaylistEdit(true, &redo);
+    std::wstring undo = canUndo && (undoDescription.empty() || Active().history.undo.back().when >= NewestTagEditTime())
+                            ? playlistUndo : undoDescription;
+    canUndo = canUndo || !undoDescription.empty();
+    ModifyMenuW(m, IDM_UNDO, MF_BYCOMMAND | MF_STRING | (canUndo ? 0 : MF_GRAYED), IDM_UNDO,
+                ((canUndo ? undo : std::wstring(L"Undo")) + L"\tCtrl+Z").c_str());
+    ModifyMenuW(m, IDM_REDO, MF_BYCOMMAND | MF_STRING | (canRedo ? 0 : MF_GRAYED), IDM_REDO,
+                ((canRedo ? redo : std::wstring(L"Redo")) + L"\tCtrl+Y").c_str());
     ShowWhileRunning(m, IDM_ADD_FOLDER, IDM_CANCEL_IMPORT, L"&Cancel import", g.importRunning);
     ShowWhileRunning(m, IDM_STEAM, IDM_CANCEL_STEAM, L"Cancel soundtrack search", SteamDiscoveryRunning());
     EnableMenuItem(m, IDM_STEAM, MF_BYCOMMAND | (SteamDiscoveryRunning() ? MF_GRAYED : MF_ENABLED));

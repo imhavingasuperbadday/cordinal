@@ -60,6 +60,8 @@ uint32_t TestSeed();
 void TestHarness(const std::wstring& scratch);
 void TestSortingProperties();
 void TestPlaylistFiles(const std::wstring& scratch);
+void TestPlaylistUndo();
+void TestDiscArt(const std::wstring& scratch);
 void TestSearchProperties();
 void TestLibraryWorkflow(const std::wstring& scratch);
 void TestImportedFolders(const std::wstring& scratch);
