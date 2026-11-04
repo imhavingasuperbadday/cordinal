@@ -344,7 +344,7 @@ void OpenRowMenu(float x, float y) {
 void OpenHeaderMenu(float x, float y) {
     std::vector<MenuItem> items;
     for (int c = 1; c < ColumnTotal(); ++c) {
-        if (c >= ui::kColCover && c < ui::kColumnCount) continue;
+        if (c >= ui::kColCover && c <= ui::kColApolloTag) continue;  // the private themes' own columns
         bool shown = std::find(ActiveColumnTypes().begin(), ActiveColumnTypes().end(), c) != ActiveColumnTypes().end();
         MenuItem it = Item(Utf8(ColumnAt(c).name), kColumnToggle, {}, shown, c != 2);
         it.arg = c;

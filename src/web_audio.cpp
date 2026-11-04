@@ -174,7 +174,7 @@ std::string Waveform(const Track& track, const std::atomic<bool>& cancel) {
     auto decoder = OpenTrackDecoder(track.path, 48000, error);
     if (!decoder || !decoder->Rate()) return {};
     PeakAccumulator accumulator;
-    accumulator.Begin((uint64_t)std::llround(decoder->Duration() * decoder->Rate()));
+    accumulator.Begin((uint64_t)std::llround(decoder->Duration() * decoder->Rate()), decoder->Rate());
     std::array<float, 8192> samples;
     while (!cancel) {
         size_t frames = decoder->Read(samples.data(), samples.size() / 2);

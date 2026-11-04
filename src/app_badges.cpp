@@ -153,7 +153,11 @@ void DrawBadgeCell(HDC dc, int row, int subitem, TrackId id, COLORREF text, COLO
     COLORREF tag = selected ? Blend(bg, text, 22) : Blend(bg, Ref(P().accent), 18);
     COLORREF tagText = selected ? text : Blend(Ref(P().accent), TextColor(), 35);
     // The spinner, the title, then "MIX" right after it (or at the cell's end when the title is
-    // cut short).
+    // cut short). A Title column running past the list's right edge ends at that edge instead,
+    // so a narrow window cuts the title short rather than pushing "MIX" out of sight.
+    RECT client{};
+    GetClientRect(g.list, &client);
+    cell.right = std::min<LONG>(cell.right, client.right - S(4));
     if (TrackBusy(id)) {
         int save = SaveDC(dc);
         IntersectClipRect(dc, r.left, r.top, r.right, r.bottom);

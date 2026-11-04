@@ -1252,8 +1252,9 @@ LRESULT CALLBACK LibViewProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             int delta = GET_WHEEL_DELTA_WPARAM(wp);
             if (GET_KEYSTATE_WPARAM(wp) & MK_CONTROL) {
                 // Ctrl+wheel: bigger or smaller covers.
+                // A view change for this session; keeping it for startup is the review's job.
                 v.tile = std::clamp(v.tile + (delta > 0 ? 20 : -20), 80, 300);
-                IniWrite(L"Library", L"CoverSize", std::to_wstring(v.tile));
+                g.coverSize = v.tile;
                 DropBitmaps();
                 LayoutItems();
                 InvalidateRect(h, nullptr, FALSE);
@@ -1330,7 +1331,8 @@ StringPool::Handle Split1(StringPool::Handle h) {
 // first paint, so the ordinary track list never pays for the album/artist renderer.
 void CreateLibView(HWND parent) {
     RegisterAppClass(kLibViewClass, LibViewProc, CS_DBLCLKS, false);
-    v.tile = std::clamp(IniInt(L"Library", L"CoverSize", 160), 80, 300);
+    g.coverSize = g.defaultCoverSize = std::clamp(IniInt(L"Library", L"CoverSize", 160), 80, 300);
+    v.tile = g.coverSize;
     v.hwnd = CreateWindowExW(0, kLibViewClass, L"", WS_CHILD | WS_VSCROLL | WS_TABSTOP, 0, 0, 0, 0, parent,
                              (HMENU)(INT_PTR)IDC_LIBVIEW, g.inst, nullptr);
     g.libView = v.hwnd;
@@ -1340,6 +1342,17 @@ void LibViewRebuild() {
     if (!v.hwnd || !CanvasActive()) return;
     BuildGroups();
     v.hoverItem = -1;
+    LayoutItems();
+    InvalidateRect(v.hwnd, nullptr, FALSE);
+}
+
+// A Preferences change or Ctrl+wheel: the live tile size for this session.
+void LibViewSetCoverSize(int pixels) {
+    const int size = std::clamp(pixels, 80, 300);
+    if (g.coverSize == size && v.tile == size) return;
+    g.coverSize = v.tile = size;
+    if (!v.hwnd) return;
+    DropBitmaps();
     LayoutItems();
     InvalidateRect(v.hwnd, nullptr, FALSE);
 }

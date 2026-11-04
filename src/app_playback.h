@@ -60,6 +60,10 @@ void OnPeaksReady(uint32_t requestId);
 bool WaveformShown();
 bool LiveWaveformShown();
 bool DrawWaveform(HDC dc, const RECT& rc, const RECT& channel, double frac);
+// The Mood column's cell for track `id` on a row filled with `bg`; empty until its peaks are known.
+void DrawMoodCell(HDC dc, const RECT& cell, TrackId id, COLORREF bg);
+// The peaks service finished a Mood column track: repaint the rows that show one.
+void OnListPeaksReady();
 void WaveformTick();
 bool WaveformStep(UINT_PTR id);
 int WaveformPeak(double from, double to);
@@ -67,6 +71,17 @@ COLORREF WaveformPlayedColor();
 COLORREF WaveformRestColor();
 // The waveform's look (app_fountain.cpp): Dark Fountain at every position and per-position colors.
 void LoadWaveLook();
+// The waveform rows of Preferences (app_tweaks.cpp): the style and the fountain's toggles.
+int WaveStyleIndex();
+void SetWaveStyle(int style);
+bool WaveMoving();
+bool WaveDeltaruneColors();
+bool WaveGlow();
+bool WaveBlack();
+void SetWaveMoving(bool on);
+void SetWaveDeltaruneColors(bool on);
+void SetWaveGlow(bool on);
+void SetWaveBlack(bool on);
 bool FountainShown();
 void PaintFountain(HDC dc, const RECT& client, int top, int bottom, double frac);
 void FountainWake();

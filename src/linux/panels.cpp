@@ -980,6 +980,9 @@ const char* const kNewMusicNames[] = {"Add automatically", "Review in Inbox"};
 const char* const kBandWaveSizes[] = {"Use layout size", "Slim (26 px)", "Medium (44 px)", "Tall (72 px)",
                                     "Extra tall (108 px)", "Largest (144 px)"};
 static_assert(std::size(kBandWaveSizes) == std::size(ui::kBandWaveHeights));
+const char* const kSeekStyleNames[] = {"Waveform", "Moodbar", "Mood waveform"};
+const char* const kMoodColorNames[] = {"Theme", "Vivid", "Spectrum"};
+static_assert(std::size(kSeekStyleNames) == kSeekStyles && std::size(kMoodColorNames) == kMoodColorSchemes);
 const char* const kUndoNames[] = {"1 day", "3 days", "1 week", "7 weeks"};
 const char* const kCoverSourceNames[] = {"Deezer", "iTunes", "MusicBrainz"};
 const char* const kCoverSaveNames[] = {"Save as cover.jpg in the album folder", "Embed in the files' tags",
@@ -1070,6 +1073,27 @@ const Pref kPrefs[] = {
      "Sets the waveform's height in the normal player bar. Other player modes keep their own sizes.",
      PrefType::Choice, 0, 5, 0, 1, [] { return (double)Cfg().bandWaveSize; },
      [](double v) { Cfg().bandWaveSize = (int)v; Saved(); }, kBandWaveSizes},
+    {"seek_style", "View", "Seek bar style",
+     "How the seek bar looks, for the whole song and the live waveform alike. Moodbar colours "
+     "each moment by its sound: one way for bass, the other for treble, brighter when louder. "
+     "Mood waveform keeps the waveform's shape in those colours.",
+     PrefType::Choice, 0, 2, 0, 1, [] { return (double)Cfg().seekStyle; },
+     [](double v) { Cfg().seekStyle = (int)v; Saved(); }, kSeekStyleNames},
+    {"mood_colors", "View", "Moodbar colours",
+     "The moodbar's colours: turned from the theme's accent, the whole colour wheel, or red for "
+     "bass, green for mids and blue for treble.",
+     PrefType::Choice, 0, 2, 0, 1, [] { return (double)Cfg().moodColors; },
+     [](double v) { Cfg().moodColors = (int)v; Saved(); }, kMoodColorNames},
+    {"smooth_seek", "View", "Smooth seek bar",
+     "Rounds off the whole song's outline and blends its moodbar colours into each other. "
+     "The live waveform keeps its detail.",
+     PrefType::Bool, 0, 1, 0, 1, [] { return (double)Cfg().smoothSeek; },
+     [](double v) { Cfg().smoothSeek = v != 0; Saved(); }},
+    {"wave_reflection", "View", "Waveform reflection",
+     "Mirrors the seek bar below its center line. Turn off to draw only the upper half, for the "
+     "waveform and both moodbar styles alike.",
+     PrefType::Bool, 0, 1, 1, 1, [] { return (double)Cfg().waveReflection; },
+     [](double v) { Cfg().waveReflection = v != 0; Saved(); }},
     {"scrobbling_paused", "Scrobbling", "Pause scrobbling",
      "Stops collecting and sending listens to Last.fm, ListenBrainz and Libre.fm, keeping connections and queued listens.",
      PrefType::Bool, 0, 1, 0, 1, [] { return (double)listenbrainz::Paused(); },
@@ -3138,11 +3162,12 @@ struct LayoutPanel {
     int focus = 0;
 } g_layout;
 
-bool PartShown(unsigned bit) { return !(g.settings.layout.hiddenParts & bit); }
+bool PartShown(unsigned bit) { return !(g.settings.defaultLayout.hiddenParts & bit); }
 
 void SetPart(unsigned bit, bool shown) {
-    if (shown) g.settings.layout.hiddenParts &= ~bit;
-    else g.settings.layout.hiddenParts |= bit;
+    if (shown) g.settings.defaultLayout.hiddenParts &= ~bit;
+    else g.settings.defaultLayout.hiddenParts |= bit;
+    g.settings.layout = g.settings.defaultLayout;
     SaveSettings();
     g.redraw = true;
 }
@@ -3151,18 +3176,20 @@ void LayoutActivate(int index) {
     if (index < (int)std::size(kLayoutParts)) {
         const auto& part = kLayoutParts[index];
         if (part.flag) {
-            g.settings.layout.*part.flag = !(g.settings.layout.*part.flag);
+            g.settings.defaultLayout.*part.flag = !(g.settings.defaultLayout.*part.flag);
+            g.settings.layout = g.settings.defaultLayout;
             SaveSettings();
             g.redraw = true;
         } else SetPart(part.bit, !PartShown(part.bit));
     } else if (index == (int)std::size(kLayoutParts)) {
         OpenChoice(g_layout.dock.x, g_layout.dock.B(), {"Top", "Bottom", "Left", "Right"},
-            g.settings.layout.dock, [](int i) { g.settings.layout.dock = i; g.redraw = true; SaveSettings(); });
+            g.settings.defaultLayout.dock, [](int i) { g.settings.defaultLayout.dock = i; g.settings.layout = g.settings.defaultLayout; g.redraw = true; SaveSettings(); });
     } else if (index == (int)std::size(kLayoutParts) + 1) {
         OpenChoice(g_layout.wave.x, g_layout.wave.B(), {"Slim", "Medium", "Tall"},
-            g.settings.layout.waveSize, [](int i) { g.settings.layout.waveSize = i; g.redraw = true; SaveSettings(); });
+            g.settings.defaultLayout.waveSize, [](int i) { g.settings.defaultLayout.waveSize = i; g.settings.layout = g.settings.defaultLayout; g.redraw = true; SaveSettings(); });
     } else if (index == (int)std::size(kLayoutParts) + 2) {
-        g.settings.layout = WindowLayout{};
+        g.settings.defaultLayout = WindowLayout{};
+        g.settings.layout = g.settings.defaultLayout;
         SaveSettings();
         g.redraw = true;
     } else if (index == (int)std::size(kLayoutParts) + 3) {
@@ -3170,12 +3197,13 @@ void LayoutActivate(int index) {
         for (const auto& name : PackLayoutNames()) names.push_back(Utf8(name));
         OpenChoice(g_layout.presets.x, g_layout.presets.B(), names, -1, [](int i) {
             if (i >= 5) { ApplyPackLayout(i - 5); return; }
-            auto& l = g.settings.layout;
+            auto& l = g.settings.defaultLayout;
             l = WindowLayout{};
             if (i == 1) { l.dock = 1; l.waveSize = 1; l.waveOwnRow = l.largeCover = true; }
             if (i == 2) { l.dock = 2; l.waveSize = 1; l.upNext = true; }
             if (i == 3) { l.waveSize = 2; l.waveOwnRow = l.largeCover = true; }
             if (i == 4) l.hiddenParts = kPartOrder | kPartNowPlaying | kPartViews | kPartStatus;
+            g.settings.layout = g.settings.defaultLayout;
             SaveSettings(); g.redraw = true;
         });
     } else ClosePanel();
@@ -3190,8 +3218,8 @@ void DrawLayoutPanel(const Palette& p) {
     const char* sizes[] = {"Slim", "Medium", "Tall"};
     g_layout.dock = {x, y, w / 2 - S(10), S(28)};
     g_layout.wave = {x + w / 2 + S(10), y, w / 2 - S(10), S(28)};
-    DrawButton(g_layout.dock, std::string("Player: ") + docks[g.settings.layout.dock], p);
-    DrawButton(g_layout.wave, std::string("Waveform: ") + sizes[g.settings.layout.waveSize], p);
+    DrawButton(g_layout.dock, std::string("Player: ") + docks[g.settings.defaultLayout.dock], p);
+    DrawButton(g_layout.wave, std::string("Waveform: ") + sizes[g.settings.defaultLayout.waveSize], p);
     y += S(40);
     constexpr int perColumn = (std::size(kLayoutParts) + 1) / 2;
     float rowH = std::min(S(26), std::max(LineHeight(Font::Normal) + S(2),
@@ -3199,7 +3227,7 @@ void DrawLayoutPanel(const Palette& p) {
     for (size_t i = 0; i < std::size(kLayoutParts); ++i) {
         const auto& part = kLayoutParts[i];
         g_layout.rows[i] = {x + (i / perColumn) * w / 2, y + (i % perColumn) * rowH, w / 2 - S(8), rowH};
-        DrawCheck(g_layout.rows[i], part.label, part.flag ? g.settings.layout.*part.flag : PartShown(part.bit), p);
+        DrawCheck(g_layout.rows[i], part.label, part.flag ? g.settings.defaultLayout.*part.flag : PartShown(part.bit), p);
         if (g_layout.focus == (int)i) Frame(g_layout.rows[i], p.accent);
     }
     float by = panel.B() - S(46);

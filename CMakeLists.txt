@@ -5,7 +5,7 @@
 # Needs SDL3, SDL3_ttf, PipeWire (libpipewire-0.3), libsystemd (sd-bus), fontconfig and OpenSSL 3
 # (the web server's HTTPS away from home).
 cmake_minimum_required(VERSION 3.20)
-project(cordinal VERSION 0.1.4 LANGUAGES CXX)
+project(cordinal VERSION 0.1.5 LANGUAGES CXX)
 
 if(WIN32)
     message(FATAL_ERROR "On Windows, build with build.bat")

@@ -34,7 +34,8 @@ std::vector<std::string> WrapLines(Font font, const std::string& text, float wid
 }
 
 constexpr unsigned kDefaultTheme = 1, kDefaultLibraryView = 2, kDefaultBrowser = 4, kDefaultSize = 8, kDefaultLayout = 16;
-constexpr unsigned kChoiceCount = 5;
+constexpr unsigned kDefaultCoverSize = 32, kDefaultBrowserHeight = 64;
+constexpr unsigned kChoiceCount = 7;  // 0 theme, 1 view, 2 browser, 3 size, 4 layout, 5 covers, 6 browser height
 constexpr uint64_t kSettleMs = 5 * 60 * 1000, kQuietMs = 15 * 1000, kReviewInterval = 24 * 60 * 60;
 
 struct Choices {
@@ -43,16 +44,19 @@ struct Choices {
     bool browser = true;
     ViewSize size = ViewSize::Normal;
     WindowLayout layout;
+    int coverSize = 160, browserHeight = 150;
     bool operator==(const Choices&) const = default;
 };
 
-Choices Current() { return {g.settings.theme, g.settings.libraryMode, g.settings.browserVisible, g.settings.size, g.settings.layout}; }
-Choices Approved() { return {g.settings.defaultTheme, g.settings.defaultLibraryMode, g.settings.defaultBrowserVisible, g.settings.defaultSize, g.settings.defaultLayout}; }
+Choices Current() { return {g.settings.theme, g.settings.libraryMode, g.settings.browserVisible, g.settings.size, g.settings.layout, g.settings.coverSize, g.settings.browserHeight}; }
+Choices Approved() { return {g.settings.defaultTheme, g.settings.defaultLibraryMode, g.settings.defaultBrowserVisible, g.settings.defaultSize, g.settings.defaultLayout, g.settings.defaultCoverSize, g.settings.defaultBrowserHeight}; }
 
 unsigned Difference(const Choices& a, const Choices& b) {
     return (a.theme != b.theme ? kDefaultTheme : 0) | (a.library != b.library ? kDefaultLibraryView : 0) |
            (a.browser != b.browser ? kDefaultBrowser : 0) | (a.size != b.size ? kDefaultSize : 0) |
-        (a.layout != b.layout ? kDefaultLayout : 0);
+           (a.layout != b.layout ? kDefaultLayout : 0) |
+           (a.coverSize != b.coverSize ? kDefaultCoverSize : 0) |
+           (a.browserHeight != b.browserHeight ? kDefaultBrowserHeight : 0);
 }
 
 Choices g_observed;
@@ -78,7 +82,9 @@ std::wstring ChoiceText(unsigned index) {
         case 2: return c.browser ? L"Library browser: shown" : L"Library browser: hidden";
         case 3: { const wchar_t* sizes[] = {L"Compact", L"Normal", L"Big mode plus", L"Big mode"};
             return L"Window size: " + std::wstring(sizes[(int)c.size]); }
-        default: return L"Window layout";
+        case 4: return L"Window layout";
+        case 5: return L"Album cover size: " + std::to_wstring(c.coverSize) + L" px";
+        default: return L"Column browser height: " + std::to_wstring(c.browserHeight) + L" px";
     }
 }
 
@@ -100,6 +106,8 @@ static void SaveStartupDefaults(const Choices& choices, unsigned selected) {
     if (selected & kDefaultBrowser) g.settings.defaultBrowserVisible = choices.browser;
     if (selected & kDefaultSize) g.settings.defaultSize = choices.size;
     if (selected & kDefaultLayout) g.settings.defaultLayout = choices.layout;
+    if (selected & kDefaultCoverSize) { g.settings.defaultCoverSize = choices.coverSize; g.settings.coverSize = choices.coverSize; }
+    if (selected & kDefaultBrowserHeight) { g.settings.defaultBrowserHeight = choices.browserHeight; g.settings.browserHeight = choices.browserHeight; }
     SaveSettings();
 }
 

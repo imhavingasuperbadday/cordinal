@@ -1304,6 +1304,38 @@ bool Engine::WaveformPeaks(uint8_t* out, size_t buckets) const {
     return true;
 }
 
+bool Engine::WaveformBands(float* energy, size_t buckets) const {
+    if (!energy || !buckets || buckets > 4096) return false;
+    std::fill_n(energy, buckets * kMoodBands, 0.0f);
+    Impl& d = *impl_;
+    std::lock_guard<std::mutex> lock(d.ringMx);
+    unsigned rate = d.rate.load();
+    if (!rate || !d.cap || !d.writePos) return false;
+    uint64_t end = std::min(d.out.PlayedPosition(), d.writePos);
+    uint64_t frames = std::max(1u, rate / 4), first = end > frames ? end - frames : 0;
+    uint64_t oldest = std::max<uint64_t>(d.waveStart, d.writePos > d.cap ? d.writePos - d.cap : 0);
+    first = std::max(first, oldest);
+    if (end <= first) return false;
+    // One bucket's frames at a time, contiguous in the ring, through one split that runs on across
+    // the window so the filters stay settled.
+    MoodSplit split;
+    split.Begin(rate);
+    for (size_t b = 0; b < buckets; ++b) {
+        const int64_t base = (int64_t)end - (int64_t)frames;  // before the track's start early on
+        uint64_t from = (uint64_t)std::max<int64_t>((int64_t)first, base + (int64_t)(frames * b / buckets));
+        uint64_t to = (uint64_t)std::max<int64_t>((int64_t)from, base + (int64_t)(frames * (b + 1) / buckets));
+        if (to <= from) continue;
+        double sums[kMoodBands] = {};
+        for (uint64_t at = from; at < to;) {
+            size_t slot = (size_t)(at % d.cap), count = (size_t)std::min<uint64_t>(to - at, d.cap - slot);
+            split.Add(d.ring.data() + slot * 2, count, sums);
+            at += count;
+        }
+        for (int band = 0; band < kMoodBands; ++band) energy[b * kMoodBands + band] = (float)(sums[band] / (to - from));
+    }
+    return true;
+}
+
 size_t Engine::Scope(float* out, size_t frames) const {
     Impl& d = *impl_;
     std::lock_guard<std::mutex> lock(d.scopeMx);

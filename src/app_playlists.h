@@ -56,6 +56,8 @@ int ViewButtonWidth(int i);
 StringPool::Handle Split1(StringPool::Handle h);
 void CreateLibView(HWND parent);
 void LibViewRebuild();
+// Sets the covers' tile size (96-DPI pixels) for this session and relayouts the view.
+void LibViewSetCoverSize(int pixels);
 void LibViewInvalidate();
 void LibViewForgetCovers(const std::vector<TrackId>& ids);  // their covers changed on disk
 void LibViewBusyTick(bool any);

@@ -353,6 +353,7 @@ bool RequestPeaks(TrackId id, Peaks& peaks, uint32_t& request);
 bool LiveWaveformShown();
 bool LiveFountainShown();
 bool DrawWaveform(const Rect& r, double frac, const Palette& p);
+void DrawMoodCell(const Rect& cell, TrackId id, const Palette& p);  // the Mood column
 void DrawSection(const Rect& r, double duration, const Palette& p);
 double TrackDuration();
 void DrawBand(const Palette& p);

@@ -17,8 +17,12 @@ transform/quantizer constants follow the formats' specifications.
 Windows supplies WASAPI, Direct2D, DirectWrite, WinHTTP, the UCRT and other system components;
 Windows builds use its image loader instead of stb_image.
 
-Release packing uses [UPX](https://upx.github.io/) 5.2.1, downloaded and hash-checked by
-`tools/pack-release.ps1`. It is a build tool and its unmodified stub is used.
+The Windows release is packed by cdpack (`cdpack/`), cordinal's own packer, decoder and loader. It
+contains no UPX code; it is GPL-2.0-or-later (`cdpack/COPYING`), and `cdpack/PROVENANCE.md` records
+its sources. Building it needs LLVM-MinGW's clang and Python 3.14, which release CI downloads at
+pinned versions; neither is part of the player. `build.bat stock-nrv` packs with
+[UPX](https://upx.github.io/) 5.2.1 instead, downloaded and hash-checked by `tools/pack-release.ps1`,
+with its unmodified stub.
 
 New dependencies must have GPL-3.0-or-later-compatible licenses and be recorded here and in
 `src/third_party/README.md`.

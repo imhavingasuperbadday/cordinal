@@ -353,6 +353,8 @@ void SavePreferences() {
     IniWrite(L"Window", L"DefaultSize", std::to_wstring((int)g.defaultSize));
     IniWrite(L"Window", L"DefaultMiniPlayer", g.defaultMiniPlayer ? L"1" : L"0");
     WriteSavedTheme(g.defaultTheme);  // a pack theme by name, beside its built-in fallback
+    IniWrite(L"Library", L"CoverSize", std::to_wstring(g.defaultCoverSize));
+    IniWrite(L"Library", L"BrowserHeight", std::to_wstring(g.defaultBrowserHeight));
     IniWrite(L"Player", L"Volume", std::to_wstring(g.volumePercent));
     IniWrite(L"Player", L"LastAudibleVolume", std::to_wstring(g.lastAudibleVolume));
     IniWrite(L"Player", L"Shuffle", std::to_wstring(g.shuffle));
@@ -470,9 +472,20 @@ void LoadPreferences() {
     g.volumePercent = std::clamp(IniInt(L"Player", L"Volume", 80), 0, 100);
     g.lastAudibleVolume = g.volumePercent > 0 ? g.volumePercent :
         std::clamp(IniInt(L"Player", L"LastAudibleVolume", 80), 1, 100);
-    // Skip-aware shuffle, radio, output, ReplayGain, effects, conversion and the view toggles. The
-    // reverb amount is not the old ReverbMix key: its 8-30% amounts were too faint to hear.
+    // Skip-aware shuffle, radio, output, ReplayGain, effects, conversion and the view toggles.
     LoadTweaks();
+    // Session-only rates: the registry's Speed/Tempo rows are legacy-loaded, so the engine always
+    // starts at normal speed and tempo however the last session ended.
+    g.speed = g.tempo = 1;
+    g.engine.SetSpeed(1);
+    g.engine.SetTempo(1);
+    // The LibView cover size and the column browser's height: the live copies start from the
+    // approved startup defaults in the profile. A change stays in the session until the startup
+    // review keeps it, exactly as a layout change does.
+    g.defaultCoverSize = std::clamp(IniInt(L"Library", L"CoverSize", 160), 80, 300);
+    g.coverSize = g.defaultCoverSize;
+    g.defaultBrowserHeight = std::clamp(IniInt(L"Library", L"BrowserHeight", 150), 60, 2000);
+    g.browserHeight = g.defaultBrowserHeight;
     for (auto& [token, info] : g.tokens) info.radioNext = UINT32_MAX;
     // Settings from before the single model kept a Mode (0 = off); any other mode means on.
     g.rgOn = IniInt(L"ReplayGain", L"Enabled", IniInt(L"ReplayGain", L"Mode", 1) != 0) != 0;

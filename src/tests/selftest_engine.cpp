@@ -967,6 +967,30 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
                         : L"quiet live bars animate in both 26 px bands with fixed progress";
                     batch.Next(motionText);
                     Check(motion.Passed(), L"%ls%ls", motionText, motion.failed.c_str());
+                    // The live moodbar: the heard audio's bands reach the seek bar, which the stripe
+                    // then fills from edge to edge instead of drawing bars around the center line.
+                    g.liveFountain = false; g.themeMode = ThemeMode::Dark; g.layout.player = Dock::Top;
+                    std::array<float, 256 * kMoodBands> bands{};
+                    const bool heard = g.engine.WaveformBands(bands.data(), 256) &&
+                                       std::any_of(bands.begin(), bands.end(), [](float e) { return e > 0; });
+                    const int savedStyle = g.seekStyle;
+                    auto covered = [&](int style) {
+                        g.seekStyle = style;
+                        for (int frame = 0; frame < 3; ++frame) {  // the live scale settles on its first frame
+                            Pump(33);
+                            DrawWaveform(dc, {0, 0, 120, 26}, {4, 0, 116, 26}, 0.001);
+                        }
+                        GdiFlush();
+                        const auto* px = (const uint32_t*)pixels;
+                        const uint32_t background = px[0];
+                        return (int)std::count_if(px, px + 120 * 26, [&](uint32_t c) { return c != background; });
+                    };
+                    const int bars = covered(kSeekWaveform), stripe = covered(kSeekMoodbar);
+                    g.seekStyle = savedStyle;
+                    batch.Next(L"the live moodbar colours the seek bar from the audio being heard");
+                    Check(heard && stripe > bars && stripe > 110 * 20,
+                          L"the live moodbar colours the seek bar from the audio being heard (bands %d, bars %d px, "
+                          L"stripe %d px)", (int)heard, bars, stripe);
                 }
                 if (old) SelectObject(dc, old);
                 if (bitmap) DeleteObject(bitmap);

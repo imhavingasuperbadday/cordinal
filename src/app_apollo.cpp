@@ -385,6 +385,9 @@ void SaveApollo() {
     IniWrite(L"Apollo", L"RebarOpacity", std::to_wstring(ap.opacity));
 }
 
+// The opacity table is shared with the Preferences rows (kOpacities is the menu's own list).
+// It is defined outside the anonymous namespace so the header's extern links it.
+
 void Relayout() {
     Layout();
     RedrawWindow(g.hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
@@ -788,6 +791,18 @@ void ListTheme(bool on) {
 }
 
 }  // namespace
+
+const int ApolloOpacityTable[5] = {20, 40, 60, 80, 100};
+// The Preferences rows read the saved keys rather than the window's cached state, so they answer
+// for the profile even before the Apollo window exists (and after another profile was loaded).
+bool ApolloAnalyzer() { return IniInt(L"Apollo", L"Analyzer", 1) != 0; }
+bool ApolloScope() { return IniInt(L"Apollo", L"Oscilloscope", 1) != 0; }
+int ApolloSkin() { return std::clamp(IniInt(L"Apollo", L"Rebar", 0), 0, kSkins); }
+int ApolloOpacity() { return std::clamp(IniInt(L"Apollo", L"RebarOpacity", 40), 0, 100); }
+void SetApolloAnalyzer(bool on) { ap.analyzer = on; SaveApollo(); g.engine.SetScope(ap.on && (ap.analyzer || ap.scope)); }
+void SetApolloScope(bool on) { ap.scope = on; SaveApollo(); g.engine.SetScope(ap.on && (ap.analyzer || ap.scope)); }
+void SetApolloSkin(int skin) { ap.skin = std::clamp(skin, 0, kSkins); SaveApollo(); }
+void SetApolloOpacity(int opacity) { ap.opacity = std::clamp(opacity, 0, 100); SaveApollo(); }
 
 void ApolloSync() {
     bool on = ApolloMode() && g.hwnd && g.list;

@@ -395,6 +395,18 @@ bool PickColor(Rgb current, Rgb& out) {
 
 // [Waveform]: Left (the shared style; legacy key), Motion, DeltaruneColors, Glow, Black, and <Position>Played /
 // <Position>Unplayed as RRGGBB (empty: the theme's).
+// The Preferences rows (app_tweaks.cpp) read and write the same state as the Waveform submenu.
+int WaveStyleIndex() { return (int)look.style; }
+void SetWaveStyle(int style) { look.style = (WaveStyle)std::clamp(style, 0, (int)WaveStyle::Count - 1); SaveLook(); FountainWake(); InvalidateRect(g.seek, nullptr, FALSE); }
+bool WaveMoving() { return look.motion; }
+bool WaveDeltaruneColors() { return look.drColors; }
+bool WaveGlow() { return look.glow; }
+bool WaveBlack() { return look.black; }
+void SetWaveMoving(bool on) { look.motion = on; SaveLook(); FountainWake(); InvalidateRect(g.seek, nullptr, FALSE); }
+void SetWaveDeltaruneColors(bool on) { look.drColors = on; SaveLook(); FountainWake(); InvalidateRect(g.seek, nullptr, FALSE); }
+void SetWaveGlow(bool on) { look.glow = on; SaveLook(); FountainWake(); InvalidateRect(g.seek, nullptr, FALSE); }
+void SetWaveBlack(bool on) { look.black = on; SaveLook(); FountainWake(); InvalidateRect(g.seek, nullptr, FALSE); }
+
 void LoadWaveLook() {
     look.style = (WaveStyle)std::clamp(IniInt(L"Waveform", L"Left", (int)WaveStyle::DarkFountain), 0, (int)WaveStyle::Count - 1);
     look.motion = IniInt(L"Waveform", L"Motion", 1) != 0;
@@ -618,6 +630,16 @@ Rgb DockRest() { return g.size == ViewSize::Normal ? dockRest[(int)g.layout.play
 
 }  // namespace
 
+int WaveStyleIndex() { return 2; }  // the theme is out of this build: the style has no effect
+void SetWaveStyle(int) {}
+bool WaveMoving() { return true; }
+bool WaveDeltaruneColors() { return true; }
+bool WaveGlow() { return true; }
+bool WaveBlack() { return true; }
+void SetWaveMoving(bool) {}
+void SetWaveDeltaruneColors(bool) {}
+void SetWaveGlow(bool) {}
+void SetWaveBlack(bool) {}
 void LoadWaveLook() {
     const wchar_t* names[] = {L"Top", L"Bottom", L"Left", L"Right"};
     auto color = [](const std::wstring& key) {

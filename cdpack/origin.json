@@ -1,0 +1,64 @@
+{
+  "repository": "https://github.com/upx/upx",
+  "local_branch": "a local research branch",
+  "commit": "f63f010171c59600a1f781f2a6032f86719cfd24",
+  "files": [
+    {
+      "path": "cdpack/CMakeLists.txt",
+      "sha256": "aa87ca91b231ef4de859c5171c3956ec90e925d06f9a5e828f177e187884f3d3"
+    },
+    {
+      "path": "cdpack/PORTING.md",
+      "sha256": "0c172e86632222b9a8f565ed9642321ab66841988c77978b0f626322b24c0162"
+    },
+    {
+      "path": "cdpack/PROVENANCE.md",
+      "sha256": "686aefa63b18e97082f3df6ffd6ce558c1b340cec84f2c37bf39b2c1d42685fd"
+    },
+    {
+      "path": "cdpack/spec.md",
+      "sha256": "98a37b7080ba5efb75fb53f0890d35c432dc2372dae53e7f62233aba15e6f5e7"
+    },
+    {
+      "path": "cdpack/src/decoder/stream.h",
+      "sha256": "0ef3ba64730ee10f63cd2104e5f48ab311b31856a1285bfef1cccc69a4b8a175"
+    },
+    {
+      "path": "cdpack/src/filter.h",
+      "sha256": "bd29f1de4fd39cffa0620a35464e2c99f363526a36f6fcf49c210de7e2763688"
+    },
+    {
+      "path": "cdpack/src/format.h",
+      "sha256": "c5502d352d4961121353e9c4a151b6d19f3d36e2d080346a1f4ba693aa81cbdf"
+    },
+    {
+      "path": "cdpack/src/stub/loader.cpp",
+      "sha256": "0079691d68b7e6b93a4a97a41cf8f695cb5b609ca4c35f978bfa5c948a792494"
+    },
+    {
+      "path": "cdpack/tests/decode.cpp",
+      "sha256": "9f5234e5d0f91b2e708ef9ba5bae6579a4cc34b09f8cbf053b03436ced2930e0"
+    },
+    {
+      "path": "cdpack/tests/dll_host.cpp",
+      "sha256": "7dfc9f03111a435cefaf011888e302751be0c99bf37f5e16eccc9f24943e6366"
+    },
+    {
+      "path": "cdpack/tests/pe_fixture.cpp",
+      "sha256": "fd750a7dc7e59b07207d44c37700e0bcc2b37bab6e0e6746b83b95ab3063e4a9"
+    },
+    {
+      "path": "cdpack/tests/verify.py",
+      "sha256": "f287f5cd0f33469917b16345ddb95420693d9a7a57a2e0563d78d8842bd8f926"
+    },
+    {
+      "path": "cdpack/tools/build.ps1",
+      "sha256": "3aaf5849fe80cc1b63e516057edf503658f29156631462ceaa615352e49185bd"
+    },
+    {
+      "path": "cdpack/tools/pack.py",
+      "sha256": "b5c0398acfffc8a1740b5e00767ae9629cee51be322cbc2abe5a6c851d8ab764"
+    }
+  ],
+  "source_commit_is_local_research": true
+}

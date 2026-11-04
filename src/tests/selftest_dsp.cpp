@@ -1007,7 +1007,8 @@ std::string MakeSineWav(double seconds, double silentFrom) {
 
 // Waveform peaks: bucket values for a half-scale sine, silence and partial ranges, the CUE-track
 // mapping (a track's waveform is a range of the file, asked for in file seconds), the streaming
-// accumulator, and the disk cache's store/read-by-key behaviour.
+// accumulator, and the disk cache's store/read-by-key behaviour. The moodbar rides along: its bands,
+// its colours, and the same cache and CUE checks.
 void TestPeaks(const std::wstring& scratch) {
     testlog::Batch batch;
     const std::wstring sine = scratch + L"\\peaks_sine.wav", half = scratch + L"\\peaks_half.wav",
@@ -1040,7 +1041,116 @@ void TestPeaks(const std::wstring& scratch) {
 
     ok = ComputePeaks(silent, 0, 0, p, nullptr);
     span(p, 0, kPeakBuckets, lo, hi);
-    Check(ok && hi == 0, L"PEAKS silence is all zero (max %d)", hi);
+    const bool moodSilent = std::all_of(&p.mood[0][0], &p.mood[0][0] + sizeof(p.mood), [](uint8_t v) { return v == 0; });
+    Check(ok && hi == 0 && moodSilent, L"PEAKS silence is all zero (max %d, moodbar %ls)", hi, moodSilent ? L"zero" : L"lit");
+
+    // The moodbar's bands: a 100 Hz tone is bass, an 8 kHz tone treble, and a track that moves
+    // from one to the other turns its hue from one side of the accent to the other.
+    auto tones = [](std::initializer_list<double> hz, Peaks& out) {
+        std::vector<float> audio;
+        for (double f : hz)
+            for (int i = 0; i < 48000 * 2; ++i) {
+                float x = (float)(0.5 * std::sin(2 * 3.14159265358979 * f * i / 48000.0));
+                audio.push_back(x), audio.push_back(x);
+            }
+        PeakAccumulator a;
+        a.Begin(audio.size() / 2, 48000);
+        a.Add(audio.data(), audio.size() / 2);
+        return a.Finish(out);
+    };
+    auto bandMean = [](const Peaks& peaks, int band, int from, int to) {
+        int sum = 0;
+        for (int i = from; i < to; ++i) sum += peaks.mood[band][i];
+        return sum / (to - from);
+    };
+    Peaks low{}, high{}, sweep{};
+    batch.Next(L"MOODBAR splits bass and treble, colours by balance and keeps an accent's contrast");
+    ok = tones({100}, low) && tones({8000}, high) && tones({100, 8000}, sweep);
+    const int lowBass = bandMean(low, kMoodBass, 0, kPeakBuckets), lowMid = bandMean(low, kMoodMid, 0, kPeakBuckets),
+              lowTreble = bandMean(low, kMoodTreble, 0, kPeakBuckets);
+    const int highBass = bandMean(high, kMoodBass, 0, kPeakBuckets), highMid = bandMean(high, kMoodMid, 0, kPeakBuckets),
+              highTreble = bandMean(high, kMoodTreble, 0, kPeakBuckets);
+    Check(ok && lowBass >= 240 && lowMid + 50 < lowBass && lowTreble < 30 && highTreble >= 240 &&
+              highMid + 20 < highTreble && highBass < 30,
+          L"MOODBAR 100 Hz is bass (bass %d, mid %d, treble %d) and 8 kHz treble (bass %d, mid %d, treble %d)",
+          lowBass, lowMid, lowTreble, highBass, highMid, highTreble);
+    const float center = MoodCenter(sweep);
+    const MoodTone bassy = MoodOf(sweep, 20, kPeakBuckets / 2 - 20, center),
+                   bright = MoodOf(sweep, kPeakBuckets / 2 + 20, kPeakBuckets - 20, center);
+    Check(bassy.bright < -0.9f && bright.bright > 0.9f && bassy.level > 0.8f && bright.level > 0.8f &&
+              MoodOf(p, 0, kPeakBuckets, 0).level == 0,
+          L"MOODBAR tones follow the balance: bass half %.2f, treble half %.2f, silence level %.2f", bassy.bright,
+          bright.bright, MoodOf(p, 0, kPeakBuckets, 0).level);
+    testlog::Cases contrast;
+    for (const Palette* palette : {&LightPalette(), &DarkPalette()}) {
+        MoodPalette moods;
+        moods.Make(palette->accent, palette->surface);
+        for (int h = 0; h < MoodPalette::kHues; ++h) {
+            Rgb loud = moods.played[h][MoodPalette::kLevels - 1];
+            contrast.Add(Contrast(loud, palette->surface) >= 3 && moods.rest[h][MoodPalette::kLevels - 1] != loud,
+                         palette->dark ? L"dark" : L"light");
+        }
+        contrast.Add(moods.Pick({0.5f, 1}, true) != moods.Pick({-0.5f, 1}, true) &&
+                         moods.Pick({0, 0}, true) == palette->surface, L"pick");
+    }
+    Check(contrast.Passed(), L"MOODBAR full-level colours keep 3:1 on the player and differ when unplayed%ls",
+          contrast.failed.c_str());
+
+    // Spectrum puts the bands on red, green and blue; Vivid spreads its hues further than Theme.
+    MoodPalette spectrum, vivid, theme;
+    spectrum.Make(0xE04050, 0x202020, kMoodSpectrum);
+    vivid.Make(0xE04050, 0x202020, kMoodVivid);
+    theme.Make(0xE04050, 0x202020, kMoodTheme);
+    MoodTone bassTone, trebleTone;
+    bassTone.level = trebleTone.level = 1;
+    bassTone.bands[kMoodBass] = trebleTone.bands[kMoodTreble] = 1;
+    bassTone.bright = -1, trebleTone.bright = 1;
+    const Rgb red = spectrum.Pick(bassTone, true), blue = spectrum.Pick(trebleTone, true);
+    auto hueGap = [](Rgb a, Rgb b) {
+        int d = 0;
+        for (int shift : {16, 8, 0}) d += std::abs((int)(a >> shift & 0xFF) - (int)(b >> shift & 0xFF));
+        return d;
+    };
+    const bool spectrumOk = red == 0xFF0000 && blue == 0x0000FF;
+    // Vivid passes through more colours on its way from bass to treble than Theme does.
+    auto travel = [&](const MoodPalette& m) {
+        int sum = 0;
+        for (int h = 1; h < MoodPalette::kHues; ++h)
+            sum += hueGap(m.played[h - 1][MoodPalette::kLevels - 1], m.played[h][MoodPalette::kLevels - 1]);
+        return sum;
+    };
+    const bool spread = travel(vivid) > travel(theme);
+    // Every theme hue keeps its saturation: no table entry comes out gray (the conversion's sectors).
+    bool colourful = true;
+    for (int h = 0; h < MoodPalette::kHues; ++h) {
+        Rgb c = theme.played[h][MoodPalette::kLevels - 1];
+        int most = std::max({c >> 16 & 0xFF, c >> 8 & 0xFF, c & 0xFF}), least = std::min({c >> 16 & 0xFF, c >> 8 & 0xFF, c & 0xFF});
+        colourful = colourful && most - least > 80;
+    }
+    Check(spectrumOk && spread && colourful,
+          L"MOODBAR colour schemes: spectrum bass %06x, treble %06x; vivid spreads further; theme stays saturated %d",
+          red, blue, (int)colourful);
+
+    // The live scale follows the music: a bass tone lights the bass, and a following silence leaves
+    // nothing lit. Smoothing turns a step into a ramp and keeps a flat run flat.
+    LiveMood live;
+    Peaks liveOut{};
+    std::vector<float> liveEnergy(64 * kMoodBands);
+    for (int i = 0; i < 64; ++i) liveEnergy[i * kMoodBands + kMoodBass] = 0.1f, liveEnergy[i * kMoodBands + kMoodTreble] = 1e-6f;
+    live.Scale(liveEnergy.data(), 64, liveOut);
+    const bool liveLit = liveOut.mood[kMoodBass][10] == 255 && liveOut.mood[kMoodTreble][10] < 40;
+    std::fill(liveEnergy.begin(), liveEnergy.end(), 0.0f);
+    live.Scale(liveEnergy.data(), 64, liveOut);
+    const bool liveQuiet = liveOut.mood[kMoodBass][10] == 0;
+    Peaks step{}, soft{};
+    std::fill(step.v + kPeakBuckets / 2, step.v + kPeakBuckets, (uint8_t)200);
+    std::fill(&step.mood[kMoodMid][0], &step.mood[kMoodMid][0] + kPeakBuckets, (uint8_t)90);
+    SmoothPeaks(step, soft, 8);
+    const int mid = kPeakBuckets / 2;
+    const bool ramp = soft.v[mid - 20] == 0 && soft.v[mid + 20] == 200 && soft.v[mid] > 60 && soft.v[mid] < 140 &&
+                      soft.v[mid - 4] < soft.v[mid] && soft.mood[kMoodMid][0] == 90 && soft.mood[kMoodMid][kPeakBuckets - 1] == 90;
+    Check(liveLit && liveQuiet && ramp, L"MOODBAR live scale (lit %d, quiet %d) and smoothing (step at %d)",
+          (int)liveLit, (int)liveQuiet, (int)soft.v[mid]);
 
     testlog::Cases ranges;
     batch.Next(L"PEAKS ranges preserve their samples, reject reversed bounds and cancellation, and CUE "
@@ -1074,7 +1184,8 @@ void TestPeaks(const std::wstring& scratch) {
                    ComputePeaks(track2, from, to, trackPeaks, nullptr);
     bool fileOk = ComputePeaks(cueAudio, from, to, filePeaks, nullptr);
     span(trackPeaks, 0, kPeakBuckets, lo, hi);
-    Check(trackOk && fileOk && hi == 0 && std::memcmp(trackPeaks.v, filePeaks.v, kPeakBuckets) == 0,
+    Check(trackOk && fileOk && hi == 0 && std::memcmp(trackPeaks.v, filePeaks.v, kPeakBuckets) == 0 &&
+              std::memcmp(trackPeaks.mood, filePeaks.mood, sizeof(filePeaks.mood)) == 0,
           L"PEAKS CUE track [%.3f, %.3f): track=%d file=%d max %d (expected both decoded, max 0)", from, to,
           (int)trackOk, (int)fileOk, hi);
 
@@ -1175,7 +1286,9 @@ void TestPeaks(const std::wstring& scratch) {
     StopPeaks();
     StartPeaks(nullptr, 0, cache);
     hit = GetPeaks(sine, size, time, 0, 0, got, req);
-    Check(hit && std::memcmp(got.v, sinePeaks.v, kPeakBuckets) == 0, L"PEAKS cache round trip: a new service reads the disk copy");
+    Check(hit && std::memcmp(got.v, sinePeaks.v, kPeakBuckets) == 0 &&
+              std::memcmp(got.mood, sinePeaks.mood, sizeof(got.mood)) == 0 && sinePeaks.mood[kMoodMid][300] > 200,
+          L"PEAKS cache round trip: a new service reads the disk copy, moodbar included");
     Peaks ranged{};
     std::memset(ranged.v, 77, sizeof(ranged.v));
     StorePeaks(sine, size, time, 0.5, 1.0, ranged);
@@ -1183,6 +1296,17 @@ void TestPeaks(const std::wstring& scratch) {
     Check(hit && std::memcmp(got.v, ranged.v, kPeakBuckets) == 0, L"PEAKS stored range is returned by its own key");
     hit = GetPeaks(sine, size + 1, time, 0, 0, got, req);
     Check(!hit, L"PEAKS a changed file size is a cache miss");
+    // The Mood column asks from memory only: a miss queues the track, and its result then answers.
+    Peaks listed{};
+    bool listMiss = !ListPeaks(half, size + 50, time, 0, 0, listed), listHit = false;
+    for (int i = 0; i < 500 && !listHit; ++i) {
+        Sleep(20);
+        listHit = ListPeaks(half, size + 50, time, 0, 0, listed);
+    }
+    Check(listMiss && listHit && std::memcmp(listed.v, halfPeaks.v, kPeakBuckets) == 0 &&
+              std::memcmp(listed.mood, halfPeaks.mood, sizeof(listed.mood)) == 0,
+          L"PEAKS the Mood column queues a missing track and then reads it from memory (miss %d, hit %d)",
+          (int)listMiss, (int)listHit);
     StopPeaks();
 
     // The actual next song is warmed behind the current one, so the hand-off can read its

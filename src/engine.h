@@ -121,6 +121,9 @@ public:
     // attacks and falls smoothly. Pre-volume, empty while stopped, held by the clock on pause.
     // No decoder work or history allocation; the whole-track waveform keeps its own peak scale.
     bool WaveformPeaks(uint8_t* out, size_t buckets) const;
+    // The same window's bass, mid and treble energy (mean squares, kMoodBands per bucket, peaks.h
+    // MoodSplit) for the live moodbar; zero while nothing is heard.
+    bool WaveformBands(float* energy, size_t buckets) const;
     // Takes this token's pending problem, or the oldest when token is 0.
     std::wstring TakeError(unsigned long long token = 0);
 

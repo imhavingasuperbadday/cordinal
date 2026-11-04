@@ -1,4 +1,4 @@
-# Builds cordinal for Windows (build.bat) and natively for Linux (CMake, in an Arch Linux
+# Builds cordinal for Windows (build.bat cdpack, packed by cdpack/) and natively for Linux (CMake, in an Arch Linux
 # container, the distribution the Linux build targets), checks the Linux installer, and
 # publishes a GitHub release for a v* tag, or for a push to main whose version (src/cordinal.rc)
 # has no release yet.
@@ -20,9 +20,34 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The release player is packed by cordinal's own packer (cdpack/). Its loader is built with
+      # LLVM-MinGW's clang and its encoder and verifier run on Python; neither ships in the player.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        id: python
+        with:
+          python-version: '3.14'
+      - name: Install LLVM-MinGW
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'llvm-mingw.zip'
+          Invoke-WebRequest -Uri 'https://github.com/mstorsjo/llvm-mingw/releases/download/20260616/llvm-mingw-20260616-ucrt-x86_64.zip' -OutFile $zip
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          if ($hash -ne 'b9b68a4d276e16fa25802aaba458e4638f64b3884c290aaccdc2d87083b6ca35') { throw "LLVM-MinGW hash $hash" }
+          & "$env:SystemRoot\System32\tar.exe" -x -f $zip -C $env:RUNNER_TEMP
+          if ($LASTEXITCODE) { throw 'Extracting LLVM-MinGW failed.' }
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value (Join-Path $env:RUNNER_TEMP 'llvm-mingw-20260616-ucrt-x86_64\bin')
       - name: Build
         shell: cmd
-        run: build.bat stock-nrv
+        env:
+          CDPACK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: build.bat cdpack
+      # cdpack's own suite: decoder corpora, corruption, and packed EXE/DLL fixtures (TLS, threads,
+      # relocation) run on this runner's Windows.
+      - name: Check the packer
+        shell: pwsh
+        run: |
+          & '${{ steps.python.outputs.python-path }}' cdpack/tests/verify.py --tools build/tools/cdpack
+          if ($LASTEXITCODE) { throw 'cdpack checks failed.' }
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows

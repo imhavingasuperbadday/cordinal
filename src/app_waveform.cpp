@@ -7,6 +7,14 @@
 // failed. The split between the two shades is the playhead. At every player position the waveform
 // can be a Dark Fountain instead (app_fountain.cpp).
 //
+// The moodbar styles (Preferences, Seek bar style) colour the bar by its sound instead (peaks.h
+// MoodPalette, in the Moodbar colours scheme): a flat stripe, or the waveform's own columns, for the
+// whole song or the live audio. Their colours can't carry the state any more, so what has played is
+// drawn at full strength, the rest dimmed and desaturated, and the whole song's bar gets a playhead
+// line for the state: the text color while playing, amber paused, red for a warning. Smooth seek bar
+// softens the whole song's outline and blends its colours. Waveform reflection can drop the mirrored
+// lower half, leaving the upper half alone, for the waveform and moodbar styles alike.
+//
 // One state block owns everything the bar needs for the track it shows: the peaks (or the request
 // still computing them), the chapters, and what the last paint looked like. The entry points only
 // move that block forward, so a paint can never mix two tracks.
@@ -189,6 +197,18 @@ private:
     std::vector<Overflow> overflow_;
     int used_ = 0;
 };
+
+// The playhead line over a moodbar: the state color (paused, a warning) or else the text color, which
+// stands out from every mood hue.
+COLORREF MoodPlayhead() {
+    const bool warn = g.playing != kNone && (g_lib[g.playing].Failed() || g.stopAfterCurrent);
+    return warn || g.engine.Paused() ? WaveformPlayedColor() : Ref(P().text);
+}
+
+// How far the Smooth seek bar setting blurs the whole song, in buckets either side (of 600).
+constexpr int kSmoothRadius = 8;
+
+Rgb RgbOf(COLORREF c) { return (Rgb)GetRValue(c) << 16 | (Rgb)GetGValue(c) << 8 | GetBValue(c); }
 
 uint32_t DibColor(COLORREF c) {
     return (uint32_t)GetRValue(c) << 16 | (uint32_t)GetGValue(c) << 8 | GetBValue(c);
@@ -382,7 +402,8 @@ int WaveformPeak(double from, double to) {
 // peak as a fainter edge around it (a live waveform has peaks only), shaded by WaveShades. The
 // split between the two colors is the playhead; a live waveform draws no line of its own. With
 // waveforms enabled, the spotlight, big mode and the vertical bar keep flat columns until peaks
-// are known.
+// are known. The moodbar styles color each column by its sound instead and draw the playhead.
+// Waveform reflection off drops the lower half, for the whole song and the live waveform alike.
 bool DrawWaveform(HDC dc, const RECT& rc, const RECT& channel, double frac) {
     if (!g.waveform) return false;
     const bool live = LiveWaveformShown();
@@ -401,7 +422,36 @@ bool DrawWaveform(HDC dc, const RECT& rc, const RECT& channel, double frac) {
     }
     int right = left + width;
     int cy = (rc.top + rc.bottom) / 2, half = std::max(1, (int)(rc.bottom - rc.top) / 2 - S(2));
-    int col = std::max(2, S(2)), step = col + std::max(1, S(1));
+    // The whole song's peaks, softened when Smooth seek bar is on.
+    const bool song = !live && known && g_wave.ready;
+    static Peaks smoothed;
+    if (song && g.smoothSeek) SmoothPeaks(g_wave.peaks, smoothed, kSmoothRadius);
+    const Peaks& peaks = song && g.smoothSeek ? smoothed : g_wave.peaks;
+    // A track whose peaks are still unknown has no mood yet; a live waveform takes its colours from
+    // the audio being heard.
+    const int style = live || song ? std::clamp(g.seekStyle, 0, kSeekStyles - 1) : kSeekWaveform;
+    const bool mood = style != kSeekWaveform, stripe = style == kSeekMoodbar;
+    static MoodPalette moods;
+    static Peaks liveMood;
+    static LiveMood liveScale;
+    float center = 0;
+    if (mood) {
+        const int scheme = std::clamp(g.moodColors, 0, kMoodColorSchemes - 1);
+        if (!moods.For(P().accent, RgbOf(bg), scheme)) moods.Make(P().accent, RgbOf(bg), scheme);
+        if (live) {
+            std::array<float, 256 * kMoodBands> bands{};
+            g.engine.WaveformBands(bands.data(), livePeaks.size());
+            center = liveScale.Scale(bands.data(), (int)livePeaks.size(), liveMood);
+        } else {
+            center = MoodCenter(peaks);
+        }
+    }
+    // Live audio counts as heard unless its progress is split off (Full color for live waveforms).
+    const bool allPlayed = live && g.fullLiveWaveform;
+    // The reflection is the dimmer lower half; off draws the upper half alone.
+    const bool reflect = g.waveReflection;
+    // The stripe's columns touch; the waveform's stand a pixel apart.
+    int col = std::max(2, S(2)), step = stripe ? col : col + std::max(1, S(1));
     int playedX = left + (int)(width * frac);
     const WaveShades playedShades = ShadesOf(WaveformPlayedColor(), bg), restShades = ShadesOf(WaveformRestColor(), bg);
     // The rows of band `i`, counted from the center line out.
@@ -413,48 +463,68 @@ bool DrawWaveform(HDC dc, const RECT& rc, const RECT& channel, double frac) {
             // when columns are wide. The last column is clipped to the channel, leaving no gap there.
             int end = std::min(x + col, right);
             int v = 0, rms = 0;
+            BucketSpan buckets{0, 1};
             if (live) {
-                int first = std::clamp((x - left) * 256 / width, 0, 255);
-                int last = std::clamp((x + step - left) * 256 / width, first + 1, 256);
-                for (int b = first; b < last; ++b) v = std::max<int>(v, livePeaks[b]);
+                buckets.first = std::clamp((x - left) * 256 / width, 0, 255);
+                buckets.last = std::clamp((x + step - left) * 256 / width, buckets.first + 1, 256);
+                for (int b = buckets.first; b < buckets.last; ++b) v = std::max<int>(v, livePeaks[b]);
                 rms = v;
-            } else if (known && g_wave.ready) {
-                BucketSpan buckets = BucketsFor(x, x + step, left, width);
+            } else if (song) {
+                buckets = BucketsFor(x, x + step, left, width);
                 for (int b = buckets.first; b < buckets.last; ++b) {
-                    v = std::max<int>(v, g_wave.peaks.v[b]);
-                    rms = std::max<int>(rms, g_wave.peaks.rms[b]);
+                    v = std::max<int>(v, peaks.v[b]);
+                    rms = std::max<int>(rms, peaks.rms[b]);
                 }
             }
             int h = std::max(1, half * v / 255), body = std::clamp(half * rms / 255, 1, h);
-            const WaveShades& s = x < playedX ? playedShades : restShades;
+            const bool played = allPlayed || x < playedX;
+            const WaveShades* shades = played ? &playedShades : &restShades;
+            WaveShades moodShades;
+            if (mood) {
+                const MoodTone tone = live ? MoodOf(liveMood, buckets.first, buckets.last, center, (int)livePeaks.size())
+                                           : MoodOf(peaks, buckets.first, buckets.last, center);
+                COLORREF c = Ref(moods.Pick(tone, played));
+                if (stripe) {
+                    fills.Add(c, {x, cy - half, end, reflect ? cy + half + 1 : cy + 1});
+                    continue;
+                }
+                moodShades = ShadesOf(c, bg);
+                shades = &moodShades;
+            }
+            const WaveShades& s = *shades;
             // Upper half: row cy - d for d = 0..h. Lower half, the reflection: row cy + 1 + d for d < h.
             for (int i = 0; i < WaveShades::kBands && bandStart(i) <= body; ++i) {
                 int d0 = bandStart(i), d1 = std::min(body + 1, bandStart(i + 1));
                 fills.Add(s.body[i], {x, cy - d1 + 1, end, cy - d0 + 1});
-                fills.Add(s.mirror[i], {x, cy + 1 + d0, end, cy + 1 + std::min(d1, body)});
+                if (reflect) fills.Add(s.mirror[i], {x, cy + 1 + d0, end, cy + 1 + std::min(d1, body)});
             }
             if (h > body) {
                 fills.Add(s.edge, {x, cy - h, end, cy - body});
-                fills.Add(s.mirrorEdge, {x, cy + 1 + body, end, cy + 1 + h});
+                if (reflect) fills.Add(s.mirrorEdge, {x, cy + 1 + body, end, cy + 1 + h});
             }
             // Fractional end pixels keep a quiet note's smooth fall visible in the slim player.
             int alpha = live ? std::max(0, half * v - h * 255) : 0;
             if (alpha) {
                 int tip = std::min(WaveShades::kBands - 1, h * WaveShades::kBands / span);
                 fills.Add(Mix(bg, s.body[tip], alpha * 100 / 255), {x, cy - h - 1, end, cy - h});
-                fills.Add(Mix(bg, s.mirror[tip], alpha * 100 / 255), {x, cy + h + 1, end, cy + h + 2});
+                if (reflect) fills.Add(Mix(bg, s.mirror[tip], alpha * 100 / 255), {x, cy + h + 1, end, cy + h + 2});
             }
         }
     };
-    // Live frames are the only ones that arrive 30 times a second. A transformed DC, such as the
-    // upright seek bar's transpose, keeps the GDI path below.
-    if (live && PlainTarget(dc)) {
+    const int headWidth = std::max(2, S(2));
+    const RECT head{playedX - headWidth / 2, cy - half, playedX - headWidth / 2 + headWidth,
+                    reflect ? cy + half + 1 : cy + 1};
+    // Live frames are the only ones that arrive 30 times a second; a moodbar's many colors would
+    // overflow WaveFills' groups. A transformed DC, such as the upright seek bar's transpose, keeps
+    // the GDI path below.
+    if ((live || mood) && PlainTarget(dc)) {
         const int w = rc.right - rc.left, h = rc.bottom - rc.top;
         static WaveDib dib;
         if (w > 0 && h > 0 && dib.Ready(dc, w, h)) {
             GdiFlush();  // the previous frame's BitBlt may still be reading these bits
             PixelFills pixels(dib.bits, w, h, rc.left, rc.top, bg);
             columns(pixels);
+            if (mood && !live) pixels.Add(MoodPlayhead(), head);
             dib.Present(dc, rc);
             return true;
         }
@@ -464,7 +534,42 @@ bool DrawWaveform(HDC dc, const RECT& rc, const RECT& channel, double frac) {
     fills.Reset();
     columns(fills);
     fills.Flush(dc);
+    if (mood && !live) FillSolid(dc, head, MoodPlayhead());
     return true;
+}
+
+// The Mood column: the track's moodbar as a stripe in the Moodbar colours scheme, one row of
+// pixels stretched to the cell's height. The peaks come from ListPeaks' memory, so a paint never
+// decodes; a track not known yet leaves its cell empty until OnListPeaksReady.
+void DrawMoodCell(HDC dc, const RECT& cell, TrackId id, COLORREF bg) {
+    std::wstring path;
+    double start, end;
+    if (!PeakSource(id, path, start, end)) return;
+    const Track& t = g_lib[id];
+    static Peaks peaks;
+    if (!ListPeaks(path, t.fileSize, t.fileTime, start, end, peaks)) return;
+    const RECT r{cell.left + S(4), cell.top + S(3), cell.right - S(4), cell.bottom - S(3)};
+    const int w = r.right - r.left;
+    if (w <= 0 || r.bottom <= r.top) return;
+    static MoodPalette moods;
+    const int scheme = std::clamp(g.moodColors, 0, kMoodColorSchemes - 1);
+    const Rgb background = RgbOf(WindowBg());
+    if (!moods.For(P().accent, background, scheme)) moods.Make(P().accent, background, scheme);
+    const float center = MoodCenter(peaks);
+    static std::vector<uint32_t> row;
+    row.resize(w);
+    for (int x = 0; x < w; ++x) {
+        BucketSpan buckets = BucketsFor(x, x + 1, 0, w);
+        MoodTone tone = MoodOf(peaks, buckets.first, buckets.last, center);
+        row[x] = DibColor(tone.level > 0 ? Ref(moods.Pick(tone, true)) : bg);  // silence shows the row
+    }
+    BITMAPINFO info{};
+    info.bmiHeader = {sizeof(BITMAPINFOHEADER), w, 1, 1, 32, BI_RGB};
+    StretchDIBits(dc, r.left, r.top, w, r.bottom - r.top, 0, 0, w, 1, row.data(), &info, DIB_RGB_COLORS, SRCCOPY);
+}
+
+void OnListPeaksReady() {
+    if (g.list && SubitemOf(kColMood) >= 0) InvalidateRect(g.list, nullptr, FALSE);
 }
 
 }  // namespace app

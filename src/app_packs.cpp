@@ -454,11 +454,13 @@ bool PackCommand(int id) {
         std::vector<int> types{0};
         std::wstring missing;
         for (const std::wstring& name : s.columnSets[id - IDM_PACK_COLSET_BASE]->show) {
+            // A pack's own column key comes first, so a pack column keeps its name when cordinal
+            // later gains a column with the same title (Mood).
             int found = -1;
+            for (int t = kColumnCount; t < ColumnTotal() && found < 0; ++t)
+                if (_wcsicmp(PackColumnName(t).substr(PackColumnName(t).find(L'/') + 1).c_str(), name.c_str()) == 0) found = t;
             for (int t = 1; t < ColumnTotal() && found < 0; ++t)
-                if (_wcsicmp(plain(ColumnAt(t).name).c_str(), name.c_str()) == 0 ||
-                    (t >= kColumnCount && _wcsicmp(PackColumnName(t).substr(PackColumnName(t).find(L'/') + 1).c_str(), name.c_str()) == 0))
-                    found = t;
+                if (_wcsicmp(plain(ColumnAt(t).name).c_str(), name.c_str()) == 0) found = t;
             if (found > 0 && std::find(types.begin(), types.end(), found) == types.end()) types.push_back(found);
             else if (found < 0) missing += (missing.empty() ? L"" : L", ") + name;
         }

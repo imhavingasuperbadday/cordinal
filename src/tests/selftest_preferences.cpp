@@ -229,11 +229,48 @@ void TestWaveform(const std::wstring& scratch) {
     }
     Peaks completed{};
     std::memset(completed.v, 128, sizeof(completed.v));
+    std::memset(completed.mood, 128, sizeof(completed.mood));
     StorePeaks(g_lib.Path(g.playing), 0, 0, 0, 0, completed);
     SendMessageW(g.seek, TBM_SETPOS, FALSE, 625);
     OnCommand(IDM_THEME_BASE + (int)ThemeMode::Dark, 0, nullptr);
     Check(waiting && WaveformShown() && SendMessageW(g.seek, TBM_GETPOS, 0, 0) == 625,
           L"switching from Apollo refreshes a pending waveform from completed cache data without replay");
+    {
+        // The reflection is the dimmer lower half; off keeps the upper half alone. Both the plain
+        // waveform and the flat moodbar stripe follow the setting.
+        g.waveReflection = true;
+        WaveformTrackChanged();
+        Pump(5000, [] { return WaveformPeak(0, 1) > 0; });
+        HDC dc = CreateCompatibleDC(nullptr);
+        BITMAPINFO info{};
+        info.bmiHeader = {sizeof(BITMAPINFOHEADER), 120, -26, 1, 32, BI_RGB};
+        void* pixels = nullptr;
+        HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+        HGDIOBJ old = bitmap ? SelectObject(dc, bitmap) : nullptr;
+        const RECT rc{0, 0, 120, 26}, channel{4, 0, 116, 26};
+        const int style = g.seekStyle;
+        testlog::Cases reflections;
+        bool drawn = dc && bitmap && !LiveWaveformShown();
+        for (int painted : {kSeekWaveform, kSeekMoodbar}) {
+            g.seekStyle = painted;
+            for (bool mirror : {true, false}) {
+                g.waveReflection = mirror;
+                const bool ok = drawn && DrawWaveform(dc, rc, channel, 0.5) &&
+                                (GetPixel(dc, 10, 12) != PlayerColor()) &&
+                                (GetPixel(dc, 10, 14) != PlayerColor()) == mirror;
+                reflections.Add(ok, std::wstring(painted == kSeekWaveform ? L"waveform " : L"moodbar ") +
+                                       (mirror ? L"reflection" : L"upper half only"));
+            }
+        }
+        batch.Next(L"waveform reflection draws the mirrored lower half or the upper half alone");
+        Check(reflections.Passed(), L"waveform and moodbar reflection can be turned off without losing the upper half%ls",
+              reflections.failed.c_str());
+        g.seekStyle = style;
+        g.waveReflection = true;
+        if (old) SelectObject(dc, old);
+        if (bitmap) DeleteObject(bitmap);
+        if (dc) DeleteDC(dc);
+    }
     testlog::Cases sizes;
     for (ViewSize size : {ViewSize::Compact, ViewSize::Normal, ViewSize::Spotlight, ViewSize::Big}) {
         g.size = size;
@@ -493,7 +530,31 @@ void TestTweaks(const std::wstring& scratch) {
     }
     batch.Next(L"tweak keys are unique and sane, every row has a default and an empty profile loads them all");
     Check(unique && sane && Tweaks().size() >= 20, L"tweak keys are unique and every row has a default in range and help");
-    Check(defaults, L"an empty profile loads every tweak at its default");
+    // The session-rate rows (speed, tempo) start where the engine does: normal.
+    bool rates = false;
+    if (const Tweak* speed = FindTweak("playback.speed"))
+        if (const Tweak* tempo = FindTweak("playback.tempo")) {
+            g.speed = 1.5;
+            g.tempo = 1.25;
+            LoadPreferences();
+            rates = g.speed == 1 && g.tempo == 1 && !TweakChanged(*speed) && !TweakChanged(*tempo);
+        }
+    std::wstring changedRows;
+    for (const Tweak& t : Tweaks())
+        if (!(t.flags & kTweakOutside) && TweakChanged(t))
+            changedRows += std::wstring(changedRows.empty() ? L"" : L", ") + FromUtf8(t.key);
+    Check(defaults && rates && changedRows.empty(), L"an empty profile loads every tweak at its default%ls",
+          changedRows.empty() ? L"" : (L" (changed: " + changedRows + L")").c_str());
+    // The reverb preset row mirrors the slider: at the slider's default it sits at 40%.
+    if (const Tweak* preset = FindTweak("effects.reverb_mix_choice")) {
+        const float live = g.reverb.mix;
+        g.reverb.mix = 0.4f;
+        batch.Next(L"the reverb preset row matches the slider's default amount");
+        Check(preset->get() == 1 && !TweakChanged(*preset), L"the reverb preset row sits at 40 percent when the slider does");
+        g.reverb.mix = live;
+    } else {
+        Check(false, L"Preferences lists the reverb preset");
+    }
     {
         // Online sources stay off until chosen; each row names what it sends, and choices survive a reload.
         // A chosen cover is shown in cordinal only unless asked otherwise, so no file changes by default.
@@ -552,6 +613,32 @@ void TestTweaks(const std::wstring& scratch) {
         Check(tall && g.bandWaveSize == 0 && IniRead(L"Window", L"BandWaveSize", L"") == L"0",
               L"top/bottom waveform size persists and can return to the layout's own size");
     } else Check(false, L"View preferences includes Top/bottom waveform size");
+    if (const Tweak* style = FindTweak("view.seek_style")) {
+        SetTweak(*style, kSeekMoodWaveform); g.seekStyle = 0; LoadPreferences();
+        bool mood = g.seekStyle == kSeekMoodWaveform && style->def == 0 && !wcscmp(TweakPage(*style), L"View");
+        SetTweak(*style, kSeekMoodbar); g.seekStyle = 0; LoadPreferences();
+        bool stripe = g.seekStyle == kSeekMoodbar;
+        SetTweak(*style, kSeekWaveform); g.seekStyle = kSeekMoodbar; LoadPreferences();
+        Check(mood && stripe && g.seekStyle == kSeekWaveform && IniRead(L"Window", L"SeekStyle", L"") == L"0",
+              L"seek bar style starts as the waveform and persists every moodbar style");
+    } else Check(false, L"View preferences includes Seek bar style");
+    const Tweak* colors = FindTweak("view.mood_colors");
+    const Tweak* smooth = FindTweak("view.smooth_seek");
+    if (colors && smooth) {
+        SetTweak(*colors, kMoodSpectrum); SetTweak(*smooth, 1); g.moodColors = 0; g.smoothSeek = false; LoadPreferences();
+        bool kept = g.moodColors == kMoodSpectrum && g.smoothSeek && colors->def == 0 && smooth->def == 0;
+        SetTweak(*colors, kMoodTheme); SetTweak(*smooth, 0); LoadPreferences();
+        Check(kept && g.moodColors == kMoodTheme && !g.smoothSeek && IniRead(L"Window", L"MoodColors", L"") == L"0",
+              L"moodbar colours and the smooth seek bar persist both ways");
+    } else Check(false, L"View preferences includes Moodbar colours and Smooth seek bar");
+    if (const Tweak* reflection = FindTweak("view.wave_reflection")) {
+        SetTweak(*reflection, 0); g.waveReflection = true; LoadPreferences();
+        const bool off = !g.waveReflection && reflection->def == 1 && !wcscmp(TweakPage(*reflection), L"View");
+        SetTweak(*reflection, 1); g.waveReflection = false; LoadPreferences();
+        Check(off && g.waveReflection && IniRead(L"Window", L"WaveReflection", L"") == L"1",
+              L"waveform reflection starts on and persists both ways");
+    } else Check(false, L"View preferences includes Waveform reflection");
+    Check(ColumnAt(kColMood).name == std::wstring(L"Mood"), L"the track list offers a Mood column");
     if (const Tweak* gpu = FindTweak("view.gpu_drawing")) {
         const bool offByDefault = gpu->def == 0 && !wcscmp(TweakPage(*gpu), L"View");
         SetTweak(*gpu, 1); g.gpuDrawing = false; LoadPreferences();
@@ -560,6 +647,56 @@ void TestTweaks(const std::wstring& scratch) {
         Check(offByDefault && kept && !g.gpuDrawing,
               L"drawing with the graphics card starts off, and the choice persists both ways");
     } else Check(false, L"View preferences includes Draw with the graphics card");
+    {
+        // The rows for features that had no registry entry: layout parts and the two library sizes
+        // apply to the session at once (startup defaults approves them), while speed, Apollo's
+        // bands and foobar2000's Album List view write their feature's own keys.
+        const Tweak* dock = FindTweak("window.player_dock");
+        const Tweak* transport = FindTweak("window.transport");
+        const Tweak* cover = FindTweak("library.cover_size");
+        const Tweak* height = FindTweak("library.browser_height");
+        const Tweak* speed = FindTweak("playback.speed");
+        const Tweak* apollo = FindTweak("view.apollo_analyzer");
+        const Tweak* apolloFade = FindTweak("view.apollo_opacity");
+        const Tweak* foobarView = FindTweak("view.foobar_view");
+        const MainLayout live = g.layout, approved = g.defaultLayout;
+        const int liveCover = g.coverSize, liveHeight = g.browserHeight;
+        const double liveSpeed = g.speed;
+        if (Ready(dock && transport && cover && height && speed && apollo && apolloFade && foobarView,
+                  L"Preferences lists the layout, library size and per-theme rows")) {
+            bool words = TweakText(*dock, 2) == L"Left" && TweakText(*apolloFade, 4) == L"100%";
+            g.layout = g.defaultLayout = MainLayout{};
+            SetTweak(*dock, 2);
+            SetTweak(*transport, 0);
+            const bool liveLayout = g.layout.player == Dock::Left && !g.layout.transport;
+            const bool notApproved = g.defaultLayout == MainLayout{};
+            SetTweak(*cover, 220);
+            SetTweak(*height, 240);
+            const bool sizes = g.coverSize == 220 && g.browserHeight == 240 && g.defaultCoverSize == 160 &&
+                               g.defaultBrowserHeight == 150;
+            SetTweak(*speed, 5);
+            const bool rate = std::fabs(g.speed - 1.25) < 1e-9 && IniRead(L"Player", L"Speed", L"").empty();
+            SetTweak(*apollo, 0);
+            SetTweak(*apolloFade, 4);
+            const bool apolloKeys = IniInt(L"Apollo", L"Analyzer", -1) == 0 && IniInt(L"Apollo", L"RebarOpacity", -1) == 100;
+            SetTweak(*foobarView, 2);
+            const bool foobarKey = IniInt(L"Foobar", L"AlbumListView", -1) == 2;
+            batch.Next(L"the layout, library size and per-theme rows change the session or their own keys");
+            Check(words && liveLayout && notApproved && sizes && rate && apolloKeys && foobarKey,
+                  L"layout rows stay in the session, size rows stay unapproved, and theme rows write their keys");
+            SetTweak(*dock, (double)(int)live.player);
+            SetTweak(*transport, live.transport);
+            SetTweak(*cover, liveCover);
+            SetTweak(*height, liveHeight);
+            SetTweak(*speed, (double)(std::find(std::begin(kSpeeds), std::end(kSpeeds), liveSpeed) - std::begin(kSpeeds)));
+            SetTweak(*apollo, 1);
+            SetTweak(*apolloFade, 1);
+            SetTweak(*foobarView, 0);
+            g.layout = live;
+            g.defaultLayout = approved;
+            ApplyMainLayout();
+        }
+    }
 
     const Tweak* resume = FindTweak("playback.resume");
     const Tweak* preamp = FindTweak("replaygain.preamp");
@@ -1041,6 +1178,7 @@ void TestPersonalization(const std::wstring& scratch) {
     SetLibraryMode(LibraryMode::Tracks);
     ToggleBrowser();
     g.browserHeight = 213;
+    g.coverSize = 200;
     g.panes[0].field = BrowseField::Composer;
     g.panes[1].field = BrowseField::Folder;
     SaveBrowserSettings();
@@ -1062,9 +1200,9 @@ void TestPersonalization(const std::wstring& scratch) {
     ULONGLONG changed = GetTickCount64();
     ObservePreferenceChanges(changed);
     batch.Next(L"presentation changes collect into one review after five settled minutes");
-    Check(PendingStartupDefaults() == kAllStartupDefaults && !PreferenceSuggestionsDue(changed + 20000) &&
-              PreferenceSuggestionsDue(changed + 300000),
-          L"presentation changes collect into one review after five settled minutes");
+    Check(PendingStartupDefaults() != 0 && (PendingStartupDefaults() & kDefaultCoverSize) && (PendingStartupDefaults() & kDefaultBrowserHeight) &&
+              PendingStartupDefaults() == kAllStartupDefaults && !PreferenceSuggestionsDue(changed + 20000) && PreferenceSuggestionsDue(changed + 300000),
+          L"presentation changes collect into one review after five settled minutes (pending %u)", PendingStartupDefaults());
     StartupPreferences choices = CaptureStartupPreferences();
     SaveStartupDefaults(choices, 0);
     SaveViewSize();
@@ -1095,6 +1233,9 @@ void TestPersonalization(const std::wstring& scratch) {
           L"a review saves its displayed snapshot even if the live choice changes later");
     g.themeMode = choices.theme;
     SaveStartupDefaults(choices, kAllStartupDefaults);
+    Check(g.defaultCoverSize == 200 && g.defaultBrowserHeight == 213 && IniInt(L"Library", L"CoverSize", -1) == 200 &&
+              IniInt(L"Library", L"BrowserHeight", -1) == 213 && g.coverSize == 200 && g.browserHeight == 213,
+          L"cover size and browser height are offered as startup defaults and survive saving");
     Check(IniInt(L"Layout", L"Player", -1) == (int)Dock::Left &&
               IniInt(L"Window", L"Theme", -1) == (int)chosen &&
               IniInt(L"Player", L"Volume", -1) == 0 && IniInt(L"Player", L"LastAudibleVolume", -1) == 37 &&

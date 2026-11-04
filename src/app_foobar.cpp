@@ -495,6 +495,17 @@ void FoobarTheme() {
     ArrangePanel();
 }
 
+// The Preferences row (app_tweaks.cpp) reads and writes the same [Foobar] key as the panel's combo.
+int FoobarView() {
+    return std::clamp(IniInt(L"Foobar", L"AlbumListView", 0), 0, (int)std::size(kViews) - 1);
+}
+void SetFoobarView(int view) {
+    int wanted = std::clamp(view, 0, (int)std::size(kViews) - 1);
+    IniWrite(L"Foobar", L"AlbumListView", std::to_wstring(wanted));
+    if (fb.view) SendMessageW(fb.view, CB_SETCURSEL, wanted, 0);
+    if (fb.on) BuildTree();
+}
+
 void FoobarSync() {
     bool on = FoobarMode() && g.hwnd && g.list;
     if (on) CreatePanel();
@@ -803,6 +814,10 @@ void DrawFoobarCover(HDC dc, int row, RECT rc) {
 namespace app {
 
 bool FoobarMode() { return false; }
+int FoobarView() { return std::clamp(IniInt(L"Foobar", L"AlbumListView", 0), 0, 3); }
+void SetFoobarView(int view) {
+    IniWrite(L"Foobar", L"AlbumListView", std::to_wstring(std::clamp(view, 0, 3)));
+}
 void FoobarSync() {}
 void LayoutFoobar(HDWP&, RECT) {}
 void PaintFoobarChrome(HDC) {}

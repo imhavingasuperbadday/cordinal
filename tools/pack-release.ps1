@@ -213,6 +213,12 @@ foreach ($name in @('cordinal.exe', 'cordinal-test.exe')) {
     if ($LASTEXITCODE -ne 0) { throw "UPX compression failed: $name" }
     & $upx -t $packedPath
     if ($LASTEXITCODE -ne 0) { throw "UPX integrity check failed: $name" }
+    if (!$useResearch -and !$Cdpack -and $name -eq 'cordinal.exe') {
+        # build.ps1 relinks the release player until stock UPX can filter its calls (Test-CallFilter);
+        # say so plainly when it still could not, since the packed size alone hides why.
+        $info = (& $upx --fileinfo $packedPath 2>&1) -join "`n"
+        if ($info -match 'filter 0x00/') { Write-Warning "Stock UPX packed $name without its call filter (docs/size.md)." }
+    }
     if ($ExperimentalAddresses) {
         # The new format must reject in stock before decoding; the research host restores it below.
         $rejectedPath = Join-Path $stage ($name + '.stock-rejected')

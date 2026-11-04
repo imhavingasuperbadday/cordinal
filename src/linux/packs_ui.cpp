@@ -640,7 +640,9 @@ void ApplyPackColumnSet(size_t index) {
     if (index >= g_columnSets.size()) return;
     std::vector<int> columns{0};
     for (const auto& name : g_columnSets[index]->show) {
-        for (int c = 1; c < ColumnTotal(); ++c) {
+        // A pack's own column keys come first, then cordinal's titles, as on Windows (app_packs.cpp).
+        for (int i = 1; i < ColumnTotal(); ++i) {
+            const int c = (i - 1 + ui::kColumnCount - 1) % (ColumnTotal() - 1) + 1;
             const std::wstring& key = c < ui::kColumnCount ? std::wstring(ColumnAt(c).name) : g_columns[c - ui::kColumnCount].key;
             if (_wcsicmp(key.c_str(), name.c_str()) == 0 &&
                 std::find(columns.begin(), columns.end(), c) == columns.end()) {
@@ -675,10 +677,10 @@ void ApplyPackLayout(size_t index) {
     };
     const wchar_t* keys[] = {L"transport", L"order", L"waveform", L"times", L"volume",
         L"now_playing", L"tabs", L"search", L"view_buttons", L"status_bar"};
-    g.settings.layout = WindowLayout{};
+    g.settings.defaultLayout = WindowLayout{};
     for (unsigned i = 0; i < std::size(keys); ++i)
-        if (!flag(keys[i], true)) g.settings.layout.hiddenParts |= 1u << i;
-    auto& l = g.settings.layout;
+        if (!flag(keys[i], true)) g.settings.defaultLayout.hiddenParts |= 1u << i;
+    auto& l = g.settings.defaultLayout;
     l.points = flag(L"points", false);
     l.waveOwnRow = flag(L"waveform_row", false);
     l.largeCover = flag(L"large_cover", false);
@@ -697,6 +699,9 @@ void ApplyPackLayout(size_t index) {
         for (int i = 0; i < 3; ++i)
             if (_wcsicmp(size->c_str(), sizes[i]) == 0) l.waveSize = i;
     }
+    // The live layout is the pack's from here on: customizing it afterwards is the user's own
+    // change, exactly as it is after a Preferences edit.
+    g.settings.layout = l;
     g.settings.bandWaveSize = 0;
     SaveSettings();
     g.redraw = true;

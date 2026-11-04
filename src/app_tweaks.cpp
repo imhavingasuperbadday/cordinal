@@ -6,6 +6,7 @@
 #include "app.h"
 
 #include "metadata_fetch.h"
+#include "peaks.h"
 #include "musicbrainz.h"
 #include "listenbrainz.h"
 
@@ -27,10 +28,49 @@ const wchar_t* const kCoverSaveNames[] = {L"Save as cover.jpg in the album folde
 const wchar_t* const kBandWaveSizes[] = {L"Use layout size", L"Slim (26 px)", L"Medium (44 px)", L"Tall (72 px)",
                                        L"Extra tall (108 px)", L"Largest (144 px)"};
 static_assert(std::size(kBandWaveSizes) == std::size(ui::kBandWaveHeights));
+const wchar_t* const kSeekStyleNames[] = {L"Waveform", L"Moodbar", L"Mood waveform"};
+const wchar_t* const kMoodColorNames[] = {L"Theme", L"Vivid", L"Spectrum"};
+static_assert(std::size(kSeekStyleNames) == kSeekStyles && std::size(kMoodColorNames) == kMoodColorSchemes);
 static_assert(std::size(kLoopNames) == 4 && std::size(kReverbNames) == (size_t)ReverbPreset::Count &&
               std::size(kUndoNames) == std::size(kConvertMemoryDays) &&
               std::size(kSavingNames) == (size_t)PreferenceSaving::Count &&
               std::size(kCoverSourceNames) == online::kCoverSources);
+
+// Choice lists for the non-tweak features below, in the same order the menus offer them.
+const wchar_t* const kSpeedNames[] = {L"0.5x", L"0.75x", L"0.9x", L"Normal (1x)", L"1.1x", L"1.25x", L"1.5x", L"2x"};
+const wchar_t* const kTempoNames[] = {L"0.75x", L"0.9x", L"Normal (1x)", L"1.1x", L"1.25x", L"1.5x", L"1.75x", L"2x"};
+const wchar_t* const kReverbMixNames[] = {L"25%", L"40%", L"55%", L"75%"};
+const wchar_t* const kWaveStyleNames[] = {L"Bars", L"Fountain bars", L"Dark Fountain (DELTARUNE)"};
+const wchar_t* const kSkinNames[] = {L"Capacala", L"Butterflies", L"Letters", L"Notes", L"None"};
+const wchar_t* const kOpacityNames[] = {L"20%", L"40%", L"60%", L"80%", L"100%"};
+const wchar_t* const kFoobarViewNames[] = {L"By folder structure", L"By artist/album", L"By album", L"By genre"};
+const wchar_t* const kDockNames[] = {L"Top", L"Bottom", L"Left", L"Right"};
+const wchar_t* const kWaveSizeNames[] = {L"Slim", L"Medium", L"Tall"};
+static_assert(std::size(kSpeedNames) == std::size(kSpeeds) && std::size(kTempoNames) == std::size(kTempos) &&
+              std::size(kReverbMixNames) == std::size(kReverbMixes) && std::size(kWaveStyleNames) == 3 &&
+              std::size(kSkinNames) == 5 && std::size(kOpacityNames) == 5 && std::size(kFoobarViewNames) == 4 &&
+              std::size(kDockNames) == (size_t)Dock::Count && std::size(kWaveSizeNames) == 3);
+template <size_t N>
+int IndexOf(const double (&values)[N], double value) {
+    for (size_t i = 0; i < N; ++i)
+        if (std::fabs(values[i] - value) < 0.001) return (int)i;
+    return -1;
+}
+template <size_t N>
+int IndexOf(const float (&values)[N], float value) {
+    for (size_t i = 0; i < N; ++i)
+        if (std::fabs((double)values[i] - (double)value) < 0.001) return (int)i;
+    return -1;
+}
+template <size_t N>
+int IndexOf(const int (&values)[N], int value) {
+    for (size_t i = 0; i < N; ++i)
+        if (values[i] == value) return (int)i;
+    return -1;
+}
+int OpacityIndex(int opacity) {
+    return IndexOf(ApolloOpacityTable, opacity);
+}
 
 // Grouped as the window shows them. Keys are permanent: renaming one would orphan saved values.
 const Tweak kTweaks[] = {
@@ -124,6 +164,28 @@ const Tweak kTweaks[] = {
      L"Big, compact and side players keep their own sizes.", TweakType::Choice, 0, 5, 0,
      [] { return (double)g.bandWaveSize; }, [](double v) { g.bandWaveSize = (int)v; }, 0,
      [] { Layout(); WaveformTrackChanged(true); WaveformTick(); }, kBandWaveSizes},
+    {"view.seek_style", L"Window", L"SeekStyle", L"Seek bar style",
+     L"How the seek bar looks, for the whole song and the live waveform alike. Moodbar colours "
+     L"each moment by its sound: one way for bass, the other for treble, brighter when louder. "
+     L"Mood waveform keeps the waveform's shape in those colours.",
+     TweakType::Choice, 0, 2, 0, [] { return (double)g.seekStyle; }, [](double v) { g.seekStyle = (int)v; }, 0,
+     [] { if (g.seek) InvalidateRect(g.seek, nullptr, FALSE); }, kSeekStyleNames},
+    {"view.mood_colors", L"Window", L"MoodColors", L"Moodbar colours",
+     L"The moodbar's colours: turned from the theme's accent, the whole colour wheel, or red for "
+     L"bass, green for mids and blue for treble.",
+     TweakType::Choice, 0, 2, 0, [] { return (double)g.moodColors; }, [](double v) { g.moodColors = (int)v; }, 0,
+     [] { if (g.seek) InvalidateRect(g.seek, nullptr, FALSE); if (g.list) InvalidateRect(g.list, nullptr, FALSE); },
+     kMoodColorNames},
+    {"view.smooth_seek", L"Window", L"SmoothSeek", L"Smooth seek bar",
+     L"Rounds off the whole song's outline and blends its moodbar colours into each other. "
+     L"The live waveform keeps its detail.", TweakType::Bool, 0, 1, 0,
+     [] { return (double)g.smoothSeek; }, [](double v) { g.smoothSeek = v != 0; }, 0,
+     [] { if (g.seek) InvalidateRect(g.seek, nullptr, FALSE); }},
+    {"view.wave_reflection", L"Window", L"WaveReflection", L"Waveform reflection",
+     L"Mirrors the seek bar below its center line. Turn off to draw only the upper half, for the "
+     L"waveform and both moodbar styles alike.", TweakType::Bool, 0, 1, 1,
+     [] { return (double)g.waveReflection; }, [](double v) { g.waveReflection = v != 0; }, 0,
+     [] { if (g.seek) InvalidateRect(g.seek, nullptr, FALSE); }},
     {"view.group_albums", L"Window", L"GroupAlbums", L"Group tracks by album",
      L"The track list shows a header with the cover above each album's tracks.", TweakType::Bool, 0, 1, 1,
      [] { return (double)g.groupAlbums; }, [](double v) { g.groupAlbums = v != 0; }, IDM_GROUP_ALBUMS},
@@ -245,6 +307,175 @@ const Tweak kTweaks[] = {
      L"Turns on the web server whenever cordinal starts, so a paired phone or browser can play your library.",
      TweakType::Bool, 0, 1, 0, [] { return (double)WebStartsWithCordinal(); },
      [](double v) { SetWebStartsWithCordinal(v != 0); }, 0, ApplyWebStart},
+    // Non-tweak features: session rates, sizes and menu-only windows, exposed as preferences so
+    // every persistent choice is one home (Preferences). Speed, tempo and the reverb-mix preset
+    // are session rates: their rows name the menu's own command and never reach the file (see
+    // SaveTweaks). Everything else reuses the ini key its feature already writes.
+    {"playback.speed", L"Player", L"Speed", L"Playback speed",
+     L"Lasts for this session only: the next start is always normal speed, so a podcast's rate "
+     L"cannot carry over to tomorrow's album. Pitch follows.",
+     TweakType::Choice, 0, (float)std::size(kSpeedNames) - 1, 3,
+     [] { return (double)std::max(0, IndexOf(kSpeeds, g.speed)); },
+     [](double v) { if (int i = (int)v; i >= 0 && i < (int)std::size(kSpeedNames)) SetSpeed(kSpeeds[i]); },
+     IDM_SPEED_BASE, nullptr, kSpeedNames, nullptr, kTweakRadio | kTweakLegacyLoad},
+    {"playback.tempo", L"Player", L"Tempo", L"Playback tempo",
+     L"Lasts for this session only, like speed. Pitch stays.",
+     TweakType::Choice, 0, (float)std::size(kTempoNames) - 1, 2,
+     [] { return (double)std::max(0, IndexOf(kTempos, g.tempo)); },
+     [](double v) { if (int i = (int)v; i >= 0 && i < (int)std::size(kTempoNames)) SetTempo(kTempos[i]); },
+     IDM_TEMPO_BASE, nullptr, kTempoNames, nullptr, kTweakRadio | kTweakLegacyLoad},
+    {"effects.reverb_mix_choice", L"Effects", L"ReverbMixChoice", L"Reverb amount (preset)",
+     L"The menu's preset amounts, as an alternative to dragging the slider: 25%, 40%, 55% or 75%. "
+     L"The first preset at or below the slider is shown.",
+     TweakType::Choice, 0, 3, 1,
+     [] { return (double)std::max(0, IndexOf(kReverbMixes, g.reverb.mix)); },
+     [](double v) { if (int i = (int)v; i >= 0 && i <= 3) OnCommand(IDM_REVERB_MIX_BASE + i, 0, nullptr); },
+     IDM_REVERB_MIX_BASE, nullptr, kReverbMixNames, nullptr, kTweakRadio | kTweakLegacyLoad},
+    {"library.cover_size", L"Library", L"CoverSize", L"Album cover size",
+     L"The covers' size in the Albums and Artists views, in pixels. Ctrl+wheel over the view also changes it. "
+     L"Startup defaults offers to keep it for the next start.",
+     TweakType::Float, 80, 300, 160, [] { return (double)g.coverSize; },
+     [](double v) { LibViewSetCoverSize((int)std::lround(v)); }, 0, nullptr, nullptr, L"px"},
+    {"library.browser_height", L"Library", L"BrowserHeight", L"Column browser height",
+     L"The column browser's height in pixels. Drag the splitter under it to change it, too. "
+     L"Startup defaults offers to keep it for the next start.",
+     TweakType::Float, 60, 2000, 150, [] { return (double)g.browserHeight; },
+     [](double v) { g.browserHeight = std::clamp((int)std::lround(v), 60, 2000); }, 0,
+     [] {
+         if (g.hwnd) Layout();
+     },
+     nullptr, L"px"},
+    {"view.wave_style", L"Waveform", L"Left", L"Waveform style",
+     L"How the seek bar draws: plain bars, the fountain's bars, or the Dark Fountain itself. "
+     L"Only drawn in the DELTARUNE theme.",
+     TweakType::Choice, 0, 2, 2, [] { return (double)WaveStyleIndex(); },
+     [](double v) { SetWaveStyle((int)v); }, IDM_WAVE_STYLE_BASE, nullptr, kWaveStyleNames, nullptr, kTweakRadio},
+    {"view.wave_moving", L"Waveform", L"Motion", L"Fountain moving",
+     L"The fountain keeps moving while a track plays and slows to a stop on pause, like the game.",
+     TweakType::Bool, 0, 1, 1, [] { return (double)WaveMoving(); },
+     [](double v) { SetWaveMoving(v != 0); }, IDM_WAVE_MOTION},
+    {"view.wave_deltarune_colors", L"Waveform", L"DeltaruneColors", L"Fountain colors",
+     L"The fountain's light follows DELTARUNE's hue wheel instead of the position's played color.",
+     TweakType::Bool, 0, 1, 1, [] { return (double)WaveDeltaruneColors(); },
+     [](double v) { SetWaveDeltaruneColors(v != 0); }, IDM_WAVE_DR_COLORS},
+    {"view.wave_glow", L"Waveform", L"Glow", L"Fountain glow",
+     L"The room behind the fountain in the game's colors, instead of black.",
+     TweakType::Bool, 0, 1, 1, [] { return (double)WaveGlow(); },
+     [](double v) { SetWaveGlow(v != 0); }, IDM_WAVE_GLOW},
+    {"view.wave_black", L"Waveform", L"Black", L"Black surroundings",
+     L"The fountain's backdrop is black, as in the game, instead of the bar's surface color.",
+     TweakType::Bool, 0, 1, 1, [] { return (double)WaveBlack(); },
+     [](double v) { SetWaveBlack(v != 0); }, IDM_WAVE_BLACK},
+    {"view.apollo_analyzer", L"Apollo", L"Analyzer", L"Frequency analyzer",
+     L"Apollo's frequency analyzer band under the toolbar.",
+     TweakType::Bool, 0, 1, 1, [] { return (double)ApolloAnalyzer(); },
+     [](double v) { SetApolloAnalyzer(v != 0); }, 0, [] { ApolloSync(); }, nullptr, nullptr, kTweakLegacyLoad},
+    {"view.apollo_scope", L"Apollo", L"Oscilloscope", L"Oscilloscope",
+     L"Apollo's oscilloscope band under the toolbar.",
+     TweakType::Bool, 0, 1, 1, [] { return (double)ApolloScope(); },
+     [](double v) { SetApolloScope(v != 0); }, 0, [] { ApolloSync(); }, nullptr, nullptr, kTweakLegacyLoad},
+    {"view.apollo_rebar", L"Apollo", L"Rebar", L"Apollo toolbar background",
+     L"Which of Apollo's four bitmaps the toolbar uses, or none.",
+     TweakType::Choice, 0, 4, 0, [] { return (double)ApolloSkin(); },
+     [](double v) { SetApolloSkin((int)v); }, 0, [] { ApolloSync(); }, kSkinNames, nullptr, kTweakLegacyLoad},
+    {"view.apollo_opacity", L"Apollo", L"RebarOpacity", L"Apollo toolbar opacity",
+     L"How faint the toolbar's background bitmap is, in percent. Grayed with a none background.",
+     TweakType::Choice, 0, 4, 1, [] { return (double)std::max(0, OpacityIndex(ApolloOpacity())); },
+     [](double v) { static const int kOpacities[5] = {20, 40, 60, 80, 100}; if (int i = (int)v; i >= 0 && i <= 4) SetApolloOpacity(kOpacities[i]); },
+     0, [] { ApolloSync(); }, kOpacityNames, nullptr, kTweakLegacyLoad},
+    {"view.foobar_view", L"Foobar", L"AlbumListView", L"Album List view",
+     L"How the Album List panel groups the library: by folder, by artist and album, by album, or by genre.",
+     TweakType::Choice, 0, 3, 0, [] { return (double)FoobarView(); },
+     [](double v) { SetFoobarView((int)v); }, 0, [] { FoobarSync(); }, kFoobarViewNames, nullptr, kTweakLegacyLoad},
+    // Window layout: each choice shows or hides one part of the normal window's player, or sets
+    // where it docks and how the waveform fills it. They change the live layout (g.layout) and are
+    // kept for startup by the review, like the layout menu. The section/key fields name where the
+    // same choice lives in the saved layout; SaveTweaks skips them because [Layout] Parts is one
+    // string (SaveMainLayout), not one key per part.
+    {"window.player_dock", L"Layout", L"Player", L"Player position",
+     L"Where the player sits in the normal window: top, bottom, left or right.",
+     TweakType::Choice, 0, 3, 0, [] { return (double)(int)g.layout.player; },
+     [](double v) { g.layout.player = (Dock)(int)v; }, 0, ApplyMainLayout, kDockNames},
+    {"window.wave_size", L"Layout", L"Wave", L"Waveform size",
+     L"How tall the waveform band is, or how wide the column: slim, medium or tall.",
+     TweakType::Choice, 0, 2, 0, [] { return (double)g.layout.waveSize; },
+     [](double v) { g.layout.waveSize = (uint8_t)v; }, 0, ApplyMainLayout, kWaveSizeNames},
+    {"window.wave_own_row", L"Layout", L"WaveRow", L"Waveform on its own row",
+     L"At the top or bottom, the waveform on a line of its own under the buttons.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)g.layout.waveOwnRow; },
+     [](double v) { g.layout.waveOwnRow = v != 0; }, 0, ApplyMainLayout},
+    {"window.panels_left", L"Layout", L"PanelsLeft", L"Side panels on the left",
+     L"The side panels (Up next, lyrics) take the left side instead of the right.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)g.layout.panelsLeft; },
+     [](double v) { g.layout.panelsLeft = v != 0; }, 0, ApplyMainLayout},
+    {"window.transport", L"Layout", L"PartsTransport", L"Show previous, play and next",
+     L"The transport buttons in the player.",
+     TweakType::Bool, 0, 1, 1, [] { return (double)g.layout.transport; },
+     [](double v) { g.layout.transport = v != 0; }, 0, ApplyMainLayout},
+    {"window.order", L"Layout", L"PartsOrder", L"Show shuffle and repeat",
+     L"The shuffle and repeat buttons in the player.",
+     TweakType::Bool, 0, 1, 1, [] { return (double)g.layout.order; },
+     [](double v) { g.layout.order = v != 0; }, 0, ApplyMainLayout},
+    {"window.wave", L"Layout", L"PartsWaveform", L"Show waveform seek bar",
+     L"The waveform seek bar in the player.",
+     TweakType::Bool, 0, 1, 1, [] { return (double)g.layout.wave; },
+     [](double v) { g.layout.wave = v != 0; }, 0, ApplyMainLayout},
+    {"window.times", L"Layout", L"PartsTimes", L"Show times",
+     L"The elapsed and remaining times beside the waveform.",
+     TweakType::Bool, 0, 1, 1, [] { return (double)g.layout.times; },
+     [](double v) { g.layout.times = v != 0; }, 0, ApplyMainLayout},
+    {"window.volume", L"Layout", L"PartsVolume", L"Show volume",
+     L"The volume control in the player.",
+     TweakType::Bool, 0, 1, 1, [] { return (double)g.layout.volume; },
+     [](double v) { g.layout.volume = v != 0; }, 0, ApplyMainLayout},
+    {"window.now_playing", L"Layout", L"PartsNowPlaying", L"Show now playing",
+     L"The now playing line: cover, title and artist.",
+     TweakType::Bool, 0, 1, 1, [] { return (double)g.layout.nowPlaying; },
+     [](double v) { g.layout.nowPlaying = v != 0; }, 0, ApplyMainLayout},
+    {"window.large_cover", L"Layout", L"PartsLargeCover", L"Show large cover",
+     L"A larger cover in the now playing line.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)g.layout.largeCover; },
+     [](double v) { g.layout.largeCover = v != 0; }, 0, ApplyMainLayout},
+    {"window.points", L"Layout", L"PartsPoints", L"Show level and points",
+     L"The level and points chip beside now playing.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)g.layout.points; },
+     [](double v) { g.layout.points = v != 0; }, 0, ApplyMainLayout},
+    {"window.tabs", L"Layout", L"PartsTabs", L"Show playlist tabs",
+     L"The playlist tabs above the track list.",
+     TweakType::Bool, 0, 1, 1, [] { return (double)g.layout.tabs; },
+     [](double v) { g.layout.tabs = v != 0; }, 0, ApplyMainLayout},
+    {"window.search", L"Layout", L"PartsSearch", L"Show search box",
+     L"The search box beside the playlist tabs.",
+     TweakType::Bool, 0, 1, 1, [] { return (double)g.layout.search; },
+     [](double v) { g.layout.search = v != 0; }, 0, ApplyMainLayout},
+    {"window.views", L"Layout", L"PartsViews", L"Show library view buttons",
+     L"The Library's view buttons above the track list.",
+     TweakType::Bool, 0, 1, 1, [] { return (double)g.layout.views; },
+     [](double v) { g.layout.views = v != 0; }, 0, ApplyMainLayout},
+    {"window.up_next", L"Layout", L"PartsUpNext", L"Show up next panel",
+     L"The Up next panel beside the track list.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)g.layout.upNext; },
+     [](double v) { g.layout.upNext = v != 0; }, 0, ApplyMainLayout},
+    {"window.status", L"Layout", L"PartsStatus", L"Show status bar",
+     L"The status bar at the bottom of the window.",
+     TweakType::Bool, 0, 1, 1, [] { return (double)g.layout.status; },
+     [](double v) { g.layout.status = v != 0; }, 0, ApplyMainLayout},
+    {"window.menu_bar", L"Layout", L"PartsMenuBar", L"Show menu bar",
+     L"The menu bar. When hidden, Alt or a right-click on the player still opens the menus.",
+     TweakType::Bool, 0, 1, 1, [] { return (double)g.layout.menuBar; },
+     [](double v) { g.layout.menuBar = v != 0; }, 0, ApplyMainLayout},
+    {"window.tab_counts", L"Layout", L"PartsTabCounts", L"Show track counts on tabs",
+     L"The item count after each tab's name.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)g.layout.tabCounts; },
+     [](double v) { g.layout.tabCounts = v != 0; }, 0, ApplyMainLayout},
+    {"window.status_details", L"Layout", L"PartsStatusDetails", L"Show audio details in the status bar",
+     L"ReplayGain, equalizer and output details in the status bar.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)g.layout.statusDetails; },
+     [](double v) { g.layout.statusDetails = v != 0; }, 0, ApplyMainLayout},
+    {"window.hints", L"Layout", L"PartsHints", L"Show playback hints",
+     L"How-to hints in the now playing line.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)g.layout.hints; },
+     [](double v) { g.layout.hints = v != 0; }, 0, ApplyMainLayout},
 };
 
 // The window's pages: All settings, then one per key prefix in registry order. A page may also
@@ -267,6 +498,7 @@ const Page kPages[] = {
       {IDM_RG_SCAN_ALL, L"Scan &library"}, {IDM_RG_CANCEL, L"&Cancel scan"}}},
     {"effects.", L"Effects", {{IDM_EQUALIZER, L"&Equalizer..."}}},
     {"view.", L"View", {{IDM_FORMAT, L"Title &formatting..."}}},
+    {"window.", L"Layout", {{IDM_STARTUP_DEFAULTS, L"&Startup defaults..."}}},
     {"startup.", L"Startup", {{IDM_STARTUP_DEFAULTS, L"&Startup defaults..."}}},
     {"convert.", L"Conversion", {}},
     {"scrobbling.", L"Scrobbling", {{IDM_LISTENBRAINZ, L"&Scrobbling..."}}},
@@ -678,7 +910,14 @@ LRESULT CALLBACK PreferencesProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 std::span<const Tweak> Tweaks() { return kTweaks; }
 
 bool TweakShown(const Tweak& t) {
-    return kExtraThemes || (strcmp(t.key, "view.live_fountain") && strcmp(t.key, "view.robotic_sounds"));
+    if (!kExtraThemes && (!strcmp(t.key, "view.live_fountain") || !strcmp(t.key, "view.robotic_sounds"))) return false;
+    // The fountain, Apollo and foobar rows only draw in themes this build leaves out.
+    const char* themeOnly[] = {"view.wave_style", "view.wave_moving", "view.wave_deltarune_colors",
+                               "view.wave_glow", "view.wave_black", "view.foobar_view"};
+    if (!kExtraThemes)
+        for (const char* key : themeOnly)
+            if (!strcmp(t.key, key)) return false;
+    return true;
 }
 
 const Tweak* FindTweak(std::string_view key) {
@@ -719,9 +958,23 @@ void SetTweak(const Tweak& t, double value) {
 
 // Reads each tweak as LoadPreferences always has: an integer is clamped into range, anything not a
 // finite number keeps the default.
+//
+// Rows whose value another record owns are skipped: the window.* rows are the [Layout] Parts string
+// (LoadMainLayout), the library size rows are the approved defaults in [Library], and the Apollo
+// and foobar2000 rows read and write their feature's own keys. Loading them as plain single keys
+// would split one record in two.
+static bool TweakHasOwnIniRow(const Tweak& t) {
+    const char* owned[] = {"library.cover_size", "library.browser_height", "view.apollo_analyzer",
+                           "view.apollo_scope", "view.apollo_rebar", "view.apollo_opacity", "view.foobar_view"};
+    if (!strncmp(t.key, "window.", 7)) return false;
+    for (const char* key : owned)
+        if (!strcmp(t.key, key)) return false;
+    return true;
+}
 void LoadTweaks() {
     for (const Tweak& t : kTweaks) {
         if (t.flags & (kTweakLegacyLoad | kTweakOutside)) continue;
+        if (!TweakHasOwnIniRow(t)) continue;
         double v = t.type == TweakType::Float ? IniFloat(t.section, t.iniKey, t.def)
                                               : (double)IniInt(t.section, t.iniKey, (int)t.def);
         if (!std::isfinite(v)) v = t.def;
@@ -733,6 +986,16 @@ void LoadTweaks() {
 void SaveTweaks() {
     for (const Tweak& t : kTweaks) {
         if (t.flags & kTweakOutside) continue;
+        // The layout, library-size, Apollo and foobar2000 rows are written by the record their
+        // feature owns (SaveMainLayout, SaveBrowserSettings, SaveApollo, the Album List combo), not
+        // as one key per row, so a profile never has two copies to reconcile.
+        if (!TweakHasOwnIniRow(t)) continue;
+        // Speed, tempo and the reverb-mix preset are session rates: their rows name the menu's own
+        // choice, and LoadPreferences starts the next session at normal. Writing them would imply
+        // they persist, so they stay out of the file like the engine's own session state.
+        if (t.flags & kTweakLegacyLoad && (!strcmp(t.key, "playback.speed") || !strcmp(t.key, "playback.tempo") ||
+                                           !strcmp(t.key, "effects.reverb_mix_choice")))
+            continue;
         double v = t.get();
         IniWrite(t.section, t.iniKey, t.type == TweakType::Float ? F2S((float)v) : std::to_wstring((int)v));
     }

@@ -3,12 +3,12 @@ rem Builds cordinal. The real work is in tools\build.ps1 (read that file for the
 rem the compile groups and every flag); this launcher exists because cmd is the supported entry point.
 rem
 rem   build.bat              local experimental packed build (with the address filter)
-rem   build.bat stock-nrv    stock UPX release build
+rem   build.bat stock-nrv    stock UPX packed build
 rem   build.bat unpacked     development build, plain executables, no UPX download
 rem   build.bat full         ignore the incremental record and rebuild everything
 rem   build.bat experimental  local development build with the sibling UPX research decoder
 rem   build.bat experimental-addresses  also use its smaller x64 address-filter format
-rem   build.bat cdpack       independent decoder, PE packer and loader (local development)
+rem   build.bat cdpack       release build: cordinal's own packer (needs LLVM-MinGW clang, Python 3.14)
 rem   build.bat themes       also include the themes beyond Light and Dark
 setlocal
 cd /d "%~dp0"

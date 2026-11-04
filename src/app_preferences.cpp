@@ -5,7 +5,7 @@
 namespace app {
 namespace {
 
-constexpr unsigned kChoiceCount = 5;
+constexpr unsigned kChoiceCount = 7;
 constexpr ULONGLONG kSettleMs = 5 * 60 * 1000, kReviewInterval = 24 * 60 * 60;
 StartupPreferences observed;
 ULONGLONG changedAt = 0, lastReview = 0;
@@ -31,7 +31,9 @@ ULONGLONG WallSeconds() {
 unsigned Difference(const StartupPreferences& a, const StartupPreferences& b) {
     return ((a.mini != b.mini || (!a.mini && a.size != b.size)) ? kDefaultWindowSize : 0) |
            (a.theme != b.theme ? kDefaultTheme : 0) | (a.library != b.library ? kDefaultLibraryView : 0) |
-           (a.browser != b.browser ? kDefaultBrowser : 0) | (a.layout != b.layout ? kDefaultLayout : 0);
+           (a.browser != b.browser ? kDefaultBrowser : 0) | (a.layout != b.layout ? kDefaultLayout : 0) |
+           (a.coverSize != b.coverSize ? kDefaultCoverSize : 0) |
+           (a.browserHeight != b.browserHeight ? kDefaultBrowserHeight : 0);
 }
 
 int D(int px) { return MulDiv(px, review.dpi, 96); }
@@ -46,7 +48,9 @@ std::wstring ChoiceText(unsigned index) {
         case 1: return L"Theme: " + std::wstring(ThemeInfo(p.theme).name);
         case 2: return L"Library view: " + std::wstring(views[(int)p.library]);
         case 3: return p.browser ? L"Library browser: shown" : L"Library browser: hidden";
-        default: return L"Player layout and controls: " + std::wstring(docks[(int)p.layout.player]) + L" dock";
+        case 4: return L"Player layout and controls: " + std::wstring(docks[(int)p.layout.player]) + L" dock";
+        case 5: return L"Album cover size: " + std::to_wstring(p.coverSize) + L" px";
+        default: return L"Column browser height: " + std::to_wstring(p.browserHeight) + L" px";
     }
 }
 
@@ -197,12 +201,14 @@ LRESULT CALLBACK ReviewProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 }  // namespace
 
 StartupPreferences CaptureStartupPreferences() {
-    return {g.size, MiniPlayerWindow() != nullptr, g.themeMode, g.libMode, g.browserVisible, g.layout};
+    return {g.size, MiniPlayerWindow() != nullptr, g.themeMode, g.libMode, g.browserVisible, g.layout,
+            g.coverSize, g.browserHeight};
 }
 
 unsigned PendingStartupDefaults() {
     StartupPreferences approved{g.defaultSize, g.defaultMiniPlayer, g.defaultTheme,
-        g.defaultLibraryMode, g.defaultBrowserVisible, g.defaultLayout};
+        g.defaultLibraryMode, g.defaultBrowserVisible, g.defaultLayout,
+        g.defaultCoverSize, g.defaultBrowserHeight};
     return Difference(CaptureStartupPreferences(), approved);
 }
 
@@ -213,6 +219,8 @@ void SaveStartupDefaults(const StartupPreferences& choices, unsigned selected) {
     if (selected & kDefaultLibraryView) g.defaultLibraryMode = choices.library;
     if (selected & kDefaultBrowser) g.defaultBrowserVisible = choices.browser;
     if (selected & kDefaultLayout) g.defaultLayout = choices.layout;
+    if (selected & kDefaultCoverSize) { g.defaultCoverSize = choices.coverSize; g.coverSize = choices.coverSize; }
+    if (selected & kDefaultBrowserHeight) { g.defaultBrowserHeight = choices.browserHeight; g.browserHeight = choices.browserHeight; }
     SavePreferences();
     SaveBrowserSettings();
 }

@@ -307,7 +307,7 @@ void LoadBrowserSettings() {
     g.browserVisible = IniInt(L"Library", L"Browser", 1) != 0;
     g.defaultLibraryMode = g.libMode;
     g.defaultBrowserVisible = g.browserVisible;
-    g.browserHeight = std::clamp(IniInt(L"Library", L"BrowserHeight", 150), 60, 2000);
+    g.browserHeight = g.defaultBrowserHeight = std::clamp(IniInt(L"Library", L"BrowserHeight", 150), 60, 2000);
 }
 
 void SaveBrowserSettings() {
@@ -316,7 +316,11 @@ void SaveBrowserSettings() {
     IniWrite(L"Library", L"BrowserFields", JoinInts(fields));
     IniWrite(L"Library", L"View", std::to_wstring((int)g.defaultLibraryMode));
     IniWrite(L"Library", L"Browser", g.defaultBrowserVisible ? L"1" : L"0");
-    IniWrite(L"Library", L"BrowserHeight", std::to_wstring(g.browserHeight));
+    // The cover size and the browser height are presentation choices like the layout: the file
+    // keeps the approved startup defaults, so a drag or a Ctrl+wheel is offered by the review
+    // rather than silently replacing them.
+    IniWrite(L"Library", L"BrowserHeight", std::to_wstring(g.defaultBrowserHeight));
+    IniWrite(L"Library", L"CoverSize", std::to_wstring(g.defaultCoverSize));
 }
 
 void ThemeBrowser() {

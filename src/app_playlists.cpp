@@ -637,6 +637,10 @@ void DrawTrackRow(NMLVCUSTOMDRAW* cd, int row, TrackId id, bool playing) {
             DrawStars(dc, r, g_lib[id].rating, selected, hot);
             continue;
         }
+        if (type == kColMood) {
+            DrawMoodCell(dc, r, id, bg);
+            continue;
+        }
         std::wstring s = CellText(row, sub);
         if (apollo && type == kColApolloTitle) {
             ApolloDrawTrackIcon(dc, r);
@@ -924,6 +928,10 @@ LRESULT CALLBACK ListSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
     } else if (msg == WM_LBUTTONUP || msg == WM_CAPTURECHANGED) {
         g_pendingDrag.on = false;
     }
+    // A Title cell's "MIX" sits at the list's right edge when the column runs past it, so a width
+    // change moves it; the list itself repaints only the strip it just uncovered. Repaint the whole
+    // list on every size message: a width cache here cost about 197 KB in the packed player.
+    if (msg == WM_SIZE) InvalidateRect(h, nullptr, FALSE);
     if (msg == WM_NCDESTROY) {
         EndTrackDrag(false, {});
         RemoveWindowSubclass(h, ListSubclass, 0);

@@ -15,7 +15,8 @@ void SetViewSize(ViewSize size);
 void RestoreViewSize(WINDOWPLACEMENT full, int showCmd);
 void SaveViewSize();
 constexpr unsigned kDefaultWindowSize = 1, kDefaultTheme = 2, kDefaultLibraryView = 4,
-                   kDefaultBrowser = 8, kDefaultLayout = 16, kAllStartupDefaults = 31;
+                   kDefaultBrowser = 8, kDefaultLayout = 16, kDefaultCoverSize = 32,
+                   kDefaultBrowserHeight = 64, kAllStartupDefaults = 127;
 StartupPreferences CaptureStartupPreferences();
 unsigned PendingStartupDefaults();
 void SaveStartupDefaults(const StartupPreferences& choices, unsigned selected);

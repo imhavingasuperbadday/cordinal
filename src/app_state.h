@@ -245,6 +245,7 @@ using ui::kColumns;
 using ui::kColumnCount;
 using ui::kColRating;
 using ui::kColCover;
+using ui::kColMood;
 using ui::kColTrackNo;
 using ui::kColTitleArtist;
 using ui::kColApolloTitle;
@@ -265,6 +266,7 @@ struct StartupPreferences {
     LibraryMode library = LibraryMode::Albums;
     bool browser = true;
     MainLayout layout;
+    int coverSize = 160, browserHeight = 150;
     bool operator==(const StartupPreferences&) const = default;
 };
 // Saved as indices in settings.ini; append fields so existing panes keep their meaning.
@@ -335,6 +337,10 @@ struct App {
     bool liveFountain = false;  // let the DELTARUNE fountain follow audible audio, including radio
     bool fullLiveWaveform = true;  // light the whole live display instead of splitting it at the song position
     int bandWaveSize = 0;       // normal top/bottom waveform height; 0 follows the layout preset
+    int seekStyle = 0;          // the seek bar's look, whole song or live: SeekStyle (peaks.h)
+    int moodColors = 0;         // the moodbar's colours: MoodColors (peaks.h)
+    bool smoothSeek = false;    // soften the whole song's outline and blend its moodbar colours
+    bool waveReflection = true; // mirror the waveform below its center line, for the waveform and moodbar styles
     bool resumeOn = true;       // remember the stopped / last-playing track's position across restarts
     bool resumeInSong = false;  // reopen with that track loaded, paused where it stopped
     bool resumePlay = false;    // start a reopened track at once instead of waiting paused
@@ -428,6 +434,9 @@ struct App {
     LibraryMode libMode = LibraryMode::Albums;
     bool browserVisible = true, browserUpdating = false, splitting = false;
     int browserHeight = 150;  // at 96 DPI
+    int coverSize = 160;      // the LibView covers' tile, at 96 DPI (Ctrl+wheel, Preferences)
+    // The approved startup defaults for the two sizes; a session change is offered by the review.
+    int defaultCoverSize = 160, defaultBrowserHeight = 150;
     BrowserPane panes[3];
     HWND viewButtons[kViewButtons] = {};
     HWND libView = nullptr;  // the Albums / Albums & Tracks / Artists canvas

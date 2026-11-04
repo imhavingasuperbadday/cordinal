@@ -389,7 +389,7 @@ RgResult Measure(const TrackPath& item, uint64_t fileSize, uint64_t fileTime, co
         LoudnessMeter meter(dec->Rate());
         TruePeak truePeak;
         PeakAccumulator peaks;
-        peaks.Begin((uint64_t)(dec->Duration() * dec->Rate()));
+        peaks.Begin((uint64_t)(dec->Duration() * dec->Rate()), dec->Rate());
         bool complete = false;
         while (!cancel) {
             size_t n = dec->Read(buf.data(), 4096);

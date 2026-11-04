@@ -476,6 +476,10 @@ void PrefetchWaveform(TrackId id) {
 }
 
 void OnPeaksReady(uint32_t request) {
+    if (!request) {  // a Mood column track (peaks.h ListPeaks)
+        g.redraw = true;
+        return;
+    }
     if (!g.settings.waveform || g_wave.track == kNone || !request || request != g_wave.request) return;
     g_wave.ready = RequestPeaks(g_wave.track, g_wave.peaks, g_wave.request);
     g.redraw = true;

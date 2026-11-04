@@ -61,6 +61,8 @@ inline const Column kColumns[] = {
     {L"Bit Resolution", 84, L"[%apollo_bits%]",    L"[%apollo_bits%]",                                 kAlignLeft},
     {L"File Size",    62,  L"[%apollo_size%]",     L"[$num(%filesize%,12)]",                           kAlignRight},
     {L"ID3 Tag",      56,  L"[%apollo_tag%]",      L"[%apollo_tag%]",                                  kAlignRight},
+    // Each track's moodbar, drawn by the list rather than formatted (peaks.h ListPeaks).
+    {L"Mood",         120, L"",                    L"",                                                kAlignLeft},
 };
 #undef CD_DISC_TRACK
 constexpr int kColumnCount = (int)(sizeof(kColumns) / sizeof(kColumns[0]));
@@ -68,6 +70,7 @@ constexpr int kColRating = 8;
 constexpr int kColCover = 25, kColTrackNo = 26, kColTitleArtist = 27;
 constexpr int kColApolloTitle = 28, kColApolloBitrate = 29, kColApolloRate = 30, kColApolloBits = 31, kColApolloSize = 32,
               kColApolloTag = 33;
+constexpr int kColMood = 34;
 // The columns a new profile shows, left to right.
 inline constexpr int kDefaultColumns[] = {0, 1, 2, 3, 4, 5, kColRating, 6, 7};
 

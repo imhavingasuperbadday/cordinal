@@ -144,6 +144,10 @@ struct Settings {
     bool liveFountain = false;   // the DELTARUNE fountain follows audible audio, including radio
     bool fullLiveWaveform = true; // light the whole live display instead of splitting it at the song position
     int bandWaveSize = 0;        // normal top waveform height; 0 follows the layout size
+    int seekStyle = 0;           // the seek bar's look, whole song or live: SeekStyle (peaks.h)
+    int moodColors = 0;          // the moodbar's colours: MoodColors (peaks.h)
+    bool smoothSeek = false;     // soften the whole song's outline and blend its moodbar colours
+    bool waveReflection = true;  // mirror the waveform below its center line, for the waveform and moodbar styles
     bool alwaysOnTop = false;
     bool gpuDrawing = false;     // draw through the graphics card; off keeps its driver out
     // The games (games.cpp), as the Windows build's [Games] keys: Name That Track's rounds solved at each clip
@@ -202,6 +206,8 @@ struct Settings {
     bool browserVisible = true;
     uint8_t browserFields[3] = {(uint8_t)BrowseField::Genre, (uint8_t)BrowseField::AlbumArtist, (uint8_t)BrowseField::Album};
     int browserHeight = 150, coverSize = 160;
+    // Their startup defaults (preferences_ui.cpp): what the settings file keeps when they change.
+    int defaultBrowserHeight = 150, defaultCoverSize = 160;
     std::vector<int> columns{std::begin(ui::kDefaultColumns), std::end(ui::kDefaultColumns)};
     std::string savedPackColumns;  // named pack columns read before the enabled packs load
     std::vector<int> widths = std::vector<int>(ui::kColumnCount, 0);  // per column, at scale 1 (0 = default)

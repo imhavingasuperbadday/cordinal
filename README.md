@@ -3,11 +3,11 @@
 ![icon](docs/icon.png)
 
 A small, fast music player and library for Windows 10/11, with a Linux preview. It is one native
-program of about 1.5 MB: no installer, no runtime, nothing else to install. It plays almost any
+program of about 1.6 MB: no installer, no runtime, nothing else to install. It plays almost any
 audio file with its own decoders, keeps your ratings and listening history, and leaves your music
 where it is.
 
-Current release: **0.1.4** (`cordinal.exe`, 1,487,360 bytes). Download it from
+Current release: **0.1.5** (`cordinal.exe`, 1,630,208 bytes). Download it from
 [Releases](https://github.com/imhavingasuperbadday/cordinal/releases/latest) and run it.
 
 ## What it does
@@ -107,6 +107,17 @@ Current release: **0.1.4** (`cordinal.exe`, 1,487,360 bytes). Download it from
   setting. Every setting lives in Preferences (Ctrl+,).
   **Preferences ▸ View ▸ Waveform playback bar** switches between a waveform and a regular progress
   bar. Turn it off to use the regular bar even when live waveform is enabled; the live setting is kept.
+  **Preferences ▸ View ▸ Seek bar style** can colour the seek bar by its sound instead: each
+  moment's balance of bass and treble turns its hue to one side of the theme's accent or the other,
+  and louder moments stand out more. **Moodbar** draws a flat stripe; **Mood waveform** keeps the
+  waveform's shape. Both work for the whole song and for the live waveform. On the whole song a
+  playhead line shows the playback state: amber while paused, red when playback will stop or the
+  track failed. **Moodbar colours** picks Theme, Vivid (the whole colour wheel) or Spectrum (red
+  bass, green mids, blue treble), and **Smooth seek bar** rounds the outline and blends the colours.
+  **Waveform reflection** mirrors the bar below its centre line; turn it off to draw only the upper
+  half, for the waveform and both moodbar styles alike.
+  The track list's **Mood** column shows each track's moodbar; tracks not seen before fill in while
+  nothing else is being prepared, and a ReplayGain scan prepares them all.
 
 ## Your data
 
@@ -202,8 +213,10 @@ Windows needs Visual Studio 2022 (or its Build Tools) with the C++ x64 workload:
 build.bat
 ```
 
-The first build downloads the pinned UPX packer and checks its hash. `build.bat unpacked` skips
-packing for a quicker development build. Both write `build\cordinal.exe`.
+The first build downloads the pinned UPX packer and checks its hash. Releases are packed with
+cordinal's own packer instead: `build.bat cdpack` also needs [LLVM-MinGW](https://github.com/mstorsjo/llvm-mingw)'s
+`clang++` on `PATH` and Python 3.14 (see [cdpack/README.md](cdpack/README.md)). `build.bat unpacked`
+skips packing for a quicker development build. All of them write `build\cordinal.exe`.
 
 Linux needs CMake, a C++20 compiler, SDL3, SDL3_ttf, PipeWire, systemd-libs, fontconfig and OpenSSL:
 

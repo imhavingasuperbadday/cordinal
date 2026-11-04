@@ -671,7 +671,8 @@ bool OnPlatformMessage(UINT msg, WPARAM wp, LPARAM lp) {
         return true;
     }
     if (msg == WM_APP_PEAKS) {
-        OnPeaksReady((uint32_t)wp);
+        if (wp) OnPeaksReady((uint32_t)wp);
+        else OnListPeaksReady();  // request 0: a Mood column track (peaks.h ListPeaks)
         return true;
     }
     return false;

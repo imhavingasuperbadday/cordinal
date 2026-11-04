@@ -168,7 +168,6 @@ void LoadSettings() {
     if (auto it = v.find("web_code"); it != v.end() && web::CheckFixedCode(it->second, s.webCode)) s.webCode.clear();
     if (auto it = v.find("web_hosts"); it != v.end()) s.webHosts = it->second;
     if (auto it = v.find("output_device"); it != v.end()) s.outputDevice = it->second;
-    s.layout.points = ToInt(v, "points_chip", 0) != 0;
     s.lyricsPanel = ToInt(v, "lyrics_panel", 0) != 0;
     s.nttGuesses.clear();
     if (auto it = v.find("games_ntt_guesses"); it != v.end())
@@ -188,24 +187,30 @@ void LoadSettings() {
     if (auto it = v.find("helpers_on"); it != v.end()) s.helpersOn = it->second;
     for (const auto& [key, value] : v)
         if (key.starts_with("helper_trust.")) s.helperTrust[key.substr(13)] = value;
-    s.layout.dock = std::clamp(ToInt(v, "layout_dock", 0), 0, 3);
-    s.layout.waveSize = std::clamp(ToInt(v, "layout_wave_size", 0), 0, 2);
-    s.layout.waveOwnRow = ToInt(v, "layout_wave_row", 0) != 0;
-    s.layout.largeCover = ToInt(v, "layout_large_cover", 0) != 0;
-    s.layout.upNext = ToInt(v, "layout_up_next", 0) != 0;
-    s.layout.panelsLeft = ToInt(v, "layout_panels_left", 0) != 0;
-    s.layout.menuBar = ToInt(v, "layout_menu_bar", 1) != 0;
-    s.layout.tabCounts = ToInt(v, "layout_tab_counts", 0) != 0;
-    s.layout.statusDetails = ToInt(v, "layout_status_details", 0) != 0;
-    s.layout.hints = ToInt(v, "layout_hints", 0) != 0;
+    s.defaultLayout.dock = std::clamp(ToInt(v, "layout_dock", 0), 0, 3);
+    s.defaultLayout.waveSize = std::clamp(ToInt(v, "layout_wave_size", 0), 0, 2);
+    s.defaultLayout.waveOwnRow = ToInt(v, "layout_wave_row", 0) != 0;
+    s.defaultLayout.largeCover = ToInt(v, "layout_large_cover", 0) != 0;
+    s.defaultLayout.upNext = ToInt(v, "layout_up_next", 0) != 0;
+    s.defaultLayout.panelsLeft = ToInt(v, "layout_panels_left", 0) != 0;
+    s.defaultLayout.menuBar = ToInt(v, "layout_menu_bar", 1) != 0;
+    s.defaultLayout.tabCounts = ToInt(v, "layout_tab_counts", 0) != 0;
+    s.defaultLayout.statusDetails = ToInt(v, "layout_status_details", 0) != 0;
+    s.defaultLayout.hints = ToInt(v, "layout_hints", 0) != 0;
+    s.defaultLayout.points = ToInt(v, "points_chip", 0) != 0;
     s.defaultSize = s.size = (ViewSize)std::clamp(ToInt(v, "view_size", 1), 0, 3);
-    s.layout.hiddenParts = (unsigned)std::clamp(ToInt(v, "layout_hidden", 0), 0, 1023);
+    s.defaultLayout.hiddenParts = (unsigned)std::clamp(ToInt(v, "layout_hidden", 0), 0, 1023);
+    s.layout = s.defaultLayout;
     s.timeRemaining = ToInt(v, "time_remaining", 1) != 0;
     s.waveform = ToInt(v, "waveform", 1) != 0;
     s.liveWaveform = ToInt(v, "live_waveform", 0) != 0;
     s.liveFountain = ToInt(v, "live_fountain", 0) != 0;
     s.fullLiveWaveform = ToInt(v, "full_live_waveform", 1) != 0;
     s.bandWaveSize = std::clamp(ToInt(v, "band_wave_size", 0), 0, 5);
+    s.seekStyle = std::clamp(ToInt(v, "seek_style", 0), 0, 2);
+    s.moodColors = std::clamp(ToInt(v, "mood_colors", 0), 0, 2);
+    s.smoothSeek = ToInt(v, "smooth_seek", 0) != 0;
+    s.waveReflection = ToInt(v, "wave_reflection", 1) != 0;
     s.alwaysOnTop = ToInt(v, "always_on_top", 0) != 0;
     s.gpuDrawing = ToInt(v, "gpu_drawing", 0) != 0;
     for (auto [key, target] : {std::pair{"format_title", &s.fmtTitle}, std::pair{"format_subtitle", &s.fmtSub},
@@ -306,8 +311,8 @@ void LoadSettings() {
         for (int i = 0; i < 3; ++i)
             if (f[i] >= 0 && f[i] < (int)BrowseField::Count) s.browserFields[i] = (uint8_t)f[i];
     }
-    s.browserHeight = std::clamp(ToInt(v, "browser_height", 150), 60, 2000);
-    s.coverSize = std::clamp(ToInt(v, "cover_size", 160), 80, 300);
+    s.browserHeight = s.defaultBrowserHeight = std::clamp(ToInt(v, "browser_height", 150), 60, 2000);
+    s.coverSize = s.defaultCoverSize = std::clamp(ToInt(v, "cover_size", 160), 80, 300);
     s.windowW = std::max(480, ToInt(v, "window_width", s.windowW));
     s.windowH = std::max(320, ToInt(v, "window_height", s.windowH));
     s.maximized = ToInt(v, "maximized", 0) != 0;
@@ -344,7 +349,6 @@ void LoadSettings() {
         }
         if (columns.size() > 1) s.columns = columns;
     }
-    s.defaultLayout = s.layout;
 }
 
 void SaveSettings() {
@@ -393,6 +397,8 @@ void SaveSettings() {
             "\nonline_artist_info=" + std::to_string(net.artistInfo) + "\n";
     text += "output_device=" + s.outputDevice + "\n";
     text += "view_size=" + std::to_string((int)s.defaultSize) + "\n";
+    // The layout keys hold the saved default layout: a Preferences or Customize-layout change
+    // writes them at once, and the live layout starts from them on the next start.
     text += "layout_dock=" + std::to_string(s.defaultLayout.dock) + "\n";
     text += "layout_wave_size=" + std::to_string(s.defaultLayout.waveSize) + "\n";
     text += "layout_wave_row=" + std::to_string(s.defaultLayout.waveOwnRow) + "\n";
@@ -404,10 +410,10 @@ void SaveSettings() {
     text += "layout_status_details=" + std::to_string(s.defaultLayout.statusDetails) + "\n";
     text += "layout_hints=" + std::to_string(s.defaultLayout.hints) + "\n";
     text += "layout_hidden=" + std::to_string(s.defaultLayout.hiddenParts) + "\n";
+    text += "points_chip=" + std::to_string(s.defaultLayout.points) + "\n";
     text += "packs_on=" + s.packsOn + "\nhelpers_on=" + s.helpersOn + "\n";
     for (const auto& [id, record] : s.helperTrust) text += "helper_trust." + id + "=" + record + "\n";
     text += "lyrics_panel=" + std::to_string(s.lyricsPanel) + "\n";
-    text += "points_chip=" + std::to_string(s.defaultLayout.points) + "\n";
     text += "games_ntt_guesses=";
     for (size_t i = 0; i < s.nttGuesses.size(); ++i) text += (i ? "," : "") + std::to_string(s.nttGuesses[i]);
     text += "\ngames_ntt_streak=" + std::to_string(s.nttStreak) + "\ngames_ntt_best=" + std::to_string(s.nttBest) +
@@ -419,6 +425,9 @@ void SaveSettings() {
     text += "live_fountain=" + std::to_string(s.liveFountain) + "\n";
     text += "full_live_waveform=" + std::to_string(s.fullLiveWaveform) + "\n";
     text += "band_wave_size=" + std::to_string(s.bandWaveSize) + "\n";
+    text += "seek_style=" + std::to_string(s.seekStyle) + "\nmood_colors=" + std::to_string(s.moodColors) +
+            "\nsmooth_seek=" + std::to_string(s.smoothSeek) + "\nwave_reflection=" +
+            std::to_string(s.waveReflection) + "\n";
     text += "format_title=" + ToUtf8(s.fmtTitle) + "\nformat_subtitle=" + ToUtf8(s.fmtSub) + "\nformat_status=" + ToUtf8(s.fmtStatus) +
             "\nformat_window=" + ToUtf8(s.fmtWindow) + "\n";
     text += "sound_effects=" + std::to_string(s.soundEffects) + "\nrobotic_sounds=" + std::to_string(s.roboticSounds) + "\n";
@@ -432,8 +441,8 @@ void SaveSettings() {
             "\nscrobbling_now_playing=" + std::to_string(listenbrainz::SendNowPlaying()) + "\n";
     text += "library_view=" + std::to_string((int)s.defaultLibraryMode) + "\nlibrary_browser=" + std::to_string(s.defaultBrowserVisible) +
             "\nbrowser_fields=" + std::to_string(s.browserFields[0]) + "," + std::to_string(s.browserFields[1]) + "," +
-            std::to_string(s.browserFields[2]) + "\nbrowser_height=" + std::to_string(s.browserHeight) +
-            "\ncover_size=" + std::to_string(s.coverSize) + "\n";
+            std::to_string(s.browserFields[2]) + "\nbrowser_height=" + std::to_string(s.defaultBrowserHeight) +
+            "\ncover_size=" + std::to_string(s.defaultCoverSize) + "\n";
     text += "window_width=" + std::to_string(s.windowW) + "\nwindow_height=" + std::to_string(s.windowH) + "\n";
     text += "maximized=" + std::to_string(s.maximized) + "\nactive_tab=" + std::to_string(g.active) + "\n";
     text += "rg_enabled=" + std::to_string(s.rg.on) + "\nrg_mode=" + std::to_string((int)s.rg.mode) + "\nrg_preamp=" + FloatText(s.rg.preamp) +

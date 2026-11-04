@@ -26,6 +26,17 @@ void ApolloDrawTrackIcon(HDC dc, const RECT& cell);
 // Apollo's own playlist fields: apollo_size ("7510 KB", "11 MB"), apollo_bits ("16 bit stereo")
 // and apollo_tag (the ID3 tag version, "v2.3.0"). The last two read the file's header once.
 bool ApolloField(TrackId id, const std::wstring& name, std::wstring& out);
+// The Apollo rows of Preferences (app_tweaks.cpp): the analyzer/oscilloscope bands, the toolbar
+// background and its opacity. Each persists the same [Apollo] key its menu writes.
+bool ApolloAnalyzer();
+bool ApolloScope();
+int ApolloSkin();
+int ApolloOpacity();
+extern const int ApolloOpacityTable[5];
+void SetApolloAnalyzer(bool on);
+void SetApolloScope(bool on);
+void SetApolloSkin(int skin);
+void SetApolloOpacity(int opacity);
 // Compaction renumbers tracks: its per-track file-header probes must not be reused by the new ids.
 void ForgetApolloProbes();
 

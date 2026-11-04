@@ -1,12 +1,12 @@
 # Builds cordinal on Windows. Invoke it through build.bat (the supported entry point):
 #
 #   build.bat                 local experimental packed build (with the address filter)
-#   build.bat stock-nrv       stock UPX release build
+#   build.bat stock-nrv       stock UPX packed build
 #   build.bat unpacked        development build: plain executables, no UPX download
 #   build.bat full            ignore the incremental record and rebuild everything
 #   build.bat experimental  use the sibling UPX research decoder for a local development build
 #   build.bat experimental-addresses  also use its smaller x64 address-filter format
-#   build.bat cdpack          independent decoder, packer and loader; local development
+#   build.bat cdpack          release build: cordinal's own packer (cdpack/; LLVM-MinGW clang, Python)
 #   build.bat themes          also include the themes beyond Light and Dark (combines with the others)
 #
 # What it produces:
@@ -51,7 +51,7 @@ $objDir = 'build\obj'
 $manifestPath = Join-Path $objDir 'build.json'
 # The packed player's size budget in decimal bytes (PRINCIPLES.md: fast and small are features). A
 # release build over it fails: a change that needs more raises this number and says why in docs\size.md.
-$SizeBudget = 1720000
+$SizeBudget = 2000000
 
 function Write-Step([string]$Text) { Write-Host "==> $Text" }
 function Fail([string]$Message) { throw $Message }
@@ -124,6 +124,65 @@ function Invoke-Tool([string]$Exe, [string[]]$Arguments) {
     if ($LASTEXITCODE -ne 0) { Fail "$Exe failed with exit code $LASTEXITCODE." }
 }
 
+# Stock UPX has one filter for win64, 0x49 (upx src/filter/ctok.h and getcto.h). It rewrites every
+# E8/E9 call or jump and 0F 8x branch in the code and marks the rewritten ones with a byte value that
+# no unrewritten one, whose 32-bit target falls outside the code, may start with. When every one of the
+# 256 values is taken, UPX quietly packs the code unfiltered and the player grows by about 200 KB
+# (docs/size.md). Which values are taken depends on the distances between functions, so a different
+# function order is a fresh draw. This mirrors UPX's scan of the image from BaseOfCode for SizeOfCode.
+Add-Type -TypeDefinition @'
+public static class CordinalCallFilter {
+    public static bool HasFreeMarker(byte[] file) {
+        int pe = System.BitConverter.ToInt32(file, 0x3c), opt = pe + 24;
+        int codeSize = System.BitConverter.ToInt32(file, opt + 4), codeBase = System.BitConverter.ToInt32(file, opt + 20);
+        int sections = System.BitConverter.ToUInt16(file, pe + 6), table = opt + System.BitConverter.ToUInt16(file, pe + 20);
+        byte[] b = new byte[codeSize];
+        for (int i = 0; i < sections; i++) {
+            int at = table + 40 * i;
+            int va = System.BitConverter.ToInt32(file, at + 12), raw = System.BitConverter.ToInt32(file, at + 16);
+            int pointer = System.BitConverter.ToInt32(file, at + 20);
+            int lo = System.Math.Max(va, codeBase), hi = System.Math.Min(va + raw, codeBase + codeSize);
+            if (lo < hi) System.Array.Copy(file, pointer + lo - va, b, lo - codeBase, hi - lo);
+        }
+        bool[] taken = new bool[256];
+        for (int ic = 0; ic < codeSize - 5; ic++) {
+            byte x = b[ic];
+            if (!(x == 0xE8 || x == 0xE9 || (ic > 0 && b[ic - 1] == 0x0F && x >= 0x80 && x <= 0x8F))) continue;
+            uint target = System.BitConverter.ToUInt32(b, ic + 1) + (uint)ic + 1;
+            if (target < (uint)codeSize) {
+                if (target + (uint)(codeBase - 0x1000) >= (1u << 24)) return false;
+            } else {
+                taken[b[ic + 1]] = true;
+            }
+        }
+        foreach (bool t in taken) if (!t) return true;
+        return false;
+    }
+}
+'@
+
+function Test-CallFilter([string]$Exe) {
+    return [CordinalCallFilter]::HasFreeMarker([IO.File]::ReadAllBytes((Join-Path $root $Exe)))
+}
+
+# Functions to try moving to the front of the code, from the last link's map: external ones (an
+# anonymous-namespace name can change between links) that ICF kept apart, spread across the image.
+function Get-OrderCandidates([string]$Map, [int]$Count) {
+    $rows = foreach ($line in [IO.File]::ReadLines((Join-Path $root $Map))) {
+        if ($line -match '^\s*0001:([0-9a-f]{8})\s+(\S+)\s+[0-9a-f]{16}\s+f\s' -and $matches[2] -notmatch '\?A0x|^\?\?__') {
+            [pscustomobject]@{ At = [Convert]::ToInt64($matches[1], 16); Name = $matches[2] }
+        }
+    }
+    $rows = @($rows | Sort-Object At)
+    $unique = for ($i = 0; $i -lt $rows.Count; ++$i) {
+        $alone = ($i -eq 0 -or $rows[$i - 1].At -ne $rows[$i].At) -and
+            ($i + 1 -eq $rows.Count -or $rows[$i + 1].At -ne $rows[$i].At)
+        if ($alone -and $rows[$i].Name.Length -lt 200) { $rows[$i] }
+    }
+    $unique = @($unique)
+    for ($k = 1; $k -le $Count -and $unique.Count; ++$k) { $unique[[int]($unique.Count * $k / ($Count + 1))].Name }
+}
+
 # --- what changed ------------------------------------------------------------------------------
 
 New-Item -ItemType Directory -Force -Path $objDir, 'build\unpacked' | Out-Null
@@ -188,7 +247,7 @@ $oldMode = if ($old) { $old.mode } else { '' }
 
 # Flags shared by every translation unit. The groups below add only what differs, so a new .cpp needs
 # no flag copy: put it in src\ and it builds with the app set.
-$common = @('/nologo', '/std:c++20', '/Zc:throwingNew', '/W4', '/EHsc', '/GR-', '/MT', '/utf-8', '/DNOMINMAX')
+$common = @('/nologo', '/std:c++20', '/Zc:throwingNew', '/W4', '/EHsc', '/GR-', '/MT', '/utf-8', '/GF', '/DNOMINMAX')
 # Releases ship Light and Dark only; `themes` compiles in the others and embeds their art (theme_palette.h).
 $themeDefine = if ($Themes) { @('/DCORDINAL_EXTRA_THEMES') } else { @() }
 $common += $themeDefine
@@ -336,13 +395,34 @@ $testExe = 'build\unpacked\cordinal-test.exe'
 
 # The two links run one after the other: side by side, their whole-program code generation competes
 # and both take longer (measured November 3, 2026: 28 s together against 16 s in turn).
+function Invoke-PlayerLink([string[]]$Extra = @()) {
+    Invoke-Tool 'link.exe' (@('/nologo', '/LTCG', '/SUBSYSTEM:WINDOWS', '/MANIFEST:NO', '/OPT:REF',
+            '/OPT:ICF', '/DEBUG:NONE', '/NODEFAULTLIB:libucrt.lib', '/MAP:build\cordinal.map',
+            "/OUT:$appExe") + $Extra + $appObjects + @($resPath) + $stubObjects + $chipObjects + $libraries)
+}
 if ($appLinked -or !(Test-Path -LiteralPath $appExe)) {
     Initialize-Msvc
     Write-Host 'Linking cordinal.exe'
-    Invoke-Tool 'link.exe' (@('/nologo', '/LTCG', '/SUBSYSTEM:WINDOWS', '/MANIFEST:NO', '/OPT:REF',
-            '/OPT:ICF', '/DEBUG:NONE', '/NODEFAULTLIB:libucrt.lib', '/MAP:build\cordinal.map',
-            "/OUT:$appExe") + $appObjects + @($resPath) + $stubObjects + $chipObjects + $libraries)
+    Invoke-PlayerLink
     $testLinked = $true
+}
+# The release player is packed by stock UPX, so keep its call filter usable (Test-CallFilter). Checked
+# on every release build, whichever mode last linked the player: moving one function to the front
+# changes no behaviour and no size, only the distances the filter's markers depend on.
+if ($StockNrv -and !(Test-CallFilter $appExe)) {
+    Initialize-Msvc
+    $orderFile = Join-Path $objDir 'call-filter-order.txt'
+    $usable = $false
+    foreach ($name in @(Get-OrderCandidates 'build\cordinal.map' 12)) {
+        Write-Host "Relinking cordinal.exe so stock UPX can filter its calls (first: $name)"
+        Set-Content -LiteralPath $orderFile -Value $name -Encoding ascii
+        Invoke-PlayerLink @("/ORDER:@$orderFile")
+        if (Test-CallFilter $appExe) { $usable = $true; break }
+    }
+    if (!$usable) {
+        Write-Warning ('No tried function order leaves stock UPX a call-filter marker; the packed player will be ' +
+            'about 200 KB larger (docs/size.md).')
+    }
 }
 if ($testLinked -or !(Test-Path -LiteralPath $testExe)) {
     Initialize-Msvc

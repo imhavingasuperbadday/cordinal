@@ -21,6 +21,9 @@ RECT FoobarSliderTrack(HWND bar);
 void FoobarTick();  // the status updates: Selection Properties follows the focused track
 void FoobarTheme();
 void FoobarFoldersChanged();
+// The foobar2000 Preferences row (app_tweaks.cpp): how the Album List groups the library.
+int FoobarView();
+void SetFoobarView(int view);
 // The playlist: the group header row ("Artist - [Year] Album") and the cover column beside a
 // group's tracks, and how many rows that cover needs.
 void DrawFoobarHeader(HDC dc, int group, RECT rc);
