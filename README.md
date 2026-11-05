@@ -3,11 +3,11 @@
 ![icon](docs/icon.png)
 
 A small, fast music player and library for Windows 10/11, with a Linux preview. It is one native
-program of about 1.6 MB: no installer, no runtime, nothing else to install. It plays almost any
+program of about 1.7 MB: no installer, no runtime, nothing else to install. It plays almost any
 audio file with its own decoders, keeps your ratings and listening history, and leaves your music
 where it is.
 
-Current release: **0.1.6**. Download it from
+Current release: **0.1.6** (`cordinal.exe`, 1,654,272 bytes). Download it from
 [Releases](https://github.com/imhavingasuperbadday/cordinal/releases/latest) and run it.
 
 ## What it does
