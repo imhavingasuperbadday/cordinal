@@ -178,10 +178,21 @@ void ResetColumns() {
     SaveColumns();
 }
 
+// Whether the header's menu lists a column. The foobar2000 and Apollo themes' own columns appear only
+// under their theme (Linux leaves them out entirely), unless one is shown, so it can still be hidden.
+bool ColumnOffered(int type) {
+    if (type <= 0 || type >= ColumnTotal()) return false;
+    if (SubitemOf(type) >= 0) return true;
+    if (type >= kColCover && type <= kColTitleArtist) return FoobarMode();
+    if (type >= kColApolloTitle && type <= kColApolloTag) return ApolloMode();
+    return true;
+}
+
 void ShowColumnMenu(POINT pt) {
     HMENU m = CreatePopupMenu();
     for (int t = 1; t < ColumnTotal(); ++t) {
         if (t == kColumnCount) AppendMenuW(m, MF_SEPARATOR, 0, nullptr);  // the packs' columns follow
+        if (!ColumnOffered(t)) continue;
         AppendMenuW(m, MF_STRING | (SubitemOf(t) >= 0 ? MF_CHECKED : 0), IDM_COLUMN_BASE + t, ColumnAt(t).name);
     }
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);

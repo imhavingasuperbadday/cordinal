@@ -307,8 +307,27 @@ std::wstring WindowText(HWND h) {
     return text;
 }
 
+// Compares against what the control already shows without a heap allocation for ordinary text.
+// This runs several times per UI tick and the strings involved are almost always short.
 void SetTextIfChanged(HWND h, const std::wstring& text) {
-    if (WindowText(h) != text) SetWindowTextW(h, text.c_str());
+    if (!h) return;
+    const int len = GetWindowTextLengthW(h);
+    if ((size_t)len != text.size()) {
+        SetWindowTextW(h, text.c_str());
+        return;
+    }
+    if (!len) return;
+    wchar_t stack[256];
+    if ((size_t)len < std::size(stack)) {
+        if (GetWindowTextW(h, stack, len + 1) != len || text.compare(0, std::wstring::npos, stack, (size_t)len) != 0)
+            SetWindowTextW(h, text.c_str());
+        return;
+    }
+    // Longer text (a notice, a long playlist name): one buffer, sized for the terminator.
+    std::wstring current((size_t)len + 1, L'\0');
+    const int got = GetWindowTextW(h, current.data(), len + 1);
+    current.resize(got > 0 ? (size_t)got : 0);
+    if (current != text) SetWindowTextW(h, text.c_str());
 }
 
 void SetStatusPart(int part, const std::wstring& text) {
@@ -393,8 +412,56 @@ bool TranslateMainKey(MSG* msg) {
     return TranslateAcceleratorW(g.hwnd, g.accel, msg) != 0;
 }
 
+// One off-screen surface, shared by every double-buffered control paint and kept between paints.
+// Controls repaint far more often than they change size, and a lyrics glide or a toast fade repaints
+// sixty times a second, so a compatible DC and bitmap per paint was pure churn. The surface only
+// grows, and a smaller paint uses the same top-left corner, so a paint's pixels are unchanged. A
+// nested paint (one that pumps a message) gets its own throwaway surface instead.
+struct PaintSurface {
+    // A larger paint uses a throwaway surface instead, so what is kept stays small: panels, the
+    // lyrics column and notices are all well under this, while a large dialog is rare and transient.
+    static constexpr size_t kMaxRetainedBytes = 1u << 20;
+    HDC dc = nullptr;
+    HBITMAP bitmap = nullptr;
+    HGDIOBJ previous = nullptr;
+    int width = 0, height = 0;
+    bool busy = false;  // a paint is drawing into it
+
+    bool Acquire(HDC target, int w, int h) {
+        if (dc && width >= w && height >= h) return true;
+        const int nw = std::max(1, std::max(w, width)), nh = std::max(1, std::max(h, height));
+        if ((size_t)nw * (size_t)nh * 4 > kMaxRetainedBytes) return false;
+        Reset();
+        HDC created = CreateCompatibleDC(target);
+        if (!created) return false;
+        HBITMAP bmp = CreateCompatibleBitmap(target, nw, nh);
+        if (!bmp) {
+            DeleteDC(created);
+            return false;
+        }
+        previous = SelectObject(created, bmp);
+        dc = created;
+        bitmap = bmp;
+        width = nw;
+        height = nh;
+        return true;
+    }
+
+    void Reset() {
+        if (dc && previous) SelectObject(dc, previous);
+        if (bitmap) DeleteObject(bitmap);
+        if (dc) DeleteDC(dc);
+        dc = nullptr;
+        bitmap = nullptr;
+        previous = nullptr;
+        width = height = 0;
+    }
+};
+PaintSurface paintSurface;
+
 void TrimMemory() {
     ReleaseGroupArt();
+    paintSurface.Reset();  // sized for the largest panel that last painted; a paint makes a new one
     CompactLibrary();
 }
 
@@ -421,15 +488,24 @@ void DoubleBufferedPaint(HWND hwnd, void (*draw)(HDC, RECT)) {
     int w = area.right - area.left, h = area.bottom - area.top;
     if (w > 0 && h > 0) {
         // The bitmap holds only the area being repainted; the viewport shifts drawing into it.
-        HDC mem = CreateCompatibleDC(dc);
-        HBITMAP bmp = CreateCompatibleBitmap(dc, w, h);
-        HGDIOBJ oldBmp = SelectObject(mem, bmp);
-        SetViewportOrgEx(mem, -area.left, -area.top, nullptr);
-        draw(mem, rc);
-        BitBlt(dc, area.left, area.top, w, h, mem, area.left, area.top, SRCCOPY);
-        SelectObject(mem, oldBmp);
-        DeleteObject(bmp);
-        DeleteDC(mem);
+        // The shared surface is used whenever no other paint is already drawing into it.
+        const bool shared = !paintSurface.busy && paintSurface.Acquire(dc, w, h);
+        HDC mem = shared ? paintSurface.dc : CreateCompatibleDC(dc);
+        HBITMAP bmp = shared ? nullptr : CreateCompatibleBitmap(dc, w, h);
+        HGDIOBJ oldBmp = shared || !mem || !bmp ? nullptr : SelectObject(mem, bmp);
+        if (mem && (shared || bmp)) {
+            if (shared) paintSurface.busy = true;
+            SetViewportOrgEx(mem, -area.left, -area.top, nullptr);
+            if (shared) SetBkMode(mem, OPAQUE);  // a kept DC must start like a fresh one
+            draw(mem, rc);
+            BitBlt(dc, area.left, area.top, w, h, mem, area.left, area.top, SRCCOPY);
+            if (shared) paintSurface.busy = false;
+        }
+        if (!shared) {
+            if (oldBmp) SelectObject(mem, oldBmp);
+            if (bmp) DeleteObject(bmp);
+            if (mem) DeleteDC(mem);
+        }
     }
     EndPaint(hwnd, &ps);
 }

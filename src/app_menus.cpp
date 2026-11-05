@@ -59,6 +59,9 @@ HMENU BuildMenu() {
     AppendMenuW(file, MF_STRING, IDM_IMPORT_M3U, L"&Open playlist file...");
     AppendMenuW(file, MF_STRING, IDM_EXPORT_M3U, L"&Save playlist as...\tCtrl+S");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(file, MF_STRING, IDM_EXPORT_COLLECTION, L"Export collection...");
+    AppendMenuW(file, MF_STRING, IDM_IMPORT_COLLECTION, L"Import collection...");
+    AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, IDM_BACKUP, L"Back up library and settings...");
     AppendMenuW(file, MF_STRING, IDM_RESTORE_BACKUP, L"Restore backup...");
     AppendMenuW(file, MF_STRING, IDM_IMPORT_STATISTICS, L"Import playback statistics...");
@@ -126,6 +129,7 @@ HMENU BuildMenu() {
     for (int i = 0; i < (int)std::size(kReverbMixes); ++i) AppendMenuW(reverb, MF_STRING, IDM_REVERB_MIX_BASE + i, mixNames[i]);
     AppendMenuW(playback, MF_POPUP, (UINT_PTR)reverb, L"Rever&b");
     AppendMenuW(playback, MF_STRING, IDM_NIGHT_MODE, L"Ni&ght mode");
+    AppendMenuW(playback, MF_STRING, IDM_BITCRUSH, L"Bitcr&ush");
     AppendMenuW(playback, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(playback, MF_STRING, IDM_EQUALIZER, L"&Equalizer...\tCtrl+E");
     AppendMenuW(playback, MF_STRING, IDM_HEADPHONES, L"&Headphones and device settings...");
@@ -300,7 +304,7 @@ void UpdateMainMenu(HMENU m) {
     const struct { UINT id; bool checked; } checks[] = {
         {IDM_SHUFFLE, g.shuffle == kShuffleTracks}, {IDM_SHUFFLE_ALBUMS, g.shuffle == kShuffleAlbums},
         {IDM_RADIO, g.radio}, {IDM_MUTE, g.volumePercent == 0},
-        {IDM_RG_ENABLE, g.rgOn}, {IDM_STOP_AFTER, g.stopAfterCurrent}, {IDM_NIGHT_MODE, g.nightMode},
+        {IDM_RG_ENABLE, g.rgOn}, {IDM_STOP_AFTER, g.stopAfterCurrent}, {IDM_NIGHT_MODE, g.nightMode}, {IDM_BITCRUSH, g.bitcrush.enabled},
         {IDM_EQUALIZER, g.eq.enabled || g.eq.crossfeed}, {IDM_ALWAYS_ON_TOP, g.alwaysOnTop},
         {IDM_GROUP_ALBUMS, g.groupAlbums}, {IDM_LYRICS, LyricsPanelShown()},
     };
@@ -363,6 +367,9 @@ void UpdateMainMenu(HMENU m) {
     ShowWhileRunning(m, IDM_CONVERT, IDM_CONVERT_CANCEL, L"Cancel conversion", ConvertBusy());
     ShowWhileRunning(m, IDM_COPY_TO, IDM_COPY_CANCEL, L"Cancel copy", CopyBusy());
     ShowWhileRunning(m, IDM_BACKUP, IDM_CANCEL_BACKUP, L"Cancel backup operation", BackupBusy());
+    ShowWhileRunning(m, IDM_IMPORT_COLLECTION, IDM_COLLECTION_CANCEL, CollectionCancelText().c_str(), CollectionRunning());
+    for (UINT id : {IDM_EXPORT_COLLECTION, IDM_IMPORT_COLLECTION})
+        EnableMenuItem(m, id, MF_BYCOMMAND | (CollectionBusy() ? MF_GRAYED : MF_ENABLED));
     const int tool = HelperToolIndex();
     ShowWhileRunning(m, IDM_HELPER_TOOL_BASE + std::max(tool, 0), IDM_HELPER_CANCEL, HelperCancelText().c_str(), tool >= 0);
     UpdateHelperMenu(m);

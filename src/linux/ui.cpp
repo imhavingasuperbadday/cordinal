@@ -211,7 +211,7 @@ void ApplyTheme() {
 }
 
 bool UiAnimating() {
-    return ((LiveWaveformShown() || LiveFountainShown()) && (g.playing != kNone || RadioPlaying()) &&
+    return ((LiveWaveformShown() || LiveFountainShown() || SeekGlowPulsing()) && (g.playing != kNone || RadioPlaying()) &&
             !IsPaused() && L.seek.w > 0) ||
            (MiniActive() && g.playing != kNone && !IsPaused()) || PointsChipAnimating() || LyricsAnimating() ||
            (FountainStyleShown() && FountainAppearance().motion && g.playing != kNone && !IsPaused()) ||
@@ -224,7 +224,7 @@ bool UiAnimating() {
 // every other animation still force a full frame, so nothing is drawn over.
 bool SeekAnimationOnly() {
     if (g.settings.gpuDrawing) return false;
-    if (!((LiveWaveformShown() || LiveFountainShown()) && (g.playing != kNone || RadioPlaying()) &&
+    if (!((LiveWaveformShown() || LiveFountainShown() || SeekGlowPulsing()) && (g.playing != kNone || RadioPlaying()) &&
           !IsPaused() && L.seek.w > 0)) return false;
     if (g_drag != Drag::None || g.searchFocused || !g_popups.empty() || g_folders.open || g_aboutOpen ||
         g_web.open || g_exclude.open || PanelOpen() || StartupReviewOpen() || MiniActive()) return false;

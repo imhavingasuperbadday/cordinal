@@ -18,14 +18,15 @@ namespace {
 
 // Encodes to a ".tmp" file then replaces the target, so a half-written cache entry is never read
 // as a valid thumbnail. Quality 0.88 keeps the cache small; these are only ever display thumbnails.
-bool SaveJpeg(const std::wstring& file, const ArtImage& img) {
+// Returns the bytes the entry takes on disk, or 0 when it could not be written.
+uint64_t SaveJpeg(const std::wstring& file, const ArtImage& img) {
     ComPtr<IWICImagingFactory> wic;
-    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic)))) return false;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic)))) return 0;
     ComPtr<IWICBitmap> bitmap;
     if (FAILED(wic->CreateBitmapFromMemory(img.width, img.height, GUID_WICPixelFormat32bppBGR, img.width * 4,
                                            (UINT)(img.pixels.size() * 4),
                                            reinterpret_cast<BYTE*>(const_cast<uint32_t*>(img.pixels.data())), &bitmap)))
-        return false;
+        return 0;
     std::wstring tmp = file + L".tmp";
     ComPtr<IWICStream> stream;
     ComPtr<IWICBitmapEncoder> encoder;
@@ -53,9 +54,12 @@ bool SaveJpeg(const std::wstring& file, const ArtImage& img) {
     stream.Reset();
     if (!ok || !MoveFileExW(tmp.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING)) {
         DeleteFileW(tmp.c_str());
-        return false;
+        return 0;
     }
-    return true;
+    WIN32_FILE_ATTRIBUTE_DATA written{};
+    return GetFileAttributesExW(file.c_str(), GetFileExInfoStandard, &written)
+               ? (uint64_t)written.nFileSizeHigh << 32 | written.nFileSizeLow
+               : 0;
 }
 
 bool LoadJpeg(const std::wstring& file, int size, ArtImage& out) {
@@ -74,19 +78,20 @@ struct CacheEntry {
     FILETIME written;
 };
 
-void PruneCache(const std::wstring& dir) {
+// Deletes the oldest .jpg files until the folder is under kCacheLimit, and returns what is left.
+uint64_t PruneCache(const std::wstring& dir) {
     std::vector<CacheEntry> entries;
     uint64_t total = 0;
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW((dir + L"\\*.jpg").c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
+    if (h == INVALID_HANDLE_VALUE) return 0;
     do {
         uint64_t size = (uint64_t)fd.nFileSizeHigh << 32 | fd.nFileSizeLow;
         entries.push_back({dir + L"\\" + fd.cFileName, size, fd.ftLastWriteTime});
         total += size;
     } while (FindNextFileW(h, &fd));
     FindClose(h);
-    if (total <= kCacheLimit) return;
+    if (total <= kCacheLimit) return total;
     std::sort(entries.begin(), entries.end(), [](const CacheEntry& a, const CacheEntry& b) {
         return CompareFileTime(&a.written, &b.written) < 0;
     });
@@ -94,6 +99,7 @@ void PruneCache(const std::wstring& dir) {
         if (total <= kCacheLimit) break;
         if (DeleteFileW(e.file.c_str())) total -= e.size;
     }
+    return total;
 }
 
 }  // namespace
@@ -132,8 +138,7 @@ void ThumbLoader::Start(HWND notify, UINT msg, std::wstring cacheDir, int thread
     msg_ = msg;
     dir_ = std::move(cacheDir);
     SHCreateDirectoryExW(nullptr, dir_.c_str(), nullptr);
-    PruneCache(dir_);
-    savedSincePrune_ = 0;
+    cacheBytes_ = PruneCache(dir_);
     quit_ = false;
     pendingLimit_ = reducedMemory ? 64 : 128;
     readyLimit_ = reducedMemory ? 1 : 2;
@@ -149,6 +154,7 @@ void ThumbLoader::Stop() {
         jobs_.clear();
         results_.clear();
         active_.clear();
+        cacheBytes_ = 0;
     }
     cv_.notify_all();
     for (auto& t : threads_) t.join();
@@ -172,20 +178,17 @@ void ThumbLoader::Request(uint64_t key, const std::wstring& mediaPath, int size)
 }
 
 // UI-side drain: returns the oldest ready result and frees its active_ slot so it can be requested
-// again after eviction.
+// again after eviction. The cache budget is kept by the workers (WroteCacheFile), so no scroll ever
+// waits for a directory listing here.
 std::unique_ptr<ThumbResult> ThumbLoader::TakeResult() {
     std::unique_ptr<ThumbResult> result;
-    bool prune = false;
     {
         std::lock_guard<std::mutex> lock(mx_);
         if (results_.empty()) return {};
         result = std::move(results_.front());
         results_.pop_front();
         active_.erase({result->key, result->size});
-        prune = ++savedSincePrune_ >= 256;  // a long session can browse past the cache budget
-        if (prune) savedSincePrune_ = 0;
     }
-    if (prune) PruneCache(dir_);
     cv_.notify_all();
     return result;
 }
@@ -229,7 +232,7 @@ void ThumbLoader::Run() {
         std::wstring jpg = CacheFile(job.key, job.size, L"jpg");
         if (!LoadJpeg(jpg, job.size, r->image)) {
             if (LoadAlbumArt(job.path, job.size, r->image)) {
-                SaveJpeg(jpg, r->image);
+                if (uint64_t bytes = SaveJpeg(jpg, r->image)) WroteCacheFile(bytes);
             }
         }
         {
@@ -246,4 +249,20 @@ void ThumbLoader::Run() {
         }
     }
     CoUninitialize();
+}
+
+// Called by a worker after it wrote a cache entry. The folder holds thousands of names, so it is
+// listed only once the bytes kept there reach the limit; the old code listed and sorted it on the
+// UI thread after every few hundred covers, for a folder that was usually still under budget.
+void ThumbLoader::WroteCacheFile(uint64_t bytes) {
+    {
+        std::lock_guard<std::mutex> lock(mx_);
+        cacheBytes_ += bytes;
+        if (cacheBytes_ <= kCacheLimit) return;
+    }
+    const uint64_t left = PruneCache(dir_);
+    std::lock_guard<std::mutex> lock(mx_);
+    // A folder that would not shrink (a file another program holds open) is retried after another
+    // megabyte of covers rather than on every write.
+    cacheBytes_ = left > kCacheLimit ? kCacheLimit - (1u << 20) : left;
 }

@@ -26,7 +26,8 @@ struct TagJournal {
 // in which case nothing can be restored and the caller should leave the file out.
 bool CaptureTagUndo(const std::wstring& path, const TagEdit& edit, TagUndoFile& out);
 
-// Writes a journal into `dir` and prunes older ones. `journal.time` is the name it was saved under.
+// Writes a journal into `dir` and prunes older ones. `journal.time` is the name it was saved under:
+// now, unless the caller set it, bumped past the newest journal already there.
 bool SaveTagJournal(const std::wstring& dir, TagJournal& journal, std::wstring& error);
 // The newest journal in `dir`: its file, how many files it covers (from the header alone) and,
 // when asked, its unix time.

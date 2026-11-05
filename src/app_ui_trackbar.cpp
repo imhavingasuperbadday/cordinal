@@ -99,10 +99,12 @@ void PaintPlayerBar(HWND bar, HDC printDC = nullptr) {
     int lo = (int)SendMessageW(bar, TBM_GETRANGEMIN, 0, 0), hi = (int)SendMessageW(bar, TBM_GETRANGEMAX, 0, 0);
     int pos = (int)SendMessageW(bar, TBM_GETPOS, 0, 0);
     double frac = hi > lo ? (double)(pos - lo) / (hi - lo) : 0;
-    // Drawn off screen and copied once: the Dark Fountain repaints 30 times a second. The live
-    // waveform paints every pixel of its bar, so that surface is kept instead of created each frame.
-    const bool reusable = !printDC && bar == g.seek && LiveWaveformShown() && !FountainShown() &&
-                          !SeekVertical() && liveBarSurface.Ready(dc, (int)client.right, (int)client.bottom);
+    // Drawn off screen and copied once: the Dark Fountain, the live waveform and a glowing whole
+    // song repaint 30 times a second. Those paint every pixel of their bar, and so does every
+    // upright bar (its fallback fills the whole column), so that surface is kept instead of created
+    // each frame; the plain horizontal bar draws only its channel and thumb.
+    const bool reusable = !printDC && bar == g.seek && (FountainShown() || LiveWaveformShown() || SeekVertical()) &&
+                          liveBarSurface.Ready(dc, (int)client.right, (int)client.bottom);
     HDC mem = reusable ? liveBarSurface.dc : CreateCompatibleDC(dc);
     HBITMAP bmp = reusable ? nullptr : CreateCompatibleBitmap(dc, std::max(1, (int)client.right), std::max(1, (int)client.bottom));
     HGDIOBJ oldBmp = reusable ? nullptr : SelectObject(mem, bmp);

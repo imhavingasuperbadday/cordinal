@@ -87,6 +87,7 @@ void StopAppWorkers(HWND hwnd) {
     StopOrganizer();
     StopConverter();
     StopCopier();
+    StopCollection();
     StopIpod();
     StopArtistInfo();
     StopCoverFetch();

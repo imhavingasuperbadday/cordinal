@@ -24,21 +24,36 @@ struct Entry {
     uint32_t crc = 0;
 };
 
-std::wstring EntryName(const std::string& raw, bool utf8) {
-    if (utf8 || std::all_of(raw.begin(), raw.end(), [](char c) { return (unsigned char)c < 0x80; })) return FromUtf8(raw);
-    std::wstring out(raw.size(), L'\0');
-    int n = MultiByteToWideChar(437, 0, raw.data(), (int)raw.size(), out.data(), (int)out.size());
-    if (n <= 0) {  // no code page 437 here: keep the bytes as Latin-1 rather than lose the entry
-        for (size_t i = 0; i < raw.size(); ++i) out[i] = (unsigned char)raw[i];
-        return out;
-    }
-    out.resize((size_t)n);
-    return out;
-}
-
 // The archive's playable entries: files only, not encrypted, stored or deflated, with names that
 // stay inside the archive. False when there is no readable central directory.
 bool ReadDirectory(FileSource& src, std::vector<Entry>& out) {
+    std::vector<ZipEntry> all;
+    if (!ReadZipDirectory(src, all)) return false;
+    for (ZipEntry& z : all) {
+        std::string raw = std::move(z.name);
+        std::replace(raw.begin(), raw.end(), '\\', '/');
+        if (raw.empty() || raw.back() == '/' || (z.flags & 1) || (z.method != 0 && z.method != 8)) continue;
+        // No absolute names, no climbing out, and no '|', which would read as a song number.
+        if (raw[0] == '/' || raw.find(':') != std::string::npos || raw.find('|') != std::string::npos ||
+            ("/" + raw + "/").find("/../") != std::string::npos)
+            continue;
+        if (z.method == 0 && z.packed != z.size) continue;
+        z.name = std::move(raw);
+        Entry e{ZipEntryName(z), z.local, z.packed, z.size, z.crc};
+        if constexpr (kPathSep != L'/') std::replace(e.name.begin(), e.name.end(), L'/', kPathSep);
+        out.push_back(std::move(e));
+    }
+    return true;
+}
+
+bool SameName(const std::wstring& a, const std::wstring& b) {
+    return a.size() == b.size() &&
+           CompareStringOrdinal(a.c_str(), (int)a.size(), b.c_str(), (int)b.size(), TRUE) == CSTR_EQUAL;
+}
+
+}  // namespace
+
+bool ReadZipDirectory(FileSource& src, std::vector<ZipEntry>& out) {
     const uint64_t size = src.Size();
     if (size < 22) return false;
     const size_t tail = (size_t)std::min<uint64_t>(size, 65557);
@@ -65,8 +80,9 @@ bool ReadDirectory(FileSource& src, std::vector<Entry>& out) {
     size_t at = 0;
     for (uint64_t i = 0; i < count; ++i) {
         if (at + 46 > cd.size() || Le32(cd, at) != 0x02014B50) return false;
-        const uint32_t flags = Le16(cd, at + 8), method = Le16(cd, at + 10);
-        Entry e;
+        ZipEntry e;
+        e.flags = (uint16_t)Le16(cd, at + 8);
+        e.method = (uint16_t)Le16(cd, at + 10);
         e.crc = Le32(cd, at + 16);
         e.packed = Le32(cd, at + 20);
         e.size = Le32(cd, at + 24);
@@ -74,7 +90,8 @@ bool ReadDirectory(FileSource& src, std::vector<Entry>& out) {
         const size_t nameLen = Le16(cd, at + 28), extraLen = Le16(cd, at + 30), commentLen = Le16(cd, at + 32);
         const size_t next = at + 46 + nameLen + extraLen + commentLen;
         if (next > cd.size()) return false;
-        // ZIP64 sizes and offset, in that order, for each field the entry marks as 0xFFFFFFFF.
+        // ZIP64 sizes and offset, in that order, for each field the entry marks as 0xFFFFFFFF; the
+        // extended timestamp's modification time, when the writer gave one.
         for (size_t x = at + 46 + nameLen, xend = x + extraLen; x + 4 <= xend;) {
             const size_t id = Le16(cd, x), len = Le16(cd, x + 2), body = x + 4;
             if (body + len > xend) break;
@@ -86,31 +103,37 @@ bool ReadDirectory(FileSource& src, std::vector<Entry>& out) {
                 take(e.size);
                 take(e.packed);
                 take(e.local);
+            } else if (id == 0x5455 && len >= 5 && ((uint8_t)cd[body] & 1)) {
+                e.unixTime = Le32(cd, body + 1);
             }
             x = body + len;
         }
-        std::string raw = cd.substr(at + 46, nameLen);
+        e.name = cd.substr(at + 46, nameLen);
         at = next;
-        std::replace(raw.begin(), raw.end(), '\\', '/');
-        if (raw.empty() || raw.back() == '/' || (flags & 1) || (method != 0 && method != 8)) continue;
-        // No absolute names, no climbing out, and no '|', which would read as a song number.
-        if (raw[0] == '/' || raw.find(':') != std::string::npos || raw.find('|') != std::string::npos ||
-            ("/" + raw + "/").find("/../") != std::string::npos)
-            continue;
-        e.name = EntryName(raw, (flags & 0x800) != 0);
-        if constexpr (kPathSep != L'/') std::replace(e.name.begin(), e.name.end(), L'/', kPathSep);
-        if (method == 0 && e.packed != e.size) continue;
         out.push_back(std::move(e));
     }
     return true;
 }
 
-bool SameName(const std::wstring& a, const std::wstring& b) {
-    return a.size() == b.size() &&
-           CompareStringOrdinal(a.c_str(), (int)a.size(), b.c_str(), (int)b.size(), TRUE) == CSTR_EQUAL;
+std::wstring ZipEntryName(const ZipEntry& e) {
+    const std::string& raw = e.name;
+    if ((e.flags & 0x800) || std::all_of(raw.begin(), raw.end(), [](char c) { return (unsigned char)c < 0x80; }))
+        return FromUtf8(raw);
+    std::wstring out(raw.size(), L'\0');
+    int n = MultiByteToWideChar(437, 0, raw.data(), (int)raw.size(), out.data(), (int)out.size());
+    if (n <= 0) {  // no code page 437 here: keep the bytes as Latin-1 rather than lose the entry
+        for (size_t i = 0; i < raw.size(); ++i) out[i] = (unsigned char)raw[i];
+        return out;
+    }
+    out.resize((size_t)n);
+    return out;
 }
 
-}  // namespace
+uint64_t ZipDataStart(FileSource& src, const ZipEntry& e) {
+    std::string local;
+    if (!src.Read(e.local, 30, local) || Le32(local, 0) != 0x04034B50) return 0;
+    return e.local + 30 + Le16(local, 26) + Le16(local, 28);
+}
 
 bool IsArchiveFile(const std::wstring& path) { return ExtOf(path) == L"zip"; }
 
@@ -138,6 +161,9 @@ bool ListArchive(const std::wstring& archive, std::vector<std::wstring>& members
     FileSource src(archive);
     std::vector<Entry> entries;
     if (!src.Valid() || !ReadDirectory(src, entries)) return false;
+    // A collection export is the library's own music again: listing it would add every song twice.
+    const std::wstring manifest = FromUtf8(kCollectionManifest);
+    if (std::any_of(entries.begin(), entries.end(), [&](const Entry& e) { return e.name == manifest; })) return true;
     for (const Entry& e : entries) members.push_back(archive + kPathSep + e.name);
     return true;
 }

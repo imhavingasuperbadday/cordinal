@@ -298,7 +298,10 @@ void TestTagUndo(const std::wstring& media, const std::wstring& scratch) {
         TagData changed;
         ReadTags(copy, changed);
         bool applied = written && changed.title == "Undo test title" && changed.artist == "Undo test artist";
-        bool found = FindNewestTagJournal(dir, file, count) && count == 1;
+        // Named by the time of the edit: Ctrl+Z compares it with the newest playlist edit's time.
+        uint64_t when = 0;
+        const uint64_t now = (uint64_t)std::time(nullptr);
+        bool found = FindNewestTagJournal(dir, file, count, &when) && count == 1 && when + 60 >= now && when <= now + 60;
         TagJournal back;
         bool loaded = found && LoadTagJournal(file, back) && back.files.size() == 1;
         const TagUndoFile* old = loaded ? &back.files[0] : nullptr;

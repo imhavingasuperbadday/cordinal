@@ -103,6 +103,8 @@ std::vector<Suite> Suites(const std::wstring& root) {
             [root](const auto& s) { TestOrganize(root + L"\\media", s + L"\\organize"); }},
         {L"copy", L"copy to folder or device", L"src/tests/selftest_copy.cpp", Media | Tags, 0,
             [root](const auto& s) { TestDeviceCopy(root + L"\\media", s + L"\\copy"); }},
+        {L"collection", L"collection export and import", L"src/tests/selftest_collection.cpp", 0, 0,
+            [](const auto& s) { TestCollection(s + L"\\collection"); }},
         {L"ipod", L"classic iPod detection and iTunesDB sync", L"src/tests/selftest_ipod.cpp", 0, 0,
             [](const auto& s) { TestIpod(s + L"\\ipod-test"); }},
         {L"tag-undo", L"tag undo", L"src/tests/selftest_library_files.cpp", Media, 0,

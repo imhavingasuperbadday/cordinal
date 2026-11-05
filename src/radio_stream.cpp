@@ -218,7 +218,7 @@ bool HttpStream(const std::string& url, const std::atomic<bool>& cancel,
     std::wstring target = std::wstring(parts.lpszUrlPath ? parts.lpszUrlPath : L"", parts.dwUrlPathLength) +
                           std::wstring(parts.lpszExtraInfo ? parts.lpszExtraInfo : L"", parts.dwExtraInfoLength);
     if (target.empty()) target = L"/";
-    HINTERNET session = WinHttpOpen(L"cordinal/0.1.5", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+    HINTERNET session = WinHttpOpen(L"cordinal/0.1.6", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     HINTERNET connection = session ? WinHttpConnect(session, host.c_str(), parts.nPort, 0) : nullptr;
     HINTERNET request = connection ? WinHttpOpenRequest(connection, L"GET", target.c_str(), nullptr,

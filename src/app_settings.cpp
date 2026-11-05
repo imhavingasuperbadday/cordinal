@@ -14,13 +14,16 @@ namespace { uint64_t iniWriteFailures = 0; }
 // be long (the pipe-separated library folder list), so a full small buffer retries with the
 // largest string the API returns instead of silently dropping the tail.
 std::wstring IniRead(const wchar_t* section, const wchar_t* key, const wchar_t* def) {
-    std::vector<wchar_t> buf(2048);
-    DWORD n = GetPrivateProfileStringW(section, key, def, buf.data(), (DWORD)buf.size(), g.iniPath.c_str());
-    if (n == buf.size() - 1) {
-        buf.assign(32768, 0);
-        n = GetPrivateProfileStringW(section, key, def, buf.data(), (DWORD)buf.size(), g.iniPath.c_str());
+    // A stack buffer for ordinary values: this runs for every track's saved section and for most
+    // preference reads, and a 4 KB vector per call was a heap allocation each time.
+    wchar_t buf[1024];
+    DWORD n = GetPrivateProfileStringW(section, key, def, buf, (DWORD)std::size(buf), g.iniPath.c_str());
+    if (n == std::size(buf) - 1) {
+        std::vector<wchar_t> big(32768, 0);
+        n = GetPrivateProfileStringW(section, key, def, big.data(), (DWORD)big.size(), g.iniPath.c_str());
+        return std::wstring(big.data(), n);
     }
-    return std::wstring(buf.data(), n);
+    return std::wstring(buf, n);
 }
 int IniInt(const wchar_t* section, const wchar_t* key, int def) {
     return (int)GetPrivateProfileIntW(section, key, def, g.iniPath.c_str());

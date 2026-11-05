@@ -554,6 +554,7 @@ void RefreshGains(bool includePlaying) {
 // Loop points apply to tracks opened from now on; the effects at once.
 void ApplyEffects() {
     g.engine.SetReverb(g.settings.reverb);
+    g.engine.SetBitcrush(g.settings.bitcrush);
     g.engine.SetSmartVolume(g.settings.loudnessComp, g.settings.nightMode);
     g.engine.SetLoops(g.settings.loops, 8.0);
 }

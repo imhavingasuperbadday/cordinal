@@ -196,6 +196,9 @@ void OnCommand(int id, int code, HWND ctl) {
         {IDM_RESTORE_BACKUP, RestoreProfile},
         {IDM_IMPORT_STATISTICS, ImportPlaybackStatistics},
         {IDM_CANCEL_BACKUP, CancelBackup},
+        {IDM_EXPORT_COLLECTION, ExportCollection},
+        {IDM_IMPORT_COLLECTION, ImportCollection},
+        {IDM_COLLECTION_CANCEL, CancelCollection},
         {IDM_EXIT, [] { SendMessageW(g.hwnd, WM_CLOSE, 0, 0); }},
         {IDM_WEB_SERVER, ShowWebServer},
         {IDM_IPOD_SYNC, ShowIpod},
@@ -273,6 +276,13 @@ void OnCommand(int id, int code, HWND ctl) {
              ApplyEffects();
              SavePreferences();
              ShowMessage(g.nightMode ? L"Night mode on: quiet parts are lifted and loud parts softened." : L"Night mode off.");
+         }},
+        {IDM_BITCRUSH, [] {
+             g.bitcrush.enabled = !g.bitcrush.enabled;
+             ApplyEffects();
+             SavePreferences();
+             ShowMessage(g.bitcrush.enabled ? L"Bitcrush on. Its depth, rate and mix are in Preferences > Effects."
+                                            : L"Bitcrush off.");
          }},
         {IDM_RG_CANCEL, CancelReplayGain},
         {IDM_RG_CLEAR, [] {

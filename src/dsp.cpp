@@ -873,6 +873,49 @@ void LoudnessContour::Process(float* x, size_t frames, float volume, bool on) {
 }
 
 // ---------------------------------------------------------------------------
+// Bitcrusher. The quantizer is mid-tread (zero is a level), so at low depths quiet passages drop
+// to silence the way an old 8-bit sampler gates them. The crushed share glides linearly.
+
+void Bitcrusher::Configure(const BitcrushSettings& s, unsigned rate) {
+    settings_ = s;
+    settings_.bits = std::clamp(s.bits, kBitcrushMinBits, kBitcrushMaxBits);
+    settings_.rate = std::isfinite(s.rate) ? std::clamp(s.rate, kBitcrushMinRate, kBitcrushMaxRate) : 11025;
+    settings_.mix = std::isfinite(s.mix) ? std::clamp(s.mix, 0.0f, 1.0f) : 1;
+    rate_ = std::max(rate, 1u);
+    step_ = std::min(1.0, (double)settings_.rate / rate_);
+    levels_ = (float)(1 << (settings_.bits - 1));
+    glide_ = (float)(1.0 / (0.02 * rate_));
+    target_ = settings_.enabled ? settings_.mix : 0;
+    active_ = active_ || target_ > 0;
+}
+
+void Bitcrusher::Clear() {
+    phase_ = 1;  // take the next sample at once
+    held_[0] = held_[1] = 0;
+}
+
+void Bitcrusher::Process(float* x, size_t frames) {
+    if (!active_) return;
+    for (size_t n = 0; n < frames; ++n) {
+        if (wet_ != target_) wet_ = wet_ < target_ ? std::min(target_, wet_ + glide_) : std::max(target_, wet_ - glide_);
+        phase_ += step_;
+        if (phase_ >= 1) {
+            phase_ -= std::floor(phase_);
+            for (int ch = 0; ch < 2; ++ch) held_[ch] = std::round(x[n * 2 + ch] * levels_) / levels_;
+        }
+        // All wet is the held sample exactly; v + (held - v) can land an ulp off it and break the hold.
+        for (int ch = 0; ch < 2; ++ch) {
+            float& v = x[n * 2 + ch];
+            v = wet_ == 1 ? held_[ch] : v + (held_[ch] - v) * wet_;
+        }
+    }
+    if (wet_ == 0 && target_ == 0) {
+        active_ = false;
+        Clear();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Night mode. The detector follows the mean square of what plays, divided back to before the
 // volume, with a 50 ms attack and 400 ms release. Below -24 dBFS the gain closes 60% of the gap
 // (fading to nothing between -60 and -70 dBFS); above -16 dBFS it takes off half the excess. It

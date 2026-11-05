@@ -50,6 +50,7 @@ private:
         uint64_t generation;
     };
     void Run();
+    void WroteCacheFile(uint64_t bytes);  // keeps the disk cache under its budget, on a worker
     std::wstring CacheFile(uint64_t key, int size, const wchar_t* ext) const;
 
     HWND notify_ = nullptr;
@@ -64,5 +65,5 @@ private:
     uint64_t generation_ = 0;                          // bumped to invalidate in-flight work
     bool quit_ = false;
     size_t pendingLimit_ = 128, readyLimit_ = 2;
-    unsigned savedSincePrune_ = 0;  // UI thread only
+    uint64_t cacheBytes_ = 0;  // what the cache folder should hold, from the last listing
 };

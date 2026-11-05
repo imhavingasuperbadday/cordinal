@@ -111,6 +111,13 @@ bool IsPlayerPart(HWND h) {
     return false;
 }
 
+// Whether a right-click on `h` opens the menu bar's menus, which only the normal window has as a bar.
+// The big views' strip (seek bar, volume, buttons, times) counts as well as the panels, or a
+// right-click in the middle of Big mode plus opened nothing.
+bool OpensPlayerMenu(HWND h) {
+    return g.size != ViewSize::Normal && (IsPlayerPart(h) || h == NowPlayingPanel() || h == UpNextPanel());
+}
+
 // WM_CONTEXTMENU routing: browser headers first, then the list header / list / tabs,
 // then the compact and big-mode menus (only the normal window has a menu bar). Returns
 // false to let the default menu handling run.
@@ -125,9 +132,11 @@ bool MainContextMenu(WPARAM wp, LPARAM lp) {
     else if ((HWND)wp == g.list || (HWND)wp == g.libView) ShowListContextMenu(pt);
     else if ((HWND)wp == g.tabs) ShowTabContextMenu(pt);
     else if (ApolloContextMenu((HWND)wp, pt)) return true;  // the rebar: Apollo's options
-    else if (g.size != ViewSize::Normal && ((HWND)wp == g.hwnd || (HWND)wp == g.npTitle || (HWND)wp == g.npSub ||
-                                            (HWND)wp == NowPlayingPanel() || (HWND)wp == UpNextPanel()))
-        ShowCompactMenu(pt);  // the menu bar's menus: only the normal window has the bar
+    // The seek bar's section menu while a track plays. A mouse right-click is sent here rather than
+    // posted, so the message loop's RegionMouse never sees it.
+    else if ((HWND)wp == g.seek && ShowRegionMenu(pt)) return true;
+    else if (OpensPlayerMenu((HWND)wp))
+        ShowCompactMenu(pt);
     else if (g.size == ViewSize::Normal && IsPlayerPart((HWND)wp))
         ShowLayoutMenu(pt);  // the normal window's player and now playing line: customize them
     else return false;
@@ -267,6 +276,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case WM_APP_STARTUP: FinishStartup(hwnd); return 0;
         case WM_APP_BACKUP: OnBackupMessage(lp); return 0;
+        case WM_APP_COLLECTION: OnCollectionMessage(wp, lp); return 0;
         case WM_APP_HELPER: OnHelperMessage(wp, lp); return 0;
         case WM_APP_STEAM: OnSteamDiscovery(wp, lp); return 0;
         case WM_APP_WEB: if (wp == 1) OpenWebPlayer(); else WebTick(); return 0;

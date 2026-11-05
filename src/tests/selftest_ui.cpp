@@ -6,7 +6,11 @@
 #include "radio.h"
 
 void TestPersonalization(const std::wstring& scratch);
-namespace app { bool LyricsReadyFor(TrackId id, const std::wstring& line); }
+namespace app {
+bool LyricsReadyFor(TrackId id, const std::wstring& line);
+bool OpensPlayerMenu(HWND h);  // app_window.cpp
+bool ColumnOffered(int type);   // app_columns.cpp
+}
 
 namespace {
 constexpr int kUiWidth = 1163, kUiHeight = 752;
@@ -838,6 +842,44 @@ void TestUiControls(const std::wstring& scratch) {
         g.layout = savedLayout;
         SetWindowPos(g.hwnd, nullptr, 0, 0, S(kUiWidth), S(kUiHeight), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
         Layout();
+    }
+    {
+        // Right-clicks that used to open nothing. A list view keeps its header's right-click, so the
+        // header names itself to the window (the column menu, with Mood); and the big views' strip
+        // opens the player menu like their panels do, while the normal window's strip keeps its
+        // layout menu.
+        static HWND contextFrom = nullptr;
+        contextFrom = nullptr;
+        HHOOK hook = SetWindowsHookExW(WH_CALLWNDPROC, [](int code, WPARAM wp, LPARAM lp) -> LRESULT {
+            const auto* sent = reinterpret_cast<const CWPSTRUCT*>(lp);
+            if (code == HC_ACTION && sent->message == WM_CONTEXTMENU && sent->hwnd == g.hwnd) contextFrom = (HWND)sent->wParam;
+            return CallNextHookEx(nullptr, code, wp, lp);
+        }, nullptr, GetCurrentThreadId());
+        SendMessageW(g.header, WM_RBUTTONDOWN, MK_RBUTTON, MAKELPARAM(S(20), S(8)));
+        SendMessageW(g.header, WM_RBUTTONUP, 0, MAKELPARAM(S(20), S(8)));
+        if (hook) UnhookWindowsHookEx(hook);
+        const ViewSize savedSize = g.size;
+        testlog::Cases strip;
+        for (ViewSize mode : {ViewSize::Normal, ViewSize::Compact, ViewSize::Spotlight, ViewSize::Big}) {
+            g.size = mode;
+            const bool big = mode != ViewSize::Normal;
+            int index = 0;
+            for (HWND part : {g.seek, g.volume, g.buttons[1]})  // the test window has no panels
+                strip.Add(part && OpensPlayerMenu(part) == big, std::to_wstring((int)mode) + L"/" + std::to_wstring(index++));
+            strip.Add(!OpensPlayerMenu(g.list) && !OpensPlayerMenu(g.header), std::to_wstring((int)mode) + L" list");
+        }
+        g.size = savedSize;
+        // The column menu offers Mood and the usual columns, but not the foobar2000 or Apollo themes'
+        // own columns outside those themes (this test runs in neither).
+        const bool themed = FoobarMode() || ApolloMode();
+        strip.Add(themed || (ColumnOffered(kColMood) && ColumnOffered(kColRating) && !ColumnOffered(0) &&
+                             !ColumnOffered(kColCover) && !ColumnOffered(kColTitleArtist) &&
+                             !ColumnOffered(kColApolloTitle) && !ColumnOffered(kColApolloTag)),
+                  L"column menu");
+        batch.Next(L"UI: right-clicks on the list header and the big views' strip reach their menus");
+        Check(hook && contextFrom == g.header, L"UI: a right-click on the track list header asks for the column menu");
+        Check(strip.Passed(), L"UI: the big views' strip opens the player menu and the normal one doesn't%ls",
+              strip.failed.c_str());
     }
     {
         // A compact size remembered at the full window's width (an earlier build saved one) is not a

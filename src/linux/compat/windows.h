@@ -202,6 +202,7 @@ HANDLE CreateFileMappingW(HANDLE file, void*, DWORD protect, DWORD high, DWORD l
 void* MapViewOfFile(HANDLE mapping, DWORD access, DWORD high, DWORD low, size_t bytes);
 BOOL UnmapViewOfFile(const void* address);
 BOOL GetFileTime(HANDLE h, FILETIME* created, FILETIME* accessed, FILETIME* written);
+BOOL SetFileTime(HANDLE h, const FILETIME* created, const FILETIME* accessed, const FILETIME* written);  // the write time only
 BOOL SetEndOfFile(HANDLE h);
 BOOL FlushFileBuffers(HANDLE h);
 BOOL CloseHandle(HANDLE h);

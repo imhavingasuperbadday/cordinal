@@ -58,6 +58,7 @@ constexpr UINT WM_APP_COVERFETCH = WM_APP + 38;  // cover search results, progre
 constexpr UINT WM_APP_IPOD = WM_APP + 37;    // classic iPod progress (0) or sync result (1); lParam owns it
 constexpr UINT WM_APP_GAME = WM_APP + 36;  // a game's clip or cover decoded (lParam owns it, games.cpp)
 constexpr UINT WM_APP_FILE = WM_APP + 31;    // a file chosen for a dialog (wParam = what for, lParam = std::wstring*)
+constexpr UINT WM_APP_COLLECTION = WM_APP + 40;  // collection export/import progress, results and choices (collection_run.cpp)
 
 // How long a conversion can be undone, in days; the Windows build's kConvertMemoryDays.
 constexpr unsigned kConvertMemoryDays[] = {1, 3, 7, 49};
@@ -146,8 +147,13 @@ struct Settings {
     int bandWaveSize = 0;        // normal top waveform height; 0 follows the layout size
     int seekStyle = 0;           // the seek bar's look, whole song or live: SeekStyle (peaks.h)
     int moodColors = 0;          // the moodbar's colours: MoodColors (peaks.h)
+    int moodWaveColors = 0;      // the mood waveform's: 0 the moodbar's, else MoodColors + 1
+    int waveColor = 0;           // the plain waveform's colour and the moodbar's base: WaveColors (peaks.h)
+    int waveRestColor = 0;       // the waveform's unplayed part: WaveRestColors (peaks.h)
     bool smoothSeek = false;     // soften the whole song's outline and blend its moodbar colours
     bool waveReflection = true;  // mirror the waveform below its center line, for the waveform and moodbar styles
+    bool waveFullHeight = true;  // unmirrored, the waveforms still fill both halves, the lower as bright
+    bool seekGlow = true;        // the seek bar's colours glow softly past its edges, every style and source alike
     bool alwaysOnTop = false;
     bool gpuDrawing = false;     // draw through the graphics card; off keeps its driver out
     // The games (games.cpp), as the Windows build's [Games] keys: Name That Track's rounds solved at each clip
@@ -222,6 +228,7 @@ struct Settings {
     EqSettings eq;
     // Effects after the EQ, and game-music loop points (the engine's, as on Windows).
     ReverbSettings reverb;
+    BitcrushSettings bitcrush;
     bool loudnessComp = false, nightMode = false;
     int loops = 2;  // passes of a loop before the fade; 0 ignores loop points
 };
@@ -356,7 +363,7 @@ void SetExclusive(bool exclusive);
 void SetSpeed(double speed);
 void SetTempo(double tempo);
 void ToggleStopAfterCurrent();
-void ApplyEffects();  // reverb, loudness compensation, night mode and loop points to the engine
+void ApplyEffects();  // reverb, bitcrush, loudness compensation, night mode and loop points to the engine
 void OnEngineEvent(EngineEvent e, unsigned long long token);
 void PlaybackTick();
 void RecordListening(TrackId id, double seconds, bool manual, uint32_t when = 0);
@@ -440,6 +447,17 @@ void StartCopy(std::vector<CopyItem> plan, CopySettings settings, std::vector<Co
 void OnCopyMessage(WPARAM wp, LPARAM lp);
 void CancelCopy();
 void StopCopier();
+
+// collection_run.cpp: File > Export collection and Import collection, on a worker. Busy covers
+// the choices asked between steps; Running only the worker, which Cancel stops.
+void ExportCollection();
+void ImportCollection();
+void CancelCollection();
+bool CollectionBusy();
+bool CollectionRunning();
+std::string CollectionCancelText();
+void OnCollectionMessage(WPARAM wp, LPARAM lp);
+void StopCollection();
 
 // ipod_run.cpp: Library > Sync to iPod writes a classic iPod's iTunesDB on a worker.
 bool IpodBusy();

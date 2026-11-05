@@ -72,7 +72,7 @@ void TestWaveform(const std::wstring& scratch) {
     SendMessageW(g.seek, TBM_SETPOS, FALSE, 625);
     g.liveWaveform = true; WaveformTrackChanged(true); WaveformTick();
     bool live = LiveWaveformShown() && WaveformShown() && SendMessageW(g.seek, TBM_GETPOS, 0, 0) == 625;
-    if (const Tweak* display = FindTweak("view.waveform")) {
+    if (const Tweak* display = FindTweak("view.seek_bar")) {
         const auto layout = g.layout;
         RECT window{}; GetWindowRect(g.hwnd, &window);
         SetWindowPos(g.hwnd, nullptr, 0, 0, S(ui::kLayoutWidth), S(ui::kLayoutHeight),
@@ -124,7 +124,7 @@ void TestWaveform(const std::wstring& scratch) {
         Check(overviewHidden && WaveformShown(), L"the playback display choice also hides and restores whole-song peaks");
         g.liveWaveform = true;
         EnableWindow(g.seek, enabled);
-    } else Check(false, L"View preferences includes Waveform playback bar");
+    } else Check(false, L"View preferences includes Seek bar");
     const auto originalDuration = g_lib[ids[1]].durationMs;
     testlog::Cases lit;
     for (Dock dock : {Dock::Top, Dock::Bottom}) {
@@ -251,22 +251,131 @@ void TestWaveform(const std::wstring& scratch) {
         const int style = g.seekStyle;
         testlog::Cases reflections;
         bool drawn = dc && bitmap && !LiveWaveformShown();
+        const bool savedGlow = g.seekGlow;
+        g.seekGlow = false;  // the shape alone; the glow's own checks follow
         for (int painted : {kSeekWaveform, kSeekMoodbar}) {
             g.seekStyle = painted;
             for (bool mirror : {true, false}) {
                 g.waveReflection = mirror;
-                const bool ok = drawn && DrawWaveform(dc, rc, channel, 0.5) &&
-                                (GetPixel(dc, 10, 12) != PlayerColor()) &&
-                                (GetPixel(dc, 10, 14) != PlayerColor()) == mirror;
+                // Without the mirror, Full height still mirrors the waveform, its lower half as bright
+                // as the upper (row 14 matches row 12, row 15 matches row 11); the stripe keeps the
+                // upper half, ending at the center line.
+                const bool waveform = painted == kSeekWaveform;
+                auto drawnAt = [&](int y) { return GetPixel(dc, 10, y) != PlayerColor(); };
+                auto same = [&](int a, int b) { return GetPixel(dc, 10, a) == GetPixel(dc, 10, b); };
+                const bool ok = drawn && DrawWaveform(dc, rc, channel, 0.5) && drawnAt(12) &&
+                                (waveform ? drawnAt(14) && same(14, 12) != mirror && (mirror || same(15, 11))
+                                          : drawnAt(14) == mirror);
                 reflections.Add(ok, std::wstring(painted == kSeekWaveform ? L"waveform " : L"moodbar ") +
                                        (mirror ? L"reflection" : L"upper half only"));
             }
         }
+        // Upper half: the cut-off shape, stopping at the center line, for those who choose it.
+        g.seekStyle = kSeekWaveform;
+        g.waveReflection = false;
+        g.waveFullHeight = false;
+        const bool cut = drawn && DrawWaveform(dc, rc, channel, 0.5) && GetPixel(dc, 10, 12) != PlayerColor() &&
+                         GetPixel(dc, 10, 14) == PlayerColor() && GetPixel(dc, 10, 22) == PlayerColor();
+        reflections.Add(cut, L"waveform upper half (cut off)");
+        g.waveFullHeight = true;
         batch.Next(L"waveform reflection draws the mirrored lower half or the upper half alone");
         Check(reflections.Passed(), L"waveform and moodbar reflection can be turned off without losing the upper half%ls",
               reflections.failed.c_str());
-        g.seekStyle = style;
+        // Seek bar glow: every look lights the bar above its top edge (the first row that isn't the
+        // bar's own colour rises) and below its reflection, fading out before the bar's edge. Off, the
+        // bar is as before.
         g.waveReflection = true;
+        testlog::Cases glows;
+        auto firstLit = [&](bool fromTop) {
+            for (int i = 0; i < 26; ++i)
+                if (GetPixel(dc, 10, fromTop ? i : 25 - i) != PlayerColor()) return i;
+            return 26;
+        };
+        for (int painted : {kSeekWaveform, kSeekMoodbar, kSeekMoodWaveform}) {
+            g.seekStyle = painted;
+            g.seekGlow = false;
+            const bool unlit = drawn && DrawWaveform(dc, rc, channel, 0.5);
+            // The stripe stands shorter so its glow fits in the same height: its outer rows change
+            // to the glow instead of the lit part growing.
+            const int top = firstLit(true), bottom = firstLit(false);
+            const COLORREF topEdge = GetPixel(dc, 10, top), bottomEdge = GetPixel(dc, 10, 25 - bottom);
+            g.seekGlow = true;
+            const bool glowing = unlit && DrawWaveform(dc, rc, channel, 0.5);
+            const bool above = firstLit(true) < top || GetPixel(dc, 10, top) != topEdge;
+            const bool below = firstLit(false) < bottom || GetPixel(dc, 10, 25 - bottom) != bottomEdge;
+            glows.Add(glowing && above && below && firstLit(true) > 0 && firstLit(false) > 0,
+                      L"look " + std::to_wstring(painted));
+        }
+        // With the upper half alone the stripe stands on the center line and still glows below it.
+        g.seekStyle = kSeekMoodbar;
+        g.waveReflection = false;
+        const bool upper = drawn && DrawWaveform(dc, rc, channel, 0.5);
+        const COLORREF stripeColor = GetPixel(dc, 10, 12), under = GetPixel(dc, 10, 14);
+        glows.Add(upper && under != PlayerColor() && under != stripeColor && GetPixel(dc, 10, 25) == PlayerColor(),
+                  L"below the upper half alone");
+        g.waveReflection = true;
+        g.seekGlow = savedGlow;
+        batch.Next(L"seek bar glow lights past the edges of every look");
+        Check(glows.Passed(), L"seek bar glow lights past the edges of every look and fades before the bar's edge%ls",
+              glows.failed.c_str());
+        // Every look builds its pixels directly, the upright seek bar's transposed DC included, and
+        // writes the glow without a rectangle a row. Those pixels must be the GDI path's (which a
+        // non-MM_TEXT target still takes), and the upright bar the horizontal one turned. Paused, so
+        // the glow's pulse holds still between the paints.
+        {
+            const bool wasPaused = g.engine.Paused(), wasReflection = g.waveReflection, wasFull = g.waveFullHeight;
+            g.engine.SetPaused(true);
+            g.seekGlow = true;
+            auto render = [&](bool upright, bool gdi, std::vector<uint32_t>& out) {
+                const int w = upright ? 26 : 120, h = upright ? 120 : 26;
+                HDC target = CreateCompatibleDC(nullptr);
+                BITMAPINFO image{};
+                image.bmiHeader = {sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB};
+                void* bits = nullptr;
+                HBITMAP surface = CreateDIBSection(target, &image, DIB_RGB_COLORS, &bits, nullptr, 0);
+                HGDIOBJ previous = surface ? SelectObject(target, surface) : nullptr;
+                if (gdi) {
+                    SetMapMode(target, MM_ANISOTROPIC);
+                    SetWindowExtEx(target, 1, 1, nullptr);
+                    SetViewportExtEx(target, 1, 1, nullptr);
+                }
+                if (upright) {
+                    SetGraphicsMode(target, GM_ADVANCED);
+                    XFORM transpose{0, 1, 1, 0, 0, 0};
+                    SetWorldTransform(target, &transpose);
+                }
+                const bool ok = surface && DrawWaveform(target, rc, channel, 0.5);
+                GdiFlush();
+                out.clear();
+                if (ok) for (int i = 0; i < w * h; ++i) out.push_back(static_cast<uint32_t*>(bits)[i] & 0xFFFFFF);
+                if (previous) SelectObject(target, previous);
+                if (surface) DeleteObject(surface);
+                DeleteDC(target);
+                return ok;
+            };
+            testlog::Cases paths;
+            for (int painted : {kSeekWaveform, kSeekMoodbar, kSeekMoodWaveform}) {
+                for (int shape = 0; shape < 3; ++shape) {
+                    g.seekStyle = painted;
+                    g.waveReflection = shape == 0;
+                    g.waveFullHeight = shape == 1;
+                    std::vector<uint32_t> plain, plainGdi, up, upGdi;
+                    bool ok = render(false, false, plain) && render(false, true, plainGdi) && render(true, false, up) &&
+                              render(true, true, upGdi) && plain == plainGdi && up == upGdi;
+                    for (int x = 0; ok && x < 120; ++x)
+                        for (int y = 0; ok && y < 26; ++y) ok = up[x * 26 + y] == plain[y * 120 + x];
+                    paths.Add(ok, L"look " + std::to_wstring(painted) + L" shape " + std::to_wstring(shape));
+                }
+            }
+            batch.Next(L"direct and upright seek bar pixels match the GDI path for every look with the glow");
+            Check(paths.Passed(), L"every look's direct pixels, upright or not, match the GDI path with the glow%ls",
+                  paths.failed.c_str());
+            g.engine.SetPaused(wasPaused);
+            g.waveReflection = wasReflection;
+            g.waveFullHeight = wasFull;
+            g.seekGlow = savedGlow;
+        }
+        g.seekStyle = style;
         if (old) SelectObject(dc, old);
         if (bitmap) DeleteObject(bitmap);
         if (dc) DeleteDC(dc);
@@ -580,18 +689,50 @@ void TestTweaks(const std::wstring& scratch) {
         Check(rows >= 8 && off && named && kept && !online::AnyCoverSource(),
               L"online sources default to off, each names what it sends, and choices round-trip settings.ini");
     }
-    if (const Tweak* display = FindTweak("view.waveform")) {
-        SetTweak(*display, 0); g.waveform = true; LoadPreferences();
-        bool regular = !g.waveform && IniRead(L"Window", L"Waveform", L"") == L"0";
-        SetTweak(*display, 1); g.waveform = false; LoadPreferences();
-        Check(regular && g.waveform && display->def == 1 && !wcscmp(TweakPage(*display), L"View"),
-              L"View preferences saves and reloads both playback displays and defaults to waveform");
-    } else Check(false, L"View preferences includes Waveform playback bar");
+    // Seek bar and Seek bar shows each keep two of the [Window] keys earlier versions wrote, so a
+    // profile reads the same in every version. Every choice must round-trip through them.
+    const Tweak* seekBar = FindTweak("view.seek_bar");
+    const Tweak* seekShows = FindTweak("view.seek_shows");
+    if (seekBar && seekShows) {
+        testlog::Cases looks;
+        const struct { int value; const wchar_t* waveform; const wchar_t* style; } bars[] = {
+            {1, L"1", L"0"}, {2, L"1", L"1"}, {3, L"1", L"2"}, {0, L"0", L"2"}};  // Progress bar keeps the look
+        for (const auto& bar : bars) {
+            g.waveform = bar.value == 0;  // start from another choice, so the row really changes
+            SetTweak(*seekBar, bar.value); g.waveform = bar.value == 0; g.seekStyle = 0; LoadPreferences();
+            looks.Add(seekBar->get() == bar.value && IniRead(L"Window", L"Waveform", L"") == bar.waveform &&
+                          IniRead(L"Window", L"SeekStyle", L"") == bar.style,
+                      L"seek bar " + std::to_wstring(bar.value));
+        }
+        const struct { int value; const wchar_t* live; const wchar_t* full; } shows[] = {
+            {1, L"1", L"1"}, {2, L"1", L"0"}, {0, L"0", L"0"}};  // Whole song keeps the progress choice
+        for (const auto& show : shows) {
+            g.liveWaveform = show.value == 0;
+            SetTweak(*seekShows, show.value); g.liveWaveform = show.value == 0; g.fullLiveWaveform = true;
+            LoadPreferences();
+            looks.Add(seekShows->get() == show.value && IniRead(L"Window", L"LiveWaveform", L"") == show.live &&
+                          IniRead(L"Window", L"FullLiveWaveform", L"") == show.full,
+                      L"seek bar shows " + std::to_wstring(show.value));
+        }
+        // A profile from before the merge: a regular bar over a remembered moodbar, live with progress.
+        IniWrite(L"Window", L"Waveform", L"0"); IniWrite(L"Window", L"SeekStyle", L"1");
+        IniWrite(L"Window", L"LiveWaveform", L"1"); IniWrite(L"Window", L"FullLiveWaveform", L"0");
+        LoadPreferences();
+        looks.Add(seekBar->get() == 0 && g.seekStyle == kSeekMoodbar && seekShows->get() == 2, L"older profile");
+        SetTweak(*seekBar, 2);
+        looks.Add(g.waveform && g.seekStyle == kSeekMoodbar, L"moodbar after a progress bar");
+        SetTweak(*seekBar, 1); SetTweak(*seekShows, 0); SetTweak(*seekShows, 1); SetTweak(*seekShows, 0);
+        looks.Add(seekBar->def == 1 && seekShows->def == 0 && !wcscmp(TweakPage(*seekBar), L"View") &&
+                      !wcscmp(TweakPage(*seekShows), L"View") && g.fullLiveWaveform,
+                  L"defaults and page");
+        batch.Next(L"View preferences save and reload every seek bar look and source through the older keys");
+        Check(looks.Passed(), L"Seek bar and Seek bar shows round-trip every choice through the older keys%ls",
+              looks.failed.c_str());
+    } else Check(false, L"View preferences includes Seek bar and Seek bar shows");
     testlog::Cases liveSettings;
     const struct { const char* key; const wchar_t* ini; bool* value; } liveRows[] = {
-        {"view.live_waveform", L"LiveWaveform", &g.liveWaveform},
         {"view.live_fountain", L"LiveFountain", &g.liveFountain},
-        {"view.full_live_waveform", L"FullLiveWaveform", &g.fullLiveWaveform}
+        {"view.seek_glow", L"SeekGlow", &g.seekGlow}
     };
     for (const auto& row : liveRows) {
         const Tweak* live = FindTweak(row.key);
@@ -602,9 +743,10 @@ void TestTweaks(const std::wstring& scratch) {
         SetTweak(*live, 0);
         *row.value = true; LoadPreferences();
         liveSettings.Add(enabled && !*row.value && IniRead(L"Window", row.ini, L"") == L"0", FromUtf8(row.key));
+        SetTweak(*live, live->def);
     }
-    batch.Next(L"View preferences save and reload live waveform, fountain, full color and band size");
-    Check(liveSettings.Passed(), L"View preferences saves and reloads live waveform, fountain and full color choices%ls",
+    batch.Next(L"View preferences save and reload the live fountain and seek bar glow");
+    Check(liveSettings.Passed(), L"View preferences saves and reloads the live fountain and seek bar glow%ls",
           liveSettings.failed.c_str());
     if (const Tweak* size = FindTweak("view.band_wave_size")) {
         SetTweak(*size, 3); g.bandWaveSize = 0; LoadPreferences();
@@ -613,15 +755,6 @@ void TestTweaks(const std::wstring& scratch) {
         Check(tall && g.bandWaveSize == 0 && IniRead(L"Window", L"BandWaveSize", L"") == L"0",
               L"top/bottom waveform size persists and can return to the layout's own size");
     } else Check(false, L"View preferences includes Top/bottom waveform size");
-    if (const Tweak* style = FindTweak("view.seek_style")) {
-        SetTweak(*style, kSeekMoodWaveform); g.seekStyle = 0; LoadPreferences();
-        bool mood = g.seekStyle == kSeekMoodWaveform && style->def == 0 && !wcscmp(TweakPage(*style), L"View");
-        SetTweak(*style, kSeekMoodbar); g.seekStyle = 0; LoadPreferences();
-        bool stripe = g.seekStyle == kSeekMoodbar;
-        SetTweak(*style, kSeekWaveform); g.seekStyle = kSeekMoodbar; LoadPreferences();
-        Check(mood && stripe && g.seekStyle == kSeekWaveform && IniRead(L"Window", L"SeekStyle", L"") == L"0",
-              L"seek bar style starts as the waveform and persists every moodbar style");
-    } else Check(false, L"View preferences includes Seek bar style");
     const Tweak* colors = FindTweak("view.mood_colors");
     const Tweak* smooth = FindTweak("view.smooth_seek");
     if (colors && smooth) {
@@ -631,12 +764,45 @@ void TestTweaks(const std::wstring& scratch) {
         Check(kept && g.moodColors == kMoodTheme && !g.smoothSeek && IniRead(L"Window", L"MoodColors", L"") == L"0",
               L"moodbar colours and the smooth seek bar persist both ways");
     } else Check(false, L"View preferences includes Moodbar colours and Smooth seek bar");
+    // Waveform colour, its unplayed part and the mood waveform's own scheme persist, and the colours
+    // the seek bar draws with follow them.
+    const Tweak* waveColor = FindTweak("view.wave_color");
+    const Tweak* waveRest = FindTweak("view.wave_rest_color");
+    const Tweak* moodWave = FindTweak("view.mood_wave_colors");
+    if (waveColor && waveRest && moodWave) {
+        SetTweak(*waveColor, kWaveTeal); SetTweak(*waveRest, kWaveRestFaded); SetTweak(*moodWave, kMoodColorBlind + 1);
+        SetTweak(*colors, kMoodWarm);
+        g.waveColor = g.waveRestColor = g.moodWaveColors = g.moodColors = 0;
+        LoadPreferences();
+        const bool kept = g.waveColor == kWaveTeal && g.waveRestColor == kWaveRestFaded &&
+                          g.moodWaveColors == kMoodColorBlind + 1 && g.moodColors == kMoodWarm;
+        const COLORREF bar = PlayerColor();
+        const Rgb barRgb = (Rgb)GetRValue(bar) << 16 | (Rgb)GetGValue(bar) << 8 | GetBValue(bar);
+        const Rgb teal = WaveColorOn(kWaveTeal, barRgb);
+        const bool follows = PreferredWaveColor() == teal && PreferredWaveRest(teal) == FadedWaveColor(teal, barRgb);
+        SetTweak(*waveColor, kWaveTheme); SetTweak(*waveRest, kWaveRestTheme); SetTweak(*moodWave, 0);
+        SetTweak(*colors, kMoodTheme);
+        LoadPreferences();
+        Check(kept && follows && g.waveColor == kWaveTheme && PreferredWaveColor() == kNoRgb &&
+                  PreferredWaveRest(0x123456) == kNoRgb && g.moodWaveColors == 0 && waveColor->def == 0 &&
+                  IniRead(L"Window", L"WaveColor", L"") == L"0",
+              L"waveform colour, its unplayed part and the mood waveform colours persist both ways and drive the colours");
+    } else Check(false, L"View preferences includes Waveform colour, its unplayed part and Mood waveform colours");
     if (const Tweak* reflection = FindTweak("view.wave_reflection")) {
-        SetTweak(*reflection, 0); g.waveReflection = true; LoadPreferences();
-        const bool off = !g.waveReflection && reflection->def == 1 && !wcscmp(TweakPage(*reflection), L"View");
-        SetTweak(*reflection, 1); g.waveReflection = false; LoadPreferences();
-        Check(off && g.waveReflection && IniRead(L"Window", L"WaveReflection", L"") == L"1",
-              L"waveform reflection starts on and persists both ways");
+        // Upper half, Mirrored and Full height, through WaveReflection (the older on/off key, so 0 and 1
+        // mean what they always did) and WaveFullHeight beside it.
+        testlog::Cases shapes;
+        const struct { int value; const wchar_t* mirrored; const wchar_t* full; } rows[] = {
+            {0, L"0", L"0"}, {2, L"0", L"1"}, {1, L"1", L"1"}};
+        for (const auto& row : rows) {
+            SetTweak(*reflection, row.value); g.waveReflection = row.value != 1; g.waveFullHeight = row.value != 2;
+            LoadPreferences();
+            shapes.Add(reflection->get() == row.value && IniRead(L"Window", L"WaveReflection", L"") == row.mirrored &&
+                           IniRead(L"Window", L"WaveFullHeight", L"") == row.full,
+                       L"shape " + std::to_wstring(row.value));
+        }
+        shapes.Add(reflection->def == 1 && !wcscmp(TweakPage(*reflection), L"View"), L"defaults and page");
+        Check(shapes.Passed(), L"waveform reflection starts mirrored and persists all three shapes%ls", shapes.failed.c_str());
     } else Check(false, L"View preferences includes Waveform reflection");
     Check(ColumnAt(kColMood).name == std::wstring(L"Mood"), L"the track list offers a Mood column");
     if (const Tweak* gpu = FindTweak("view.gpu_drawing")) {
@@ -1169,6 +1335,10 @@ void TestPersonalization(const std::wstring& scratch) {
     OnCommand(IDM_REVERB_MIX_BASE + 2, 0, nullptr);
     OnCommand(IDM_LOUDNESS_COMP, 0, nullptr);
     OnCommand(IDM_NIGHT_MODE, 0, nullptr);
+    OnCommand(IDM_BITCRUSH, 0, nullptr);
+    if (const Tweak* bits = FindTweak("effects.bitcrush_bits")) SetTweak(*bits, 5 - kBitcrushMinBits);
+    if (const Tweak* crushRate = FindTweak("effects.bitcrush_rate")) SetTweak(*crushRate, 1);
+    if (const Tweak* crushMix = FindTweak("effects.bitcrush_mix")) SetTweak(*crushMix, 0.65);
     OnCommand(IDM_RG_ESTIMATE, 0, nullptr);
     OnCommand(IDM_CONVERT_RECYCLE, 0, nullptr);
     OnCommand(IDM_CONVERT_SHOW_ORIGINALS, 0, nullptr);
@@ -1248,7 +1418,8 @@ void TestPersonalization(const std::wstring& scratch) {
     batch.Next(L"missing settings use defaults rather than stale choices, and older profiles keep their size");
     Check(g.layout == MainLayout{} && !g.eq.enabled && g.eq.gains[2] == 0 && g.volumePercent == 80 && !g.shuffle &&
               !g.eq.crossfeed && !g.eq.parametric && !g.eq.filterCount && !g.skipAwareShuffle && !g.radio &&
-              g.reverb == ReverbSettings{} && !g.loudnessComp && !g.nightMode && g.rgEstimate && g.convertRecycle &&
+              g.reverb == ReverbSettings{} && g.bitcrush == BitcrushSettings{} && !g.loudnessComp && !g.nightMode &&
+              g.rgEstimate && g.convertRecycle &&
               !g.convertShowOriginals && g.convertMemory == 3,
           L"missing settings use defaults rather than stale choices from a previous profile");
     IniWrite(L"Window", L"Size", std::to_wstring((int)ViewSize::Spotlight));
@@ -1267,6 +1438,10 @@ void TestPersonalization(const std::wstring& scratch) {
     Check(g.reverb.preset == ReverbPreset::Hall && std::fabs(g.reverb.mix - kReverbMixes[2]) < 1e-4f && g.loudnessComp && g.nightMode &&
               !g.rgEstimate,
           L"reverb, loudness compensation, night mode and the quick estimate choice survive reloading");
+    Check(g.bitcrush.enabled && g.bitcrush.bits == 5 && g.bitcrush.rate == kBitcrushRates[1] &&
+              std::fabs(g.bitcrush.mix - 0.65f) < 1e-4f,
+          L"bitcrush and its depth, rate and mix survive reloading (%d, %d bits, %.0f Hz, %.2f)", g.bitcrush.enabled,
+          g.bitcrush.bits, g.bitcrush.rate, g.bitcrush.mix);
     Check(!g.convertRecycle && g.convertShowOriginals && g.convertMemory == 1,
           L"conversion options (Recycle Bin, kept originals shown, undo memory) survive reloading");
     Check(g.skipAwareShuffle && g.radio && g.eq.parametric && g.eq.crossfeed && g.eq.filterCount == 2 &&
@@ -1465,7 +1640,7 @@ void TestPersonalization(const std::wstring& scratch) {
         SendMessageW(g.seek, TBM_SETPOS, FALSE, 625);
         g.liveFountain = true; WaveformTick();
         bool fountain = FountainShown() && SendMessageW(g.seek, TBM_GETPOS, 0, 0) == 625;
-        if (const Tweak* display = FindTweak("view.waveform")) {
+        if (const Tweak* display = FindTweak("view.seek_bar")) {
             SetTweak(*display, 0);
             bool regular = !FountainShown() && !LiveWaveformShown() && g.liveWaveform && g.liveFountain;
             SetTweak(*display, 1);

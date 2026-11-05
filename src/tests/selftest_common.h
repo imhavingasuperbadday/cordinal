@@ -96,6 +96,7 @@ void TestPoints();
 void TestAutoPlaylists();
 void TestOrganize(const std::wstring& media, const std::wstring& scratch);
 void TestDeviceCopy(const std::wstring& media, const std::wstring& scratch);
+void TestCollection(const std::wstring& scratch);
 void TestIpod(const std::wstring& scratch);
 void TestScanner(const std::wstring& media, const std::wstring& scratch);
 void TestLibraryFolders(const std::wstring& scratch);

@@ -42,7 +42,7 @@ namespace lx {
 
 namespace {
 
-enum class Kind { None, Eq, Headphones, Tags, Prefs, Rules, Organize, Copy, ListenBrainz, Format, Device, Points, Review, Palette, Layout, Packs, Helpers, Games, Editions, Covers, Artist };
+enum class Kind { None, Eq, Headphones, Tags, Prefs, Rules, Organize, Copy, ListenBrainz, Format, Device, Points, Review, Palette, Layout, Packs, Helpers, Games, Editions, Covers, Artist, Export };
 Kind g_kind = Kind::None;
 float g_mx = -1, g_my = -1;
 
@@ -980,9 +980,29 @@ const char* const kNewMusicNames[] = {"Add automatically", "Review in Inbox"};
 const char* const kBandWaveSizes[] = {"Use layout size", "Slim (26 px)", "Medium (44 px)", "Tall (72 px)",
                                     "Extra tall (108 px)", "Largest (144 px)"};
 static_assert(std::size(kBandWaveSizes) == std::size(ui::kBandWaveHeights));
-const char* const kSeekStyleNames[] = {"Waveform", "Moodbar", "Mood waveform"};
-const char* const kMoodColorNames[] = {"Theme", "Vivid", "Spectrum"};
-static_assert(std::size(kSeekStyleNames) == kSeekStyles && std::size(kMoodColorNames) == kMoodColorSchemes);
+// The seek bar's look: a plain progress bar first, then the SeekStyle values (peaks.h) one up.
+const char* const kSeekBarNames[] = {"Progress bar", "Waveform", "Moodbar", "Mood waveform"};
+// Waveform reflection's shapes. Mirrored is wave_reflection on; with it off, wave_full_height (default on)
+// picks Full height over Upper half, so settings from before the choice open in Full height.
+const char* const kWaveShapeNames[] = {"Upper half", "Mirrored", "Full height"};
+const char* const kSeekShowsNames[] = {"Whole song", "Live audio", "Live audio with progress"};
+const char* const kMoodColorNames[] = {"Theme", "Vivid", "Spectrum", "Warm", "Cool", "Colour-blind friendly",
+                                       "Single colour"};
+const char* const kMoodWaveColorNames[] = {"Same as moodbar", "Theme", "Vivid", "Spectrum", "Warm", "Cool",
+                                           "Colour-blind friendly", "Single colour"};
+const char* const kWaveColorNames[] = {"Theme", "Red", "Orange", "Yellow", "Green", "Teal", "Blue", "Purple", "Pink",
+                                       "Grey"};
+const char* const kWaveRestNames[] = {"Theme grey", "Faded waveform colour"};
+static_assert(std::size(kSeekBarNames) == kSeekStyles + 1 && std::size(kMoodColorNames) == kMoodColorSchemes &&
+              std::size(kMoodWaveColorNames) == kMoodColorSchemes + 1 &&
+              std::size(kWaveColorNames) == kWaveColorChoices && std::size(kWaveRestNames) == kWaveRestChoices);
+const char* const kBitcrushBitNames[] = {"2 bits", "3 bits", "4 bits", "5 bits", "6 bits", "7 bits", "8 bits",
+                                         "9 bits", "10 bits", "11 bits", "12 bits", "13 bits", "14 bits", "15 bits",
+                                         "16 bits"};
+const char* const kBitcrushRateNames[] = {"2 kHz", "4 kHz", "6 kHz", "8 kHz", "11 kHz", "16 kHz", "22 kHz", "32 kHz",
+                                          "48 kHz"};
+static_assert(std::size(kBitcrushBitNames) == kBitcrushMaxBits - kBitcrushMinBits + 1 &&
+              std::size(kBitcrushRateNames) == std::size(kBitcrushRates));
 const char* const kUndoNames[] = {"1 day", "3 days", "1 week", "7 weeks"};
 const char* const kCoverSourceNames[] = {"Deezer", "iTunes", "MusicBrainz"};
 const char* const kCoverSaveNames[] = {"Save as cover.jpg in the album folder", "Embed in the files' tags",
@@ -1053,47 +1073,84 @@ const Pref kPrefs[] = {
     {"night_mode", "Effects", "Night mode", "Slowly lifts quiet passages and softens loud ones, for listening at night.",
      PrefType::Bool, 0, 1, 0, 1, [] { return (double)Cfg().nightMode; },
      [](double v) { Cfg().nightMode = v != 0; ApplyEffects(); Saved(); }},
-    {"waveform", "View", "Waveform playback bar",
-     "Turn off to use a regular progress bar. This overrides live waveform and fountain settings without changing them.",
-     PrefType::Bool, 0, 1, 1, 1, [] { return (double)Cfg().waveform; },
-     [](double v) { Cfg().waveform = v != 0; Saved(); }},
-    {"live_waveform", "View", "Live waveform for songs",
-     "Show a moving waveform of the audio being heard instead of the whole-song overview. Seeking still works. "
-     "Radio also uses it while Waveform playback bar is on.", PrefType::Bool, 0, 1, 0, 1,
-     [] { return (double)Cfg().liveWaveform; }, [](double v) { Cfg().liveWaveform = v != 0; Saved(); }},
+    {"bitcrush", "Effects", "Bitcrush",
+     "Lo-fi crunch: fewer levels and a lower sample rate, like an old sampler or game console.", PrefType::Bool, 0, 1,
+     0, 1, [] { return (double)Cfg().bitcrush.enabled; },
+     [](double v) { Cfg().bitcrush.enabled = v != 0; ApplyEffects(); Saved(); }},
+    {"bitcrush_bits", "Effects", "Bitcrush depth",
+     "How many bits each sample keeps. Fewer is harsher and buzzier; at 4 or fewer, quiet passages drop out.",
+     PrefType::Choice, 0, (float)std::size(kBitcrushBitNames) - 1, 8 - kBitcrushMinBits, 1,
+     [] { return (double)(Cfg().bitcrush.bits - kBitcrushMinBits); },
+     [](double v) { Cfg().bitcrush.bits = (int)v + kBitcrushMinBits; ApplyEffects(); Saved(); }, kBitcrushBitNames},
+    {"bitcrush_rate", "Effects", "Bitcrush sample rate",
+     "The rate the sound is held at. Lower rates lose treble and add metallic aliasing.", PrefType::Choice, 0,
+     (float)std::size(kBitcrushRateNames) - 1, kBitcrushDefaultRate, 1,
+     [] { return (double)BitcrushRateIndex(Cfg().bitcrush.rate); },
+     [](double v) {
+         Cfg().bitcrush.rate = kBitcrushRates[std::clamp((int)v, 0, (int)std::size(kBitcrushRates) - 1)];
+         ApplyEffects();
+         Saved();
+     }, kBitcrushRateNames},
+    {"bitcrush_mix", "Effects", "Bitcrush mix",
+     "How much of the crushed sound replaces the clean one, from 0 (none) to 1 (all of it).", PrefType::Float, 0, 1, 1,
+     0.05f, [] { return (double)Cfg().bitcrush.mix; },
+     [](double v) { Cfg().bitcrush.mix = (float)v; ApplyEffects(); Saved(); }},
+    // Seek bar and Seek bar shows each stand for two settings earlier versions offered as separate
+    // switches; settings.ini keeps those keys as they were, as on Windows (app_tweaks.cpp).
+    {"seek_bar", "View", "Seek bar",
+     "How the seek bar looks. Moodbar colours each moment by its sound: one way for bass, the other for "
+     "treble, brighter when louder. Mood waveform keeps the waveform's shape in those colours.",
+     PrefType::Choice, 0, 3, 1, 1, [] { return Cfg().waveform ? (double)Cfg().seekStyle + 1 : 0.0; },
+     [](double v) { Cfg().waveform = v != 0; if (v != 0) Cfg().seekStyle = (int)v - 1; Saved(); }, kSeekBarNames},
+    {"seek_shows", "View", "Seek bar shows",
+     "The whole song, or a moving picture of the audio being heard; seeking still works either way, and Radio "
+     "always shows live audio. With progress, what has played is lit and the rest dimmed.",
+     PrefType::Choice, 0, 2, 0, 1, [] { return !Cfg().liveWaveform ? 0.0 : Cfg().fullLiveWaveform ? 1.0 : 2.0; },
+     [](double v) { Cfg().liveWaveform = v != 0; if (v != 0) Cfg().fullLiveWaveform = v == 1; Saved(); },
+     kSeekShowsNames},
+    {"seek_glow", "View", "Seek bar glow",
+     "A soft halo of the seek bar's colours around it that pulses with the beat, brighter where the song is loud. "
+     "Every look, whole song or live.", PrefType::Bool, 0, 1, 1, 1, [] { return (double)Cfg().seekGlow; },
+     [](double v) { Cfg().seekGlow = v != 0; Saved(); }},
     {"live_fountain", "View", "Live audio for Dark Fountain",
      "In the DELTARUNE theme, Dark Fountain follows the audio being heard, including Radio. "
      "Song seeking still works.", PrefType::Bool, 0, 1, 0, 1,
      [] { return (double)Cfg().liveFountain; }, [](double v) { Cfg().liveFountain = v != 0; Saved(); }},
-    {"full_live_waveform", "View", "Full color for live waveforms",
-     "Light the whole live waveform. Turn off to show song progress with played and unplayed colors.",
-     PrefType::Bool, 0, 1, 1, 1, [] { return (double)Cfg().fullLiveWaveform; },
-     [](double v) { Cfg().fullLiveWaveform = v != 0; Saved(); }},
     {"band_wave_size", "View", "Top/bottom waveform size",
      "Sets the waveform's height in the normal player bar. Other player modes keep their own sizes.",
      PrefType::Choice, 0, 5, 0, 1, [] { return (double)Cfg().bandWaveSize; },
      [](double v) { Cfg().bandWaveSize = (int)v; Saved(); }, kBandWaveSizes},
-    {"seek_style", "View", "Seek bar style",
-     "How the seek bar looks, for the whole song and the live waveform alike. Moodbar colours "
-     "each moment by its sound: one way for bass, the other for treble, brighter when louder. "
-     "Mood waveform keeps the waveform's shape in those colours.",
-     PrefType::Choice, 0, 2, 0, 1, [] { return (double)Cfg().seekStyle; },
-     [](double v) { Cfg().seekStyle = (int)v; Saved(); }, kSeekStyleNames},
+    {"wave_color", "View", "Waveform colour",
+     "The waveform's played colour, kept bright enough to read on the player. The moodbar's Theme, Vivid and "
+     "Single colour schemes turn from it too. Paused and warnings keep their own colours.",
+     PrefType::Choice, 0, kWaveColorChoices - 1, 0, 1, [] { return (double)Cfg().waveColor; },
+     [](double v) { Cfg().waveColor = (int)v; Saved(); }, kWaveColorNames},
+    {"wave_rest_color", "View", "Waveform unplayed part",
+     "What is still to play: the theme's grey, or the waveform's own colour faded toward the background.",
+     PrefType::Choice, 0, kWaveRestChoices - 1, 0, 1, [] { return (double)Cfg().waveRestColor; },
+     [](double v) { Cfg().waveRestColor = (int)v; Saved(); }, kWaveRestNames},
     {"mood_colors", "View", "Moodbar colours",
-     "The moodbar's colours: turned from the theme's accent, the whole colour wheel, or red for "
-     "bass, green for mids and blue for treble.",
-     PrefType::Choice, 0, 2, 0, 1, [] { return (double)Cfg().moodColors; },
+     "The moodbar's colours: turned from the waveform colour, the whole colour wheel, red for bass, green "
+     "for mids and blue for treble, warm or cool shades, blue to orange (easy to tell apart with colour "
+     "blindness), or one colour that stands out more for treble.",
+     PrefType::Choice, 0, kMoodColorSchemes - 1, 0, 1, [] { return (double)Cfg().moodColors; },
      [](double v) { Cfg().moodColors = (int)v; Saved(); }, kMoodColorNames},
+    {"mood_wave_colors", "View", "Mood waveform colours",
+     "The Mood waveform's colours: the moodbar's, or a scheme of its own.", PrefType::Choice, 0, kMoodColorSchemes, 0,
+     1, [] { return (double)Cfg().moodWaveColors; }, [](double v) { Cfg().moodWaveColors = (int)v; Saved(); },
+     kMoodWaveColorNames},
     {"smooth_seek", "View", "Smooth seek bar",
      "Rounds off the whole song's outline and blends its moodbar colours into each other. "
      "The live waveform keeps its detail.",
      PrefType::Bool, 0, 1, 0, 1, [] { return (double)Cfg().smoothSeek; },
      [](double v) { Cfg().smoothSeek = v != 0; Saved(); }},
     {"wave_reflection", "View", "Waveform reflection",
-     "Mirrors the seek bar below its center line. Turn off to draw only the upper half, for the "
-     "waveform and both moodbar styles alike.",
-     PrefType::Bool, 0, 1, 1, 1, [] { return (double)Cfg().waveReflection; },
-     [](double v) { Cfg().waveReflection = v != 0; Saved(); }},
+     "Mirrored reflects the seek bar below its center line, dimmer. Upper half stops at the center line; "
+     "Full height mirrors the waveforms as bright below as above (the Moodbar stripe keeps the upper "
+     "half).",
+     PrefType::Choice, 0, 2, 1, 1, [] { return Cfg().waveReflection ? 1.0 : Cfg().waveFullHeight ? 2.0 : 0.0; },
+     [](double v) { Cfg().waveReflection = v == 1; if (v != 1) Cfg().waveFullHeight = v == 2; Saved(); },
+     kWaveShapeNames},
     {"scrobbling_paused", "Scrobbling", "Pause scrobbling",
      "Stops collecting and sending listens to Last.fm, ListenBrainz and Libre.fm, keeping connections and queued listens.",
      PrefType::Bool, 0, 1, 0, 1, [] { return (double)listenbrainz::Paused(); },
@@ -3920,9 +3977,11 @@ void ClosePanel() {
         g_kind == Kind::Editions)
         SDL_StopTextInput(g.window);
     if (g_kind == Kind::ListenBrainz) { listenbrainz::CancelAuthorization(g_lb.selected); g_lb = LbPanel{}; }  // a token is not left lying in memory
+    const bool exporting = g_kind == Kind::Export;
     g_kind = Kind::None;
     g_eq.drag = -1;
     g.redraw = true;
+    if (exporting) ExportPanelClose();  // last: Export... goes on to the save dialog
 }
 
 void ShowCoverPanel(bool overTags) {
@@ -3934,6 +3993,12 @@ void ShowCoverPanel(bool overTags) {
     }
     g_kind = Kind::Covers;
     SDL_StartTextInput(g.window);
+    g.redraw = true;
+}
+
+void ShowExportPanel() {
+    if (g_kind != Kind::Export) ClosePanel();
+    g_kind = Kind::Export;
     g.redraw = true;
 }
 
@@ -3978,6 +4043,7 @@ void DrawPanel(const Palette& p, float mouseX, float mouseY) {
     else if (g_kind == Kind::Editions) DrawEditionsPanel(p);
     else if (g_kind == Kind::Covers) DrawCoverPanel(p, mouseX, mouseY);
     else if (g_kind == Kind::Artist) DrawArtistPanel(p);
+    else if (g_kind == Kind::Export) DrawExportPanel(p);
 }
 
 void PanelMouseDown(float x, float y, int button, int clicks) {
@@ -4005,6 +4071,7 @@ void PanelMouseDown(float x, float y, int button, int clicks) {
     else if (g_kind == Kind::Editions) EditionsMouseDown(x, y, button, clicks);
     else if (g_kind == Kind::Covers) CoverPanelMouseDown(x, y, button, clicks);
     else if (g_kind == Kind::Artist && button == SDL_BUTTON_LEFT) ArtistPanelMouseDown(x, y);
+    else if (g_kind == Kind::Export) ExportPanelMouseDown(x, y);
 }
 
 void PanelMouseMove(float x, float y) {
@@ -4050,6 +4117,8 @@ void PanelWheel(float x, float y, float dy) {
         CoverPanelWheel(x, y, dy);
     } else if (g_kind == Kind::Artist) {
         ArtistPanelWheel(x, y, dy);
+    } else if (g_kind == Kind::Export) {
+        ExportPanelWheel(x, y, dy);
     } else if (g_kind == Kind::Device) {
         g_dev.first = std::clamp(g_dev.first - (int)std::lround(dy * 2), 0, std::max(0, (int)g_dev.devices.size() + 1 - kDeviceRows));
     } else if (g_kind == Kind::Prefs) {
@@ -4090,6 +4159,7 @@ void PanelKey(const SDL_KeyboardEvent& e) {
     else if (g_kind == Kind::Editions) EditionsKey(e);
     else if (g_kind == Kind::Covers) CoverPanelKey(e);
     else if (g_kind == Kind::Artist) ArtistPanelKey(e);
+    else if (g_kind == Kind::Export) ExportPanelKey(e);
 }
 
 void PanelText(const char* text) {

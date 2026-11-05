@@ -7,13 +7,18 @@
 // failed. The split between the two shades is the playhead. At every player position the waveform
 // can be a Dark Fountain instead (app_fountain.cpp).
 //
-// The moodbar styles (Preferences, Seek bar style) colour the bar by its sound instead (peaks.h
+// Seek bar glow draws a halo of each column's colour around the bar, past its edges and ends, that
+// pulses with the beat of what is heard (peaks.h GlowPulse), for every look, whole song or live.
+// While it plays, the whole song's bar then repaints on the live waveform's timer.
+//
+// The moodbar looks (Preferences, Seek bar) colour the bar by its sound instead (peaks.h
 // MoodPalette, in the Moodbar colours scheme): a flat stripe, or the waveform's own columns, for the
 // whole song or the live audio. Their colours can't carry the state any more, so what has played is
 // drawn at full strength, the rest dimmed and desaturated, and the whole song's bar gets a playhead
 // line for the state: the text color while playing, amber paused, red for a warning. Smooth seek bar
 // softens the whole song's outline and blends its colours. Waveform reflection can drop the mirrored
-// lower half, leaving the upper half alone, for the waveform and moodbar styles alike.
+// lower half (Upper half), or mirror the waveforms as bright below as above (Full height); the moodbar
+// stripe keeps the upper half without the reflection.
 //
 // One state block owns everything the bar needs for the track it shows: the peaks (or the request
 // still computing them), the chapters, and what the last paint looked like. The entry points only
@@ -210,21 +215,31 @@ constexpr int kSmoothRadius = 8;
 
 Rgb RgbOf(COLORREF c) { return (Rgb)GetRValue(c) << 16 | (Rgb)GetGValue(c) << 8 | GetBValue(c); }
 
+// What the moodbar's colours turn from on `background`: the chosen Waveform colour, else the accent.
+Rgb MoodBase(Rgb background) {
+    const Rgb chosen = WaveColorOn(g.waveColor, background);
+    return chosen != kNoRgb ? chosen : P().accent;
+}
+
 uint32_t DibColor(COLORREF c) {
     return (uint32_t)GetRValue(c) << 16 | (uint32_t)GetGValue(c) << 8 | GetBValue(c);
 }
 
-// The direct path draws in device coordinates. An advanced DC can hold the upright seek bar's
-// transpose, so only an identity world transform may use it; every other target keeps GDI.
-bool PlainTarget(HDC dc) {
-    if (GetMapMode(dc) != MM_TEXT) return false;
-    if (GetGraphicsMode(dc) != GM_ADVANCED) return true;
-    XFORM transform{};
-    return GetWorldTransform(dc, &transform) && transform.eM11 == 1 && transform.eM12 == 0 &&
-           transform.eM21 == 0 && transform.eM22 == 1 && transform.eDx == 0 && transform.eDy == 0;
+// The direct path writes device pixels, so it takes an identity world transform or the upright seek
+// bar's transpose (x' = y, y' = x, app_ui_trackbar.cpp), whose columns it writes as rows. Every other
+// target, such as a scaled print DC, keeps GDI.
+enum class DibTarget { None, Plain, Transposed };
+DibTarget DibTargetOf(HDC dc) {
+    if (GetMapMode(dc) != MM_TEXT) return DibTarget::None;
+    if (GetGraphicsMode(dc) != GM_ADVANCED) return DibTarget::Plain;
+    XFORM t{};
+    if (!GetWorldTransform(dc, &t) || t.eDx != 0 || t.eDy != 0) return DibTarget::None;
+    if (t.eM11 == 1 && t.eM12 == 0 && t.eM21 == 0 && t.eM22 == 1) return DibTarget::Plain;
+    if (t.eM11 == 0 && t.eM12 == 1 && t.eM21 == 1 && t.eM22 == 0) return DibTarget::Transposed;
+    return DibTarget::None;
 }
 
-// A reusable top-down 32-bit surface for the live waveform. Every frame is built by direct pixel
+// A reusable top-down 32-bit surface for the seek bar's waveform. Every frame is built by direct pixel
 // writes and copied once: the same rectangles through PolyPolygon cost many GDI calls per frame.
 struct WaveDib {
     HDC dc = nullptr;
@@ -256,8 +271,18 @@ struct WaveDib {
         return true;
     }
 
-    void Present(HDC target, const RECT& rc) {
-        BitBlt(target, rc.left, rc.top, width, height, dc, 0, 0, SRCCOPY);
+    // `rc` is the logical rectangle the frame covers. A transposed target takes the surface in
+    // device coordinates, already turned, so the transform is lifted for the copy.
+    void Present(HDC target, const RECT& rc, bool transposed) {
+        if (!transposed) {
+            BitBlt(target, rc.left, rc.top, width, height, dc, 0, 0, SRCCOPY);
+            return;
+        }
+        XFORM saved{};
+        GetWorldTransform(target, &saved);
+        ModifyWorldTransform(target, nullptr, MWT_IDENTITY);
+        BitBlt(target, rc.top, rc.left, width, height, dc, 0, 0, SRCCOPY);
+        SetWorldTransform(target, &saved);
     }
 
     void Release() {
@@ -273,11 +298,13 @@ struct WaveDib {
 };
 
 // The same rectangles WaveFills receives, written straight into a top-down DIB. FillRect excludes
-// the right and bottom edges, so each span ends at r.right/r.bottom exactly.
+// the right and bottom edges, so each span ends at r.right/r.bottom exactly. `width` and `height`
+// are the logical rectangle's; a transposed surface stores logical column x as device row x, so
+// the upright bar's pixels land where the transposed GDI calls would have put them.
 class PixelFills {
 public:
-    PixelFills(uint32_t* bits, int width, int height, int left, int top, COLORREF background)
-        : bits_(bits), width_(width), height_(height), left_(left), top_(top) {
+    PixelFills(uint32_t* bits, int width, int height, int left, int top, COLORREF background, bool transposed)
+        : bits_(bits), width_(width), height_(height), left_(left), top_(top), transposed_(transposed) {
         std::fill_n(bits_, (size_t)width_ * height_, DibColor(background));
     }
 
@@ -288,12 +315,46 @@ public:
         int y1 = std::clamp((int)r.bottom - top_, 0, height_);
         if (x0 >= x1 || y0 >= y1) return;
         const uint32_t c = DibColor(color);
-        for (int y = y0; y < y1; ++y) std::fill_n(bits_ + (size_t)y * width_ + x0, x1 - x0, c);
+        if (transposed_) {
+            for (int x = x0; x < x1; ++x) std::fill_n(bits_ + (size_t)x * height_ + y0, y1 - y0, c);
+        } else {
+            for (int y = y0; y < y1; ++y) std::fill_n(bits_ + (size_t)y * width_ + x0, x1 - x0, c);
+        }
+    }
+
+    // One column's glow, the rows DrawWaveform's `halo` would Add one at a time: row top - d and
+    // row bottom + d - 1 for d = 1..glow, `tint` mixed into `bg` by percent * weights[d] / scale (halved
+    // below unless `even`), exactly as Mix rounds. A wide upright bar's halo runs to tens of thousands
+    // of rows a frame, so they are written here without a rectangle each. A fade of 0 is the
+    // background the surface already holds, and the fade only falls with d, so the loop stops there.
+    void Halo(int x, int end, COLORREF bg, COLORREF tint, int percent, const int* weights, int scale, int glow, int top,
+              int bottom, bool even) {
+        const int x0 = std::clamp(x - left_, 0, width_), x1 = std::clamp(end - left_, 0, width_);
+        if (x0 >= x1 || percent <= 0) return;
+        const int r = GetRValue(bg), gr = GetGValue(bg), b = GetBValue(bg);
+        const int dr = GetRValue(tint) - r, dg = GetGValue(tint) - gr, db = GetBValue(tint) - b;
+        auto put = [&](int row, int fade) {
+            if (fade <= 0 || row < 0 || row >= height_) return;
+            const uint32_t c = (uint32_t)(r + dr * fade / 100) << 16 | (uint32_t)(gr + dg * fade / 100) << 8 |
+                               (uint32_t)(b + db * fade / 100);
+            if (transposed_) {
+                for (int i = x0; i < x1; ++i) bits_[(size_t)i * height_ + row] = c;
+            } else {
+                std::fill_n(bits_ + (size_t)row * width_ + x0, x1 - x0, c);
+            }
+        };
+        for (int d = 1; d <= glow; ++d) {
+            const int fade = percent * weights[d] / scale;
+            if (fade <= 0) break;
+            put(top - d - top_, fade);
+            put(bottom + d - 1 - top_, even ? fade : fade / 2);
+        }
     }
 
 private:
     uint32_t* bits_;
     int width_, height_, left_, top_;
+    bool transposed_;
 };
 
 }  // namespace
@@ -347,7 +408,10 @@ void OnPeaksReady(uint32_t requestId) {
 void WaveformTick() {
     if (!g.seek) return;
     FountainWake();
-    bool animate = LiveWaveformShown() && !FountainShown() && !g.engine.Paused() && IsWindowVisible(g.seek) && !IsIconic(g.hwnd);
+    // Seek bar glow pulses with the music, so a whole song's bar moves too while it plays.
+    const bool pulsing = g.seekGlow && WaveformShown() && g.playing != kNone;
+    bool animate = (LiveWaveformShown() || pulsing) && !FountainShown() && !g.engine.Paused() && IsWindowVisible(g.seek) &&
+                   !IsIconic(g.hwnd);
     if (animate && !liveTimer) liveTimer = SetTimer(g.seek, kLiveWaveTimer, 33, nullptr) != 0;
     else if (!animate && liveTimer) { KillTimer(g.seek, kLiveWaveTimer); liveTimer = false; }
     int pos = (int)SendMessageW(g.seek, TBM_GETPOS, 0, 0);
@@ -403,7 +467,8 @@ int WaveformPeak(double from, double to) {
 // split between the two colors is the playhead; a live waveform draws no line of its own. With
 // waveforms enabled, the spotlight, big mode and the vertical bar keep flat columns until peaks
 // are known. The moodbar styles color each column by its sound instead and draw the playhead.
-// Waveform reflection off drops the lower half, for the whole song and the live waveform alike.
+// Waveform reflection's Upper half drops the lower half and Full height draws it as bright as the
+// upper one, for the whole song and the live waveform alike.
 bool DrawWaveform(HDC dc, const RECT& rc, const RECT& channel, double frac) {
     if (!g.waveform) return false;
     const bool live = LiveWaveformShown();
@@ -436,8 +501,11 @@ bool DrawWaveform(HDC dc, const RECT& rc, const RECT& channel, double frac) {
     static LiveMood liveScale;
     float center = 0;
     if (mood) {
-        const int scheme = std::clamp(g.moodColors, 0, kMoodColorSchemes - 1);
-        if (!moods.For(P().accent, RgbOf(bg), scheme)) moods.Make(P().accent, RgbOf(bg), scheme);
+        // The mood waveform can take its own scheme; the stripe always takes the moodbar's.
+        const int scheme = std::clamp(!stripe && g.moodWaveColors > 0 ? g.moodWaveColors - 1 : g.moodColors, 0,
+                                      kMoodColorSchemes - 1);
+        const Rgb base = MoodBase(RgbOf(bg));
+        if (!moods.For(base, RgbOf(bg), scheme)) moods.Make(base, RgbOf(bg), scheme);
         if (live) {
             std::array<float, 256 * kMoodBands> bands{};
             g.engine.WaveformBands(bands.data(), livePeaks.size());
@@ -446,14 +514,62 @@ bool DrawWaveform(HDC dc, const RECT& rc, const RECT& channel, double frac) {
             center = MoodCenter(peaks);
         }
     }
-    // Live audio counts as heard unless its progress is split off (Full color for live waveforms).
+    // Live audio counts as heard unless its progress is split off (Seek bar shows, with progress).
     const bool allPlayed = live && g.fullLiveWaveform;
-    // The reflection is the dimmer lower half; off draws the upper half alone.
-    const bool reflect = g.waveReflection;
+    // The reflection is the dimmer lower half; off draws the upper half alone. Full height mirrors a
+    // waveform as bright below the center line as above it, with no darker underside; the moodbar
+    // stripe keeps the upper half.
+    const bool fullHeight = !g.waveReflection && g.waveFullHeight && !stripe;
+    const bool reflect = g.waveReflection || fullHeight;
     // The stripe's columns touch; the waveform's stand a pixel apart.
     int col = std::max(2, S(2)), step = stripe ? col : col + std::max(1, S(1));
+    // Seek bar glow: a halo of each column's colour around the bar, fading out from its edge, that
+    // pulses with the beat of what is heard (GlowPulse) and is stronger where the song is loud and
+    // on what has played. The stripe stands shorter to leave the halo room before the bar's edge;
+    // a waveform's columns already have room above their tips.
+    const int glow = g.seekGlow ? std::max(S(4), half / 2) : 0;
+    const int room = std::min(cy - (int)rc.top, (int)rc.bottom - cy - 1) - glow - 1;  // a pixel short of the edge
+    const int stripeHalf = stripe && glow ? std::clamp(room, 1, half) : half;
+    static GlowPulse pulse;
+    if (glow && (g.playing != kNone || RadioPlaying()) && !g.engine.Paused()) {
+        std::array<uint8_t, 256> heard{};
+        if (live) heard = livePeaks;
+        else g.engine.WaveformPeaks(heard.data(), heard.size());
+        pulse.Step(heard.data(), (int)heard.size(), GetTickCount64() / 1000.0);
+    }
+    const float beat = pulse.Value();
     int playedX = left + (int)(width * frac);
-    const WaveShades playedShades = ShadesOf(WaveformPlayedColor(), bg), restShades = ShadesOf(WaveformRestColor(), bg);
+    // `glow` rows of `tint` at `percent` strength, fading softly, above row `top` and, at half
+    // strength unless `even`, from row `bottom` down: the first row past the reflection's edge, or
+    // past the center line when the upper half is drawn alone, so the halo goes all the way round.
+    const int glowScale = (glow + 1) * (glow + 1);
+    static std::vector<int> glowWeights;  // (glow + 1 - d)^2 for row d of the fade
+    glowWeights.resize(glow + 1);
+    for (int d = 1; d <= glow; ++d) glowWeights[d] = (glow + 1 - d) * (glow + 1 - d);
+    auto fadeAt = [&](int percent, int d) { return percent * glowWeights[d] / glowScale; };
+    auto halo = [&](auto& fills, int x, int end, COLORREF tint, int percent, int top, int bottom, bool even) {
+        if constexpr (std::is_same_v<std::decay_t<decltype(fills)>, PixelFills>) {
+            fills.Halo(x, end, bg, tint, percent, glowWeights.data(), glowScale, glow, top, bottom, even);
+        } else {
+            for (int d = 1; d <= glow && percent > 0; ++d) {
+                const int fade = fadeAt(percent, d);
+                if (top - d >= rc.top) fills.Add(Mix(bg, tint, fade), {x, top - d, end, top - d + 1});
+                if (bottom + d <= rc.bottom)
+                    fills.Add(Mix(bg, tint, even ? fade : fade / 2), {x, bottom + d - 1, end, bottom + d});
+            }
+        }
+    };
+    // How strongly a column glows: the beat lifts every column at once, its own loudness (0..1)
+    // a little more, and what has played glows brighter than what is still to come.
+    auto glowPercent = [beat](float level, bool played) {
+        level = std::clamp(level, 0.0f, 1.0f);
+        return level > 0 ? (int)((25 + 70 * beat) * (0.6f + 0.4f * level) * (played ? 1.0f : 0.55f)) : 0;
+    };
+    // The stripe's two ends glow sideways too, so the halo goes all the way around.
+    struct EndGlow { COLORREF tint = 0; int percent = 0; };
+    EndGlow firstEnd, lastEnd;
+    const COLORREF playedTint = WaveformPlayedColor(), restTint = WaveformRestColor();
+    const WaveShades playedShades = ShadesOf(playedTint, bg), restShades = ShadesOf(restTint, bg);
     // The rows of band `i`, counted from the center line out.
     const int span = half + 1;
     auto bandStart = [span](int i) { return i * span / WaveShades::kBands; };
@@ -479,16 +595,23 @@ bool DrawWaveform(HDC dc, const RECT& rc, const RECT& channel, double frac) {
             int h = std::max(1, half * v / 255), body = std::clamp(half * rms / 255, 1, h);
             const bool played = allPlayed || x < playedX;
             const WaveShades* shades = played ? &playedShades : &restShades;
+            COLORREF tint = played ? playedTint : restTint;
             WaveShades moodShades;
             if (mood) {
                 const MoodTone tone = live ? MoodOf(liveMood, buckets.first, buckets.last, center, (int)livePeaks.size())
                                            : MoodOf(peaks, buckets.first, buckets.last, center);
-                COLORREF c = Ref(moods.Pick(tone, played));
+                tint = Ref(moods.Pick(tone, played));
                 if (stripe) {
-                    fills.Add(c, {x, cy - half, end, reflect ? cy + half + 1 : cy + 1});
+                    // Without the reflection the stripe stands on the center line, and glows below it.
+                    const int top = cy - stripeHalf, bottom = reflect ? cy + stripeHalf + 1 : cy + 1;
+                    fills.Add(tint, {x, top, end, bottom});
+                    const int percent = glowPercent(tone.level, played);
+                    halo(fills, x, end, tint, percent, top, bottom, true);
+                    if (x == left) firstEnd = {tint, percent};
+                    lastEnd = {tint, percent};
                     continue;
                 }
-                moodShades = ShadesOf(c, bg);
+                moodShades = ShadesOf(tint, bg);
                 shades = &moodShades;
             }
             const WaveShades& s = *shades;
@@ -496,36 +619,51 @@ bool DrawWaveform(HDC dc, const RECT& rc, const RECT& channel, double frac) {
             for (int i = 0; i < WaveShades::kBands && bandStart(i) <= body; ++i) {
                 int d0 = bandStart(i), d1 = std::min(body + 1, bandStart(i + 1));
                 fills.Add(s.body[i], {x, cy - d1 + 1, end, cy - d0 + 1});
-                if (reflect) fills.Add(s.mirror[i], {x, cy + 1 + d0, end, cy + 1 + std::min(d1, body)});
+                if (reflect) fills.Add(fullHeight ? s.body[i] : s.mirror[i], {x, cy + 1 + d0, end, cy + 1 + std::min(d1, body)});
             }
             if (h > body) {
                 fills.Add(s.edge, {x, cy - h, end, cy - body});
-                if (reflect) fills.Add(s.mirrorEdge, {x, cy + 1 + body, end, cy + 1 + h});
+                if (reflect) fills.Add(fullHeight ? s.edge : s.mirrorEdge, {x, cy + 1 + body, end, cy + 1 + h});
             }
             // Fractional end pixels keep a quiet note's smooth fall visible in the slim player.
             int alpha = live ? std::max(0, half * v - h * 255) : 0;
             if (alpha) {
                 int tip = std::min(WaveShades::kBands - 1, h * WaveShades::kBands / span);
                 fills.Add(Mix(bg, s.body[tip], alpha * 100 / 255), {x, cy - h - 1, end, cy - h});
-                if (reflect) fills.Add(Mix(bg, s.mirror[tip], alpha * 100 / 255), {x, cy + h + 1, end, cy + h + 2});
+                if (reflect) fills.Add(Mix(bg, fullHeight ? s.body[tip] : s.mirror[tip], alpha * 100 / 255), {x, cy + h + 1, end, cy + h + 2});
+            }
+            // The glow starts past the column's tip, and past its fractional end pixel when it has one.
+            const int tipRow = alpha ? cy - h - 1 : cy - h;
+            const int mirrorRow = !reflect ? cy + 1 : alpha ? cy + h + 2 : cy + h + 1;
+            halo(fills, x, end, tint, glowPercent(v / 255.0f, played), tipRow, mirrorRow, fullHeight);
+        }
+        if (stripe && glow) {
+            const int top = cy - stripeHalf, bottom = reflect ? cy + stripeHalf + 1 : cy + 1;
+            for (int d = 1; d <= glow; ++d) {
+                if (left - d >= rc.left && firstEnd.percent)
+                    fills.Add(Mix(bg, firstEnd.tint, fadeAt(firstEnd.percent, d)), {left - d, top, left - d + 1, bottom});
+                if (right + d <= rc.right && lastEnd.percent)
+                    fills.Add(Mix(bg, lastEnd.tint, fadeAt(lastEnd.percent, d)), {right + d - 1, top, right + d, bottom});
             }
         }
     };
     const int headWidth = std::max(2, S(2));
-    const RECT head{playedX - headWidth / 2, cy - half, playedX - headWidth / 2 + headWidth,
-                    reflect ? cy + half + 1 : cy + 1};
-    // Live frames are the only ones that arrive 30 times a second; a moodbar's many colors would
-    // overflow WaveFills' groups. A transformed DC, such as the upright seek bar's transpose, keeps
+    const RECT head{playedX - headWidth / 2, cy - stripeHalf, playedX - headWidth / 2 + headWidth,
+                    reflect ? cy + stripeHalf + 1 : cy + 1};
+    // Every look can repaint 30 times a second (live, or a whole song's glow), and the moodbar's and
+    // the glow's blended colours overflow WaveFills' groups into one GDI call per rectangle, so
+    // the bar is built in pixels whenever the target allows, upright or not. Other targets keep
     // the GDI path below.
-    if ((live || mood) && PlainTarget(dc)) {
+    if (const DibTarget target = DibTargetOf(dc); target != DibTarget::None) {
+        const bool transposed = target == DibTarget::Transposed;
         const int w = rc.right - rc.left, h = rc.bottom - rc.top;
         static WaveDib dib;
-        if (w > 0 && h > 0 && dib.Ready(dc, w, h)) {
+        if (w > 0 && h > 0 && dib.Ready(dc, transposed ? h : w, transposed ? w : h)) {
             GdiFlush();  // the previous frame's BitBlt may still be reading these bits
-            PixelFills pixels(dib.bits, w, h, rc.left, rc.top, bg);
+            PixelFills pixels(dib.bits, w, h, rc.left, rc.top, bg, transposed);
             columns(pixels);
             if (mood && !live) pixels.Add(MoodPlayhead(), head);
-            dib.Present(dc, rc);
+            dib.Present(dc, rc, transposed);
             return true;
         }
     }
@@ -553,8 +691,8 @@ void DrawMoodCell(HDC dc, const RECT& cell, TrackId id, COLORREF bg) {
     if (w <= 0 || r.bottom <= r.top) return;
     static MoodPalette moods;
     const int scheme = std::clamp(g.moodColors, 0, kMoodColorSchemes - 1);
-    const Rgb background = RgbOf(WindowBg());
-    if (!moods.For(P().accent, background, scheme)) moods.Make(P().accent, background, scheme);
+    const Rgb background = RgbOf(WindowBg()), base = MoodBase(background);
+    if (!moods.For(base, background, scheme)) moods.Make(base, background, scheme);
     const float center = MoodCenter(peaks);
     static std::vector<uint32_t> row;
     row.resize(w);
@@ -566,6 +704,14 @@ void DrawMoodCell(HDC dc, const RECT& cell, TrackId id, COLORREF bg) {
     BITMAPINFO info{};
     info.bmiHeader = {sizeof(BITMAPINFOHEADER), w, 1, 1, 32, BI_RGB};
     StretchDIBits(dc, r.left, r.top, w, r.bottom - r.top, 0, 0, w, 1, row.data(), &info, DIB_RGB_COLORS, SRCCOPY);
+}
+
+Rgb PreferredWaveColor() {
+    return WaveColorOn(g.waveColor, RgbOf(PlayerColor()));
+}
+
+Rgb PreferredWaveRest(Rgb played) {
+    return g.waveRestColor == kWaveRestFaded ? FadedWaveColor(played, RgbOf(PlayerColor())) : kNoRgb;
 }
 
 void OnListPeaksReady() {

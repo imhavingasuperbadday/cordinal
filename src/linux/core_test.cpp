@@ -7,6 +7,7 @@
 //   cordinal-core-test convert FILE DIR       convert FILE to .cord with its log in DIR, then undo the conversion
 //   cordinal-core-test organize FILE ROOT     organize FILE (and its folder's cover) under ROOT, then undo it
 //   cordinal-core-test copy FILE DEST         copy FILE to DEST, find it again, then replace it with AAC
+//   cordinal-core-test collection DIR         export a small library made in DIR as a collection, then import it
 //   cordinal-core-test ipod DIR               initialize a fake classic iPod, sync one track and reopen its database
 //   cordinal-core-test eq                     check the equalizer's boost through the renderer
 //   cordinal-core-test resampler              check treble fidelity, alias rejection and output length
@@ -23,8 +24,10 @@
 //   cordinal-core-test steam [cancel]         list discovered Steam soundtrack folders; "cancel" lists none
 //   cordinal-core-test away DIR               the away-from-home pieces: JSON, STUN, keys, certificates and HTTPS
 //   cordinal-core-test web DIR CONTROL        serve DIR over HTTP; CONTROL gets the port and pairing code
+#include "archive.h"
 #include "audio_output.h"
 #include "backup.h"
+#include "collection.h"
 #include "tests/metadata_checks.h"
 #include "convert.h"
 #include "decoder.h"
@@ -59,6 +62,7 @@
 #include <openssl/pem.h>
 #include <openssl/x509v3.h>
 
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -328,6 +332,59 @@ int CopyRoundTrip(const char* file, const char* destArg) {
     if (!ReadTags(folder + name + L".m4a", copied) || copied.title != tags.title) return 8;
     if (!ReadFileBytes(path, after) || after != before) return 9;  // the original is only ever read
     printf("copied \"%s\", found it again and replaced it with AAC\n", Narrow(path).c_str());
+    return 0;
+}
+
+// Exports a small library made in DIR (an album with its cover and a file that isn't music, under a
+// name only Linux allows, and a playlist) as a collection, then imports it into DIR/in: the song must
+// come back byte for byte with its time, the playlist must point at the unpacked file, a second
+// import must find everything already there, and the scanner must not list the archive as a pack.
+int CollectionRoundTrip(const char* dirArg) {
+    const std::wstring dir = Wide(dirArg), music = dir + L"/Music", album = music + L"/Artist/Album";
+    std::filesystem::remove_all(Narrow(dir));
+    std::filesystem::create_directories(Narrow(album));
+    std::filesystem::create_directories(Narrow(dir + L"/out"));
+    auto write = [](const std::wstring& path, const std::string& bytes) { std::ofstream(Narrow(path), std::ios::binary) << bytes; };
+    std::string song(1500000, '\0');
+    for (size_t i = 0; i < song.size(); ++i) song[i] = (char)(i * 7 + (i >> 9));
+    const std::wstring one = album + L"/01 One: Live.flac";
+    write(one, song);
+    write(album + L"/cover.jpg", "jpeg bytes");
+    write(album + L"/notes.txt", "not part of the collection");
+    const struct timespec times[2] = {{0, UTIME_OMIT}, {1577934245, 0}};
+    if (utimensat(AT_FDCWD, Narrow(one).c_str(), times, 0) != 0) return 2;
+    Library library;
+    const TrackId id = library.Add(one);
+    library[id].flags |= Track::kInLibrary;
+    const std::vector<Playlist> playlists{Playlist{L"Mix", {id, id}, PlaylistKind::Static}};
+    std::atomic<bool> cancel{false};
+    const std::wstring zip = dir + L"/out/collection.zip";
+    const auto exported = collection::Export(collection::CaptureExport(library, playlists, {music}, false), zip, cancel, {});
+    if (!exported.ok || exported.songs != 1 || exported.playlists != 1 || !exported.skipped.empty()) {
+        fprintf(stderr, "export: %s\n", Narrow(exported.error).c_str());
+        return 3;
+    }
+    std::vector<std::wstring> members;
+    if (!ListArchive(zip, members) || !members.empty()) return 4;
+    collection::ImportPlan plan;
+    std::wstring error;
+    if (!collection::ReadCollection(zip, plan, error)) {
+        fprintf(stderr, "read: %s\n", Narrow(error).c_str());
+        return 5;
+    }
+    const std::wstring in = dir + L"/in", got = in + L"/Music/Artist/Album/01 One: Live.flac";
+    const auto imported = collection::Import(plan, in, cancel, {});
+    std::string back;
+    if (!imported.error.empty() || imported.written != 2 || !imported.failed.empty() || !ReadFileBytes(got, back) || back != song) return 6;
+    struct stat st;
+    if (stat(Narrow(got).c_str(), &st) != 0 || st.st_mtime != 1577934245) return 7;
+    if (imported.playlists.size() != 1 || imported.playlists[0].paths != std::vector<std::wstring>{got, got}) return 8;
+    if (imported.folders != std::vector<std::wstring>{in + L"/Music"} ||
+        GetFileAttributesW((in + L"/Music/Artist/Album/notes.txt").c_str()) != INVALID_FILE_ATTRIBUTES)
+        return 9;
+    const auto again = collection::Import(plan, in, cancel, {});
+    if (again.written || again.same != 2 || !again.failed.empty()) return 10;
+    printf("exported and imported a collection: %zu files byte for byte, its time and playlist kept\n", imported.written);
     return 0;
 }
 
@@ -1003,6 +1060,7 @@ int main(int argc, char** argv) {
     if (argc >= 4 && !strcmp(argv[1], "convert")) return ConvertRoundTrip(argv[2], argv[3]);
     if (argc >= 4 && !strcmp(argv[1], "organize")) return OrganizeRoundTrip(argv[2], argv[3]);
     if (argc >= 4 && !strcmp(argv[1], "copy")) return CopyRoundTrip(argv[2], argv[3]);
+    if (argc >= 3 && !strcmp(argv[1], "collection")) return CollectionRoundTrip(argv[2]);
     if (argc >= 2 && !strcmp(argv[1], "eq")) return CheckEq();
     if (argc >= 3 && !strcmp(argv[1], "metadata")) return CheckMetadata(argv[2], argc - 3, argv + 3);
     if (argc >= 2 && !strcmp(argv[1], "resampler")) return CheckResampler();
@@ -1018,6 +1076,6 @@ int main(int argc, char** argv) {
     if (argc >= 3 && !strcmp(argv[1], "decode")) return Decode(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "play")) return Play(argv[2], argc >= 4 ? atof(argv[3]) : 5);
     fprintf(stderr, "usage: cordinal-core-test scan DIR | decode FILE | play FILE [SECONDS] | replaygain FILE... | "
-                    "tags FILE DIR | convert FILE DIR | organize FILE ROOT | copy FILE DEST | ipod DIR | eq | resampler | waveform | helpers DIR | devices | sfx | listenbrainz DIR | weighted-shuffle | chapters FILE | library FILE | history FILE | playlists FILE | steam [cancel] | away DIR | web DIR CONTROL\n");
+                    "tags FILE DIR | convert FILE DIR | organize FILE ROOT | copy FILE DEST | collection DIR | ipod DIR | eq | resampler | waveform | helpers DIR | devices | sfx | listenbrainz DIR | weighted-shuffle | chapters FILE | library FILE | history FILE | playlists FILE | steam [cancel] | away DIR | web DIR CONTROL\n");
     return 2;
 }

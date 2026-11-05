@@ -499,15 +499,23 @@ bool FountainStyleShown() {
 Rgb WavePlayedColor(const Palette& p) {
     if (g.playing != kNone && (g_lib[g.playing].Failed() || g.stopAfterCurrent)) return p.error;
     if (IsPaused()) return p.amber;
+    return WaveRestingColor(p);
+}
+// The played colour without the paused or warning state: the position's own, then Preferences'
+// Waveform colour, then a pack theme's, then the accent (app_fountain.cpp's order).
+Rgb WaveRestingColor(const Palette& p) {
     int dock = std::clamp(g.settings.layout.dock, 0, 3);
-    Rgb own = appearance.played[dock], theme = ThemeInfo(g.settings.theme).wavePlayed;
-    return own != kNoRgb ? own : theme != kNoRgb ? theme : p.accent;
+    Rgb own = appearance.played[dock], chosen = WaveColorOn(g.settings.waveColor, p.surface),
+        theme = ThemeInfo(g.settings.theme).wavePlayed;
+    return own != kNoRgb ? own : chosen != kNoRgb ? chosen : theme != kNoRgb ? theme : p.accent;
 }
 Rgb WaveRestColor(const Palette& p, bool live) {
     if (live && g.settings.fullLiveWaveform) return WavePlayedColor(p);
     int dock = std::clamp(g.settings.layout.dock, 0, 3);
     Rgb own = appearance.rest[dock], theme = ThemeInfo(g.settings.theme).waveRest;
-    return own != kNoRgb ? own : theme != kNoRgb ? theme : p.dark ? p.faint : p.border;
+    if (own != kNoRgb) return own;
+    if (g.settings.waveRestColor == kWaveRestFaded) return FadedWaveColor(WaveRestingColor(p), p.surface);
+    return theme != kNoRgb ? theme : p.dark ? p.faint : p.border;
 }
 void LoadAlternateSettings(const std::map<std::string, std::string>& v) {
     appearance.style = Integer(v, "wave_style", 2, 0, 2);

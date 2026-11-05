@@ -328,6 +328,16 @@ BOOL GetFileTime(HANDLE h, FILETIME* created, FILETIME* accessed, FILETIME* writ
     return Ok();
 }
 
+// Only the write time is set: POSIX has no creation time to change, and the access time stays.
+BOOL SetFileTime(HANDLE h, const FILETIME*, const FILETIME*, const FILETIME* written) {
+    auto* f = As<FileObject>(h, Object::File);
+    if (!f) return Fail(EBADF);
+    if (!written) return Ok();
+    const uint64_t v = ToU64(*written);
+    struct timespec times[2] = {{0, UTIME_OMIT}, {(time_t)(v / 10000000ull) - (time_t)kEpochDiff, (long)(v % 10000000ull) * 100}};
+    return futimens(f->fd, times) == 0 ? Ok() : Fail();
+}
+
 BOOL SetEndOfFile(HANDLE h) {
     auto* f = As<FileObject>(h, Object::File);
     if (!f) return Fail(EBADF);

@@ -38,7 +38,7 @@ bool Resume();
 void ReopenLastTrack();
 void SetVolumePercent(int percent);
 void ToggleMute();
-void ApplyEffects();  // reverb and smart volume to the engine
+void ApplyEffects();  // reverb, bitcrush and smart volume to the engine
 void SetSpeed(double speed);
 void SetTempo(double tempo);
 std::wstring RateText();  // "1.25x speed", empty at normal speed and tempo
@@ -69,6 +69,10 @@ bool WaveformStep(UINT_PTR id);
 int WaveformPeak(double from, double to);
 COLORREF WaveformPlayedColor();
 COLORREF WaveformRestColor();
+// Preferences' Waveform colour on the player's background (app_waveform.cpp); kNoRgb for Theme.
+Rgb PreferredWaveColor();
+// Unplayed part, Faded colour: `played` faded into the player's background; kNoRgb for the theme's.
+Rgb PreferredWaveRest(Rgb played);
 // The waveform's look (app_fountain.cpp): Dark Fountain at every position and per-position colors.
 void LoadWaveLook();
 // The waveform rows of Preferences (app_tweaks.cpp): the style and the fountain's toggles.

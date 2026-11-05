@@ -71,10 +71,12 @@ struct Clock {
     bool running = false;  // kFountainTimer is set
 } fclock;
 
-// The paint's pixel buffer, kept between frames.
+// The paint's pixel buffer, kept between frames, and the DC that blits it: this runs thirty times a
+// second, so neither is created and deleted per frame.
 HBITMAP dib = nullptr;
 uint32_t* bits = nullptr;
 int dibW = 0, dibH = 0;
+HDC dibDC = nullptr;
 
 // Decodes the PNG resource `id` (RCDATA) into a sprite.
 bool LoadSprite(IWICImagingFactory* wic, int id, Sprite& out) {
@@ -434,7 +436,9 @@ COLORREF WaveformPlayedColor() {
     if (warn) return Ref(P().error);
     if (g.engine.Paused()) return Ref(P().amber);
     Rgb theme = ThemeInfo(g.themeMode).wavePlayed;  // a pack theme's own waveform colours
-    return own != kThemeColor ? Ref(own) : theme != kNoRgb ? Ref(theme) : Ref(P().accent);
+    if (own != kThemeColor) return Ref(own);
+    if (Rgb chosen = PreferredWaveColor(); chosen != kNoRgb) return Ref(chosen);  // Preferences, Waveform colour
+    return theme != kNoRgb ? Ref(theme) : Ref(P().accent);
 }
 
 COLORREF WaveformRestColor() {
@@ -442,7 +446,12 @@ COLORREF WaveformRestColor() {
     if (g.fullLiveWaveform && LiveWaveformShown()) return WaveformPlayedColor();
     Rgb own = DockRest();
     Rgb theme = ThemeInfo(g.themeMode).waveRest;
-    return own != kThemeColor ? Ref(own) : theme != kNoRgb ? Ref(theme) : Ref(g.dark ? P().faint : P().border);
+    if (own != kThemeColor) return Ref(own);
+    // Unplayed part, Faded colour: the resting played colour (no paused or warning state) faded.
+    Rgb played = DockPlayed(), chosen = PreferredWaveColor(), pack = ThemeInfo(g.themeMode).wavePlayed;
+    played = played != kThemeColor ? played : chosen != kNoRgb ? chosen : pack != kNoRgb ? pack : P().accent;
+    if (Rgb faded = PreferredWaveRest(played); faded != kNoRgb) return Ref(faded);
+    return theme != kNoRgb ? Ref(theme) : Ref(g.dark ? P().faint : P().border);
 }
 
 bool FountainShown() {
@@ -488,7 +497,12 @@ void PaintFountain(HDC dc, const RECT& client, int top, int bottom, double frac)
             bits[(size_t)markerY * w + x] = Pack(Mix(under, Mix(l.col, {1, 1, 1}, 0.4f), 0.6f));
         }
     GdiFlush();
-    HDC mem = CreateCompatibleDC(dc);
+    // Blitted through a compatible DC kept between frames: the fountain repaints thirty times a
+    // second, and creating and deleting one per frame was pure churn. The DIB stays deselected
+    // between frames, so it can still be replaced when the bar is resized.
+    if (!dibDC) dibDC = CreateCompatibleDC(dc);
+    if (!dibDC) return;
+    HDC mem = dibDC;
     HGDIOBJ old = SelectObject(mem, dib);
     if (vertical) {
         BitBlt(dc, client.left, client.top, w, h, mem, 0, 0, SRCCOPY);
@@ -498,7 +512,6 @@ void PaintFountain(HDC dc, const RECT& client, int top, int bottom, double frac)
         PlgBlt(dc, corners, mem, 0, 0, w, h, nullptr, 0, 0);
     }
     SelectObject(mem, old);
-    DeleteDC(mem);
 }
 
 // WaveformTick's share, four times a second: start the clock when the fountain should move, and
@@ -667,14 +680,21 @@ COLORREF WaveformPlayedColor() {
     if (g.engine.Paused()) return Ref(P().amber);
     Rgb own = DockPlayed();
     Rgb theme = ThemeInfo(g.themeMode).wavePlayed;
-    return own != kThemeColor ? Ref(own) : theme != kNoRgb ? Ref(theme) : Ref(P().accent);
+    if (own != kThemeColor) return Ref(own);
+    if (Rgb chosen = PreferredWaveColor(); chosen != kNoRgb) return Ref(chosen);
+    return theme != kNoRgb ? Ref(theme) : Ref(P().accent);
 }
 
 COLORREF WaveformRestColor() {
     if (g.fullLiveWaveform && LiveWaveformShown()) return WaveformPlayedColor();
     Rgb own = DockRest();
     Rgb theme = ThemeInfo(g.themeMode).waveRest;
-    return own != kThemeColor ? Ref(own) : theme != kNoRgb ? Ref(theme) : Ref(g.dark ? P().faint : P().border);
+    if (own != kThemeColor) return Ref(own);
+    // Unplayed part, Faded colour: the resting played colour (no paused or warning state) faded.
+    Rgb played = DockPlayed(), chosen = PreferredWaveColor(), pack = ThemeInfo(g.themeMode).wavePlayed;
+    played = played != kThemeColor ? played : chosen != kNoRgb ? chosen : pack != kNoRgb ? pack : P().accent;
+    if (Rgb faded = PreferredWaveRest(played); faded != kNoRgb) return Ref(faded);
+    return theme != kNoRgb ? Ref(theme) : Ref(g.dark ? P().faint : P().border);
 }
 
 }  // namespace app

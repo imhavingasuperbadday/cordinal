@@ -7,7 +7,9 @@ $Out = (New-Item -ItemType Directory -Force -Path $Out).FullName
 $compiler = (Get-Command clang++.exe -ErrorAction Stop).Source
 # CDPACK_PYTHON names the interpreter (release CI sets it); otherwise the py launcher's 3.14.
 $python = if ($env:CDPACK_PYTHON) { $env:CDPACK_PYTHON } else { (Get-Command py.exe -ErrorAction Stop).Source }
-$pythonArgs = if ($env:CDPACK_PYTHON) { @() } else { @('-3.14') }
+# @() outside the if: PowerShell unrolls a one-element array an if returns, and splatting the bare
+# string '-3.14' passes it one character at a time, so Python read a script from stdin and waited.
+$pythonArgs = @(if (!$env:CDPACK_PYTHON) { '-3.14' })
 $flags = @('-std=c++20', '-O2', '-Wall', '-Wextra')
 & $compiler @flags (Join-Path $repo 'cdpack/tests/decode.cpp') '-o' (Join-Path $Out 'decode.exe')
 if ($LASTEXITCODE) { throw 'Host decoder build failed.' }

@@ -59,6 +59,16 @@ bool CopyBusy();
 bool CopyDialogMessage(MSG* msg);
 void OnCopyMessage(WPARAM wp, LPARAM lp);
 void StopCopier();
+// File > Export collection and Import collection (app_collection.cpp). Busy covers the
+// choices asked between steps; Running only the worker, which Cancel stops.
+void ExportCollection();
+void ImportCollection();
+void CancelCollection();
+bool CollectionBusy();
+bool CollectionRunning();
+std::wstring CollectionCancelText();
+void OnCollectionMessage(WPARAM wp, LPARAM lp);
+void StopCollection();
 void ShowTagEditor(const std::vector<TrackId>& ids);
 bool TagEditorDialogMessage(MSG* msg);
 void WriteTagsInBackground(const std::vector<TrackId>& ids, const TagEdit& edit, bool announce = true);

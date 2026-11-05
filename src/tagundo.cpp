@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <optional>
 
 namespace {
@@ -224,6 +225,8 @@ bool CaptureTagUndo(const std::wstring& path, const TagEdit& edit, TagUndoFile& 
 bool SaveTagJournal(const std::wstring& dir, TagJournal& journal, std::wstring& error) {
     SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
     auto existing = ListJournals(dir);
+    // Named by when it was made: Undo weighs it against the newest playlist edit's unix time.
+    if (!journal.time) journal.time = (uint64_t)std::time(nullptr);
     if (!existing.empty()) journal.time = std::max(journal.time, existing.back().first + 1);
     std::wstring file = dir + kPathSep + std::to_wstring(journal.time) + L".cdu";
     std::wstring tmp = file + L".tmp";

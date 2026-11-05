@@ -559,6 +559,7 @@ void ToggleMute() {
 
 void ApplyEffects() {
     g.engine.SetReverb(g.reverb);
+    g.engine.SetBitcrush(g.bitcrush);
     g.engine.SetSmartVolume(g.loudnessComp, g.nightMode);
 }
 
@@ -778,7 +779,10 @@ void UpdateStatus() {
             text = L"Stopped.";
         if (g.stopAfterCurrent) text += L"  (stop after current)";
         if (!g.queue.empty()) text += L"  \x2022  " + std::to_wstring(g.queue.size()) + L" queued";
-        if (active && !RateText().empty()) text += L"  \x2022  " + RateText();
+        if (active) {
+            const std::wstring rate = RateText();  // once: formatting it twice was wasted work
+            if (!rate.empty()) text += L"  \x2022  " + rate;
+        }
         if (std::wstring end = active && !FoobarMode() ? EndsAtText(pos, dur) : L""; !end.empty()) text += L"  \x2022  " + end;
         SetStatusPart(0, text);
     }
@@ -805,22 +809,6 @@ void UpdateStatus() {
             if (elapsed > 0.1) dsp += L"  \x2022  " + FormatDuration((total - done) * elapsed / done) + L" left";
         }
     } else {
-        std::wstring rg = L"RG: ";
-        if (!g.rgOn) {
-            rg += L"off";
-        } else if (active && g.playing < g_lib.Count()) {
-            const Track& t = g_lib[g.playing];
-            wchar_t buf[32];
-            auto token = g.tokens.find(g.playingToken);
-            const bool estimated = token != g.tokens.end() && token->second.estimated;
-            const float gain = g.engine.PlayingGain();
-            swprintf_s(buf, L"%+.1f dB%ls", 20 * std::log10(std::max(gain, 1e-6f)), estimated ? L" (estimate)" : L"");
-            rg += t.rgTrackGain == kNoGain && t.rgAlbumGain == kNoGain && !estimated ? L"not measured yet" : buf;
-        } else {
-            rg += L"on";
-        }
-        if (g.rgRunning && g.rgAuto)
-            rg += L"  \x2022  measuring " + std::to_wstring(g.rgDone.load()) + L"/" + std::to_wstring(g.rgTotal.load());
         // Output: shared or exclusive, the device's rate and format, and whether it's bit-perfect. A
         // track a helper program decodes says so, and claims no bit-perfect path: cordinal hasn't
         // checked that program's decoding as it checks its own.
@@ -833,19 +821,36 @@ void UpdateStatus() {
             ShowMessage(o.waiting ? L"No audio output device; waiting for it to come back."
                                   : L"Audio output is back.");
         }
-        const std::wstring helper = active ? HelperDecoding(g.playing) : L"";
-        wchar_t out[96];
-        if (o.waiting)
-            swprintf_s(out, L"No audio output; waiting");
-        else if (!o.ready)
-            swprintf_s(out, L"%ls (idle)", g.exclusive ? L"Exclusive" : L"Shared");
-        else if (o.exclusive)
-            swprintf_s(out, L"Exclusive %g kHz %d-bit%ls%ls", o.rate / 1000.0, o.bits, o.floatFormat ? L" float" : L"",
-                       active && o.bitPerfect && helper.empty() ? L" \x2022 bit-perfect" : L"");
-        else
-            swprintf_s(out, L"%ls %g kHz", g.exclusive ? L"Shared (exclusive unavailable)" : L"Shared", o.rate / 1000.0);
-        // Only shown when the layout asks for them; work in progress above always shows.
+        // Only shown when the layout asks for them; work in progress above always shows. Building
+        // the three items otherwise was work thrown away on every tick.
         if (g.layout.statusDetails) {
+            std::wstring rg = L"RG: ";
+            if (!g.rgOn) {
+                rg += L"off";
+            } else if (active && g.playing < g_lib.Count()) {
+                const Track& t = g_lib[g.playing];
+                wchar_t buf[32];
+                auto token = g.tokens.find(g.playingToken);
+                const bool estimated = token != g.tokens.end() && token->second.estimated;
+                const float gain = g.engine.PlayingGain();
+                swprintf_s(buf, L"%+.1f dB%ls", 20 * std::log10(std::max(gain, 1e-6f)), estimated ? L" (estimate)" : L"");
+                rg += t.rgTrackGain == kNoGain && t.rgAlbumGain == kNoGain && !estimated ? L"not measured yet" : buf;
+            } else {
+                rg += L"on";
+            }
+            if (g.rgRunning && g.rgAuto)
+                rg += L"  \x2022  measuring " + std::to_wstring(g.rgDone.load()) + L"/" + std::to_wstring(g.rgTotal.load());
+            const std::wstring helper = active ? HelperDecoding(g.playing) : L"";
+            wchar_t out[96];
+            if (o.waiting)
+                swprintf_s(out, L"No audio output; waiting");
+            else if (!o.ready)
+                swprintf_s(out, L"%ls (idle)", g.exclusive ? L"Exclusive" : L"Shared");
+            else if (o.exclusive)
+                swprintf_s(out, L"Exclusive %g kHz %d-bit%ls%ls", o.rate / 1000.0, o.bits, o.floatFormat ? L" float" : L"",
+                           active && o.bitPerfect && helper.empty() ? L" \x2022 bit-perfect" : L"");
+            else
+                swprintf_s(out, L"%ls %g kHz", g.exclusive ? L"Shared (exclusive unavailable)" : L"Shared", o.rate / 1000.0);
             statusItems = {rg, g.eq.crossfeed ? (g.eq.enabled ? L"EQ + crossfeed" : L"Crossfeed") :
                               g.eq.enabled ? L"EQ on" : L"EQ off", out + (helper.empty() ? L"" : L" \x2022 decoded by " + helper)};
             dsp = statusItems[0] + L"  |  " + statusItems[1] + L"  |  " + statusItems[2];

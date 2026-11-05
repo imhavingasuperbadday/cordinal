@@ -3,12 +3,32 @@
 // for one song of a multi-song rip. The path names no file on disk, so anything that deletes, moves
 // or rewrites files fails on it harmlessly; only readers that know about archives (the decoders'
 // file openers, the tag reader, game music) look inside. Stored and deflated entries are read,
-// with ZIP64; encrypted entries and other methods are not listed.
+// with ZIP64; encrypted entries and other methods are not listed. A collection export
+// (collection.h) holds a library's own files, so it is never listed as a pack.
 #pragma once
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
+
+class FileSource;  // streamfile.h
+
+// One entry of a ZIP's central directory as stored, with ZIP64 sizes and offset resolved.
+struct ZipEntry {
+    std::string name;   // the stored bytes: '/'-separated, UTF-8 when flags has 0x800
+    uint64_t local = 0, packed = 0, size = 0;  // local header offset, stored and real sizes
+    uint32_t crc = 0;
+    uint32_t unixTime = 0;  // the extended timestamp's modification time (0x5455), 0 when absent
+    uint16_t flags = 0, method = 0;
+};
+// Every entry of the central directory, in order. False when there is no readable directory.
+bool ReadZipDirectory(FileSource& src, std::vector<ZipEntry>& out);
+// The entry's name decoded: UTF-8 when the archive says so (or the name is ASCII), else code page 437.
+std::wstring ZipEntryName(const ZipEntry& e);
+// Where the entry's data starts, past its local header; 0 when that header isn't there.
+uint64_t ZipDataStart(FileSource& src, const ZipEntry& e);
+// The entry that marks a collection export (collection.h); an archive holding it is not a pack.
+constexpr char kCollectionManifest[] = "cordinal-collection.txt";
 
 // True for a path whose extension is .zip.
 bool IsArchiveFile(const std::wstring& path);

@@ -32,7 +32,7 @@ constexpr size_t kMemoryCount = 8;
 constexpr size_t kListCount = 256;  // Mood column results kept in memory
 constexpr size_t kListQueue = 64;   // Mood column requests waiting; the oldest scrolled away first
 constexpr uint64_t kCacheLimit = 20ull << 20;  // bytes of .pk files kept on disk
-constexpr unsigned kPruneEvery = 64;           // stores between directory scans
+constexpr unsigned kPruneRetry = 64;           // writes before re-listing a folder that would not shrink
 constexpr auto kRequestDelay = std::chrono::milliseconds(400);  // let rapid track changes settle
 constexpr auto kProgressInterval = std::chrono::milliseconds(100);
 constexpr auto kPreviewBudget = std::chrono::milliseconds(35);
@@ -99,20 +99,21 @@ struct CacheEntry {
     FILETIME written;
 };
 
-// Deletes the oldest .pk files until the folder is under kCacheLimit.
-void PruneCache(const std::wstring& dir) {
+// Deletes the oldest .pk files until the folder is under kCacheLimit, and returns what is left.
+// Returns quickly when the folder is already under budget, so the caller decides when to look.
+uint64_t PruneCache(const std::wstring& dir) {
     std::vector<CacheEntry> entries;
     uint64_t total = 0;
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW((dir + kPathSep + L"*.pk").c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
+    if (h == INVALID_HANDLE_VALUE) return 0;
     do {
         uint64_t size = (uint64_t)fd.nFileSizeHigh << 32 | fd.nFileSizeLow;
         entries.push_back({dir + kPathSep + fd.cFileName, size, fd.ftLastWriteTime});
         total += size;
     } while (FindNextFileW(h, &fd));
     FindClose(h);
-    if (total <= kCacheLimit) return;
+    if (total <= kCacheLimit) return total;
     SortObjects(entries.begin(), entries.end(), [](const CacheEntry& a, const CacheEntry& b) {
         return CompareFileTime(&a.written, &b.written) < 0;
     });
@@ -120,6 +121,7 @@ void PruneCache(const std::wstring& dir) {
         if (total <= kCacheLimit) break;
         if (DeleteFileW(e.file.c_str())) total -= e.size;
     }
+    return total;
 }
 
 }  // namespace
@@ -547,28 +549,60 @@ Rgb FromHsl(Hsl c) {
     return byte(rgb[0]) << 16 | byte(rgb[1]) << 8 | byte(rgb[2]);
 }
 
+// The hue turn can land on a shade the background swallows (yellow on white): move the lightness
+// away from the background until it stands out as much as an accent must.
+Rgb StandOut(Hsl tone, Rgb background, bool darkBackground) {
+    Rgb full = FromHsl(tone);
+    for (int step = 0; step < 25 && Contrast(full, background) < 3; ++step) {
+        tone.l = std::clamp(tone.l + (darkBackground ? 0.03 : -0.03), 0.0, 1.0);
+        full = FromHsl(tone);
+    }
+    return full;
+}
+
 }  // namespace
+
+Rgb WaveColorOn(int choice, Rgb background) {
+    // Hues in WaveColors order from Red; Grey takes no saturation.
+    static constexpr double kHueOf[] = {0, 28, 50, 125, 175, 215, 270, 325, 0};
+    static_assert(std::size(kHueOf) == kWaveColorChoices - 1);
+    if (choice <= kWaveTheme || choice >= kWaveColorChoices) return kNoRgb;
+    const bool darkBackground = ToHsl(background).l < 0.5;
+    const Hsl tone{kHueOf[choice - 1], choice == kWaveGrey ? 0.0 : 0.85, darkBackground ? 0.62 : 0.42};
+    return StandOut(tone, background, darkBackground);
+}
+
+Rgb FadedWaveColor(Rgb played, Rgb background) {
+    return MixRgb(played, background, 60);
+}
 
 void MoodPalette::Make(Rgb accentColor, Rgb backgroundColor, int colors) {
     accent = accentColor;
     background = backgroundColor;
     scheme = colors;
     const bool darkBackground = ToHsl(background).l < 0.5;
-    Hsl base = ToHsl(accent);
-    // Theme keeps the accent's hue but always reads as a colour; Vivid runs most of the wheel.
-    const double span = scheme == kMoodVivid ? 120 : 60;  // degrees either side of the accent
-    base.s = scheme == kMoodVivid ? 1.0 : std::max(base.s, 0.85);
-    if (scheme == kMoodVivid) base.l = darkBackground ? 0.6 : 0.42;
+    const Hsl base = ToHsl(accent);
+    const double light = darkBackground ? 0.6 : 0.42, away = darkBackground ? 1 : -1;
+    // A grey base has no hue to turn: Theme then varies it as Single colour does.
+    const int kind = scheme == kMoodTheme && base.s < 0.05 ? kMoodSingle : scheme;
     for (int h = 0; h < kHues; ++h) {
+        const double side = 2.0 * h / (kHues - 1) - 1;  // -1 the bassiest hue, 1 the most treble
         Hsl tone = base;
-        tone.h = base.h + span * (2.0 * h / (kHues - 1) - 1);
-        Rgb full = FromHsl(tone);
-        // The hue turn can land on a shade the background swallows (yellow on white): move the
-        // lightness away from the background until it stands out as much as an accent must.
-        for (int step = 0; step < 20 && Contrast(full, background) < 3; ++step) {
-            tone.l = std::clamp(tone.l + (darkBackground ? 0.03 : -0.03), 0.0, 1.0);
-            full = FromHsl(tone);
+        switch (kind) {
+            // Vivid runs most of the wheel either side of the base.
+            case kMoodVivid: tone = {base.h + 120 * side, 1.0, light}; break;
+            case kMoodWarm: tone = {380 + 35 * side, 0.95, darkBackground ? 0.58 : 0.45}; break;  // red..yellow
+            case kMoodCool: tone = {218 - 48 * side, 0.85, light}; break;                         // violet..teal
+            // Blue and orange stay apart under protan, deutan and tritan vision; the middle is grey.
+            case kMoodColorBlind: tone = {side < 0 ? 212.0 : 32.0, 0.12 + 0.83 * std::fabs(side), light}; break;
+            case kMoodSingle:
+                tone.s = base.s < 0.05 ? 0 : std::max(base.s, 0.6);
+                tone.l = std::clamp(base.l + away * 0.12 * side, 0.0, 1.0);
+                break;
+            // Theme keeps the base's hue but always reads as a colour, turning 60 degrees either way.
+            default: tone = {base.h + 60 * side, std::max(base.s, 0.85), base.l}; break;
         }
+        const Rgb full = StandOut(tone, background, darkBackground);
         for (int l = 0; l < kLevels; ++l) {
             played[h][l] = MixRgb(background, full, 55 + 45 * l / (kLevels - 1));
             rest[h][l] = Unplayed(played[h][l], background);
@@ -629,7 +663,7 @@ public:
             dir_ = dir;
         }
         SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
-        PruneCache(dir);
+        cacheBytes_ = PruneCache(dir);
         stop_ = false;
         thread_ = std::thread(&PeakService::Run, this);
     }
@@ -647,6 +681,7 @@ public:
             failed_.clear();
             dir_.clear();
             cacheCount_ = nextCache_ = 0;
+            cacheBytes_ = 0;
             current_ = 0;
             currentId_ = 0;
             currentPrefetch_ = currentList_ = false;
@@ -792,19 +827,28 @@ public:
     void Store(const std::wstring& path, uint64_t size, uint64_t time, double start, double end, const Peaks& p) {
         uint64_t key = KeyOf(path, size, time, start, end);
         std::wstring dir;
-        unsigned writes = 0;
         {
             std::lock_guard<std::mutex> lock(mx_);
             if (!running()) return;
             Remember(key, p);
             dir = dir_;
-            writes = ++stores_;
         }
-        WritePeakFile(dir + kPathSep + KeyName(key), key, p);
-        if (writes % kPruneEvery == 0) PruneCache(dir);
+        if (WritePeakFile(dir + kPathSep + KeyName(key), key, p)) WroteCacheFile(dir);
     }
 
 private:
+    // Called after a cache file is written. The folder is listed only once the bytes it should hold
+    // reach the limit; listing and sorting thousands of names every few dozen stores for a folder
+    // that was already under budget was the bulk of a long scan's cache work.
+    void WroteCacheFile(const std::wstring& dir) {
+        if (cacheBytes_.fetch_add(kFileSize, std::memory_order_relaxed) + kFileSize <= kCacheLimit) return;
+        const uint64_t left = PruneCache(dir);
+        // A folder that would not shrink (a file another program holds open) is retried later,
+        // rather than listing the whole folder again on every store.
+        cacheBytes_.store(left > kCacheLimit ? kCacheLimit - (uint64_t)kFileSize * (kPruneRetry - 1) : left,
+                          std::memory_order_relaxed);
+    }
+
     bool running() const { return !dir_.empty(); }
 
     // Caller holds mx_. Entries are replaced in insertion order.
@@ -909,7 +953,6 @@ private:
             std::wstring dir;
             HWND notify = nullptr;
             UINT msg = 0;
-            unsigned writes = 0;
             bool adopted = false;
             {
                 std::lock_guard<std::mutex> lock(mx_);
@@ -930,7 +973,6 @@ private:
                 if (ok) {
                     Remember(job.key, p);
                     if (listed) RememberListed(job.key, p);
-                    if (!cached) writes = ++stores_;
                 } else {
                     // Don't requery a file that can't be decoded: that would loop forever.
                     if (failed_.size() >= kFailedCount) failed_.erase(failed_.begin());
@@ -940,12 +982,7 @@ private:
                 notify = notify_;
                 msg = msg_;
             }
-            if (ok) {
-                if (!cached) {
-                    WritePeakFile(dir + kPathSep + KeyName(job.key), job.key, p);
-                    if (writes % kPruneEvery == 0) PruneCache(dir);
-                }
-            }
+            if (ok && !cached && WritePeakFile(dir + kPathSep + KeyName(job.key), job.key, p)) WroteCacheFile(dir);
             // A list result goes out as request 0, which no seek bar waits on.
             if (notify && (!listed || adopted)) PostMessageW(notify, msg, job.id, 0);
             if (notify && listed) PostMessageW(notify, msg, 0, 0);
@@ -975,7 +1012,7 @@ private:
     uint32_t currentId_ = 0, nextId_ = 0, progressId_ = 0;
     std::chrono::steady_clock::time_point lastQueued_{};
     bool queuedBefore_ = false;
-    unsigned stores_ = 0;
+    std::atomic<uint64_t> cacheBytes_{0};  // what the .pk folder should hold, from the last listing
 };
 
 PeakService g_peaks;
@@ -1013,4 +1050,22 @@ std::wstring PeaksKeyName(const std::wstring& path, uint64_t fileSize, uint64_t 
     wchar_t name[24] = {};
     swprintf_s(name, L"%016llx", (unsigned long long)KeyOf(path, fileSize, fileTime, 0, 0));
     return name;
+}
+
+float GlowPulse::Step(const uint8_t* peaks, int buckets, double seconds) {
+    if (!peaks || buckets <= 0) return value_;
+    // The newest eighth of the window, about 30 ms: what is heard now.
+    float level = 0;
+    for (int b = buckets - std::max(1, buckets / 8); b < buckets; ++b) level = std::max(level, peaks[b] / 255.0f);
+    const float dt = last_ < 0 ? 0.0f : (float)std::clamp(seconds - last_, 0.0, 0.1);
+    last_ = seconds;
+    if (dt <= 0) return value_;
+    // A fast follower that jumps up and falls in about a tenth of a second, against a slow one that
+    // learns the music's usual level; the gap between them is the beat.
+    fast_ = level > fast_ ? level : fast_ + (level - fast_) * std::min(1.0f, dt * 10);
+    slow_ += (level - slow_) * std::min(1.0f, dt * 1.2f);
+    const float beat = std::clamp((fast_ - slow_) / std::max(slow_, 0.08f) * 1.6f, 0.0f, 1.0f);
+    const float target = std::clamp(0.35f * fast_ + 0.65f * beat, 0.0f, 1.0f);
+    value_ = target > value_ ? target : value_ + (target - value_) * std::min(1.0f, dt * 5);
+    return value_;
 }

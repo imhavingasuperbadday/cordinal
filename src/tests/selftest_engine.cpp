@@ -986,11 +986,19 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
                         return (int)std::count_if(px, px + 120 * 26, [&](uint32_t c) { return c != background; });
                     };
                     const int bars = covered(kSeekWaveform), stripe = covered(kSeekMoodbar);
+                    const bool savedGlow = g.seekGlow;
+                    g.seekGlow = false;
+                    const int plainBars = covered(kSeekWaveform);
+                    g.seekGlow = true;
+                    const int glowingBars = covered(kSeekWaveform);
+                    g.seekGlow = savedGlow;
                     g.seekStyle = savedStyle;
                     batch.Next(L"the live moodbar colours the seek bar from the audio being heard");
                     Check(heard && stripe > bars && stripe > 110 * 20,
                           L"the live moodbar colours the seek bar from the audio being heard (bands %d, bars %d px, "
                           L"stripe %d px)", (int)heard, bars, stripe);
+                    Check(glowingBars > plainBars, L"live bars glow past their tips with Seek bar glow (%d px, %d without)",
+                          glowingBars, plainBars);
                 }
                 if (old) SelectObject(dc, old);
                 if (bitmap) DeleteObject(bitmap);

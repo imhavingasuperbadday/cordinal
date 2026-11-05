@@ -8,6 +8,7 @@
 #include "listenbrainz.h"
 #include "metadata_fetch.h"
 #include "backup.h"
+#include "peaks.h"
 #include "points.h"
 
 #include <algorithm>
@@ -208,9 +209,14 @@ void LoadSettings() {
     s.fullLiveWaveform = ToInt(v, "full_live_waveform", 1) != 0;
     s.bandWaveSize = std::clamp(ToInt(v, "band_wave_size", 0), 0, 5);
     s.seekStyle = std::clamp(ToInt(v, "seek_style", 0), 0, 2);
-    s.moodColors = std::clamp(ToInt(v, "mood_colors", 0), 0, 2);
+    s.moodColors = std::clamp(ToInt(v, "mood_colors", 0), 0, kMoodColorSchemes - 1);
+    s.moodWaveColors = std::clamp(ToInt(v, "mood_wave_colors", 0), 0, (int)kMoodColorSchemes);
+    s.waveColor = std::clamp(ToInt(v, "wave_color", 0), 0, kWaveColorChoices - 1);
+    s.waveRestColor = std::clamp(ToInt(v, "wave_rest_color", 0), 0, kWaveRestChoices - 1);
     s.smoothSeek = ToInt(v, "smooth_seek", 0) != 0;
     s.waveReflection = ToInt(v, "wave_reflection", 1) != 0;
+    s.waveFullHeight = ToInt(v, "wave_full_height", 1) != 0;
+    s.seekGlow = ToInt(v, "seek_glow", 1) != 0;
     s.alwaysOnTop = ToInt(v, "always_on_top", 0) != 0;
     s.gpuDrawing = ToInt(v, "gpu_drawing", 0) != 0;
     for (auto [key, target] : {std::pair{"format_title", &s.fmtTitle}, std::pair{"format_subtitle", &s.fmtSub},
@@ -329,6 +335,11 @@ void LoadSettings() {
     s.reverb.mix = ToFloat(v, "reverb_amount", 0.4f, 0, 1);
     s.loudnessComp = ToInt(v, "loudness_compensation", 0) != 0;
     s.nightMode = ToInt(v, "night_mode", 0) != 0;
+    s.bitcrush.enabled = ToInt(v, "bitcrush", 0) != 0;
+    s.bitcrush.bits = std::clamp(ToInt(v, "bitcrush_bits", 8), kBitcrushMinBits, kBitcrushMaxBits);
+    s.bitcrush.rate = kBitcrushRates[std::clamp(ToInt(v, "bitcrush_rate", kBitcrushDefaultRate), 0,
+                                                (int)std::size(kBitcrushRates) - 1)];
+    s.bitcrush.mix = ToFloat(v, "bitcrush_mix", 1, 0, 1);
     s.loops = std::clamp(ToInt(v, "loops", 2), 0, 3);
     // "column:width,column:width" in ui::kColumns ids (the older "columns" key used ids of its own,
     // so it is left for the defaults). Column 0, the playing mark, always comes first.
@@ -425,9 +436,12 @@ void SaveSettings() {
     text += "live_fountain=" + std::to_string(s.liveFountain) + "\n";
     text += "full_live_waveform=" + std::to_string(s.fullLiveWaveform) + "\n";
     text += "band_wave_size=" + std::to_string(s.bandWaveSize) + "\n";
+    text += "mood_wave_colors=" + std::to_string(s.moodWaveColors) + "\nwave_color=" + std::to_string(s.waveColor) +
+            "\nwave_rest_color=" + std::to_string(s.waveRestColor) + "\n";
     text += "seek_style=" + std::to_string(s.seekStyle) + "\nmood_colors=" + std::to_string(s.moodColors) +
             "\nsmooth_seek=" + std::to_string(s.smoothSeek) + "\nwave_reflection=" +
-            std::to_string(s.waveReflection) + "\n";
+            std::to_string(s.waveReflection) + "\nwave_full_height=" + std::to_string(s.waveFullHeight) +
+            "\nseek_glow=" + std::to_string(s.seekGlow) + "\n";
     text += "format_title=" + ToUtf8(s.fmtTitle) + "\nformat_subtitle=" + ToUtf8(s.fmtSub) + "\nformat_status=" + ToUtf8(s.fmtStatus) +
             "\nformat_window=" + ToUtf8(s.fmtWindow) + "\n";
     text += "sound_effects=" + std::to_string(s.soundEffects) + "\nrobotic_sounds=" + std::to_string(s.roboticSounds) + "\n";
@@ -452,6 +466,9 @@ void SaveSettings() {
     text += "reverb=" + std::to_string((int)s.reverb.preset) + "\nreverb_amount=" + FloatText(s.reverb.mix) +
             "\nloudness_compensation=" + std::to_string(s.loudnessComp) + "\nnight_mode=" + std::to_string(s.nightMode) +
             "\nloops=" + std::to_string(s.loops) + "\n";
+    text += "bitcrush=" + std::to_string(s.bitcrush.enabled) + "\nbitcrush_bits=" + std::to_string(s.bitcrush.bits) +
+            "\nbitcrush_rate=" + std::to_string(BitcrushRateIndex(s.bitcrush.rate)) +
+            "\nbitcrush_mix=" + FloatText(s.bitcrush.mix) + "\n";
     text += "list_columns=";
     for (size_t i = 0; i < s.columns.size(); ++i) {
         const int column = s.columns[i];

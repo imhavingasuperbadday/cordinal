@@ -113,7 +113,7 @@ extern int g_thumbsPending;
 enum Action {
     kNoAction,
     kAddFiles, kAddFolder, kOpenPlaylistFile, kSavePlaylistFile, kExit,
-    kBackup, kRestore, kStatistics,
+    kBackup, kRestore, kStatistics, kExportCollection, kImportCollection, kCancelCollection,
     kSelectAll, kRemove, kKeepSelected, kClear, kReloadTags, kRemoveDuplicates, kRemoveDead, kCancelDead, kFind,
     kPlayPause, kStopAction, kMute, kPrevAction, kNextAction, kShuffleAction, kShuffleAlbumsAction, kRadio, kRepeatSet, kStopAfter, kSpeed, kTempo, kShared, kExclusive,
     kNewPl, kRenamePl, kClosePl, kDuplicatePl, kReopenPl, kMovePlLeft, kMovePlRight, kNextPl, kPrevPl, kReveal,
@@ -352,6 +352,8 @@ bool PeakSource(TrackId id, std::wstring& path, double& start, double& end);
 bool RequestPeaks(TrackId id, Peaks& peaks, uint32_t& request);
 bool LiveWaveformShown();
 bool LiveFountainShown();
+// The whole song's seek bar while Seek bar glow pulses with it: it then animates like the live one.
+bool SeekGlowPulsing();
 bool DrawWaveform(const Rect& r, double frac, const Palette& p);
 void DrawMoodCell(const Rect& cell, TrackId id, const Palette& p);  // the Mood column
 void DrawSection(const Rect& r, double duration, const Palette& p);

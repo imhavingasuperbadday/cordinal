@@ -38,13 +38,34 @@ struct Peaks {
     uint8_t mood[kMoodBands][kPeakBuckets];
 };
 
-// The whole-song seek bar's looks (Preferences, "Seek bar style"), in the order settings store them:
+// The whole-song seek bar's looks (Preferences, "Seek bar", one up after Progress bar), in the order
+// settings store them:
 // the plain waveform, the moodbar as a flat stripe, and the waveform's columns in mood colours.
 // The live waveform takes the same style, coloured by the audio being heard.
 enum SeekStyle { kSeekWaveform, kSeekMoodbar, kSeekMoodWaveform, kSeekStyles };
-// The moodbar's colours (Preferences, "Moodbar colours"): turned from the theme's accent, the full
-// colour wheel, or the bands themselves as red (bass), green (mids) and blue (treble).
-enum MoodColors { kMoodTheme, kMoodVivid, kMoodSpectrum, kMoodColorSchemes };
+// The moodbar's colours (Preferences, "Moodbar colours"): turned from the base colour (the theme's
+// accent, or the chosen Waveform colour), the full colour wheel, the bands themselves as red (bass),
+// green (mids) and blue (treble), red to yellow, violet to teal, blue to orange through grey (told
+// apart with the common colour-vision deficiencies), or the base colour alone, standing out more
+// from the background for treble.
+enum MoodColors {
+    kMoodTheme, kMoodVivid, kMoodSpectrum, kMoodWarm, kMoodCool, kMoodColorBlind, kMoodSingle, kMoodColorSchemes
+};
+
+// The plain waveform's colour (Preferences, "Waveform colour"): the theme's, or a named hue. It is
+// also the base the moodbar's Theme, Vivid and Single colour schemes turn from.
+enum WaveColors {
+    kWaveTheme, kWaveRed, kWaveOrange, kWaveYellow, kWaveGreen, kWaveTeal, kWaveBlue, kWavePurple, kWavePink,
+    kWaveGrey, kWaveColorChoices
+};
+// The chosen colour, its lightness moved until it stands out from `background` as much as an accent
+// must (3:1); kNoRgb for kWaveTheme or an unknown choice.
+Rgb WaveColorOn(int choice, Rgb background);
+// The unplayed part in the waveform's own colour: faded most of the way into the background, so the
+// playhead's split stays plain.
+Rgb FadedWaveColor(Rgb played, Rgb background);
+// What the Unplayed part setting offers.
+enum WaveRestColors { kWaveRestTheme, kWaveRestFaded, kWaveRestChoices };
 
 // Splits a mono mix of the audio into the three bands with cascaded one-pole filters: cheap and
 // smooth, with no FFT. Primes itself on the first sample so a short read starts settled.
@@ -73,6 +94,20 @@ public:
 private:
     double ceiling_ = 0, center_ = 0;
     bool started_ = false;
+};
+
+// The seek bar glow's pulse, 0..1, from the audio being heard (Engine::WaveformPeaks, oldest
+// first). It jumps when the sound now stands above its level of the last second or so, a beat
+// or an attack, and settles back over a fraction of a second; steady loud music keeps a middle
+// glow. `seconds` is any clock; a paused clock holds the pulse where it is.
+class GlowPulse {
+public:
+    float Step(const uint8_t* peaks, int buckets, double seconds);
+    float Value() const { return value_; }
+
+private:
+    float fast_ = 0, slow_ = 0, value_ = 0;
+    double last_ = -1;
 };
 
 // Blurs the outline and the colours over about `radius` buckets either side: the soft, rounded

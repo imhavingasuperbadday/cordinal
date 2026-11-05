@@ -5,7 +5,7 @@
 # Needs SDL3, SDL3_ttf, PipeWire (libpipewire-0.3), libsystemd (sd-bus), fontconfig and OpenSSL 3
 # (the web server's HTTPS away from home).
 cmake_minimum_required(VERSION 3.20)
-project(cordinal VERSION 0.1.5 LANGUAGES CXX)
+project(cordinal VERSION 0.1.6 LANGUAGES CXX)
 
 if(WIN32)
     message(FATAL_ERROR "On Windows, build with build.bat")
@@ -42,7 +42,7 @@ add_library(cordinal_core STATIC
     src/library.cpp src/librarydb.cpp src/listenbrainz.cpp src/migration.cpp src/backup.cpp src/playlog.cpp src/points.cpp src/radio.cpp src/radio_browser.cpp src/radio_stream.cpp src/radio_hls.cpp src/scanner.cpp src/sfx.cpp src/sort.cpp src/steam.cpp
     src/headsets.cpp src/helpers.cpp src/streamfile.cpp src/tags.cpp src/tagwriter.cpp src/tagwriter_flacogg.cpp src/tagwriter_mp3mp4.cpp
     src/tagwriter_cord.cpp src/tagundo.cpp src/playlist_files.cpp src/playlist.cpp src/md5.cpp src/cord_encode.cpp src/cord_export.cpp
-    src/convert.cpp src/organize.cpp src/devicecopy.cpp src/linux/recycle.cpp
+    src/convert.cpp src/organize.cpp src/devicecopy.cpp src/collection.cpp src/linux/recycle.cpp
     src/titleformat.cpp src/peaks.cpp src/theme_palette.cpp src/replaygain.cpp src/eq_profile.cpp
     src/packs.cpp src/web_audio.cpp src/web_catalog.cpp src/web_http.cpp src/web_library.cpp src/web_server.cpp src/web_ui.cpp
     src/web_aac.cpp src/web_acme.cpp src/web_reach.cpp src/web_remote.cpp src/qr.cpp src/linux/tls_openssl.cpp
@@ -66,7 +66,7 @@ add_executable(cordinal
     src/linux/main.cpp src/linux/ui.cpp src/linux/radio_ui.cpp src/linux/text.cpp src/linux/settings.cpp src/linux/library_sync.cpp
     src/linux/playback.cpp src/linux/cover.cpp src/linux/mpris.cpp src/linux/web.cpp src/linux/replaygain.cpp
     src/linux/tagwrite.cpp src/linux/panels.cpp src/linux/cord_export.cpp src/linux/convert_run.cpp src/linux/expand.cpp
-    src/linux/organize_run.cpp src/linux/copy_run.cpp src/linux/ipod_run.cpp src/linux/libview.cpp src/linux/scrobble.cpp src/linux/sounds.cpp src/linux/points_ui.cpp src/linux/lyrics.cpp src/linux/mini.cpp src/linux/packs_ui.cpp src/linux/helpers_ui.cpp src/linux/preferences_ui.cpp src/linux/games.cpp src/linux/editions_ui.cpp src/linux/coverfetch_ui.cpp src/linux/artistinfo_ui.cpp
+    src/linux/organize_run.cpp src/linux/copy_run.cpp src/linux/collection_run.cpp src/linux/ipod_run.cpp src/linux/libview.cpp src/linux/scrobble.cpp src/linux/sounds.cpp src/linux/points_ui.cpp src/linux/lyrics.cpp src/linux/mini.cpp src/linux/packs_ui.cpp src/linux/helpers_ui.cpp src/linux/preferences_ui.cpp src/linux/games.cpp src/linux/editions_ui.cpp src/linux/coverfetch_ui.cpp src/linux/artistinfo_ui.cpp
     src/linux/ui_model.cpp src/linux/ui_layout.cpp src/linux/ui_menus.cpp src/linux/ui_dialogs.cpp
     src/linux/ui_draw.cpp src/linux/ui_input.cpp src/linux/ui_files.cpp src/linux/ui_checks.cpp
     src/tests/selftest_linux_packs.cpp src/tests/selftest_linux_headsets.cpp

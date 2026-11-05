@@ -90,13 +90,18 @@ bool CanvasHasFocusedEdition() {
 std::vector<MenuItem> BarMenu(int m) {
     bool editable = !g.playlists.empty() && Active().Editable(), any = !g.rows.empty();
     switch (m) {
-        case 0:
-            return {Item("Add files...", kAddFiles, "Ctrl+O"), Item("Import folder once...", kAddFolder, "Ctrl+Shift+O"), Separator(),
+        case 0: {
+            std::vector<MenuItem> items{Item("Add files...", kAddFiles, "Ctrl+O"), Item("Import folder once...", kAddFolder, "Ctrl+Shift+O"), Separator(),
                     Item("Open playlist file...", kOpenPlaylistFile), Item("Save playlist as...", kSavePlaylistFile, "Ctrl+S"), Separator(),
+                    Item("Export collection...", kExportCollection, {}, false, !CollectionBusy()),
+                    Item("Import collection...", kImportCollection, {}, false, !CollectionBusy()), Separator(),
                     Item("Back up library and settings...",kBackup),Item("Restore backup...",kRestore),
                     Item("Import playback statistics...",kStatistics),Separator(),
                     Item("Web server...", kWebServer), Item("Scrobbling...", kListenBrainz),
                     Item("Preferences...", kPreferences, "Ctrl+,"), Separator(), Item("Exit", kExit)};
+            if (CollectionRunning()) items.insert(items.begin() + 8, Item(CollectionCancelText(), kCancelCollection));  // shown only while one runs
+            return items;
+        }
         case 1: {
             bool library = Active().kind == PlaylistKind::Library || Active().kind == PlaylistKind::Inbox;
             std::wstring undo, redo;
@@ -377,6 +382,9 @@ void RunAction(const MenuItem& item) {
         case kBackup: ChooseMigration(1); break;
         case kRestore: ChooseMigration(2); break;
         case kStatistics: ChooseMigration(3); break;
+        case kExportCollection: ExportCollection(); break;
+        case kImportCollection: ImportCollection(); break;
+        case kCancelCollection: CancelCollection(); break;
         case kAddFolder: ChooseImportFolder(); break;
         case kExit: g.quit = true; break;
         case kSelectAll: std::fill(g.selected.begin(), g.selected.end(), 1); break;

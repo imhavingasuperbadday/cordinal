@@ -332,8 +332,19 @@ bool LiveWaveformShown() {
     return g.settings.waveform && (RadioPlaying() || (g.settings.liveWaveform && g.playing != kNone));
 }
 
+bool SeekGlowPulsing() {
+    return g.settings.waveform && g.settings.seekGlow && g.playing != kNone && g_wave.track == g.playing &&
+           (g_wave.ready || g_wave.request) && !FountainStyleShown();
+}
+
 bool LiveFountainShown() {
     return g.settings.waveform && g.settings.liveFountain && g.settings.theme == ThemeMode::Deltarune;
+}
+
+// What the moodbar's colours turn from on `background`: the chosen Waveform colour, else the accent.
+static Rgb MoodBase(const Palette& p, Rgb background) {
+    const Rgb chosen = WaveColorOn(g.settings.waveColor, background);
+    return chosen != kNoRgb ? chosen : p.accent;
 }
 
 bool DrawWaveform(const Rect& r, double frac, const Palette& p) {
@@ -364,8 +375,12 @@ bool DrawWaveform(const Rect& r, double frac, const Palette& p) {
     static LiveMood liveScale;
     float center = 0;
     if (mood) {
-        const int scheme = std::clamp(g.settings.moodColors, 0, kMoodColorSchemes - 1);
-        if (!moods.For(p.accent, p.surface, scheme)) moods.Make(p.accent, p.surface, scheme);
+        // The mood waveform can take its own scheme; the stripe always takes the moodbar's.
+        const int scheme = std::clamp(!stripe && g.settings.moodWaveColors > 0 ? g.settings.moodWaveColors - 1
+                                                                               : g.settings.moodColors,
+                                      0, kMoodColorSchemes - 1);
+        const Rgb base = MoodBase(p, p.surface);
+        if (!moods.For(base, p.surface, scheme)) moods.Make(base, p.surface, scheme);
         if (live) {
             std::array<float, 256 * kMoodBands> bands{};
             g.engine.WaveformBands(bands.data(), livePeaks.size());
@@ -376,8 +391,28 @@ bool DrawWaveform(const Rect& r, double frac, const Palette& p) {
     }
     // The stripe's columns touch; the waveform's stand a pixel apart.
     float col = std::max(2.0f, S(2)), step = stripe ? col : col + std::max(1.0f, S(1));
-    // The reflection is the dimmer lower half; off draws the upper half alone.
-    const bool reflect = g.settings.waveReflection;
+    // The reflection is the dimmer lower half; off draws the upper half alone. Full height mirrors a
+    // waveform as bright below the center line as above it, as on Windows; the moodbar stripe keeps
+    // the upper half.
+    const bool fullHeight = !g.settings.waveReflection && g.settings.waveFullHeight && !stripe;
+    const bool reflect = g.settings.waveReflection || fullHeight;
+    // Seek bar glow, as app_waveform.cpp draws it: a halo of each column's colour around the bar,
+    // fading out from its edges and ends, pulsing with the beat of what is heard (GlowPulse),
+    // stronger where the song is loud and on what has played. The stripe stands shorter to leave
+    // the halo room before the bar's edge.
+    const float acrossTop = vertical ? r.x : r.y, acrossBottom = acrossTop + (vertical ? r.w : r.h);
+    const float alongStart = vertical ? r.y : r.x, alongEnd = alongStart + (vertical ? r.h : r.w);
+    const int glow = g.settings.seekGlow ? std::max((int)S(4), (int)half / 2) : 0;
+    const float room = std::min(cy - acrossTop, acrossBottom - cy - 1) - glow - 1;  // a pixel short of the edge
+    const float stripeHalf = stripe && glow ? std::clamp(room, 1.0f, half) : half;
+    static GlowPulse pulse;
+    if (glow && (g.playing != kNone || RadioPlaying()) && !IsPaused()) {
+        std::array<uint8_t, 256> heard{};
+        if (live) heard = livePeaks;
+        else g.engine.WaveformPeaks(heard.data(), heard.size());
+        pulse.Step(heard.data(), (int)heard.size(), SDL_GetTicks() / 1000.0);
+    }
+    const float beat = pulse.Value();
     float playedX = left + std::floor(width * (float)frac);
     uint32_t played = WavePlayedColor(p), rest = WaveRestColor(p, live);
     if (live && g.settings.fullLiveWaveform) rest = played;
@@ -405,6 +440,26 @@ bool DrawWaveform(const Rect& r, double frac, const Palette& p) {
         float y = below ? cy + 1 + from : cy - to + 1;
         fills.Add(vertical ? Rect{y, x, to - from, barWidth} : Rect{x, y, barWidth, to - from}, color);
     };
+    // `glow` rows of `tint` at `percent` strength, fading softly, above row `top` and, mirrored at
+    // half strength unless `even`, from row `bottom` down (the reflection's first row past its edge).
+    auto fadeAt = [&](int percent, int d) { return percent * (glow + 1 - d) * (glow + 1 - d) / ((glow + 1) * (glow + 1)); };
+    auto halo = [&](float x, float barWidth, uint32_t tint, int percent, float top, float bottom, bool even) {
+        for (int d = 1; d <= glow && percent > 0; ++d) {
+            const int fade = fadeAt(percent, d);
+            auto row = [&](float y, int amount) {
+                fills.Add(vertical ? Rect{y, x, 1, barWidth} : Rect{x, y, barWidth, 1}, Mix(p.surface, tint, amount));
+            };
+            if (top - d >= acrossTop) row(top - d, fade);
+            if (bottom + d <= acrossBottom) row(bottom + d - 1, even ? fade : fade / 2);
+        }
+    };
+    auto glowPercent = [beat](float level, bool heard) {
+        level = std::clamp(level, 0.0f, 1.0f);
+        return level > 0 ? (int)((25 + 70 * beat) * (0.6f + 0.4f * level) * (heard ? 1.0f : 0.55f)) : 0;
+    };
+    // The stripe's two ends glow sideways too, so the halo goes all the way around.
+    struct EndGlow { uint32_t tint = 0; int percent = 0; };
+    EndGlow firstEnd, lastEnd;
     for (float x = left; x < right; x += step) {
         int count = live ? (int)livePeaks.size() : kPeakBuckets;
         int first = std::clamp((int)((x - left) * count / width), 0, count - 1);
@@ -418,33 +473,53 @@ bool DrawWaveform(const Rect& r, double frac, const Palette& p) {
         float body = std::clamp(std::floor(half * rms / 255), 1.0f, h);
         const Shades* shades = x < playedX ? &playedShades : &restShades;
         float barWidth = std::min(x + col, right) - x;
+        // Live audio counts as heard unless its progress is split off, as `rest` already says.
+        const bool heard = x < playedX || (live && g.settings.fullLiveWaveform);
+        uint32_t tint = x < playedX ? played : rest;
         Shades moodShades;
         if (mood) {
-            // Live audio counts as heard unless its progress is split off, as `rest` already says.
-            const bool heard = x < playedX || (live && g.settings.fullLiveWaveform);
-            uint32_t c = moods.Pick(live ? MoodOf(liveMood, first, last, center, count) : MoodOf(peaks, first, last, center), heard);
+            const MoodTone tone = live ? MoodOf(liveMood, first, last, center, count) : MoodOf(peaks, first, last, center);
+            tint = moods.Pick(tone, heard);
             if (stripe) {
-                float bandHeight = reflect ? 2 * half + 1 : half + 1;
-                fills.Add(vertical ? Rect{cy - half, x, bandHeight, barWidth} : Rect{x, cy - half, barWidth, bandHeight}, c);
+                // Without the reflection the stripe stands on the center line, and glows below it.
+                float top = cy - stripeHalf, bottom = reflect ? cy + stripeHalf + 1 : cy + 1, end = bottom;
+                fills.Add(vertical ? Rect{top, x, end - top, barWidth} : Rect{x, top, barWidth, end - top}, tint);
+                const int percent = glowPercent(tone.level, heard);
+                halo(x, barWidth, tint, percent, top, bottom, true);
+                if (x == left) firstEnd = {tint, percent};
+                lastEnd = {tint, percent};
                 continue;
             }
-            moodShades = shadesOf(c);
+            moodShades = shadesOf(tint);
             shades = &moodShades;
         }
         const Shades& s = *shades;
         for (int i = 0; i < kBands && bandStart(i) <= body; ++i) {
             float d0 = bandStart(i), d1 = std::min(body + 1, bandStart(i + 1));
             rows(x, barWidth, d0, d1, false, s.body[i]);
-            if (reflect) rows(x, barWidth, d0, std::min(d1, body), true, s.mirror[i]);
+            if (reflect) rows(x, barWidth, d0, std::min(d1, body), true, fullHeight ? s.body[i] : s.mirror[i]);
         }
         rows(x, barWidth, body + 1, h + 1, false, s.edge);
-        if (reflect) rows(x, barWidth, body, h, true, s.mirrorEdge);
+        if (reflect) rows(x, barWidth, body, h, true, fullHeight ? s.edge : s.mirrorEdge);
         uint8_t alpha = live ? (uint8_t)std::max(0.f, half * v - h * 255) : 0;
         if (alpha) {
             int tip = std::min(kBands - 1, (int)h * kBands / span);
             Fill(vertical ? Rect{cy - h - 1, x, 1, barWidth} : Rect{x, cy - h - 1, barWidth, 1}, s.body[tip], alpha);
             if (reflect)
-                Fill(vertical ? Rect{cy + h + 1, x, 1, barWidth} : Rect{x, cy + h + 1, barWidth, 1}, s.mirror[tip], alpha);
+                Fill(vertical ? Rect{cy + h + 1, x, 1, barWidth} : Rect{x, cy + h + 1, barWidth, 1}, fullHeight ? s.body[tip] : s.mirror[tip], alpha);
+        }
+        // The glow starts past the column's tip, and past its fractional end pixel when it has one.
+        halo(x, barWidth, tint, glowPercent(v / 255.0f, heard), alpha ? cy - h - 1 : cy - h,
+             !reflect ? cy + 1 : alpha ? cy + h + 2 : cy + h + 1, fullHeight);
+    }
+    if (stripe && glow) {
+        const float top = cy - stripeHalf, end = reflect ? cy + stripeHalf + 1 : cy + 1;
+        auto side = [&](float x, const EndGlow& e, int d) {
+            if (e.percent) fills.Add(vertical ? Rect{top, x, end - top, 1} : Rect{x, top, 1, end - top}, Mix(p.surface, e.tint, fadeAt(e.percent, d)));
+        };
+        for (int d = 1; d <= glow; ++d) {
+            if (left - d >= alongStart) side(left - d, firstEnd, d);
+            if (right + d <= alongEnd) side(right + d - 1, lastEnd, d);
         }
     }
     fills.Flush();
@@ -452,8 +527,8 @@ bool DrawWaveform(const Rect& r, double frac, const Palette& p) {
         // The state the mood colours can't carry: the text colour while playing, else amber or red.
         bool warn = g_lib[g.playing].Failed() || g.stopAfterCurrent;
         float w = std::max(2.0f, S(2)), at = playedX - std::floor(w / 2);
-        float bandHeight = reflect ? 2 * half + 1 : half + 1;
-        Fill(vertical ? Rect{cy - half, at, bandHeight, w} : Rect{at, cy - half, w, bandHeight},
+        float bandHeight = reflect ? 2 * stripeHalf + 1 : stripeHalf + 1;
+        Fill(vertical ? Rect{cy - stripeHalf, at, bandHeight, w} : Rect{at, cy - stripeHalf, w, bandHeight},
              warn || IsPaused() ? played : p.text);
     }
     return true;
@@ -473,7 +548,8 @@ void DrawMoodCell(const Rect& cell, TrackId id, const Palette& p) {
     if (w <= 0 || r.h <= 0) return;
     static MoodPalette moods;
     const int scheme = std::clamp(g.settings.moodColors, 0, kMoodColorSchemes - 1);
-    if (!moods.For(p.accent, p.bg, scheme)) moods.Make(p.accent, p.bg, scheme);
+    const Rgb base = MoodBase(p, p.bg);
+    if (!moods.For(base, p.bg, scheme)) moods.Make(base, p.bg, scheme);
     const float center = MoodCenter(peaks);
     for (int x = 0; x < w; x += 2) {
         int first = std::clamp(x * kPeakBuckets / w, 0, kPeakBuckets - 1);

@@ -7,7 +7,7 @@ program of about 1.6 MB: no installer, no runtime, nothing else to install. It p
 audio file with its own decoders, keeps your ratings and listening history, and leaves your music
 where it is.
 
-Current release: **0.1.5** (`cordinal.exe`, 1,619,968 bytes). Download it from
+Current release: **0.1.6**. Download it from
 [Releases](https://github.com/imhavingasuperbadday/cordinal/releases/latest) and run it.
 
 ## What it does
@@ -45,7 +45,8 @@ Current release: **0.1.5** (`cordinal.exe`, 1,619,968 bytes). Download it from
   SNES, Game Boy, Genesis, Commodore 64), plus cordinal's own lossless `.cord`. No codecs to install.
 - **Sound.** Gapless playback, ReplayGain with a built-in loudness scanner, a ten-band equalizer
   with headphone (AutoEq) profiles and crossfeed, exclusive bit-perfect output, speed and tempo,
-  reverb and a night mode. Sample-rate conversion preserves treble and suppresses aliasing when
+  reverb, a night mode and a bitcrusher (**Playback ▸ Bitcrush**; its depth, sample rate and mix are
+  in **Preferences ▸ Effects**). Sample-rate conversion preserves treble and suppresses aliasing when
   a track and the output device use different rates.
   **Preferences ▸ ReplayGain** has **Scan selection**, **Scan playlist** and **Scan library**.
   Scan library remeasures every available library track, including earlier scans and failed attempts,
@@ -105,17 +106,24 @@ Current release: **0.1.5** (`cordinal.exe`, 1,619,968 bytes). Download it from
 - **Make it yours.** Light, dark, the Apollo look or follow Windows; window sizes from a big player down to a mini
   player; columns and title formats; a command palette (Ctrl+Shift+P) that finds any command or
   setting. Every setting lives in Preferences (Ctrl+,).
-  **Preferences ▸ View ▸ Waveform playback bar** switches between a waveform and a regular progress
-  bar. Turn it off to use the regular bar even when live waveform is enabled; the live setting is kept.
-  **Preferences ▸ View ▸ Seek bar style** can colour the seek bar by its sound instead: each
-  moment's balance of bass and treble turns its hue to one side of the theme's accent or the other,
-  and louder moments stand out more. **Moodbar** draws a flat stripe; **Mood waveform** keeps the
-  waveform's shape. Both work for the whole song and for the live waveform. On the whole song a
-  playhead line shows the playback state: amber while paused, red when playback will stop or the
-  track failed. **Moodbar colours** picks Theme, Vivid (the whole colour wheel) or Spectrum (red
-  bass, green mids, blue treble), and **Smooth seek bar** rounds the outline and blends the colours.
-  **Waveform reflection** mirrors the bar below its centre line; turn it off to draw only the upper
-  half, for the waveform and both moodbar styles alike.
+  **Preferences ▸ View ▸ Seek bar** picks how the seek bar looks: a plain **Progress bar**, a
+  **Waveform**, or one coloured by its sound. Each moment's balance of bass and treble turns its hue
+  to one side of the theme's accent or the other, and louder moments stand out more: **Moodbar**
+  draws a flat stripe, **Mood waveform** keeps the waveform's shape. **Seek bar shows** picks the
+  **Whole song**, or **Live audio**, a moving picture of what is being heard (optionally **with
+  progress**, lighting what has played); Radio always shows live audio, and seeking works either way.
+  Every look works for both. **Seek bar glow** draws a soft halo of the bar's colours around it that
+  pulses with the beat, brighter where the song is loud. Over the whole song, both moodbar looks draw a playhead line in
+  the playback state's colour: amber while paused, red when playback will stop or the track failed. **Moodbar colours** picks Theme, Vivid (the whole colour wheel), Spectrum (red
+  bass, green mids, blue treble), Warm, Cool, Colour-blind friendly (blue to orange) or Single colour,
+  and **Mood waveform colours** can give the Mood waveform a scheme of its own. **Waveform colour**
+  replaces the theme's colour for the waveform with a named one (kept readable on the player), and the
+  moodbar's Theme, Vivid and Single colour schemes turn from it; **Waveform unplayed part** shows what is
+  still to play in the theme's grey or in that colour faded. **Smooth seek bar** rounds the outline and
+  blends the colours.
+  **Waveform reflection** is **Mirrored** below the bar's centre line, **Upper half** (stopping at the
+  centre line) or **Full height** (the waveforms mirrored as bright below the line as above, with no
+  darker underside; the Moodbar stripe keeps the upper half).
   The track list's **Mood** column shows each track's moodbar; tracks not seen before fill in while
   nothing else is being prepared, and a ReplayGain scan prepares them all.
 
@@ -129,6 +137,19 @@ browser player, the album-edition lookup, or a cover, lyrics or artist info sour
 **File ▸ Back up library and settings** saves everything in a folder you can read, copy or zip;
 **File ▸ Restore backup** brings it back, on the same computer or a new one where the music lives
 somewhere else.
+
+**File ▸ Export collection...** saves the music itself in one `.zip`. Choose **Export entire
+collection** for every song the Library tab shows or a playlist holds, or **Select what to export**
+to tick the artists, albums, single songs and playlists to include (a ticked playlist brings all its
+songs). The music is arranged as in its library folder (songs from elsewhere go under `Other`), with
+the folders' cover images, cue sheets and lyrics, and the playlists as `.m3u8` files in `Playlists`.
+Your files are only read, and an export that fails or is cancelled leaves no archive behind. Any
+unzip program opens it. **File ▸ Import collection...** takes only archives cordinal exported: it
+unpacks one into a folder you choose, checks every file against the archive, adds that music to
+your library folders and opens the playlists as tabs. It never replaces a file: an identical one is
+left as it is, and a different one with the same name keeps it while the collection's copy goes
+beside it, so importing the same archive again only fills in what is missing. Ratings and play counts
+aren't in the archive; a backup carries those. A FAT32 drive can't hold an archive of 4 GB or more.
 
 ### Leaving cordinal
 

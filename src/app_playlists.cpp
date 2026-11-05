@@ -564,36 +564,37 @@ void ShowTabContextMenu(POINT pt) {
 
 namespace {
 
-// A track row's cell text: the playing / queue / problem mark in column 0, otherwise the column's
-// format, left out where the album header already says it. Formatted on demand and cached.
-std::wstring CellText(int row, int col) {
+// Fills `out` with a track row's cell text: the playing / queue / problem mark in column 0, otherwise
+// the column's format, left out where the album header already says it. Formatted on demand and
+// cached; `out` keeps its buffer, so painting a list allocates nothing for a cached cell.
+void CellText(int row, int col, std::wstring& out) {
+    out.clear();
     int pos = ViewPosOfRow(row);
-    if (pos < 0 || ColumnType(col) < 0) return L"";
+    if (pos < 0 || ColumnType(col) < 0) return;
     TrackId id = Active().items[g.view[pos]];
-    std::wstring text;
     if (col == 0 && ApolloMode()) {
-        text = std::to_wstring(g.view[pos] + 1) + L".";  // Apollo numbers its playlist rows
+        out = std::to_wstring(g.view[pos] + 1) + L".";  // Apollo numbers its playlist rows
     } else if (col == 0) {
-        if (id == g.playing && g.active == g.playingPl && (!Active().Editable() || (int)g.view[pos] == TokenIndex(g.playingToken, g.playingPl))) text = g.engine.Paused() ? L"❙❙" : ThemeInfo(g.themeMode).playingMark;
-        else if (int q = QueuePosition(id)) text = L"[" + std::to_wstring(q) + L"]";
-        else if (g_lib[id].Failed() || (g_lib[id].flags & Track::kTagFailed)) text = L"⚠";
+        if (id == g.playing && g.active == g.playingPl && (!Active().Editable() || (int)g.view[pos] == TokenIndex(g.playingToken, g.playingPl))) out = g.engine.Paused() ? L"❙❙" : ThemeInfo(g.themeMode).playingMark;
+        else if (int q = QueuePosition(id)) out = L"[" + std::to_wstring(q) + L"]";
+        else if (g_lib[id].Failed() || (g_lib[id].flags & Track::kTagFailed)) out = L"⚠";
     } else if (!GroupHidesCell(pos, ColumnType(col), id)) {
         static uint32_t revision = 0;
         if (revision != g_lib.Revision()) { ClearCellCache(); revision = g_lib.Revision(); }
         uint64_t key = (uint64_t)id * kMaxColumnTypes + ColumnType(col);
         auto cached = g.cellCache.find(key);
         if (cached == g.cellCache.end()) {
-            text = FormatTitle(ColumnAt(ColumnType(col)).display, Lookup(id, false));
-            if (text.size() > 4096) text.resize(4096);
-            size_t bytes = text.size() * sizeof(wchar_t);
+            out = FormatTitle(ColumnAt(ColumnType(col)).display, Lookup(id, false));
+            if (out.size() > 4096) out.resize(4096);
+            size_t bytes = out.size() * sizeof(wchar_t);
             if (g.cellCache.size() >= ViewMemoryBudget(2048) ||
                 g.cellCacheBytes + bytes > ViewMemoryBudget(2u << 20)) ClearCellCache();
             g.cellCacheBytes += bytes;
-            cached = g.cellCache.emplace(key, text).first;
+            g.cellCache.emplace(key, out);
+            return;  // `out` already holds it
         }
-        text = cached->second;
+        out = cached->second;
     }
-    return text;
 }
 
 // Where the playing row was last painted and how wide its underline was.
@@ -624,6 +625,9 @@ void DrawTrackRow(NMLVCUSTOMDRAW* cd, int row, TrackId id, bool playing) {
     FillSolid(dc, rc, bg);
     SetBkMode(dc, TRANSPARENT);
     int columns = Header_GetItemCount(g.header);
+    // One buffer for every cell of every row: a scroll repaints hundreds of cells, and each one used
+    // to allocate its own string.
+    static std::wstring cell;
     for (int sub = 0; sub < columns; ++sub) {
         RECT r{};
         if (!ListView_GetSubItemRect(g.list, row, sub, sub == 0 ? LVIR_LABEL : LVIR_BOUNDS, &r)) continue;
@@ -641,7 +645,8 @@ void DrawTrackRow(NMLVCUSTOMDRAW* cd, int row, TrackId id, bool playing) {
             DrawMoodCell(dc, r, id, bg);
             continue;
         }
-        std::wstring s = CellText(row, sub);
+        CellText(row, sub, cell);
+        const std::wstring& s = cell;
         if (apollo && type == kColApolloTitle) {
             ApolloDrawTrackIcon(dc, r);
             r.left += S(18);
@@ -857,7 +862,9 @@ LONG CellTextRight(int row, int sub, LONG right) {
     TrackId id = RowTrack(row);
     int count = Header_GetItemCount(g.header);
     if (pos < 0 || id == kNone || count <= 0) return right;
-    std::vector<int> order(count);
+    // Reused: this runs for every left-aligned cell of every painted row.
+    static std::vector<int> order;
+    order.resize((size_t)count);
     if (!Header_GetOrderArray(g.header, count, order.data())) return right;
     auto at = std::find(order.begin(), order.end(), sub);
     if (at == order.end()) return right;
@@ -952,8 +959,9 @@ LRESULT OnListNotify(NMHDR* hdr) {
         case LVN_GETDISPINFOW: {
             auto* di = reinterpret_cast<NMLVDISPINFOW*>(hdr);
             if (!(di->item.mask & LVIF_TEXT) || !di->item.pszText || di->item.cchTextMax <= 0) break;
-            std::wstring text = CellText(di->item.iItem, di->item.iSubItem);
-            wcsncpy_s(di->item.pszText, di->item.cchTextMax, text.c_str(), _TRUNCATE);
+            static std::wstring cell;  // reused: the list asks for cells while it paints and hit-tests
+            CellText(di->item.iItem, di->item.iSubItem, cell);
+            wcsncpy_s(di->item.pszText, di->item.cchTextMax, cell.c_str(), _TRUNCATE);
             break;
         }
         case LVN_ODFINDITEMW: {

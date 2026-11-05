@@ -104,6 +104,14 @@ void ArtistPanelKey(const SDL_KeyboardEvent& e);
 void ArtistPanelWheel(float x, float y, float dy);
 void ArtistPanelClose();
 void ShowArtistPanel();  // panels.cpp
+// collection_run.cpp: File > Export collection's Select what to export, a panel like the others;
+// panels.cpp shows it, and ClosePanel calls ExportPanelClose last (Export... then asks for the file).
+void ShowExportPanel();  // panels.cpp
+void DrawExportPanel(const Palette& p);
+void ExportPanelMouseDown(float x, float y);
+void ExportPanelKey(const SDL_KeyboardEvent& e);
+void ExportPanelWheel(float x, float y, float dy);
+void ExportPanelClose();
 // ui.cpp: drops the decoded covers of the views and the now-playing pane, after covers changed on disk.
 void ForgetCoverArt();
 // ui.cpp: the window's own panels, which Preferences links to.

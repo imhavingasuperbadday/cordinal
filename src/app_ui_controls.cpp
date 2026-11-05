@@ -61,6 +61,14 @@ LRESULT CALLBACK HeaderSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
         if (FoobarMode()) RefreshViewKeepingSelection();  // the cover column's width sets the groups' heights
         return result;
     }
+    if (msg == WM_RBUTTONUP) {
+        // A list view keeps its header's right-click to itself, so no WM_CONTEXTMENU ever reached the
+        // window and the column menu could not open. Name the header to the window directly.
+        POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        ClientToScreen(h, &pt);
+        SendMessageW(GetAncestor(h, GA_ROOT), WM_CONTEXTMENU, (WPARAM)h, MAKELPARAM(pt.x, pt.y));
+        return 0;
+    }
     if (msg == WM_PAINT || msg == WM_ERASEBKGND) {
         if (msg == WM_ERASEBKGND) return 1;
         PAINTSTRUCT ps;
@@ -114,14 +122,15 @@ LRESULT CALLBACK HeaderSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
                     tri[1] = {cx + S(4), cy - S(2)};
                     tri[2] = {cx, cy + S(3)};
                 }
-                HBRUSH ab = CreateSolidBrush(Ref(P().text));
-                HPEN ap = CreatePen(PS_SOLID, 1, Ref(P().text));
-                HGDIOBJ ob = SelectObject(dc, ab), op = SelectObject(dc, ap);
+                // The stock DC_BRUSH and DC_PEN need no object per paint: the same solid 1 px arrow,
+                // without a brush and pen created and deleted for every header repaint.
+                SetDCBrushColor(dc, Ref(P().text));
+                SetDCPenColor(dc, Ref(P().text));
+                HGDIOBJ ob = SelectObject(dc, GetStockObject(DC_BRUSH));
+                HGDIOBJ op = SelectObject(dc, GetStockObject(DC_PEN));
                 Polygon(dc, tri, 3);
                 SelectObject(dc, ob);
                 SelectObject(dc, op);
-                DeleteObject(ab);
-                DeleteObject(ap);
             }
         }
         FillSolid(dc, {rc.left, rc.bottom - 1, rc.right, rc.bottom}, Ref(P().border));

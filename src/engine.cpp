@@ -140,16 +140,19 @@ struct Engine::Impl {
     std::atomic<bool> eqActive{false};  // mirrors eq.Active(), which the render thread updates
     std::atomic<float> volume{1.0f};
     float smoothGain = 0, glideGain = 1;
-    // After the EQ, in this order: night mode, loudness compensation, reverb. The limiter follows.
+    // After the EQ, in this order: night mode, loudness compensation, bitcrush, reverb. The limiter
+    // follows.
     NightCompressor night;
     LoudnessContour contour;
+    Bitcrusher crusher;
     Reverb reverb;
-    std::mutex fxMx;  // reverbPending
+    std::mutex fxMx;  // reverbPending, crushPending
     ReverbSettings reverbPending;
+    BitcrushSettings crushPending;
     unsigned fxRate = 0;
-    std::atomic<bool> reverbDirty{false}, reverbClear{false};
+    std::atomic<bool> reverbDirty{false}, reverbClear{false}, crushDirty{false};
     std::atomic<bool> loudnessOn{false}, nightOn{false};
-    std::atomic<bool> effectsActive{false};  // any of the three is changing the sound
+    std::atomic<bool> effectsActive{false};  // any of them is changing the sound
     std::atomic<bool> reverbRinging{false};  // a tail is still decaying, so the device keeps running
     // EQ boosts and crossfeed need the same peak protection as ReplayGain, even when ReplayGain is
     // off. The plain EQ-off/ReplayGain-off path keeps its exact samples and has no look-ahead delay.
@@ -360,21 +363,31 @@ struct Engine::Impl {
             night.Configure(fxRate);
             contour.Configure(fxRate);
             reverbDirty = true;
+            crushDirty = true;
         }
         if (reverbDirty.exchange(false)) {
             std::lock_guard<std::mutex> lock(fxMx);
             reverb.Configure(reverbPending, fxRate);
         }
-        if (reverbClear.exchange(false)) reverb.Clear();
+        if (crushDirty.exchange(false)) {
+            std::lock_guard<std::mutex> lock(fxMx);
+            crusher.Configure(crushPending, fxRate);
+        }
+        if (reverbClear.exchange(false)) {
+            reverb.Clear();
+            crusher.Clear();
+        }
         night.Process(dst, frames, vol, nightOn.load());
         contour.Process(dst, frames, vol, loudnessOn.load());
+        crusher.Process(dst, frames);
         reverb.Process(dst, frames);
-        effectsActive = night.Active() || contour.Active() || reverb.Active();
+        effectsActive = night.Active() || contour.Active() || crusher.Active() || reverb.Active();
         reverbRinging = reverb.Active();
         const bool replayGain = limiterOn.load();
         // The contour fades out after a volume increase, so its old boost can briefly exceed
         // the new attenuation even though its steady-state target never does.
-        const bool want = replayGain || eq.Active() || night.Active() || contour.Active() || reverb.Active();
+        const bool want =
+            replayGain || eq.Active() || night.Active() || contour.Active() || crusher.Active() || reverb.Active();
         const float headroom = replayGain ? limiterHeadroom.load() : 0;
         // Engaging adds the look-ahead delay and leaving drops it, so mid-song the limiter is held
         // with the last frame out when it comes in (no gap) and only leaves once the output is
@@ -972,6 +985,8 @@ std::vector<float> RenderPlayerPcm(const float* stereo, size_t frames, unsigned 
     if (effects) {
         pipeline.reverbPending = effects->reverb;
         pipeline.reverbDirty = true;
+        pipeline.crushPending = effects->bitcrush;
+        pipeline.crushDirty = true;
         pipeline.volume = effects->volume;
         pipeline.smoothGain = trackGain * effects->volume;
         pipeline.loudnessOn = effects->loudness;
@@ -1188,6 +1203,12 @@ void Engine::SetReverb(const ReverbSettings& reverb) {
     std::lock_guard<std::mutex> lock(impl_->fxMx);
     impl_->reverbPending = reverb;
     impl_->reverbDirty = true;
+}
+
+void Engine::SetBitcrush(const BitcrushSettings& bitcrush) {
+    std::lock_guard<std::mutex> lock(impl_->fxMx);
+    impl_->crushPending = bitcrush;
+    impl_->crushDirty = true;
 }
 
 void Engine::SetSmartVolume(bool loudness, bool night) {

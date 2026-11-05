@@ -88,6 +88,7 @@ constexpr UINT WM_APP_HELPER = WM_APP + 68;        // a helper tool's progress (
 constexpr UINT WM_APP_STEAM = WM_APP + 69;         // lParam owns discovered soundtrack folders
 constexpr UINT WM_APP_IPOD = WM_APP + 70;          // iPod scan (1), progress (0) or sync result (2); lParam owns it
 constexpr UINT WM_APP_COVERFETCH = WM_APP + 71;    // cover search results and progress (app_coverfetch.cpp)
+constexpr UINT WM_APP_COLLECTION = WM_APP + 72;    // collection export/import progress (0), or its result (1: lParam owns it)
 constexpr UINT_PTR kSearchTimer = 3;
 constexpr UINT_PTR kUiTimer = 1;
 constexpr UINT_PTR kBusyTimer = 5;  // animates the busy spinners (app_badges.cpp)
@@ -182,7 +183,7 @@ enum : int {
     IDM_REVERB_MIX_BASE = 3505,  // + kReverbMixes index
     IDM_SPEED_BASE = 3510,       // + kSpeeds index
     IDM_TEMPO_BASE = 3520,       // + kTempos index
-    IDM_LOUDNESS_COMP = 3530, IDM_NIGHT_MODE, IDM_RG_ESTIMATE,
+    IDM_LOUDNESS_COMP = 3530, IDM_NIGHT_MODE, IDM_RG_ESTIMATE, IDM_BITCRUSH,
     // Converting to .cord (app_convert.cpp).
     IDM_CONVERT = 3540, IDM_CONVERT_UNDO, IDM_CONVERT_CANCEL, IDM_CONVERT_RECYCLE, IDM_CONVERT_SHOW_ORIGINALS,
     IDM_CONVERT_MEMORY_BASE = 3550,  // + kConvertMemoryDays index
@@ -205,6 +206,8 @@ enum : int {
     IDM_IPOD_SYNC = 4200,
     // Covers (app_coverfetch.cpp) and artist info.
     IDM_FIND_COVER = 4210, IDM_FETCH_COVERS, IDM_FETCH_COVERS_CANCEL, IDM_ARTIST_INFO, IDM_RESTORE_COVER,
+    // File > Export collection and Import collection (app_collection.cpp), and Cancel.
+    IDM_EXPORT_COLLECTION = 4220, IDM_IMPORT_COLLECTION, IDM_COLLECTION_CANCEL,
 };
 constexpr int kMaxPacks = 64, kMaxPackThemes = 64, kMaxPackAutoPlaylists = 64, kMaxPackColumnSets = 30;
 constexpr int kMaxHelpers = 32, kMaxHelperVisualizers = 16, kMaxHelperTools = 40;
@@ -339,8 +342,13 @@ struct App {
     int bandWaveSize = 0;       // normal top/bottom waveform height; 0 follows the layout preset
     int seekStyle = 0;          // the seek bar's look, whole song or live: SeekStyle (peaks.h)
     int moodColors = 0;         // the moodbar's colours: MoodColors (peaks.h)
+    int moodWaveColors = 0;     // the mood waveform's: 0 the moodbar's, else MoodColors + 1
+    int waveColor = 0;          // the plain waveform's colour and the moodbar's base: WaveColors (peaks.h)
+    int waveRestColor = 0;      // the waveform's unplayed part: WaveRestColors (peaks.h)
     bool smoothSeek = false;    // soften the whole song's outline and blend its moodbar colours
     bool waveReflection = true; // mirror the waveform below its center line, for the waveform and moodbar styles
+    bool waveFullHeight = true; // unmirrored, the waveforms still fill both halves, the lower as bright
+    bool seekGlow = true;       // the seek bar's colours glow softly past its edges, every style and source alike
     bool resumeOn = true;       // remember the stopped / last-playing track's position across restarts
     bool resumeInSong = false;  // reopen with that track loaded, paused where it stopped
     bool resumePlay = false;    // start a reopened track at once instead of waiting paused
@@ -472,6 +480,7 @@ struct App {
     bool rgEstimate = true;  // unmeasured tracks get a quick estimate from their first seconds
     // Effects after the EQ. Speed and tempo last for the session; the rest are saved.
     ReverbSettings reverb;
+    BitcrushSettings bitcrush;
     double speed = 1, tempo = 1;
     bool loudnessComp = false, nightMode = false;
 

@@ -45,9 +45,7 @@ bool HandleDarkMenuBar(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& resul
             GetMenuItemInfoW(item->um.hmenu, item->umi.position, TRUE, &mii);
             UINT state = item->dis.itemState;
             bool hot = state & (ODS_HOTLIGHT | ODS_SELECTED);
-            HBRUSH bg = CreateSolidBrush(hot ? Ref(P().hover) : Ref(P().surface));
-            FillRect(item->um.hdc, &item->dis.rcItem, bg);
-            DeleteObject(bg);
+            FillSolid(item->um.hdc, item->dis.rcItem, hot ? Ref(P().hover) : Ref(P().surface));
             SetBkMode(item->um.hdc, TRANSPARENT);
             SetTextColor(item->um.hdc, (state & (ODS_INACTIVE | ODS_GRAYED)) ? Ref(P().faint)
                                        : g.themeMode == ThemeMode::Foobar ? Ref(kFoobarChromeText) : Ref(P().text));

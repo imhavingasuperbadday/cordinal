@@ -19,6 +19,13 @@ const wchar_t* const kOffOn[] = {L"Off", L"On"};
 const wchar_t* const kLoopNames[] = {L"Ignore loop points", L"Play the loop once, then fade",
                                      L"Play the loop twice, then fade", L"Play the loop three times, then fade"};
 const wchar_t* const kReverbNames[] = {L"Off", L"Room", L"Hall", L"Plate"};
+const wchar_t* const kBitcrushBitNames[] = {L"2 bits", L"3 bits", L"4 bits", L"5 bits", L"6 bits", L"7 bits",
+                                            L"8 bits", L"9 bits", L"10 bits", L"11 bits", L"12 bits", L"13 bits",
+                                            L"14 bits", L"15 bits", L"16 bits"};
+const wchar_t* const kBitcrushRateNames[] = {L"2 kHz", L"4 kHz", L"6 kHz", L"8 kHz", L"11 kHz", L"16 kHz",
+                                             L"22 kHz", L"32 kHz", L"48 kHz"};
+static_assert(std::size(kBitcrushBitNames) == kBitcrushMaxBits - kBitcrushMinBits + 1 &&
+              std::size(kBitcrushRateNames) == std::size(kBitcrushRates));
 const wchar_t* const kUndoNames[] = {L"1 day", L"3 days", L"1 week", L"7 weeks"};
 const wchar_t* const kSavingNames[] = {L"Ask before saving", L"Save automatically", L"Manual only (don't ask)"};
 const wchar_t* const kNewMusicNames[] = {L"Add automatically", L"Review in Inbox"};
@@ -28,9 +35,22 @@ const wchar_t* const kCoverSaveNames[] = {L"Save as cover.jpg in the album folde
 const wchar_t* const kBandWaveSizes[] = {L"Use layout size", L"Slim (26 px)", L"Medium (44 px)", L"Tall (72 px)",
                                        L"Extra tall (108 px)", L"Largest (144 px)"};
 static_assert(std::size(kBandWaveSizes) == std::size(ui::kBandWaveHeights));
-const wchar_t* const kSeekStyleNames[] = {L"Waveform", L"Moodbar", L"Mood waveform"};
-const wchar_t* const kMoodColorNames[] = {L"Theme", L"Vivid", L"Spectrum"};
-static_assert(std::size(kSeekStyleNames) == kSeekStyles && std::size(kMoodColorNames) == kMoodColorSchemes);
+// The seek bar's look: a plain progress bar first, then the SeekStyle values (peaks.h) one up.
+const wchar_t* const kSeekBarNames[] = {L"Progress bar", L"Waveform", L"Moodbar", L"Mood waveform"};
+// Waveform reflection's shapes. Mirrored is WaveReflection on; with it off, WaveFullHeight (default on)
+// picks Full height over Upper half, so a profile from before the choice opens in Full height.
+const wchar_t* const kWaveShapeNames[] = {L"Upper half", L"Mirrored", L"Full height"};
+const wchar_t* const kSeekShowsNames[] = {L"Whole song", L"Live audio", L"Live audio with progress"};
+const wchar_t* const kMoodColorNames[] = {L"Theme", L"Vivid", L"Spectrum", L"Warm", L"Cool",
+                                          L"Colour-blind friendly", L"Single colour"};
+const wchar_t* const kMoodWaveColorNames[] = {L"Same as moodbar", L"Theme", L"Vivid", L"Spectrum", L"Warm", L"Cool",
+                                              L"Colour-blind friendly", L"Single colour"};
+const wchar_t* const kWaveColorNames[] = {L"Theme", L"Red", L"Orange", L"Yellow", L"Green", L"Teal",
+                                          L"Blue", L"Purple", L"Pink", L"Grey"};
+const wchar_t* const kWaveRestNames[] = {L"Theme grey", L"Faded waveform colour"};
+static_assert(std::size(kSeekBarNames) == kSeekStyles + 1 && std::size(kMoodColorNames) == kMoodColorSchemes &&
+              std::size(kMoodWaveColorNames) == kMoodColorSchemes + 1 &&
+              std::size(kWaveColorNames) == kWaveColorChoices && std::size(kWaveRestNames) == kWaveRestChoices);
 static_assert(std::size(kLoopNames) == 4 && std::size(kReverbNames) == (size_t)ReverbPreset::Count &&
               std::size(kUndoNames) == std::size(kConvertMemoryDays) &&
               std::size(kSavingNames) == (size_t)PreferenceSaving::Count &&
@@ -140,52 +160,91 @@ const Tweak kTweaks[] = {
     {"effects.night_mode", L"Effects", L"NightMode", L"Night mode",
      L"Slowly lifts quiet passages and softens loud ones, for listening at night.", TweakType::Bool, 0, 1, 0,
      [] { return (double)g.nightMode; }, [](double v) { g.nightMode = v != 0; }, IDM_NIGHT_MODE},
-    {"view.waveform", L"Window", L"Waveform", L"Waveform playback bar",
-     L"Turn off to use a regular progress bar. This overrides live waveform and fountain settings without changing them.",
-     TweakType::Bool, 0, 1, 1, [] { return (double)g.waveform; }, [](double v) { g.waveform = v != 0; }, 0,
-     [] { WaveformTrackChanged(true); WaveformTick(); }},
-    {"view.live_waveform", L"Window", L"LiveWaveform", L"Live waveform for songs",
-     L"Show a moving waveform of the audio being heard instead of the whole-song overview. Seeking still works. "
-     L"Radio also uses it while Waveform playback bar is on.", TweakType::Bool, 0, 1, 0,
-     [] { return (double)g.liveWaveform; }, [](double v) { g.liveWaveform = v != 0; }, 0,
-     [] { WaveformTrackChanged(true); WaveformTick(); }},
+    {"effects.bitcrush", L"Effects", L"Bitcrush", L"Bitcrush",
+     L"Lo-fi crunch: fewer levels and a lower sample rate, like an old sampler or game console.", TweakType::Bool,
+     0, 1, 0, [] { return (double)g.bitcrush.enabled; }, [](double v) { g.bitcrush.enabled = v != 0; },
+     IDM_BITCRUSH},
+    {"effects.bitcrush_bits", L"Effects", L"BitcrushBits", L"Bitcrush depth",
+     L"How many bits each sample keeps. Fewer is harsher and buzzier; at 4 or fewer, quiet passages drop out.",
+     TweakType::Choice, 0, (float)std::size(kBitcrushBitNames) - 1, 8 - kBitcrushMinBits,
+     [] { return (double)(g.bitcrush.bits - kBitcrushMinBits); },
+     [](double v) { g.bitcrush.bits = (int)v + kBitcrushMinBits; }, 0, ApplyEffects, kBitcrushBitNames},
+    {"effects.bitcrush_rate", L"Effects", L"BitcrushRate", L"Bitcrush sample rate",
+     L"The rate the sound is held at. Lower rates lose treble and add metallic aliasing.", TweakType::Choice, 0,
+     (float)std::size(kBitcrushRateNames) - 1, kBitcrushDefaultRate,
+     [] { return (double)BitcrushRateIndex(g.bitcrush.rate); },
+     [](double v) { g.bitcrush.rate = kBitcrushRates[std::clamp((int)v, 0, (int)std::size(kBitcrushRates) - 1)]; }, 0,
+     ApplyEffects, kBitcrushRateNames},
+    {"effects.bitcrush_mix", L"Effects", L"BitcrushMix", L"Bitcrush mix",
+     L"How much of the crushed sound replaces the clean one, from 0 (none) to 1 (all of it).", TweakType::Float, 0,
+     1, 1, [] { return (double)g.bitcrush.mix; }, [](double v) { g.bitcrush.mix = (float)v; }, 0, ApplyEffects},
+    // Seek bar and Seek bar shows each stand for two of the [Window] keys earlier versions offered as
+    // separate switches (Waveform and SeekStyle; LiveWaveform and FullLiveWaveform). Those keys stay
+    // as they were, so profiles move between versions unchanged; LoadTweaks and SaveTweaks keep them.
+    {"view.seek_bar", L"Window", L"SeekStyle", L"Seek bar",
+     L"How the seek bar looks. Moodbar colours each moment by its sound: one way for bass, the other for "
+     L"treble, brighter when louder. Mood waveform keeps the waveform's shape in those colours.",
+     TweakType::Choice, 0, 3, 1, [] { return g.waveform ? (double)g.seekStyle + 1 : 0.0; },
+     [](double v) { g.waveform = v != 0; if (v != 0) g.seekStyle = (int)v - 1; }, 0,
+     [] { WaveformTrackChanged(true); WaveformTick(); if (g.seek) InvalidateRect(g.seek, nullptr, FALSE); },
+     kSeekBarNames},
+    {"view.seek_shows", L"Window", L"LiveWaveform", L"Seek bar shows",
+     L"The whole song, or a moving picture of the audio being heard; seeking still works either way, and Radio "
+     L"always shows live audio. With progress, what has played is lit and the rest dimmed.",
+     TweakType::Choice, 0, 2, 0, [] { return !g.liveWaveform ? 0.0 : g.fullLiveWaveform ? 1.0 : 2.0; },
+     [](double v) { g.liveWaveform = v != 0; if (v != 0) g.fullLiveWaveform = v == 1; }, 0,
+     [] { WaveformTrackChanged(true); WaveformTick(); if (g.seek) InvalidateRect(g.seek, nullptr, FALSE); },
+     kSeekShowsNames},
+    {"view.seek_glow", L"Window", L"SeekGlow", L"Seek bar glow",
+     L"A soft halo of the seek bar's colours around it that pulses with the beat, brighter where the song is loud. "
+     L"Every look, whole song or live.", TweakType::Bool, 0, 1, 1, [] { return (double)g.seekGlow; }, [](double v) { g.seekGlow = v != 0; },
+     0, [] { if (g.seek) InvalidateRect(g.seek, nullptr, FALSE); }},
     {"view.live_fountain", L"Window", L"LiveFountain", L"Live audio for Dark Fountain",
      L"In the DELTARUNE theme, the selected fountain style follows the audio being heard, including Radio. "
      L"Song seeking still works.", TweakType::Bool, 0, 1, 0,
      [] { return (double)g.liveFountain; }, [](double v) { g.liveFountain = v != 0; }, 0,
      [] { WaveformTrackChanged(true); WaveformTick(); }},
-    {"view.full_live_waveform", L"Window", L"FullLiveWaveform", L"Full color for live waveforms",
-     L"Light the whole live waveform. Turn off to show song progress with played and "
-     L"unplayed colors.", TweakType::Bool, 0, 1, 1,
-     [] { return (double)g.fullLiveWaveform; }, [](double v) { g.fullLiveWaveform = v != 0; }, 0,
-     [] { WaveformTick(); if (g.seek) InvalidateRect(g.seek, nullptr, FALSE); }},
     {"view.band_wave_size", L"Window", L"BandWaveSize", L"Top/bottom waveform size",
      L"Sets the waveform's height only in the normal top or bottom player bar. "
      L"Big, compact and side players keep their own sizes.", TweakType::Choice, 0, 5, 0,
      [] { return (double)g.bandWaveSize; }, [](double v) { g.bandWaveSize = (int)v; }, 0,
      [] { Layout(); WaveformTrackChanged(true); WaveformTick(); }, kBandWaveSizes},
-    {"view.seek_style", L"Window", L"SeekStyle", L"Seek bar style",
-     L"How the seek bar looks, for the whole song and the live waveform alike. Moodbar colours "
-     L"each moment by its sound: one way for bass, the other for treble, brighter when louder. "
-     L"Mood waveform keeps the waveform's shape in those colours.",
-     TweakType::Choice, 0, 2, 0, [] { return (double)g.seekStyle; }, [](double v) { g.seekStyle = (int)v; }, 0,
-     [] { if (g.seek) InvalidateRect(g.seek, nullptr, FALSE); }, kSeekStyleNames},
+    {"view.wave_color", L"Window", L"WaveColor", L"Waveform colour",
+     L"The waveform's played colour, kept bright enough to read on the player. The moodbar's Theme, Vivid and "
+     L"Single colour schemes turn from it too. Paused and warnings keep their own colours.",
+     TweakType::Choice, 0, kWaveColorChoices - 1, 0, [] { return (double)g.waveColor; },
+     [](double v) { g.waveColor = (int)v; }, 0,
+     [] { WaveformTick(); if (g.seek) InvalidateRect(g.seek, nullptr, FALSE); if (g.list) InvalidateRect(g.list, nullptr, FALSE); },
+     kWaveColorNames},
+    {"view.wave_rest_color", L"Window", L"WaveRestColor", L"Waveform unplayed part",
+     L"What is still to play: the theme's grey, or the waveform's own colour faded toward the background.",
+     TweakType::Choice, 0, kWaveRestChoices - 1, 0, [] { return (double)g.waveRestColor; },
+     [](double v) { g.waveRestColor = (int)v; }, 0,
+     [] { WaveformTick(); if (g.seek) InvalidateRect(g.seek, nullptr, FALSE); }, kWaveRestNames},
     {"view.mood_colors", L"Window", L"MoodColors", L"Moodbar colours",
-     L"The moodbar's colours: turned from the theme's accent, the whole colour wheel, or red for "
-     L"bass, green for mids and blue for treble.",
-     TweakType::Choice, 0, 2, 0, [] { return (double)g.moodColors; }, [](double v) { g.moodColors = (int)v; }, 0,
+     L"The moodbar's colours: turned from the waveform colour, the whole colour wheel, red for bass, green "
+     L"for mids and blue for treble, warm or cool shades, blue to orange (easy to tell apart with colour "
+     L"blindness), or one colour that stands out more for treble.",
+     TweakType::Choice, 0, kMoodColorSchemes - 1, 0, [] { return (double)g.moodColors; },
+     [](double v) { g.moodColors = (int)v; }, 0,
      [] { if (g.seek) InvalidateRect(g.seek, nullptr, FALSE); if (g.list) InvalidateRect(g.list, nullptr, FALSE); },
      kMoodColorNames},
+    {"view.mood_wave_colors", L"Window", L"MoodWaveColors", L"Mood waveform colours",
+     L"The Mood waveform's colours: the moodbar's, or a scheme of its own.", TweakType::Choice, 0,
+     kMoodColorSchemes, 0, [] { return (double)g.moodWaveColors; }, [](double v) { g.moodWaveColors = (int)v; }, 0,
+     [] { if (g.seek) InvalidateRect(g.seek, nullptr, FALSE); }, kMoodWaveColorNames},
     {"view.smooth_seek", L"Window", L"SmoothSeek", L"Smooth seek bar",
      L"Rounds off the whole song's outline and blends its moodbar colours into each other. "
      L"The live waveform keeps its detail.", TweakType::Bool, 0, 1, 0,
      [] { return (double)g.smoothSeek; }, [](double v) { g.smoothSeek = v != 0; }, 0,
      [] { if (g.seek) InvalidateRect(g.seek, nullptr, FALSE); }},
     {"view.wave_reflection", L"Window", L"WaveReflection", L"Waveform reflection",
-     L"Mirrors the seek bar below its center line. Turn off to draw only the upper half, for the "
-     L"waveform and both moodbar styles alike.", TweakType::Bool, 0, 1, 1,
-     [] { return (double)g.waveReflection; }, [](double v) { g.waveReflection = v != 0; }, 0,
-     [] { if (g.seek) InvalidateRect(g.seek, nullptr, FALSE); }},
+     L"Mirrored reflects the seek bar below its center line, dimmer. Upper half stops at the center line; "
+     L"Full height mirrors the waveforms as bright below as above (the Moodbar stripe keeps the upper "
+     L"half).", TweakType::Choice, 0, 2, 1,
+     [] { return g.waveReflection ? 1.0 : g.waveFullHeight ? 2.0 : 0.0; },
+     [](double v) { g.waveReflection = v == 1; if (v != 1) g.waveFullHeight = v == 2; }, 0,
+     [] { if (g.seek) InvalidateRect(g.seek, nullptr, FALSE); }, kWaveShapeNames},
     {"view.group_albums", L"Window", L"GroupAlbums", L"Group tracks by album",
      L"The track list shows a header with the cover above each album's tracks.", TweakType::Bool, 0, 1, 1,
      [] { return (double)g.groupAlbums; }, [](double v) { g.groupAlbums = v != 0; }, IDM_GROUP_ALBUMS},
@@ -962,16 +1021,36 @@ void SetTweak(const Tweak& t, double value) {
 // Rows whose value another record owns are skipped: the window.* rows are the [Layout] Parts string
 // (LoadMainLayout), the library size rows are the approved defaults in [Library], and the Apollo
 // and foobar2000 rows read and write their feature's own keys. Loading them as plain single keys
-// would split one record in two.
+// would split one record in two. Seek bar, Seek bar shows and Waveform reflection are two keys each
+// (SeekBarKeys).
 static bool TweakHasOwnIniRow(const Tweak& t) {
     const char* owned[] = {"library.cover_size", "library.browser_height", "view.apollo_analyzer",
-                           "view.apollo_scope", "view.apollo_rebar", "view.apollo_opacity", "view.foobar_view"};
+                           "view.apollo_scope", "view.apollo_rebar", "view.apollo_opacity", "view.foobar_view",
+                           "view.seek_bar", "view.seek_shows", "view.wave_reflection"};
     if (!strncmp(t.key, "window.", 7)) return false;
     for (const char* key : owned)
         if (!strcmp(t.key, key)) return false;
     return true;
 }
+// The [Window] keys behind Seek bar, Seek bar shows and Waveform reflection, read and written as
+// they always were; WaveFullHeight is new beside WaveReflection.
+static void SeekBarKeys(bool save) {
+    struct Key { const wchar_t* name; int def; int* number; bool* flag; };
+    const Key keys[] = {{L"Waveform", 1, nullptr, &g.waveform},
+                        {L"SeekStyle", kSeekWaveform, &g.seekStyle, nullptr},
+                        {L"LiveWaveform", 0, nullptr, &g.liveWaveform},
+                        {L"FullLiveWaveform", 1, nullptr, &g.fullLiveWaveform},
+                        {L"WaveReflection", 1, nullptr, &g.waveReflection},
+                        {L"WaveFullHeight", 1, nullptr, &g.waveFullHeight}};
+    for (const Key& k : keys) {
+        if (save) IniWrite(L"Window", k.name, std::to_wstring(k.number ? *k.number : (int)*k.flag));
+        else if (k.number) *k.number = std::clamp(IniInt(L"Window", k.name, k.def), 0, kSeekStyles - 1);
+        else *k.flag = IniInt(L"Window", k.name, k.def) != 0;
+    }
+}
+
 void LoadTweaks() {
+    SeekBarKeys(false);
     for (const Tweak& t : kTweaks) {
         if (t.flags & (kTweakLegacyLoad | kTweakOutside)) continue;
         if (!TweakHasOwnIniRow(t)) continue;
@@ -984,6 +1063,7 @@ void LoadTweaks() {
 }
 
 void SaveTweaks() {
+    SeekBarKeys(true);
     for (const Tweak& t : kTweaks) {
         if (t.flags & kTweakOutside) continue;
         // The layout, library-size, Apollo and foobar2000 rows are written by the record their

@@ -88,6 +88,7 @@ public:
     // Effects after the EQ (see dsp.h). The limiter covers them, and any of them sounding ends
     // bit-perfect output. Loudness compensation follows the volume.
     void SetReverb(const ReverbSettings& reverb);
+    void SetBitcrush(const BitcrushSettings& bitcrush);
     void SetSmartVolume(bool loudness, bool night);
     // Speed plays faster or slower with the pitch following (the resampler's ratio); tempo keeps
     // the pitch (TimeStretch). Position, Duration and Seek stay in the track's own time. A change
@@ -141,6 +142,7 @@ bool BenchmarkPlayerPipeline(const std::wstring& path,unsigned outputRate,unsign
 // output protection.
 struct RenderEffects {
     ReverbSettings reverb;
+    BitcrushSettings bitcrush;
     float volume = 1;
     bool loudness = false, night = false;
     size_t volumeChangeFrame = SIZE_MAX;

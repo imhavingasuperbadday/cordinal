@@ -3,7 +3,9 @@
 #pragma once
 #include <array>
 #include <cstddef>
+#include <cmath>
 #include <cstdint>
+#include <iterator>
 #include <utility>
 #include <vector>
 #include <string>
@@ -151,6 +153,46 @@ private:
     float send_ = 0, wet_ = 1, mix_ = 0, step_ = 0;
     bool active_ = false, reset_ = false;
     size_t quietFrames_ = 0;
+};
+
+struct BitcrushSettings {
+    bool enabled = false;
+    int bits = 8;          // quantization depth, kBitcrushMinBits..kBitcrushMaxBits
+    float rate = 11025;    // the rate the samples are held at, Hz (above the output rate: no hold)
+    float mix = 1;         // crushed share of the output, 0..1 (the rest is the clean signal)
+    bool operator==(const BitcrushSettings&) const = default;
+};
+constexpr int kBitcrushMinBits = 2, kBitcrushMaxBits = 16;
+constexpr float kBitcrushMinRate = 1000, kBitcrushMaxRate = 48000;
+// The rates Preferences offers, lowest (crunchiest) first; settings store the index.
+constexpr float kBitcrushRates[] = {2000, 4000, 6000, 8000, 11025, 16000, 22050, 32000, 48000};
+constexpr int kBitcrushDefaultRate = 4;  // 11025 Hz
+inline int BitcrushRateIndex(float rate) {
+    int best = 0;
+    for (int i = 1; i < (int)std::size(kBitcrushRates); ++i)
+        if (std::fabs(kBitcrushRates[i] - rate) < std::fabs(kBitcrushRates[best] - rate)) best = i;
+    return best;
+}
+
+// Lo-fi bitcrusher: a sample-and-hold at `rate` (a phase accumulator, so the sound doesn't change
+// with the output rate) and rounding to 2^bits levels, with no dither or smoothing filter: the
+// aliasing and the stepped quantization noise are the effect. Turning it on or off, or changing the
+// mix, glides the crushed share over ~20 ms, so neither clicks. Off and faded out, it passes the
+// samples through untouched and is not Active.
+class Bitcrusher {
+public:
+    void Configure(const BitcrushSettings& settings, unsigned rate);
+    void Process(float* stereo, size_t frames);
+    void Clear();  // a seek or stop: the held sample is not carried into the new place
+    bool Active() const { return active_; }
+
+private:
+    BitcrushSettings settings_;
+    unsigned rate_ = 0;
+    double phase_ = 1, step_ = 1;  // hold phase; step_ = crush rate / output rate (1 = every sample)
+    float levels_ = 128, held_[2] = {};
+    float wet_ = 0, target_ = 0, glide_ = 0;
+    bool active_ = false;
 };
 
 // Tempo without a pitch change (WSOLA): 40 ms Hann-windowed segments overlap-added at 20 ms, each

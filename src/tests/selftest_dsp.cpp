@@ -1081,19 +1081,35 @@ void TestPeaks(const std::wstring& scratch) {
               MoodOf(p, 0, kPeakBuckets, 0).level == 0,
           L"MOODBAR tones follow the balance: bass half %.2f, treble half %.2f, silence level %.2f", bassy.bright,
           bright.bright, MoodOf(p, 0, kPeakBuckets, 0).level);
+    // Every hue-table scheme, turned from the accent or from any Waveform colour, keeps the accents'
+    // contrast at full level and tells bass from treble; each Waveform colour keeps it too.
     testlog::Cases contrast;
+    const int tableSchemes[] = {kMoodTheme, kMoodVivid, kMoodWarm, kMoodCool, kMoodColorBlind, kMoodSingle};
     for (const Palette* palette : {&LightPalette(), &DarkPalette()}) {
-        MoodPalette moods;
-        moods.Make(palette->accent, palette->surface);
-        for (int h = 0; h < MoodPalette::kHues; ++h) {
-            Rgb loud = moods.played[h][MoodPalette::kLevels - 1];
-            contrast.Add(Contrast(loud, palette->surface) >= 3 && moods.rest[h][MoodPalette::kLevels - 1] != loud,
-                         palette->dark ? L"dark" : L"light");
+        for (int wave = kWaveTheme; wave < kWaveColorChoices; ++wave) {
+            const Rgb chosen = WaveColorOn(wave, palette->surface), base = chosen != kNoRgb ? chosen : palette->accent;
+            wchar_t name[48];
+            swprintf_s(name, L"%ls wave %d", palette->dark ? L"dark" : L"light", wave);
+            if (wave != kWaveTheme)
+                contrast.Add(chosen != kNoRgb && Contrast(chosen, palette->surface) >= 3 &&
+                                 FadedWaveColor(chosen, palette->surface) != chosen, name);
+            for (int scheme : tableSchemes) {
+                MoodPalette moods;
+                moods.Make(base, palette->surface, scheme);
+                swprintf_s(name, L"%ls wave %d scheme %d", palette->dark ? L"dark" : L"light", wave, scheme);
+                for (int h = 0; h < MoodPalette::kHues; ++h) {
+                    Rgb loud = moods.played[h][MoodPalette::kLevels - 1];
+                    contrast.Add(Contrast(loud, palette->surface) >= 3 && moods.rest[h][MoodPalette::kLevels - 1] != loud,
+                                 name);
+                }
+                contrast.Add(moods.Pick({0.9f, 1}, true) != moods.Pick({-0.9f, 1}, true) &&
+                                 moods.Pick({0, 0}, true) == palette->surface, name);
+            }
         }
-        contrast.Add(moods.Pick({0.5f, 1}, true) != moods.Pick({-0.5f, 1}, true) &&
-                         moods.Pick({0, 0}, true) == palette->surface, L"pick");
     }
-    Check(contrast.Passed(), L"MOODBAR full-level colours keep 3:1 on the player and differ when unplayed%ls",
+    Check(contrast.Passed() && WaveColorOn(kWaveTheme, 0x202020) == kNoRgb,
+          L"MOODBAR and Waveform colours keep 3:1 on the player in every scheme, differ when unplayed and tell "
+          L"bass from treble%ls",
           contrast.failed.c_str());
 
     // Spectrum puts the bands on red, green and blue; Vivid spreads its hues further than Theme.
@@ -1151,6 +1167,25 @@ void TestPeaks(const std::wstring& scratch) {
                       soft.v[mid - 4] < soft.v[mid] && soft.mood[kMoodMid][0] == 90 && soft.mood[kMoodMid][kPeakBuckets - 1] == 90;
     Check(liveLit && liveQuiet && ramp, L"MOODBAR live scale (lit %d, quiet %d) and smoothing (step at %d)",
           (int)liveLit, (int)liveQuiet, (int)soft.v[mid]);
+
+    // Seek bar glow's pulse, frame by frame at 30 a second: steady music settles to a middle glow, a
+    // beat over it jumps up at once and falls back within half a second, and a held clock holds it.
+    {
+    GlowPulse pulse;
+    std::array<uint8_t, 256> quietRun{}, beatRun{};
+    quietRun.fill(80);
+    beatRun.fill(80);
+    std::fill(beatRun.end() - 32, beatRun.end(), (uint8_t)250);
+    double clock = 0;
+    for (int frame = 0; frame < 90; ++frame) pulse.Step(quietRun.data(), 256, clock += 1.0 / 30);
+    const float steady = pulse.Value();
+    const float hit = pulse.Step(beatRun.data(), 256, clock += 1.0 / 30);
+    const float held = pulse.Step(quietRun.data(), 256, clock);
+    for (int frame = 0; frame < 15; ++frame) pulse.Step(quietRun.data(), 256, clock += 1.0 / 30);
+    const float after = pulse.Value();
+    Check(steady > 0.05f && steady < 0.4f && hit > steady + 0.4f && held == hit && after < steady + 0.15f,
+          L"SEEK GLOW pulse: steady %.2f, beat %.2f, held %.2f, half a second later %.2f", steady, hit, held, after);
+    }
 
     testlog::Cases ranges;
     batch.Next(L"PEAKS ranges preserve their samples, reject reversed bounds and cancellation, and CUE "
@@ -1296,6 +1331,29 @@ void TestPeaks(const std::wstring& scratch) {
     Check(hit && std::memcmp(got.v, ranged.v, kPeakBuckets) == 0, L"PEAKS stored range is returned by its own key");
     hit = GetPeaks(sine, size + 1, time, 0, 0, got, req);
     Check(!hit, L"PEAKS a changed file size is a cache miss");
+    // A library scan stores peaks for every track it decodes, so the disk cache has to keep itself
+    // under budget on its own. Each entry is 3,012 bytes, so this writes well past 20 MB; the oldest
+    // entries must be gone and the newest must have survived. It uses its own folder so the entries
+    // the checks below rely on are not pruned away.
+    batch.Next(L"PEAKS the disk cache stays within its byte budget while tracks are stored");
+    const std::wstring bulkCache = scratch + L"\\peaks_cache_budget";
+    std::filesystem::remove_all(bulkCache, ec);
+    StartPeaks(nullptr, 0, bulkCache);
+    for (uint64_t i = 0; i < 7500; ++i) StorePeaks(sine, 100000 + i, time, 0, 0, ranged);
+    uint64_t cacheBytes = 0;
+    size_t cacheFiles = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(bulkCache)) {
+        if (entry.path().extension() != L".pk") continue;
+        ++cacheFiles;
+        cacheBytes += entry.file_size();
+    }
+    const std::wstring newest = bulkCache + L"\\" + PeaksKeyName(sine, 100000 + 7499, time) + L".pk";
+    Check(cacheFiles > 0 && cacheBytes <= 21ull << 20 && GetFileAttributesW(newest.c_str()) != INVALID_FILE_ATTRIBUTES,
+          L"PEAKS the disk cache stays within its budget (%zu files, %llu bytes)", cacheFiles,
+          (unsigned long long)cacheBytes);
+    StopPeaks();
+    std::filesystem::remove_all(bulkCache, ec);
+    StartPeaks(nullptr, 0, cache);
     // The Mood column asks from memory only: a miss queues the track, and its result then answers.
     Peaks listed{};
     bool listMiss = !ListPeaks(half, size + 50, time, 0, 0, listed), listHit = false;
@@ -1612,6 +1670,54 @@ void TestEffects() {
           L"NIGHT lifts a -39 dB passage by %.1f dB (expect 9), softens a -6 dB one by %.1f dB (expect -5), ignores -80 dB",
           lifted, softened);
 
+    // Bitcrush: off is exact and asleep; on, every sample lands on the depth's levels and is held for
+    // the rate's run of frames; the mix blends; turning it off glides out without a jump, then sleeps.
+    const auto crushIn = tone(440, 0.7, 0.5);
+    Bitcrusher idle;
+    idle.Configure({}, rate);
+    auto idleOut = crushIn;
+    run(idle, idleOut);
+    const size_t settled = rate / 20;  // past the 20 ms glide
+    Bitcrusher four;
+    four.Configure({true, 4, 48000, 1}, rate);
+    auto fourOut = crushIn;
+    run(four, fourOut);
+    bool onLevels = true;
+    for (size_t i = settled * 2; i < fourOut.size(); ++i)
+        onLevels = onLevels && std::fabs(fourOut[i] * 8 - std::round(fourOut[i] * 8)) < 1e-5f;
+    Bitcrusher held;
+    held.Configure({true, 16, 6000, 1}, rate);
+    auto heldOut = crushIn;
+    run(held, heldOut);
+    size_t changes = 0;  // a 440 Hz tone moves every frame, so changes come only at the 6 kHz hold rate
+    for (size_t i = settled; i + 1 < heldOut.size() / 2; ++i) changes += heldOut[(i + 1) * 2] != heldOut[i * 2];
+    const double perSecond = changes * (double)rate / (heldOut.size() / 2 - settled - 1);
+    Bitcrusher half;
+    half.Configure({true, 3, 48000, 0.5f}, rate);
+    auto halfOut = crushIn;
+    run(half, halfOut);
+    const size_t probe = settled + 123;
+    const float halfWant = (crushIn[probe * 2] + std::round(crushIn[probe * 2] * 4) / 4) / 2;
+    Bitcrusher fading;
+    fading.Configure({true, 3, 4000, 1}, rate);
+    auto fadeOut = crushIn;
+    fading.Process(fadeOut.data(), settled);
+    fading.Configure({false, 3, 4000, 1}, rate);
+    fading.Process(fadeOut.data() + settled * 2, fadeOut.size() / 2 - settled);
+    // The glide off never steps further than the crushed signal itself already does.
+    float crushedStep = 0, jump = 0;
+    for (size_t i = settled / 2; i + 1 < settled; ++i)
+        crushedStep = std::max(crushedStep, std::fabs(fadeOut[(i + 1) * 2] - fadeOut[i * 2]));
+    for (size_t i = settled; i < settled + rate / 50; ++i) jump = std::max(jump, std::fabs(fadeOut[(i + 1) * 2] - fadeOut[i * 2]));
+    bool tailExact = !fading.Active();
+    for (size_t i = (settled + rate / 25) * 2; i < fadeOut.size(); ++i) tailExact = tailExact && fadeOut[i] == crushIn[i];
+    batch.Next(L"BITCRUSH off is exact, quantizes and holds as set, mixes, and glides off to an exact bypass");
+    Check(!idle.Active() && idleOut == crushIn && onLevels && fourOut != crushIn && std::fabs(perSecond - 6000) < 60 &&
+              std::fabs(halfOut[probe * 2] - halfWant) < 1e-5f && jump <= crushedStep + 1e-4f && tailExact,
+          L"BITCRUSH off exact %d, 4-bit levels %d, 6 kHz hold %.0f changes/s, 50%% mix %.4f (expect %.4f), off "
+          L"glide step %.3f (crushed steps %.3f), exact after %d",
+          idleOut == crushIn, onLevels, perSecond, halfOut[probe * 2], halfWant, jump, crushedStep, tailExact);
+
     // The production renderer: everything off stays exact; reverb is covered by the limiter.
     auto sine = tone(1000, 0.98, 1);
     RenderEffects off, room;
@@ -1622,4 +1728,11 @@ void TestEffects() {
     Check(RenderPlayerPcm(sine.data(), sine.size() / 2, rate, {}, false, 1, 0, &off) == sine &&
               withReverb.size() == sine.size() && peak < 0.97f && peak > 0.9f,
           L"EFFECTS off leave the renderer exact; reverb on a near-full-scale tone stays under the ceiling (peak %.3f)", peak);
+    RenderEffects crushed;
+    crushed.bitcrush = {true, 6, 8000, 1};
+    auto withCrush = RenderPlayerPcm(sine.data(), sine.size() / 2, rate, {}, false, 1, 0, &crushed);
+    float crushPeak = 0;
+    for (float s : withCrush) crushPeak = std::isfinite(s) ? std::max(crushPeak, std::fabs(s)) : 2;
+    Check(withCrush.size() == sine.size() && withCrush != sine && crushPeak < 0.97f,
+          L"BITCRUSH through the renderer changes the sound and stays under the limiter's ceiling (peak %.3f)", crushPeak);
 }
