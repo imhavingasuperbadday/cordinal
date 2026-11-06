@@ -7,7 +7,7 @@ program of about 1.7 MB: no installer, no runtime, nothing else to install. It p
 audio file with its own decoders, keeps your ratings and listening history, and leaves your music
 where it is.
 
-Current release: **0.1.7**. Download it from
+Current release: **0.1.7** (`cordinal.exe`, 1,697,792 bytes). Download it from
 [Releases](https://github.com/imhavingasuperbadday/cordinal/releases/latest) and run it.
 
 ## What it does
