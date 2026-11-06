@@ -7,15 +7,14 @@ A small, fast music player and library for Windows, with a Linux preview.<br>
 One 1.7 MB program. No installer, no runtime, no codecs to add.
 </p>
 
-<p align="center">
-<a href="https://github.com/imhavingasuperbadday/cordinal/releases/latest"><b>Download</b></a> ·
-<a href="#getting-started">Getting started</a> ·
-<a href="#guide">Guide</a> ·
-<a href="#building">Building</a> ·
-<a href="https://github.com/imhavingasuperbadday/cordinal/issues">Issues</a>
-</p>
+<div align="center">
 
----
+Current release: **0.1.7** · `cordinal.exe`, 1,697,792 bytes<br>
+**[Download](https://github.com/imhavingasuperbadday/cordinal/releases/latest)** ·
+[Getting started](#getting-started) · [Guide](#guide) · [Building](#building) ·
+[Issues](https://github.com/imhavingasuperbadday/cordinal/issues)
+
+</div>
 
 cordinal plays almost any audio file with its own decoders, keeps your ratings and listening
 history, and leaves your music where it is. It opens instantly, stays responsive with a large
@@ -29,8 +28,6 @@ library, and treats your files carefully: every tag write is atomic and can be u
   written out in standard forms any other player reads.
 - **Private by default.** cordinal never goes online unless you turn on a feature that needs to, and
   it collects nothing about you.
-
-**Current release: 0.1.7** (`cordinal.exe`, 1,697,792 bytes).
 
 ## Features
 
