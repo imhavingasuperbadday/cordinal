@@ -5,6 +5,8 @@
 #include "big_ui.h"
 #include "headphones_ui.h"
 #include "app.h"
+#include "coverupload.h"
+#include "discord.h"
 #include "listenbrainz.h"
 #include "metadata_fetch.h"
 #include "backup.h"
@@ -300,6 +302,9 @@ void LoadSettings() {
     s.copyFormat = (uint8_t)std::clamp(ToInt(v, "copy_format", 0), 0, (int)CopyFormat::Count - 1);
     listenbrainz::SetPaused(ToInt(v, "scrobbling_paused", 0) != 0);
     listenbrainz::SetSendNowPlaying(ToInt(v, "scrobbling_now_playing", 1) != 0);
+    discord::SetMode((discord::Show)std::clamp(ToInt(v, "discord_status", 0), 0, discord::kShowChoices - 1));
+    if (auto it = v.find("discord_cover_upload"); it != v.end())
+        coverupload::SetCommand(compat::Widen(it->second.c_str()));  // a command line, so not a preference row
     s.libraryMode = (LibraryMode)std::clamp(ToInt(v, "library_view", (int)LibraryMode::Albums), 0, (int)LibraryMode::Count - 1);
     s.browserVisible = ToInt(v, "library_browser", 1) != 0;
     // What the file holds is how cordinal opens: the approved startup defaults (a profile from before
@@ -452,7 +457,9 @@ void SaveSettings() {
     text += "copy_folder=" + compat::Narrow(s.copyFolder.c_str()) + "\ncopy_pattern=" + compat::Narrow(s.copyPattern.c_str()) +
             "\ncopy_format=" + std::to_string(s.copyFormat) + "\n";
     text += "scrobbling_paused=" + std::to_string(listenbrainz::Paused()) +
-            "\nscrobbling_now_playing=" + std::to_string(listenbrainz::SendNowPlaying()) + "\n";
+            "\nscrobbling_now_playing=" + std::to_string(listenbrainz::SendNowPlaying()) +
+            "\ndiscord_status=" + std::to_string((int)discord::Mode()) +
+            "\ndiscord_cover_upload=" + compat::Narrow(coverupload::Command().c_str()) + "\n";
     text += "library_view=" + std::to_string((int)s.defaultLibraryMode) + "\nlibrary_browser=" + std::to_string(s.defaultBrowserVisible) +
             "\nbrowser_fields=" + std::to_string(s.browserFields[0]) + "," + std::to_string(s.browserFields[1]) + "," +
             std::to_string(s.browserFields[2]) + "\nbrowser_height=" + std::to_string(s.defaultBrowserHeight) +

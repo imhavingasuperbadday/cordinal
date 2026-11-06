@@ -1,5 +1,7 @@
 // Offline protocol and worker checks for the native scrobbling services. The injected transport
-// returns service-shaped replies, so no account credentials or internet connection are needed.
+// returns service-shaped replies, so no account credentials or internet connection are needed. The Discord
+// status runs the shared checks of discord_checks.h against a fake Discord pipe.
+#include "discord_checks.h"
 #include "selftest_common.h"
 #include "web_remote.h"
 #include <mutex>
@@ -146,4 +148,13 @@ void TestScrobbling(const std::wstring& scratch) {
     for (Service service : {Service::ListenBrainz, Service::LastFm, Service::LibreFm}) SetToken(L"", service);
     Stop(); SetHttpForTest(nullptr); SetSendNowPlaying(true); SetPaused(false); server.error = 0;
     Pump(100, [] { return false; }); DestroyWindow(window);
+}
+
+void TestDiscord() {
+    const auto results = discord_checks::All({});
+    std::wstring failed;
+    for (const auto& [ok, what] : results)
+        if (!ok) failed += L" | " + FromUtf8(what);
+    Check(failed.empty(), L"DISCORD the status for each setting, its framing and the worker against a fake Discord "
+          L"(%d cases)%ls", (int)results.size(), failed.c_str());
 }

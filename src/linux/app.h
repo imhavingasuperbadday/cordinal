@@ -488,6 +488,8 @@ void ToggleStartOnLogin();
 // ListenBrainz (scrobble.cpp): the submission worker, "playing now" and a listen for each counted play.
 void InitScrobble();
 void StopScrobble();
+void DiscordTick();  // scrobble.cpp: keeps the Discord status (discord.h) with what plays
+void StopDiscord();  // before StopCoverFetch: its cover lookups use the online cache
 void ScrobbleTrackStarted(unsigned long long token, TrackId id);
 void ScrobbleCounted(TrackId id, uint32_t when, double seconds, bool local);
 // A title-format pattern (titleformat.h) filled in from `id`, with the time fields of playback if asked.

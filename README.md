@@ -7,7 +7,7 @@ program of about 1.7 MB: no installer, no runtime, nothing else to install. It p
 audio file with its own decoders, keeps your ratings and listening history, and leaves your music
 where it is.
 
-Current release: **0.1.6** (`cordinal.exe`, 1,654,272 bytes). Download it from
+Current release: **0.1.7**. Download it from
 [Releases](https://github.com/imhavingasuperbadday/cordinal/releases/latest) and run it.
 
 ## What it does
@@ -41,7 +41,7 @@ Current release: **0.1.6** (`cordinal.exe`, 1,654,272 bytes). Download it from
   Ctrl+Z undoes changes to a playlist (adding, removing, moving, sorting, clearing) and Ctrl+Y
   redoes them, for the session; Ctrl+Z takes back a tag edit instead when that came last.
 - **Almost any format, built in.** FLAC, WAV, AIFF, MP3, MP4/M4A, Ogg Vorbis, Opus, AAC, ALAC, WMA, APE,
-  WavPack, Musepack, AC3, Matroska audio, DSD, CUE sheets, tracker modules, MIDI and video game music (NES,
+  WavPack, Musepack, AC3 and E-AC-3, TTA, Matroska audio, DSD, CUE sheets, tracker modules, MIDI and video game music (NES,
   SNES, Game Boy, Genesis, Commodore 64), plus cordinal's own lossless `.cord`. No codecs to install.
 - **Sound.** Gapless playback, ReplayGain with a built-in loudness scanner, a ten-band equalizer
   with headphone (AutoEq) profiles and crossfeed, exclusive bit-perfect output, speed and tempo,
@@ -97,6 +97,26 @@ Current release: **0.1.6** (`cordinal.exe`, 1,654,272 bytes). Download it from
   removes its saved credentials. Waiting listens stay with their account.
   A song counts after half its duration or four minutes of actual listening; Last.fm and Libre.fm
   also require it to be longer than 30 seconds.
+
+  **Preferences ▸ Scrobbling ▸ Discord status** shows what you're listening to as your Discord
+  status: **Song** (title, artist and a progress bar) or **Album** (album, its artist and the time
+  spent on it). It talks only to the Discord app running on the same computer, needs no account
+  setup in cordinal, and shows nothing while paused or stopped. It is off until you choose. The
+  cover is the one cordinal shows: a custom cover you picked from the online results keeps the
+  address it came from, so Discord can display that same picture; a cover you chose from a file has
+  no address to offer, and the album's cover from the sources under **Preferences ▸ Online** stands
+  in for it (Discord can only show pictures from the web). To show those too, put an upload command
+  in `settings.ini`:
+
+  ```ini
+  [Scrobbling]
+  DiscordCoverUpload=C:\Tools\upload.exe --json
+  ```
+
+  cordinal runs that command with the cover image's path appended as one argument, keeps the first
+  https address it prints as the cover's address, and remembers it beside the cover, so the tool
+  runs once per image. It is never run unless you set it; a command that fails, prints nothing, or
+  takes longer than ten seconds costs only that image's picture.
 - **Beyond the library.** Internet radio, a browser player for your phone, Copy to folder or
   device for SD cards, music players and phones, and **Library ▸ Sync to iPod...** for classic
   iPods. The iPod sync writes the selected tracks (or the active playlist) into the master

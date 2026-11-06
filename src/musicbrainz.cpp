@@ -193,7 +193,7 @@ std::string Fetch(const Candidate& candidate, bool& offline) {
     offline = false;
     std::string query = "releasegroup:\"" + candidate.title + "\" AND artist:\"" + candidate.artist + "\"";
     std::string url = "https://musicbrainz.org/ws/2/release-group?query=" + Encode(query) + "&fmt=json&limit=25";
-    std::string headers = "User-Agent: cordinal/0.1.6 (https://github.com/imhavingasuperbadday/cordinal)\r\n"
+    std::string headers = "User-Agent: cordinal/0.1.7 (https://github.com/imhavingasuperbadday/cordinal)\r\n"
                           "Accept: application/json\r\n";
 #ifdef _WIN32
     void* session = nullptr;

@@ -1,12 +1,14 @@
 // Windows and online integration: the system media controls (media keys, the volume flyout,
 // lock screen, headset buttons), transport commands ("cordinal --next"), Explorer's folder
 // verbs ("Play with cordinal"), the now-playing file for Linux media controls, ListenBrainz
-// scrobbling and its window, crash reports, Steam soundtrack folders and the game-music loop
+// scrobbling and its window, the Discord status, crash reports, Steam soundtrack folders and the game-music loop
 // setting.
 #include "app.h"
+#include "album_editions.h"
 #include "backup.h"
 #include "crashdump.h"
 #include "customcover.h"
+#include "discord.h"
 #include "listenbrainz.h"
 #include "peaks.h"
 #include "smtc.h"
@@ -576,9 +578,44 @@ void PlatformTrackChanged() {
     listenbrainz::PlayingNow(MakeListen(g.playing));
 }
 
+// The Discord status follows a new track or a pause at once, and checks for a seek once a second. Off, it costs
+// one comparison.
+void DiscordTick() {
+    static unsigned long long token = 0;
+    static bool paused = false;
+    static ULONGLONG checked = 0;
+    if (!discord::Available() || discord::Mode() == discord::Show::Off) return;
+    discord::NowPlaying now;
+    now.radio = RadioPlaying();
+    now.active = now.radio || g.playing != kNone;
+    now.paused = now.active && g.engine.Paused();
+    ULONGLONG tick = GetTickCount64();
+    if (token == g.playingToken && paused == now.paused && tick - checked < 1000) return;
+    token = g.playingToken;
+    paused = now.paused;
+    checked = tick;
+    if (now.radio) {
+        now.title = ToUtf8(RadioSongTitle());
+        now.artist = ToUtf8(RadioStationName());
+    } else if (now.active) {
+        const Track& t = g_lib[g.playing];
+        now.title = t.title ? Utf8(t.title) : ToUtf8(StemOf(g_lib.Str(t.file)));
+        now.artist = Utf8(t.artist ? t.artist : t.albumArtist);
+        now.album = Utf8(t.album);
+        now.albumArtist = Utf8(t.albumArtist);
+        if (const AlbumEdition* edition = AlbumEditionForTrack(g.playing)) now.release = edition->musicBrainzRelease;
+        now.path = g_lib.Path(g.playing);  // the track's custom cover, when it has one
+        now.position = g.engine.Position();
+        now.duration = CurrentDuration();
+        now.rate = g.speed * g.tempo;
+    }
+    discord::Update(now);
+}
+
 // With every status update: play state at once, the timeline once a second.
 void PlatformTick() {
     WriteNowPlaying();
+    DiscordTick();
     if (!g_smtc) return;
     smtc::State s = g.playing == kNone && !RadioPlaying() ? smtc::State::Stopped : g.engine.Paused() ? smtc::State::Paused : smtc::State::Playing;
     if (s != g_smtcState) {

@@ -20,6 +20,10 @@ std::unique_ptr<Decoder> OpenWavPackDecoder(const std::wstring& path);
 std::unique_ptr<Decoder> OpenApeDecoder(const std::wstring& path);
 std::unique_ptr<Decoder> OpenMusepackDecoder(const std::wstring& path);
 std::unique_ptr<Decoder> OpenAc3Decoder(const std::wstring& path);
+// Enhanced AC-3 (Dolby Digital Plus): raw .eac3/.ec3 streams.
+std::unique_ptr<Decoder> OpenEac3Decoder(const std::wstring& path);
+// True Audio (TTA1): independent frames, 1-8 channels of 8/16/24-bit PCM.
+std::unique_ptr<Decoder> OpenTtaDecoder(const std::wstring& path);
 std::unique_ptr<Decoder> OpenMatroskaDecoder(const std::wstring& path);
 // cordinal's own format (cord.h), version 1.
 std::unique_ptr<Decoder> OpenCordDecoder(const std::wstring& path);

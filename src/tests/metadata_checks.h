@@ -6,6 +6,7 @@
 #pragma once
 #include "backup.h"
 #include "coverfetch.h"
+#include "coverupload.h"
 #include "customcover.h"
 #include "metadata_fetch.h"
 #include "tags.h"
@@ -415,6 +416,32 @@ inline Group TextImages() {
     return g;
 }
 
+// The user's own upload tool: it names a cover Discord can show, and its output is read defensively because it is
+// somebody else's program.
+inline Group CoverUpload() {
+    Group g{"cover upload: the user's own tool turns a local image into an address Discord can show"};
+#ifdef _WIN32
+    const std::wstring prints = L"cmd.exe /c echo https://example.com/cover.png";
+    const std::wstring silent = L"cmd.exe /c exit 0";
+    const std::wstring unsafe = L"cmd.exe /c echo http://example.com/cover.png";
+#else
+    const std::wstring prints = L"echo https://example.com/cover.png";
+    const std::wstring silent = L"true";
+    const std::wstring unsafe = L"echo http://example.com/cover.png";
+#endif
+    coverupload::SetCommand(prints);
+    g.Add(coverupload::Configured() && coverupload::Run(L"/covers/image.png") == "https://example.com/cover.png",
+          "the address the tool prints is taken, whatever it prints after it");
+    coverupload::SetCommand(silent);
+    g.Add(coverupload::Run(L"/covers/image.png").empty(), "a tool that prints no address yields none");
+    coverupload::SetCommand(unsafe);
+    g.Add(coverupload::Run(L"/covers/image.png").empty(), "an address Discord cannot render is refused");
+    coverupload::SetCommand(L"");
+    g.Add(!coverupload::Configured() && coverupload::Run(L"/covers/image.png").empty(),
+          "with no command configured nothing runs at all");
+    return g;
+}
+
 // Custom covers: per track, kept once per image, persisted, restored, and unused images removed.
 inline Group CustomCovers(const std::wstring& scratch) {
     Group g{"custom covers: shown per track, persisted, restored without touching the tracks"};
@@ -455,13 +482,61 @@ inline Group CustomCovers(const std::wstring& scratch) {
     g.Add(customcover::Clear({b}) == 1 && !Exists(png) && Read(covers + sep + L"covers.txt") == "1\n" &&
               !Exists(covers + sep + L"covers.txt.tmp"),
           "restoring the last one removes the image and leaves an empty list behind");
+    // The address a downloaded cover came from travels with it, for the Discord status; a picture the user picked
+    // from a file has none, and an address Discord could not render is not kept.
+    const std::string address = "https://e-cdns-images.dzcdn.net/images/cover/abc/1000x1000-000000-80-0-0.jpg";
+    g.Add(customcover::Set({a}, Jpeg(), error, address) && customcover::SourceUrlFor(a) == FromUtf8(address) &&
+              customcover::SourceUrlFor(b).empty(),
+          "a downloaded cover keeps the address it came from, for the track given it");
+    g.Add(customcover::Set({b}, Png(), error, "http://example.com/insecure.png") && customcover::SourceUrlFor(b).empty(),
+          "an address Discord could not take is not kept; the cover still is");
+    customcover::Start(data);
+    g.Add(customcover::SourceUrlFor(a) == FromUtf8(address) && customcover::SourceUrlFor(b).empty(),
+          "the address is read back after a restart");
+    g.Add(customcover::Clear({a, b}) == 2 && customcover::SourceUrlFor(a).empty(),
+          "restoring the covers forgets their addresses too");
     customcover::Start(L"");  // nothing else in the test run sees these choices
     return g;
 }
 
+// The Discord status's cover lookup: stores' edition notes and credits compare loosely, and a track with no album
+// finds its song's album cover.
+inline Group CoverAddresses() {
+    Group g{"cover addresses: loose names and song searches"};
+    using online::LooseTitle;
+    g.Add(LooseTitle("Abbey Road (Remastered)") == LooseTitle("abbey road") &&
+          LooseTitle("Rumours [2004 Remaster]") == "rumours" &&
+          LooseTitle("Back in Black - 2003 Remaster") == "back in black", "edition notes are left out");
+    g.Add(LooseTitle("Simon & Garfunkel") == LooseTitle("Simon and Garfunkel") &&
+          LooseTitle("Don't Stop Me Now") == LooseTitle("Dont Stop Me Now") &&
+          LooseTitle("AC/DC") == LooseTitle("AC DC"), "\"&\", apostrophes and punctuation do not matter");
+    g.Add(LooseTitle("Daft Punk feat. Pharrell Williams") == "daft punk", "a featured artist is left out");
+    g.Add(LooseTitle("Pumpkin Waltz (1 hour)") == "pumpkin waltz" && LooseTitle("(untitled)") == "(untitled)" &&
+          LooseTitle("Mr. Brightside - The Killers") == "mr brightside the killers",
+          "a title of nothing but notes keeps them, and a dash without an edition note stays");
+    g.Add(LooseTitle("Sigur R\xC3\xB3s") == "sigur r\xC3\xB3s" && LooseTitle("Abbey Road") != LooseTitle("Let It Be"),
+          "accented letters stay and different names differ");
+    auto deezer = online::ParseDeezerTracks(
+        R"({"data":[{"title":"Pumpkin Waltz","artist":{"name":"Peter Palmer"},"album":{"title":"Autumn",)"
+        R"("cover_xl":"https://cdn-images.dzcdn.net/images/cover/x/1000x1000.jpg"}},)"
+        R"({"title":"No Art","artist":{"name":"A"},"album":{"title":"B"}}]})");
+    g.Add(deezer.size() == 1 && deezer[0].title == "Pumpkin Waltz" && deezer[0].album == "Autumn" &&
+          deezer[0].artist == "Peter Palmer" && deezer[0].width == 1000 && deezer[0].url.ends_with("1000x1000.jpg"),
+          "Deezer song results carry their album's cover; ones without art are left out");
+    auto itunes = online::ParseItunesTracks(
+        R"({"resultCount":1,"results":[{"trackName":"Song","artistName":"Artist","collectionName":"Album",)"
+        R"("artworkUrl100":"https://is1-ssl.mzstatic.com/image/thumb/a/100x100bb.jpg"}]})");
+    g.Add(itunes.size() == 1 && itunes[0].title == "Song" && itunes[0].url.ends_with("/1200x1200bb.jpg"),
+          "iTunes song results ask for the 1200-pixel artwork");
+    g.Add(online::ParseDeezerTracks(R"({"error":{"code":4}})").empty() && online::ParseItunesTracks("not json").empty(),
+          "an error or malformed reply yields nothing");
+    return g;
+}
+
 inline std::vector<Group> All(const std::wstring& scratch) {
-    return {Parsers(), Scoring(), Images(), TextImages(), FolderWrites(scratch), CustomCovers(scratch), Review(scratch),
-            Generations(), Lyrics(), LrcWrite(scratch), Artist()};
+    return {Parsers(), Scoring(), Images(), TextImages(), FolderWrites(scratch), CustomCovers(scratch), CoverUpload(),
+            Review(scratch),
+            Generations(), Lyrics(), LrcWrite(scratch), Artist(), CoverAddresses()};
 }
 
 }  // namespace metadata_checks

@@ -15,9 +15,19 @@ namespace customcover {
 void Start(const std::wstring& dataDir);
 // The image file chosen for the track at `trackPath` (as the library names it), or "" for none.
 std::wstring ImageFor(const std::wstring& trackPath);
+// The https address the image was downloaded from, when cordinal fetched it from a provider: Discord can show
+// that address itself, so the status shows the same picture as the player. "" for an image the user supplied
+// from a file, for a choice made by a build that did not record addresses, or when the track has none.
+std::wstring SourceUrlFor(const std::wstring& trackPath);
+// Records the address an image was uploaded to, for the tracks that already use it: the Discord status shows it.
+// `imagePath` is what ImageFor returned. Ignored unless the address is https and the file is one of ours.
+void RememberImageUrl(const std::wstring& imagePath, const std::string& url);
 // Gives every track in `trackPaths` the image, which must be a complete JPEG or PNG
-// (online::InspectImage). False with `error` when it isn't or couldn't be saved; nothing changes then.
-bool Set(const std::vector<std::wstring>& trackPaths, const std::string& image, std::wstring& error);
+// (online::InspectImage). `sourceUrl` is where the image was downloaded from, when it was; it is recorded so the
+// Discord status can point at it, and is ignored unless it is an https address. False with `error` when the
+// image isn't usable or couldn't be saved; nothing changes then.
+bool Set(const std::vector<std::wstring>& trackPaths, const std::string& image, std::wstring& error,
+         const std::string& sourceUrl = {});
 // Returns the tracks to their own covers; the number that had a custom one.
 size_t Clear(const std::vector<std::wstring>& trackPaths);
 // How many of `trackPaths` have a custom cover.

@@ -46,9 +46,9 @@ BEGIN
             VALUE "CompanyName", "imhavingasuperbadday"
             VALUE "LegalCopyright", "Copyright (C) 2026 imhavingasuperbadday. GPL-3.0-or-later."
             VALUE "FileDescription", "cordinal music player"
-            VALUE "FileVersion", "0.1.6"
+            VALUE "FileVersion", "0.1.7"
             VALUE "ProductName", "cordinal"
-            VALUE "ProductVersion", "0.1.6"
+            VALUE "ProductVersion", "0.1.7"
             VALUE "OriginalFilename", "cordinal.exe"
         END
     END

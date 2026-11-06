@@ -342,9 +342,11 @@ private:
         }
         if (!cursor.Good()) return false;
         pcm.resize(size_t(frame.samples)*2);unsigned shift=32-bits_;
+        // Scaling by the exact power of two is ldexp with the same operand and rounding.
+        const double scale=std::ldexp(1.0,1-(int)bits_);
         for (unsigned i=0;i<frame.samples;++i) for (unsigned c=0;c<2;++c) {
             int32_t value=(int32_t)((uint32_t)values[i*channels_+(channels_==1?0:c)]<<shift)>>shift;
-            pcm[i*2+c]=(float)std::ldexp((double)value,1-(int)bits_);
+            pcm[i*2+c]=(float)((double)value*scale);
         }
         return true;
     }

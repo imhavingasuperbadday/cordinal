@@ -140,6 +140,7 @@ void TestLyrics();
 void TestCrashDump(const std::wstring& scratch);
 void TestListenBrainz(const std::wstring& scratch);
 void TestScrobbling(const std::wstring& scratch);
+void TestDiscord();
 void TestLoudness();
 void TestTruePeak();
 void TestPeakLimiter();

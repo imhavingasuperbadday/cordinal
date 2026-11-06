@@ -477,7 +477,8 @@ void TakeOwn(std::string bytes, std::string text, std::string origin, std::strin
     Status(text.empty() ? L"Reading the image..." : L"Getting the image...");
     pk.ownWorker = std::thread([=, bytes = std::move(bytes), cancel = pk.ownCancel]() mutable {
         auto* own = new Own{generation};
-        if (!text.empty()) switch (online::ImageFromText(text, *cancel, bytes)) {
+        std::string sourceUrl;
+        if (!text.empty()) switch (online::ImageFromText(text, *cancel, bytes, &sourceUrl)) {
                 case online::TextImage::NotImage: own->error = L"That isn't an image or the address of one."; break;
                 case online::TextImage::Failed:
                     own->error = L"No JPEG or PNG image came from that address. Try copying the image itself.";
@@ -495,6 +496,7 @@ void TakeOwn(std::string bytes, std::string text, std::string origin, std::strin
             own->cover.candidate.album = label;
             own->cover.candidate.width = own->cover.decoded.width;
             own->cover.candidate.height = own->cover.decoded.height;
+            own->cover.candidate.url = std::move(sourceUrl);  // the address pasted for the image, when it was one
             own->cover.image = std::move(bytes);
         }
         if (!PostMessageW(target, WM_APP_COVERFETCH, kMsgOwn, (LPARAM)own)) delete own;
@@ -808,8 +810,8 @@ void LayoutPicker() {
     SetWindowPos(pk.status, nullptr, pad, statusTop, rc.right - pad * 2, S(20), SWP_NOZORDER);
     LayoutSaveChoices(pk.saves, pad, saves);
     int x = pad;
-    for (auto [button, width] : {std::pair{pk.file, S(104)}, {pk.paste, S(80)}, {pk.google, S(124)}}) {
-        SetWindowPos(button, nullptr, x, bottom, width, tall, SWP_NOZORDER);
+    for (auto [control, width] : {std::pair{pk.file, S(104)}, {pk.paste, S(80)}, {pk.google, S(124)}}) {
+        SetWindowPos(control, nullptr, x, bottom, width, tall, SWP_NOZORDER);
         x += width + gap;
     }
     SetWindowPos(pk.close, nullptr, rc.right - pad - S(100), bottom, S(100), tall, SWP_NOZORDER);

@@ -26,7 +26,7 @@ namespace online {
 
 // The version is kept with the others in tools/check-updates.ps1.
 const char kRequestHeaders[] =
-    "User-Agent: cordinal/0.1.6 (https://github.com/imhavingasuperbadday/cordinal)\r\n"
+    "User-Agent: cordinal/0.1.7 (https://github.com/imhavingasuperbadday/cordinal)\r\n"
     "Accept: application/json\r\n";
 
 namespace {
@@ -59,7 +59,7 @@ int Int(const web::JsonValue& value) { return atoi(value.text.c_str()); }
 
 Cancel::Cancel() {
 #ifdef _WIN32
-    session_ = WinHttpOpen(L"cordinal/0.1.6 (https://github.com/imhavingasuperbadday/cordinal)",
+    session_ = WinHttpOpen(L"cordinal/0.1.7 (https://github.com/imhavingasuperbadday/cordinal)",
                            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
 #endif
 }
@@ -191,6 +191,103 @@ std::vector<CoverCandidate> ParseDeezerAlbums(std::string_view json) {
         out.push_back(std::move(c));
     }
     return out;
+}
+
+std::vector<CoverCandidate> ParseDeezerTracks(std::string_view json) {
+    std::vector<CoverCandidate> out;
+    web::JsonValue root;
+    if (!web::ParseJson(json, root) || root.kind != web::JsonValue::Kind::Object) return out;
+    const web::JsonValue& data = root["data"];
+    if (data.kind != web::JsonValue::Kind::Array) return out;
+    for (const auto& item : data.items) {
+        const web::JsonValue& album = item["album"];
+        CoverCandidate c;
+        c.source = CoverSource::Deezer;
+        c.title = item.String("title");
+        c.album = album.String("title");
+        c.artist = item["artist"].String("name");
+        c.url = album.String("cover_xl");
+        c.width = c.height = 1000;
+        if (c.url.empty()) {
+            c.url = album.String("cover_big");
+            c.width = c.height = 500;
+        }
+        if (!c.url.starts_with("https://") || c.title.empty()) continue;
+        out.push_back(std::move(c));
+    }
+    return out;
+}
+
+std::vector<CoverCandidate> ParseItunesTracks(std::string_view json) {
+    std::vector<CoverCandidate> out;
+    web::JsonValue root;
+    if (!web::ParseJson(json, root) || root.kind != web::JsonValue::Kind::Object) return out;
+    const web::JsonValue& results = root["results"];
+    if (results.kind != web::JsonValue::Kind::Array) return out;
+    for (const auto& item : results.items) {
+        CoverCandidate c;
+        c.source = CoverSource::ITunes;
+        c.title = item.String("trackName");
+        c.album = item.String("collectionName");
+        c.artist = item.String("artistName");
+        std::string art = item.String("artworkUrl100");
+        size_t size = art.rfind("100x100");
+        if (size == std::string::npos || !art.starts_with("https://") || c.title.empty()) continue;
+        c.url = art.substr(0, size) + "1200x1200" + art.substr(size + 7);
+        c.width = c.height = 1200;
+        out.push_back(std::move(c));
+    }
+    return out;
+}
+
+std::string LooseTitle(std::string_view text) {
+    std::string lower = Lower(text), kept;
+    // Bracketed notes go: "(Deluxe Edition)", "[2011 Remaster]", "(1 hour)".
+    int depth = 0;
+    for (char c : lower) {
+        if (c == '(' || c == '[' || c == '{') {
+            ++depth;
+            continue;
+        }
+        if (c == ')' || c == ']' || c == '}') {
+            if (depth) --depth;
+            continue;
+        }
+        if (!depth) kept += c;
+    }
+    // "Title - 2011 Remaster", "Title - Deluxe Version": an edition note after a dash.
+    static const char* const notes[] = {"remaster", "deluxe", "edition", "version", "mono", "stereo", "anniversary",
+                                        "expanded", "bonus", "live", "mix", "edit"};
+    if (size_t dash = kept.find(" - "); dash != std::string::npos)
+        for (const char* note : notes)
+            if (kept.find(note, dash) != std::string::npos) {
+                kept.resize(dash);
+                break;
+            }
+    // A featured artist is credited differently everywhere.
+    for (const char* feat : {" feat. ", " feat ", " ft. ", " featuring "})
+        if (size_t at = kept.find(feat); at != std::string::npos) kept.resize(at);
+    std::string out;
+    bool gap = false;
+    auto put = [&](std::string_view w) {
+        if (gap && !out.empty()) out += ' ';
+        gap = false;
+        out += w;
+    };
+    for (char ch : kept) {
+        unsigned char c = (unsigned char)ch;
+        if (c == '&') {
+            gap = true;
+            put("and");
+            gap = true;
+        } else if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c >= 0x80) {
+            put(std::string_view(&ch, 1));
+        } else if (c == ' ' || c == '-' || c == '/' || c == '_' || c == '.' || c == ',' || c == ':' || c == ';') {
+            gap = true;
+        }
+        // Apostrophes, quotes and other marks go without a gap, so "don't" and "dont" agree.
+    }
+    return out.empty() ? lower : out;
 }
 
 std::vector<CoverCandidate> ParseItunesAlbums(std::string_view json) {
@@ -510,8 +607,9 @@ std::vector<CoverCandidate> Query(CoverSource source, const CoverQuery& q, Cance
     std::string url;
     switch (source) {
         case CoverSource::Deezer: {
-            std::string term = "artist:\"" + Quoted(q.artist) + "\"";
-            if (!q.album.empty()) term += " album:\"" + Quoted(q.album) + "\"";
+            // Deezer's field syntax (artist:"...") no longer matches: it returns unrelated albums or none.
+            // Plain words find the album, and the match scoring sorts out look-alikes.
+            std::string term = q.album.empty() ? q.artist : q.artist + " " + q.album;
             url = "https://api.deezer.com/search/album?limit=10&q=" + UrlEncode(term);
             break;
         }
@@ -541,6 +639,23 @@ std::vector<CoverCandidate> Query(CoverSource source, const CoverQuery& q, Cance
         }
         default: return {};
     }
+}
+
+// A song search for a track with no album: Deezer and iTunes only, as MusicBrainz names recordings, not covers.
+std::vector<CoverCandidate> QueryTracks(CoverSource source, const CoverQuery& q, Cancel& cancel, Clock::time_point deadline) {
+    std::string url;
+    if (source == CoverSource::Deezer)
+        url = "https://api.deezer.com/search/track?limit=10&q=" +
+              UrlEncode(q.artist + " " + q.title);  // plain words: the field syntax finds nothing
+    else if (source == CoverSource::ITunes)
+        url = "https://itunes.apple.com/search?media=music&entity=song&limit=10&term=" + UrlEncode(q.artist + " " + q.title);
+    else
+        return {};
+    unsigned timeout = Remaining(deadline, kApiTimeoutMs);
+    if (!timeout) return {};
+    Reply reply = Get(url, cancel, timeout);
+    if (reply.status != 200) return {};
+    return source == CoverSource::Deezer ? ParseDeezerTracks(reply.body) : ParseItunesTracks(reply.body);
 }
 
 // Downloads and proves one image. The candidate's size becomes the decoded one.
@@ -667,6 +782,74 @@ bool SearchCovers(const CoverSearch& search, Cancel& cancel, const ImageDecoder&
     return true;
 }
 
+namespace {
+
+// A Cover Art Archive release may have no art, and its address answers 404 then; the 250-pixel thumbnail is the
+// cheapest proof there is an image. `shown` becomes the 500-pixel front, plenty for a small picture.
+bool ArchiveHasArt(const std::string& url, Cancel& cancel, Clock::time_point deadline, std::string& shown) {
+    size_t at = url.rfind("/front");
+    unsigned timeout = Remaining(deadline, kImageTimeoutMs);
+    if (at == std::string::npos || !url.starts_with("https://coverartarchive.org/") || !timeout) return false;
+    std::string base = url.substr(0, at);
+    Reply reply = Get(base + "/front-250", cancel, timeout);
+    int w = 0, h = 0;
+    if (reply.status != 200 || InspectImage(reply.body, w, h) == ImageType::None) return false;
+    shown = base + "/front-500";
+    return true;
+}
+
+bool IsMbid(std::string_view id) {
+    if (id.size() != 36) return false;
+    for (size_t i = 0; i < id.size(); ++i) {
+        char c = id[i];
+        bool dash = i == 8 || i == 13 || i == 18 || i == 23;
+        if (dash ? c != '-' : !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+std::string FindCoverUrl(const CoverQuery& query, const std::string& release, const std::vector<CoverSource>& sources,
+                         Cancel& cancel) {
+    const bool byTrack = query.album.empty();
+    if (sources.empty() || query.artist.empty() || (byTrack && query.title.empty())) return {};
+    std::string key = (byTrack ? "coverurl-track" + Lower(query.title) : std::string()) + "coverurl\x1f" + Lower(query.artist) + '\x1f' + Lower(query.album) + '\x1f' + release + '\x1f',
+                cached;
+    for (CoverSource s : sources) key += (char)('0' + (int)s);
+    bool found = false;
+    if (CacheGet(key, cached, found)) return found ? cached : std::string();
+    const auto deadline = Clock::now() + kSearchTime;
+    std::string url;
+    // The release the tags name is the surest match there is; it needs MusicBrainz's archive turned on.
+    if (!byTrack && std::find(sources.begin(), sources.end(), CoverSource::MusicBrainz) != sources.end() &&
+        IsMbid(release))
+        ArchiveHasArt("https://coverartarchive.org/release/" + release + "/front", cancel, deadline, url);
+    // Then the providers one at a time in the user's order, stopping at the first match. Names are compared loosely,
+    // as stores add edition notes ("(Deluxe Edition)", "- 2011 Remaster") that tags often leave out.
+    const std::string artist = LooseTitle(query.artist), wanted = LooseTitle(byTrack ? query.title : query.album);
+    bool answered = false;  // some provider replied with results, so a miss is worth remembering
+    for (CoverSource source : sources) {
+        if (!url.empty() || cancel.Stopped()) break;
+        if (byTrack && source == CoverSource::MusicBrainz) continue;
+        auto candidates = byTrack ? QueryTracks(source, query, cancel, deadline) : Query(source, query, cancel, deadline);
+        answered = answered || !candidates.empty();
+        if (!byTrack) RankCovers(query, candidates, sources);  // the best image first; song results stay in relevance order
+        for (const auto& c : candidates) {
+            if (!c.url.starts_with("https://") || std::min(c.width, c.height) < 500 || LooseTitle(c.artist) != artist ||
+                LooseTitle(byTrack ? c.title : c.album) != wanted)
+                continue;
+            if (c.source != CoverSource::MusicBrainz) url = c.url;
+            else if (!ArchiveHasArt(c.url, cancel, deadline, url)) continue;
+            break;
+        }
+    }
+    if (cancel.Stopped()) return {};
+    if (!url.empty()) CachePut(key, url, true);
+    else if (answered) CachePut(key, {}, false);  // providers that could not be reached are not a miss
+    return url;
+}
+
 // --- writing ---------------------------------------------------------------------------------------
 
 namespace {
@@ -687,8 +870,9 @@ std::string DecodeBase64(std::string_view in) {
 
 }  // namespace
 
-TextImage ImageFromText(std::string_view text, Cancel& cancel, std::string& image) {
+TextImage ImageFromText(std::string_view text, Cancel& cancel, std::string& image, std::string* sourceUrl) {
     image.clear();
+    if (sourceUrl) sourceUrl->clear();
     while (!text.empty() && (unsigned char)text.front() <= ' ') text.remove_prefix(1);
     while (!text.empty() && (unsigned char)text.back() <= ' ') text.remove_suffix(1);
     int w = 0, h = 0;
@@ -703,6 +887,7 @@ TextImage ImageFromText(std::string_view text, Cancel& cancel, std::string& imag
         Reply reply = Get(std::string(text), cancel, 15000, kMaxImageBytes);
         if (reply.status != 200) return TextImage::Failed;
         image = std::move(reply.body);
+        if (sourceUrl) *sourceUrl = std::string(text);  // Discord can show the very address it came from
     } else {
         return head.starts_with("http://") ? TextImage::Failed : TextImage::NotImage;
     }

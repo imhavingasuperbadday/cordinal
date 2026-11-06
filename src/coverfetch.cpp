@@ -115,7 +115,12 @@ void RunBatch(const std::vector<Album>& albums, online::Cancel& cancel, const on
 std::vector<CoverChoice> CheckedChoices(const std::vector<Proposal>& proposals, const std::vector<bool>& checked) {
     std::vector<CoverChoice> choices;
     for (size_t i = 0; i < proposals.size() && i < checked.size(); ++i)
-        if (checked[i]) choices.push_back({proposals[i].album, proposals[i].cover.image});
+        if (checked[i]) {
+            // A candidate's address is where its image came from: a provider's result, or a link the user pasted.
+            // A picture handed over from a file has none, and its cover then falls back to the album's.
+            const online::CoverFound& cover = proposals[i].cover;
+            choices.push_back({proposals[i].album, cover.image, cover.candidate.url});
+        }
     return choices;
 }
 
@@ -143,7 +148,7 @@ FolderResult SaveCustom(const std::vector<CoverChoice>& choices) {
     result.custom = true;
     for (const CoverChoice& choice : choices) {
         std::wstring error;
-        if (customcover::Set(choice.album.paths, choice.image, error)) {
+        if (customcover::Set(choice.album.paths, choice.image, error, choice.url)) {
             ++result.written;
             result.changed.insert(result.changed.end(), choice.album.tracks.begin(), choice.album.tracks.end());
         } else {

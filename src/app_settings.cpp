@@ -4,6 +4,7 @@
 #include "app.h"
 #include "native_audio.h"
 #include "backup.h"
+#include "coverupload.h"
 
 namespace app {
 
@@ -456,6 +457,9 @@ void LoadState() {
 }
 
 void LoadPreferences() {
+    // The user's own upload tool for a cover Discord cannot fetch by itself. It is a command line, which the
+    // preferences list cannot hold, so it lives in settings.ini; empty means the feature is off.
+    coverupload::SetCommand(IniRead(L"Scrobbling", L"DiscordCoverUpload", L""));
     int saving = IniInt(L"Suggestions", L"SavingMode", (int)PreferenceSaving::Ask);
     g.preferenceSaving = saving >= 0 && saving < (int)PreferenceSaving::Count ?
         (PreferenceSaving)saving : PreferenceSaving::Ask;

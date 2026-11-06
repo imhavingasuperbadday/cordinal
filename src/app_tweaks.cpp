@@ -8,6 +8,7 @@
 #include "metadata_fetch.h"
 #include "peaks.h"
 #include "musicbrainz.h"
+#include "discord.h"
 #include "listenbrainz.h"
 
 namespace app {
@@ -66,10 +67,12 @@ const wchar_t* const kOpacityNames[] = {L"20%", L"40%", L"60%", L"80%", L"100%"}
 const wchar_t* const kFoobarViewNames[] = {L"By folder structure", L"By artist/album", L"By album", L"By genre"};
 const wchar_t* const kDockNames[] = {L"Top", L"Bottom", L"Left", L"Right"};
 const wchar_t* const kWaveSizeNames[] = {L"Slim", L"Medium", L"Tall"};
+const wchar_t* const kDiscordNames[] = {L"Off", L"Song", L"Album"};
 static_assert(std::size(kSpeedNames) == std::size(kSpeeds) && std::size(kTempoNames) == std::size(kTempos) &&
               std::size(kReverbMixNames) == std::size(kReverbMixes) && std::size(kWaveStyleNames) == 3 &&
               std::size(kSkinNames) == 5 && std::size(kOpacityNames) == 5 && std::size(kFoobarViewNames) == 4 &&
-              std::size(kDockNames) == (size_t)Dock::Count && std::size(kWaveSizeNames) == 3);
+              std::size(kDockNames) == (size_t)Dock::Count && std::size(kWaveSizeNames) == 3 &&
+              std::size(kDiscordNames) == discord::kShowChoices);
 template <size_t N>
 int IndexOf(const double (&values)[N], double value) {
     for (size_t i = 0; i < N; ++i)
@@ -310,6 +313,21 @@ const Tweak kTweaks[] = {
      TweakType::Bool, 0, 1, 1, [] { return (double)listenbrainz::SendNowPlaying(); },
      [](double v) { listenbrainz::SetSendNowPlaying(v != 0); }, 0,
      [] { ShowMessage(listenbrainz::SendNowPlaying() ? L"Now-playing updates are on." : L"Now-playing updates are off."); }},
+    {"scrobbling.discord", L"Scrobbling", L"Discord", L"Discord status",
+     L"While the Discord app runs on this computer, your status shows the song playing or the album, with how far "
+     L"along it is. Nothing is shown while paused. Discord shows it only while its own Activity Privacy setting "
+     L"shares your activity. The picture is the cover cordinal shows: a cover chosen from the online results keeps "
+     L"the address it came from, and a cover chosen from a file has none, so the album's cover from the sources "
+     L"under Online stands in for it. To show those too, set DiscordCoverUpload in the Scrobbling section of "
+     L"settings.ini to a command that uploads the image you hand it and prints its https address.",
+     TweakType::Choice, 0, discord::kShowChoices - 1, 0, [] { return (double)discord::Mode(); },
+     [](double v) { discord::SetMode((discord::Show)v); }, 0,
+     [] {
+         static const wchar_t* const said[] = {L"Discord status is off.", L"Discord shows the song playing.",
+                                               L"Discord shows the album playing."};
+         ShowMessage(said[(int)discord::Mode()]);
+     },
+     kDiscordNames},
     {"library.new_music", L"Library", L"Inbox", L"New music from library folders",
      L"Add music automatically or send it to the Inbox; existing Inbox tracks stay.",
      TweakType::Choice, 0, 1, 0, [] { return (double)g.inboxEnabled; }, [](double v) { g.inboxEnabled = v != 0; },
@@ -323,15 +341,18 @@ const Tweak kTweaks[] = {
      [] { musicbrainz::SetEnabled(g.musicBrainzLookup); }},
     // Online sources: each says exactly what it sends, and all are off until chosen.
     {"online.covers_deezer", L"Online", L"CoversDeezer", L"Covers from Deezer",
-     L"Sends the album's artist and title to api.deezer.com when you look for a cover.", TweakType::Bool, 0, 1, 0,
+     L"Sends the album's artist and title to api.deezer.com "
+     L"when you look for a cover, or for an album cover in the Discord status.", TweakType::Bool, 0, 1, 0,
      [] { return (double)online::Config().covers[0]; }, [](double v) { online::Config().covers[0] = v != 0; }, 0,
      OnlineSettingsChanged},
     {"online.covers_itunes", L"Online", L"CoversITunes", L"Covers from iTunes",
-     L"Sends the album's artist and title to itunes.apple.com when you look for a cover.", TweakType::Bool, 0, 1, 0,
+     L"Sends the album's artist and title to itunes.apple.com "
+     L"when you look for a cover, or for an album cover in the Discord status.", TweakType::Bool, 0, 1, 0,
      [] { return (double)online::Config().covers[1]; }, [](double v) { online::Config().covers[1] = v != 0; }, 0,
      OnlineSettingsChanged},
     {"online.covers_musicbrainz", L"Online", L"CoversMusicBrainz", L"Covers from MusicBrainz",
-     L"Sends the album's artist and title to musicbrainz.org, then the release it finds to coverartarchive.org.",
+     L"Sends the album's artist and title to musicbrainz.org, then the release it finds to coverartarchive.org, "
+     L"when you look for a cover or for one in the Discord status.",
      TweakType::Bool, 0, 1, 0, [] { return (double)online::Config().covers[2]; },
      [](double v) { online::Config().covers[2] = v != 0; }, 0, OnlineSettingsChanged},
     {"online.cover_first", L"Online", L"CoverFirst", L"Preferred cover source",
@@ -969,6 +990,7 @@ LRESULT CALLBACK PreferencesProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 std::span<const Tweak> Tweaks() { return kTweaks; }
 
 bool TweakShown(const Tweak& t) {
+    if (!discord::Available() && !strcmp(t.key, "scrobbling.discord")) return false;  // no application id yet
     if (!kExtraThemes && (!strcmp(t.key, "view.live_fountain") || !strcmp(t.key, "view.robotic_sounds"))) return false;
     // The fountain, Apollo and foobar rows only draw in themes this build leaves out.
     const char* themeOnly[] = {"view.wave_style", "view.wave_moving", "view.wave_deltarune_colors",

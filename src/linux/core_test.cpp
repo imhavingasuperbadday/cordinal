@@ -18,6 +18,7 @@
 //   cordinal-core-test history FILE           list a saved library.cdb's listens and points
 //   cordinal-core-test playlists FILE         list a saved library.cdb: playlists, items, inbox and ratings
 //   cordinal-core-test listenbrainz DIR       queue a listen and keep a token in DIR, check a bogus token
+//   cordinal-core-test discord DIR            the Discord status against a fake Discord socket made in DIR
 //   cordinal-core-test devices                list the PipeWire output devices
 //   cordinal-core-test helpers DIR            read, trust and run a helper made of two shell scripts
 //   cordinal-core-test sfx                    play a clip and an effect on the sound effect stream
@@ -28,6 +29,7 @@
 #include "audio_output.h"
 #include "backup.h"
 #include "collection.h"
+#include "tests/discord_checks.h"
 #include "tests/metadata_checks.h"
 #include "convert.h"
 #include "decoder.h"
@@ -1071,6 +1073,14 @@ int main(int argc, char** argv) {
     if (argc >= 2 && !strcmp(argv[1], "sfx")) return CheckSfx();
     if (argc >= 3 && !strcmp(argv[1], "away")) return CheckAway(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "listenbrainz")) return CheckListenBrainz(argv[2]);
+    if (argc >= 3 && !strcmp(argv[1], "discord")) {  // tests/discord_checks.h, shared with the Windows self-test
+        int failures = 0;
+        for (const auto& [ok, what] : discord_checks::All(argv[2])) {
+            printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str());
+            failures += !ok;
+        }
+        return failures ? 1 : 0;
+    }
     if (argc >= 4 && !strcmp(argv[1], "web")) return Serve(argv[2], argv[3]);
     if (argc >= 3 && !strcmp(argv[1], "scan")) return Scan(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "decode")) return Decode(argv[2]);

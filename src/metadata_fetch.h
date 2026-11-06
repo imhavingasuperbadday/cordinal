@@ -60,6 +60,7 @@ const char* CoverSourceHost(CoverSource source);      // "api.deezer.com", for t
 
 struct CoverQuery {
     std::string artist, album;  // UTF-8; album may be empty (a loose single)
+    std::string title;          // the song, which FindCoverUrl searches by when there is no album
 };
 
 struct CoverCandidate {
@@ -68,6 +69,7 @@ struct CoverCandidate {
     std::string url;            // the image to download
     int width = 0, height = 0;  // as declared (0: unknown), then as decoded
     double score = 0;
+    std::string title;          // track searches: the song the cover belongs to
 };
 
 // Each provider's search reply, reduced to candidates. Malformed JSON, an error object or an
@@ -76,6 +78,14 @@ std::vector<CoverCandidate> ParseDeezerAlbums(std::string_view json);
 std::vector<CoverCandidate> ParseItunesAlbums(std::string_view json);
 // Releases scoring at least 80; the image is the Cover Art Archive's 1200-pixel front.
 std::vector<CoverCandidate> ParseMusicBrainzReleases(std::string_view json);
+// Song searches, for a track with no album: each result's album cover, with the song in `title`.
+std::vector<CoverCandidate> ParseDeezerTracks(std::string_view json);
+std::vector<CoverCandidate> ParseItunesTracks(std::string_view json);
+
+// A title or name reduced for a forgiving comparison: lower case, with bracketed notes ("(Deluxe Edition)",
+// "[2011 Remaster]"), a trailing edition note after " - ", a "feat." credit, "&" and punctuation left out. Two
+// names that reduce alike are taken as the same. A name that is nothing but notes keeps them.
+std::string LooseTitle(std::string_view text);
 
 // score = provider quality + match + image size, with a small bonus for the user's first choices.
 //   match: +0.5 for the same artist, +0.5 for the same album (case-insensitive), -1.5 when both
@@ -126,14 +136,23 @@ struct CoverSearch {
 // anything was found.
 bool SearchCovers(const CoverSearch& search, Cancel& cancel, const ImageDecoder& decode,
                   const std::function<void(CoverFound&&)>& found);
+// For a cover shown elsewhere (the Discord status): the address of the album's cover, without downloading it. The
+// artist and album must match as LooseTitle compares them; with no album, the artist and song title are searched
+// instead and the song's album cover is used. With MusicBrainz among `sources`, the release id from the tags is tried
+// first. A Cover Art Archive address is confirmed with its small thumbnail, as a release may have no art. Blocking, on
+// a worker; remembered in the cache like batch results. Empty when nothing qualifies.
+std::string FindCoverUrl(const CoverQuery& query, const std::string& release, const std::vector<CoverSource>& sources,
+                         Cancel& cancel);
 
 // A cover the user hands over as text, pasted or dropped from a browser: a data: URL holding a
 // base64 JPEG or PNG (Google Images' thumbnails), or the https address of one, which is downloaded
 // (blocking: runs on a worker; it may take 15 seconds). NotImage when the text is neither; Failed
 // when the address gave nothing that passes the image checks above. The platform decoder still
 // has to accept `image`.
+// When `sourceUrl` is given it receives the https address the image was downloaded from, so the Discord status
+// can show the same picture; it is cleared when the text was not an address.
 enum class TextImage : uint8_t { NotImage, Got, Failed };
-TextImage ImageFromText(std::string_view text, Cancel& cancel, std::string& image);
+TextImage ImageFromText(std::string_view text, Cancel& cancel, std::string& image, std::string* sourceUrl = nullptr);
 
 // True when the folder already has a cover file art.cpp would show (cover/folder/front .jpg/.png).
 bool FolderHasCover(const std::wstring& dir);

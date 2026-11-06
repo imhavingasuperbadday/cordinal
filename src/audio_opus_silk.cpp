@@ -8,8 +8,11 @@
 #include <cmath>
 #include <cstring>
 #include <numbers>
+#include <type_traits>
+#include <emmintrin.h>
 #ifdef CORDINAL_CODEC_TRACE
 #include <cstdio>
+#include <cstdlib>
 #endif
 
 namespace nativeaudio {
@@ -18,6 +21,14 @@ using namespace silkdata;
 // An entropy model is a cumulative iCDF: counts in [0,255] ending in 0.
 using Model=std::span<const uint8_t>;
 constexpr double pi=std::numbers::pi;
+// The published 12-phase resampler kernel as one contiguous eight-tap row per phase, so the
+// inner loop reads straight through its coefficients instead of selecting them per tap.
+constexpr auto resamplerTaps=[] {
+    std::array<std::array<int16_t,8>,12> table{};
+    for (unsigned phase=0;phase<12;++phase) for (unsigned k=0;k<8;++k)
+        table[phase][k]=resampler_frac_FIR_12[k<4?phase*4+k:(11-phase)*4+7-k];
+    return table;
+}();
 int Sign(int v) { return (v>0)-(v<0); }
 double Clip(double v) { return std::clamp(v,-1.0,1.0); }
 // Rounding right shift (half up), matching the reference fixed-point arithmetic.
@@ -195,7 +206,7 @@ struct Channel {
     int logGain=0,lag=0,type=0;
     bool have=false;
     std::array<int,16> lsf{};
-    std::array<double,832> pcm{};
+    std::array<int16_t,832> pcm{};
     std::array<int32_t,832> scaled{};
     int64_t previousGain=65536;
 };
@@ -297,7 +308,7 @@ std::array<int,2> StereoWeights(OpusRange& r) {
 // Runs LPC/LTP excitation and synthesis for one channel at `rate` for subframes
 // (rate/200 samples each). Returns the new samples and shifts the 512-sample
 // history window forward; output stays at `rate` and Resample() lifts it to 48 kHz.
-std::vector<double> Synthesize(Channel& ch,const Parameters& p,unsigned rate,unsigned subframes) {
+std::vector<int16_t> Synthesize(Channel& ch,const Parameters& p,unsigned rate,unsigned subframes) {
     unsigned count=rate/200,samples=count*subframes;
     std::array<int32_t,832> residual{};
     auto coefficients=Lpc(p.lsf,p.order),first=coefficients;
@@ -326,8 +337,8 @@ std::vector<double> Synthesize(Channel& ch,const Parameters& p,unsigned rate,uns
                 int64_t inverse=(1ll<<47)/gain;
                 if (!s) inverse=multiply(inverse,(int64_t)std::lround(p.scale*16384))*4;
                 for (unsigned i=start-p.pitch[s]-2;i<start;++i) {
-                    int64_t value=(int64_t)std::llround(ch.pcm[i]*32768)*4096;
-                    for (unsigned k=0;k<p.order;++k) value-=(int64_t)filter[k]*(int32_t)std::lround(ch.pcm[i-k-1]*32768);
+                    int64_t value=(int64_t)ch.pcm[i]<<12;
+                    for (unsigned k=0;k<p.order;++k) value-=(int64_t)filter[k]*ch.pcm[i-k-1];
                     residual[i]=saturate(multiply(inverse,pcm(Rounded(value,12))));
                 }
             } else if (adjustment!=65536) {
@@ -336,25 +347,30 @@ std::vector<double> Synthesize(Channel& ch,const Parameters& p,unsigned rate,uns
         }
         // Add the pseudo-random-sign excitation, then LTP (voiced) and LPC (short-term)
         // prediction, to produce the output sample.
-        for (unsigned i=start;i<start+count;++i) {
-            int pulse=p.pulses[i-512],offset=p.type==2?(p.offset?25:8):(p.offset?60:25);
+        const int offset=p.type==2?(p.offset?25:8):(p.offset?60:25);
+        int32_t ltp[5]{};
+        if (p.type==2) for (unsigned k=0;k<5;++k) ltp[k]=(int32_t)std::lround(p.ltp[s][k]*16384);
+        const int* pulses=p.pulses.data()+s*count;
+        for (unsigned j=0;j<count;++j) {
+            const unsigned i=start+j;
+            int pulse=pulses[j];
             int64_t excitation=pulse*16384ll-Sign(pulse)*1280+offset*64;
             seed=seed*196314165u+907633515u;
             if (seed&0x80000000) excitation=-excitation;
             seed+=pulse;
             if (p.type==2) {
                 int64_t prediction=2;
-                for (unsigned k=0;k<5;++k) prediction+=multiply(residual[i-p.pitch[s]+2-k],(int32_t)std::lround(p.ltp[s][k]*16384));
+                for (unsigned k=0;k<5;++k) prediction+=multiply(residual[i-p.pitch[s]+2-k],ltp[k]);
                 excitation+=2*prediction;residual[i]=saturate(excitation*2);
             }
             int64_t prediction=p.order/2;
             for (unsigned k=0;k<p.order;++k) prediction+=multiply(ch.scaled[i-k-1],filter[k]);
             ch.scaled[i]=saturate(excitation+16*prediction);
-            ch.pcm[i]=pcm(Rounded(multiply(ch.scaled[i],gain>>6),8))/32768.0;
+            ch.pcm[i]=(int16_t)pcm(Rounded(multiply(ch.scaled[i],gain>>6),8));
         }
     }
-    std::vector<double> out(ch.pcm.begin()+512,ch.pcm.begin()+512+samples);
-    std::memmove(ch.pcm.data(),ch.pcm.data()+samples,512*sizeof(double));
+    std::vector<int16_t> out(ch.pcm.begin()+512,ch.pcm.begin()+512+samples);
+    std::memmove(ch.pcm.data(),ch.pcm.data()+samples,512*sizeof(ch.pcm[0]));
     std::memmove(ch.scaled.data(),ch.scaled.data()+samples,512*sizeof(int32_t));
     ch.lsf=p.lsf;ch.have=true;
     return out;
@@ -375,6 +391,8 @@ struct OpusSilk::State {
     double concealGain=1;
 };
 struct OpusSilk::Impl : State {
+    // Reused by Resample for the upsampled working buffer; not part of the saved state.
+    std::vector<int16_t> upScratch_;
 
     // Reconfigures the decoder when the sample rate or channel count changes;
     // a rate change discards everything, a channel-count change keeps channel 0.
@@ -392,10 +410,17 @@ struct OpusSilk::Impl : State {
 
     // Upsamples the internal 8/12/16 kHz signal to 48 kHz with the published SILK
     // resampler design (allpass cascade + 12-tap polyphase FIR), implemented here
-    // generically rather than via reference routines.
-    void Resample(const std::vector<double>& left,const std::vector<double>& right,std::vector<float>& out) {
+    // generically rather than via reference routines. A mono packet's unmix produces
+    // identical channels, so only one is filtered and both outputs take its value.
+    template<class Sample>
+    void Resample(const std::vector<Sample>& left,const std::vector<Sample>& right,std::vector<float>& out,bool mono) {
 #ifdef CORDINAL_CODEC_TRACE
-        if (std::getenv("CORDINAL_SILK_NATIVE")) for (size_t i=0;i<left.size();++i) fprintf(stderr,"lp %.12g %.12g\n",left[i],right[i]);
+        auto real=[](Sample v) {
+            if constexpr (std::is_same_v<Sample,int16_t>) return double(v)/32768.0;
+            else return double(v);
+        };
+        if (std::getenv("CORDINAL_SILK_NATIVE"))
+            for (size_t i=0;i<left.size();++i) fprintf(stderr,"lp %.12g %.12g\n",real(left[i]),real(right[i]));
 #endif
         size_t start=out.size();out.resize(start+left.size()*ratio*2);
         // Published SILK filter-design coefficients, applied by this generic
@@ -403,38 +428,66 @@ struct OpusSilk::Impl : State {
         constexpr int32_t coefficients[2][3]={{1746,14986,39083},{6854,25769,55542}};
         // 16.16 phase increment per output sample; `ratio` is the integer decimation factor.
         uint32_t increment=(uint32_t)((uint64_t(rate)*2*65536+47999)/48000);
-        for (unsigned ch=0;ch<2;++ch) {
+        const size_t upCount=left.size()*2+8;
+        if (upScratch_.size()<upCount*2) upScratch_.resize(upCount*2);
+        int16_t* upChannels[2]={upScratch_.data(),upScratch_.data()+upCount};
+        // Both channels are upsampled before the convolution, which then runs once per
+        // output sample for the pair and stores them as one 8-byte interleaved write.
+        const unsigned used=mono?1:2;
+        for (unsigned ch=0;ch<used;++ch) {
             const auto& input=ch?right:left;
-            std::vector<int16_t> up(input.size()*2+8);
-            std::copy(fir[ch].begin(),fir[ch].end(),up.begin());
+            int16_t* up=upChannels[ch];
+            std::copy(fir[ch].begin(),fir[ch].end(),up);
+            int32_t* state=allpass[ch].data();
             for (size_t i=0;i<input.size();++i) {
-                int16_t sample=(int16_t)std::clamp((int)std::lround(input[i]*32768),-32768,32767);
+                int16_t sample;
+                if constexpr (std::is_same_v<Sample,int16_t>) sample=input[i];
+                else sample=(int16_t)std::clamp((int)std::lround(input[i]*32768),-32768,32767);
                 if (inputDelay) {
                     int16_t before=delay[ch][0];
                     std::move(delay[ch].begin()+1,delay[ch].begin()+inputDelay,delay[ch].begin());
                     delay[ch][inputDelay-1]=sample;sample=before;
                 }
-                for (unsigned branch=0;branch<2;++branch) {
-                    int64_t value=sample*1024;
-                    for (unsigned section=0;section<3;++section) {
-                        int32_t& state=allpass[ch][3*branch+section];
-                        int64_t difference=((value-state)*coefficients[branch][section])>>16;
-                        int64_t next=state+difference;
-                        state=(int32_t)(value+difference);value=next;
-                    }
-                    up[8+i*2+branch]=(int16_t)std::clamp(Rounded(value,10),-32768,32767);
-                }
+                // The two allpass branches share their input and stay independent, so they
+                // are unrolled side by side with their six states held in locals.
+                int64_t v0=sample*1024,v1=v0;
+                int32_t a0=state[0],a1=state[3];
+                int64_t e0=((v0-a0)*coefficients[0][0])>>16,e1=((v1-a1)*coefficients[1][0])>>16;
+                int32_t t0=(int32_t)(v0+e0),t1=(int32_t)(v1+e1);
+                v0=a0+e0;v1=a1+e1;a0=t0;a1=t1;
+                int32_t b0=state[1],b1=state[4];
+                e0=((v0-b0)*coefficients[0][1])>>16;e1=((v1-b1)*coefficients[1][1])>>16;
+                t0=(int32_t)(v0+e0);t1=(int32_t)(v1+e1);
+                v0=b0+e0;v1=b1+e1;b0=t0;b1=t1;
+                int32_t c0=state[2],c1=state[5];
+                e0=((v0-c0)*coefficients[0][2])>>16;e1=((v1-c1)*coefficients[1][2])>>16;
+                t0=(int32_t)(v0+e0);t1=(int32_t)(v1+e1);
+                v0=c0+e0;v1=c1+e1;c0=t0;c1=t1;
+                state[0]=a0;state[1]=b0;state[2]=c0;state[3]=a1;state[4]=b1;state[5]=c1;
+                up[8+i*2]=(int16_t)std::clamp(Rounded(v0,10),-32768,32767);
+                up[8+i*2+1]=(int16_t)std::clamp(Rounded(v1,10),-32768,32767);
             }
-            uint32_t at=0;
-            for (size_t i=0;i<input.size()*ratio;++i,at+=increment) {
-                unsigned phase=((at&65535)*12)>>16,offset=at>>16;
-                int64_t sum=0;
-                for (unsigned k=0;k<8;++k) sum+=(int64_t)up[offset+k]*
-                    resampler_frac_FIR_12[k<4?phase*4+k:(11-phase)*4+7-k];
-                out[start+i*2+ch]=std::clamp(Rounded(sum,15),-32768,32767)*(1.0f/32768);
-            }
-            std::copy_n(up.end()-8,8,fir[ch].begin());
         }
+        uint32_t at=0;
+        const int16_t* upLeft=upChannels[0];
+        const int16_t* upRight=upChannels[1];
+        for (size_t i=0;i<left.size()*ratio;++i,at+=increment) {
+            unsigned phase=((at&65535)*12)>>16,offset=at>>16;
+            const __m128i taps=_mm_loadu_si128((const __m128i*)resamplerTaps[phase].data());
+            auto dot=[&](const int16_t* up) {
+                // Four 32-bit pair sums; no pair can overflow (|tap| <= 30567). They are
+                // widened before adding, since the eight-tap total can exceed 32 bits.
+                __m128i pairs=_mm_madd_epi16(_mm_loadu_si128((const __m128i*)(up+offset)),taps);
+                __m128i signs=_mm_srai_epi32(pairs,31);
+                __m128i halves=_mm_add_epi64(_mm_unpacklo_epi32(pairs,signs),_mm_unpackhi_epi32(pairs,signs));
+                int64_t sum=_mm_cvtsi128_si64(halves)+_mm_cvtsi128_si64(_mm_unpackhi_epi64(halves,halves));
+                return std::clamp(Rounded(sum,15),-32768,32767)*(1.0f/32768);
+            };
+            out[start+i*2]=dot(upLeft);
+            out[start+i*2+1]=mono?out[start+i*2]:dot(upRight);
+        }
+        std::copy_n(upLeft+upCount-8,8,fir[0].begin());
+        if (!mono) std::copy_n(upRight+upCount-8,8,fir[1].begin());
     }
 
     bool Decode(OpusRange& r,unsigned count,unsigned hz,unsigned ms,std::vector<float>& out) {
@@ -464,32 +517,37 @@ struct OpusSilk::Impl : State {
             auto nextWeights=count==2?StereoWeights(r):std::array<int,2>{};
             bool midOnly=count==2 && !active[1][f] && r.Icdf(stereo_only_code_mid_iCDF);
             auto midParameters=ReadParameters(r,channels[0],hz,subframes,active[0][f],f!=0,f==0);
-            std::vector<double> mid=Synthesize(channels[0],midParameters,hz,subframes),side(mid.size());
+            std::vector<int16_t> mid=Synthesize(channels[0],midParameters,hz,subframes),side(mid.size());
             if (count==2 && !midOnly) {
                 auto sideParameters=ReadParameters(r,channels[1],hz,subframes,active[1][f],f!=0 && sideCoded,f==0);
                 side=Synthesize(channels[1],sideParameters,hz,subframes);
             } else if (count==2) channels[1]=Channel{};
             sideCoded=!midOnly;
-            std::vector<double> left(mid.size()),right(mid.size());
+            std::vector<int16_t> left(mid.size()),right(mid.size());
             // Ramp the stereo weights over ~8 ms, then unmix mid/side to left/right
             // with the 3-tap inter-frame prediction (RFC 4.2.8).
             int ramp=8*hz/1000,step[2]{};
             for (unsigned k=0;k<2;++k) step[k]=Rounded(int64_t(nextWeights[k]-weights[k])*(65536/ramp),16);
+            // The predictor history is normalized for concealment's benefit; round it to sample
+            // units once per frame and predict in integers, like the rest of the unmix.
+            int32_t middle1=(int32_t)std::lround(mid1*32768),middle2=(int32_t)std::lround(mid2*32768);
+            int32_t sideHistory=(int32_t)std::lround(side1*32768);
             for (unsigned i=0;i<mid.size();++i) {
                 int w0=(int)i<ramp?weights[0]+((int)i+1)*step[0]:nextWeights[0];
                 int w1=(int)i<ramp?weights[1]+((int)i+1)*step[1]:nextWeights[1];
-                int64_t middle=(int)std::lround(mid1*32768),sum=(int)std::lround((mid2+2*mid1+mid[i])*32768);
-                int64_t prediction=(int)std::lround(side1*32768)*256ll+((sum*512*w0)>>16)+((middle*2048*w1)>>16);
+                int64_t middle=middle1,sum=middle2+2*middle+mid[i];
+                int64_t prediction=sideHistory*256ll+((sum*512*w0)>>16)+((middle*2048*w1)>>16);
                 int sideSample=std::clamp(Rounded(prediction,8),-32768,32767);
-                left[i]=std::clamp<int64_t>(middle+sideSample,-32768,32767)/32768.0;
-                right[i]=std::clamp<int64_t>(middle-sideSample,-32768,32767)/32768.0;
-                mid2=mid1;mid1=mid[i];side1=side[i];
+                left[i]=(int16_t)std::clamp<int64_t>(middle+sideSample,-32768,32767);
+                right[i]=(int16_t)std::clamp<int64_t>(middle-sideSample,-32768,32767);
+                middle2=middle1;middle1=mid[i];sideHistory=side[i];
             }
+            mid1=middle1/32768.0;mid2=middle2/32768.0;side1=sideHistory/32768.0;
             weights=nextWeights;
 #ifdef CORDINAL_CODEC_TRACE
             fprintf(stderr,"silk %u %u %u %u %08x\n",hz,count,midParameters.type,r.Tell(),r.FinalRange());
 #endif
-            Resample(left,right,out);
+            Resample(left,right,out,count==1);
         }
         // SILK reads a fixed number of bounded symbols and permits arithmetic
         // zero extension at the end of a frame. CELT enforces its own bit budget.
@@ -509,7 +567,7 @@ struct OpusSilk::Impl : State {
             for (unsigned ch=0;ch<count;++ch) {
                 auto& state=channels[ch];
                 unsigned lag=state.type==2?std::clamp(state.lag,int(hz/500),int(hz*18/1000)):hz/100;
-                values[ch]=state.pcm[512-lag+i%lag]*concealGain;
+                values[ch]=state.pcm[512-lag+i%lag]/32768.0*concealGain;
             }
             double predicted=(mid2+2*mid1+values[0])*weights[0]/32768;
             left[i]=Clip((1+weights[1]/8192.0)*mid1+side1+predicted);
@@ -517,7 +575,7 @@ struct OpusSilk::Impl : State {
             mid2=mid1;mid1=values[0];side1=values[1];
             concealGain*=decay;
         }
-        Resample(left,right,out);return true;
+        Resample(left,right,out,count==1);return true;
     }
 };
 

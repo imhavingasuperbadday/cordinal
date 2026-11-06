@@ -523,9 +523,9 @@ void TestNativeCodecs(const std::wstring& root, const std::wstring& scratch) {
     file.skip=file.valid=0;file.delayNs=2666667;
     testlog::Check(priming && file.Trim(48000) && file.skip==96 && file.valid==47904,
                    L"container priming: codec priming is consumed once while explicit discard remains");
-    // exactDuration is false for the lossy codecs (WMA, AC-3) whose decoder cannot report the exact
-    // sample count, so their length is only checked against the eight-second source.
-    batch.Next(L"all 11 native codecs open without a fallback, give finite samples matching their duration, "
+    // exactDuration is false for the lossy codecs (WMA, AC-3, E-AC-3) whose decoder cannot report
+    // the exact sample count, so their length is only checked against the eight-second source.
+    batch.Next(L"all 13 native codecs open without a fallback, give finite samples matching their duration, "
                L"seek exactly, refuse edge reads and seek early exactly");
     struct Fixture {
         const wchar_t* file;
@@ -537,6 +537,7 @@ void TestNativeCodecs(const std::wstring& root, const std::wstring& scratch) {
                                 {L"media\\alac.m4a",OpenAlacDecoder},{L"media\\sine.m4a",OpenAacDecoder},
                                 {L"media\\sine.opus",OpenOpusDecoder},{L"media\\sine.wma",OpenWmaDecoder,false},
                                 {L"native\\sine.wv",OpenWavPackDecoder},{L"native\\sine.ac3",OpenAc3Decoder,false},
+                                {L"native\\sine.eac3",OpenEac3Decoder,false},{L"native\\sine.tta",OpenTtaDecoder},
                                 {L"native\\sine.mka",OpenMatroskaDecoder}};
     testlog::Cases opened, lengths, seeks, edges;
     for (const auto& fixture : fixtures) {

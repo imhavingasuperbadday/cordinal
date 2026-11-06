@@ -5,7 +5,7 @@
 # Needs SDL3, SDL3_ttf, PipeWire (libpipewire-0.3), libsystemd (sd-bus), fontconfig and OpenSSL 3
 # (the web server's HTTPS away from home).
 cmake_minimum_required(VERSION 3.20)
-project(cordinal VERSION 0.1.6 LANGUAGES CXX)
+project(cordinal VERSION 0.1.7 LANGUAGES CXX)
 
 if(WIN32)
     message(FATAL_ERROR "On Windows, build with build.bat")
@@ -38,8 +38,8 @@ set_source_files_properties(src/audio_avx.cpp PROPERTIES COMPILE_OPTIONS "-mavx2
 
 # The portable core, compiled against the Windows API subset in src/linux/compat.
 add_library(cordinal_core STATIC
-    src/album_editions.cpp src/archive.cpp src/autoplaylist.cpp src/cue.cpp src/decoder.cpp src/dsp.cpp src/engine.cpp src/game_music.cpp src/inflate.cpp src/musicbrainz.cpp src/metadata_fetch.cpp src/coverfetch.cpp src/customcover.cpp src/discart.cpp
-    src/library.cpp src/librarydb.cpp src/listenbrainz.cpp src/migration.cpp src/backup.cpp src/playlog.cpp src/points.cpp src/radio.cpp src/radio_browser.cpp src/radio_stream.cpp src/radio_hls.cpp src/scanner.cpp src/sfx.cpp src/sort.cpp src/steam.cpp
+    src/album_editions.cpp src/archive.cpp src/autoplaylist.cpp src/cue.cpp src/decoder.cpp src/dsp.cpp src/engine.cpp src/game_music.cpp src/inflate.cpp src/musicbrainz.cpp src/metadata_fetch.cpp src/coverfetch.cpp src/customcover.cpp src/coverupload.cpp src/discart.cpp
+    src/discord.cpp src/library.cpp src/librarydb.cpp src/listenbrainz.cpp src/migration.cpp src/backup.cpp src/playlog.cpp src/points.cpp src/radio.cpp src/radio_browser.cpp src/radio_stream.cpp src/radio_hls.cpp src/scanner.cpp src/sfx.cpp src/sort.cpp src/steam.cpp
     src/headsets.cpp src/helpers.cpp src/streamfile.cpp src/tags.cpp src/tagwriter.cpp src/tagwriter_flacogg.cpp src/tagwriter_mp3mp4.cpp
     src/tagwriter_cord.cpp src/tagundo.cpp src/playlist_files.cpp src/playlist.cpp src/md5.cpp src/cord_encode.cpp src/cord_export.cpp
     src/convert.cpp src/organize.cpp src/devicecopy.cpp src/collection.cpp src/linux/recycle.cpp

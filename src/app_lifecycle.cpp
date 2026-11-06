@@ -2,6 +2,7 @@
 #include "app.h"
 
 #include "customcover.h"
+#include "discord.h"
 #include "metadata_fetch.h"
 #include "musicbrainz.h"
 
@@ -90,6 +91,7 @@ void StopAppWorkers(HWND hwnd) {
     StopCollection();
     StopIpod();
     StopArtistInfo();
+    discord::Stop();  // its cover lookups use the online cache, which StopCoverFetch saves and closes
     StopCoverFetch();
     MSG completed;
     while (PeekMessageW(&completed, hwnd, WM_APP_TAGWRITE, WM_APP_TAGWRITE, PM_REMOVE))

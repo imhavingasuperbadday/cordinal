@@ -55,6 +55,7 @@ void RunBatch(const std::vector<Album>& albums, online::Cancel& cancel, const on
 struct CoverChoice {
     Album album;
     std::string image;
+    std::string url;  // where the image was downloaded from; "" for the user's own file
 };
 // Only the checked proposals become choices; nothing else is ever written.
 std::vector<CoverChoice> CheckedChoices(const std::vector<Proposal>& proposals, const std::vector<bool>& checked);

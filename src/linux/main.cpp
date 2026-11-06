@@ -211,7 +211,7 @@ int Run(int argc, char** argv) {
         if (!full.empty()) paths.push_back(full);
     }
 
-    SDL_SetAppMetadata("cordinal", "0.1.6", "cordinal");
+    SDL_SetAppMetadata("cordinal", "0.1.7", "cordinal");
     SDL_SetHint(SDL_HINT_VIDEO_WAYLAND_PREFER_LIBDECOR, "1");
     if (parity) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
@@ -387,6 +387,7 @@ int Run(int argc, char** argv) {
             TickAlternate();
             HeadphonesTick();
             PlaybackTick();
+            DiscordTick();
             PreferenceTick(LastInputTicks());
             if (musicbrainz::Tick()) {
                 InvalidateCellCache();
@@ -417,6 +418,7 @@ int Run(int argc, char** argv) {
     StopCollection();
     StopIpod();
     StopArtistInfo();
+    StopDiscord();
     StopCoverFetch();
     StopExpanders();
     FlushAutomaticPreferences();

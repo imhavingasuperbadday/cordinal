@@ -24,6 +24,7 @@
 
 #include "audio_output.h"
 #include "cover.h"
+#include "discord.h"
 #include "listenbrainz.h"
 #include "playlog.h"
 #include "points.h"
@@ -972,6 +973,7 @@ struct Pref {
 
 const char* const kRgModes[] = {"Album", "Track", "By playback order"};
 const char* const kOffOn[] = {"Off", "On"};
+const char* const kDiscordNames[] = {"Off", "Song", "Album"};
 const char* const kLoopNames[] = {"Ignore loop points", "Play the loop once, then fade", "Play the loop twice, then fade",
                                   "Play the loop three times, then fade"};
 const char* const kReverbNames[] = {"Off", "Room", "Hall", "Plate"};
@@ -1159,6 +1161,12 @@ const Pref kPrefs[] = {
      "Shows the current song on connected services. Turning this off still submits completed listens.",
      PrefType::Bool, 0, 1, 1, 1, [] { return (double)listenbrainz::SendNowPlaying(); },
      [](double v) { listenbrainz::SetSendNowPlaying(v != 0); Saved(); }},
+    {"discord_status", "Scrobbling", "Discord status",
+     "While the Discord app runs on this computer, your status shows the song playing or the album, with how far "
+     "along it is. Nothing is shown while paused. Discord shows it only while its own Activity Privacy setting "
+     "shares your activity. The album cover comes from the cover sources turned on under Online.",
+     PrefType::Choice, 0, discord::kShowChoices - 1, 0, 1, [] { return (double)discord::Mode(); },
+     [](double v) { discord::SetMode((discord::Show)v); Saved(); }, kDiscordNames},
     {"musicbrainz_lookup", "Library", "Look up missing album editions online",
      "Asks MusicBrainz for a release-group id when two local albums share an artist and base title and their tags carry none. "
      "Results are cached; browsing and playback never wait for or require the network.", PrefType::Bool, 0, 1, 0, 1,
@@ -1166,13 +1174,16 @@ const Pref kPrefs[] = {
      [](double v) { Cfg().musicBrainzLookup = v != 0; musicbrainz::SetEnabled(v != 0); Saved(); }},
     // Online sources, as on Windows: each says exactly what it sends, and all are off until chosen.
     {"online_covers_deezer", "Online", "Covers from Deezer",
-     "Sends the album's artist and title to api.deezer.com when you look for a cover.", PrefType::Bool, 0, 1, 0, 1,
+     "Sends the album's artist and title to api.deezer.com "
+     "when you look for a cover, or for an album cover in the Discord status.", PrefType::Bool, 0, 1, 0, 1,
      [] { return (double)online::Config().covers[0]; }, [](double v) { online::Config().covers[0] = v != 0; Saved(); }},
     {"online_covers_itunes", "Online", "Covers from iTunes",
-     "Sends the album's artist and title to itunes.apple.com when you look for a cover.", PrefType::Bool, 0, 1, 0, 1,
+     "Sends the album's artist and title to itunes.apple.com "
+     "when you look for a cover, or for an album cover in the Discord status.", PrefType::Bool, 0, 1, 0, 1,
      [] { return (double)online::Config().covers[1]; }, [](double v) { online::Config().covers[1] = v != 0; Saved(); }},
     {"online_covers_musicbrainz", "Online", "Covers from MusicBrainz",
-     "Sends the album's artist and title to musicbrainz.org, then the release it finds to coverartarchive.org.",
+     "Sends the album's artist and title to musicbrainz.org, then the release it finds to coverartarchive.org, "
+     "when you look for a cover or for one in the Discord status.",
      PrefType::Bool, 0, 1, 0, 1, [] { return (double)online::Config().covers[2]; },
      [](double v) { online::Config().covers[2] = v != 0; Saved(); }},
     {"online_cover_first", "Online", "Preferred cover source",
@@ -1334,6 +1345,7 @@ std::wstring Lower(std::wstring s) {
 
 // The settings of themes this build leaves out (theme_palette.h) are never shown.
 bool PrefShown(const Pref& t) {
+    if (t.key && !discord::Available() && !strcmp(t.key, "discord_status")) return false;  // no application id yet
     return kExtraThemes || !t.key || (strcmp(t.key, "live_fountain") && strcmp(t.key, "robotic_sounds"));
 }
 
