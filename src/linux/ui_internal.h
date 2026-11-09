@@ -115,7 +115,7 @@ enum Action {
     kAddFiles, kAddFolder, kOpenPlaylistFile, kSavePlaylistFile, kExit,
     kBackup, kRestore, kStatistics, kExportCollection, kImportCollection, kCancelCollection,
     kSelectAll, kRemove, kKeepSelected, kClear, kReloadTags, kRemoveDuplicates, kRemoveDead, kCancelDead, kFind,
-    kPlayPause, kStopAction, kMute, kPrevAction, kNextAction, kShuffleAction, kShuffleAlbumsAction, kRadio, kRepeatSet, kStopAfter, kSpeed, kTempo, kShared, kExclusive,
+    kPlayPause, kStopAction, kMute, kPrevAction, kNextAction, kShuffleAction, kShuffleAlbumsAction, kRadio, kTaste, kRepeatSet, kStopAfter, kSpeed, kTempo, kShared, kExclusive,
     kNewPl, kRenamePl, kClosePl, kDuplicatePl, kReopenPl, kMovePlLeft, kMovePlRight, kNextPl, kPrevPl, kReveal,
     kFolders, kRescan, kAcceptInbox, kAcceptAllInbox, kExcludeLibrary, kDuplicateAudio, kCancelDuplicates,
     kSteam, kCancelSteam, kWebServer, kExportCord, kCancelExport, kConvert, kConvertUndo, kCancelConvert, kOrganize, kOrganizeUndo, kCopyTo, kCancelCopy,

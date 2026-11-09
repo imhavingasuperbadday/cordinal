@@ -6,6 +6,7 @@
 // compacts.
 #include "app.h"
 #include "playlog.h"
+#include "taste.h"
 
 namespace app {
 
@@ -115,6 +116,7 @@ void CompactLibrary() {
     LyricsLibraryChanged();     // and the lyrics panel's loaded lines belong to the old ids
     RemapPlayLog(mapping);
     RemapPoints(mapping);
+    RemapTaste(mapping);
     ClearBrowserCaches();
     for (int i = 0; i < 3; ++i) {
         g.panes[i].values.clear();

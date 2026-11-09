@@ -159,7 +159,7 @@ enum : int {
     IDM_SHUFFLE = 3200, IDM_REPEAT_BASE = 3201,  // + Repeat
     IDM_RESUME = 3205, IDM_SKIP_SHUFFLE, IDM_RADIO, IDM_HEADPHONES,
     IDM_REGION_LOOP = 3210, IDM_REGION_CLEAR, IDM_REGION_PLAYER_MENU,
-    IDM_SHUFFLE_ALBUMS,
+    IDM_SHUFFLE_ALBUMS, IDM_TASTE,
     IDM_THEME_BASE = 3220,
     IDM_THEME_ROBOTIC = 3239,  // the DELTARUNE theme's Chapter 2 sounds (app_deltarune.cpp), after the themes
     IDM_RATE_BASE = 3260,    // + 0..10 half stars
@@ -396,7 +396,7 @@ struct App {
     double resumePos = 0;
     unsigned long long resumeToken = 0;  // the token Resume() started; it seeks once it plays
     int shuffle = kShuffleOff;
-    bool skipAwareShuffle = false, radio = false;
+    bool skipAwareShuffle = false, radio = false, taste = false;
     Repeat repeat = Repeat::Off;
     bool stopAfterCurrent = false, seeking = false, alwaysOnTop = false;
     bool exclusive = false;  // WASAPI exclusive output wanted

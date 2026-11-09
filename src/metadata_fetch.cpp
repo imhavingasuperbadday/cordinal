@@ -26,7 +26,7 @@ namespace online {
 
 // The version is kept with the others in tools/check-updates.ps1.
 const char kRequestHeaders[] =
-    "User-Agent: cordinal/0.1.7 (https://github.com/imhavingasuperbadday/cordinal)\r\n"
+    "User-Agent: cordinal/0.1.8 (https://github.com/imhavingasuperbadday/cordinal)\r\n"
     "Accept: application/json\r\n";
 
 namespace {
@@ -59,7 +59,7 @@ int Int(const web::JsonValue& value) { return atoi(value.text.c_str()); }
 
 Cancel::Cancel() {
 #ifdef _WIN32
-    session_ = WinHttpOpen(L"cordinal/0.1.7 (https://github.com/imhavingasuperbadday/cordinal)",
+    session_ = WinHttpOpen(L"cordinal/0.1.8 (https://github.com/imhavingasuperbadday/cordinal)",
                            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
 #endif
 }

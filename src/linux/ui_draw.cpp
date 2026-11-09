@@ -2,6 +2,7 @@
 #include "alternate_ui.h"
 #include "big_ui.h"
 #include "discart.h"
+#include "taste.h"
 #include "ui_internal.h"
 
 #include <array>
@@ -270,7 +271,12 @@ bool RequestPeaks(TrackId id, Peaks& peaks, uint32_t& request) {
     double start, end;
     if (!PeakSource(id, path, start, end)) { request = 0; return false; }
     const Track& t = g_lib[id];
-    return GetPeaks(path, t.fileSize, t.fileTime, start, end, peaks, request) || GetPeakProgress(request, peaks);
+    if (GetPeaks(path, t.fileSize, t.fileTime, start, end, peaks, request)) {
+        NoteMood(id, peaks);
+        if (ConsumeTasteSave()) g.libraryDirty = true;
+        return true;
+    }
+    return GetPeakProgress(request, peaks);
 }
 
 // The body and edge rectangles of one paint, grouped by color. A column's rectangles never overlap

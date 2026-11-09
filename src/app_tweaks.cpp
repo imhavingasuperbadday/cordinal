@@ -113,11 +113,16 @@ const Tweak kTweaks[] = {
      TweakType::Bool, 0, 1, 1, [] { return (double)g.timeRemaining; }, [](double v) { g.timeRemaining = v != 0; }, 0,
      UpdateStatus},
     {"playback.skip_aware_shuffle", L"Player", L"SkipAwareShuffle", L"Skip-aware shuffle",
-     L"Shuffle favors tracks you haven't repeatedly skipped in their first 30 seconds.", TweakType::Bool, 0, 1, 0,
+     L"Shuffle favors tracks you haven't repeatedly skipped in their first 30 seconds. A skip while flipping through "
+     L"songs counts for less, and one just before you stop doesn't count.", TweakType::Bool, 0, 1, 0,
      [] { return (double)g.skipAwareShuffle; }, [](double v) { g.skipAwareShuffle = v != 0; }, IDM_SKIP_SHUFFLE},
     {"playback.radio", L"Player", L"Radio", L"Keep playing like this",
      L"Keeps choosing from the playing playlist, favoring what you tend to play after the current track.",
      TweakType::Bool, 0, 1, 0, [] { return (double)g.radio; }, [](double v) { g.radio = v != 0; }, IDM_RADIO},
+    {"playback.taste", L"Player", L"Taste", L"Choose by taste",
+     L"Track shuffle and Keep playing like this follow what you finish, rate, replay and come back to. Skips are judged by "
+     L"their moment, and artists by how often you finish them, not how many of their songs you have.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)g.taste; }, [](double v) { g.taste = v != 0; }, IDM_TASTE},
     {"playback.game_loops", L"Player", L"Loops", L"Game music loops",
      L"How often a game soundtrack rip with loop points plays its loop before fading out.", TweakType::Choice, 0, 3, 2,
      [] { return (double)g.loops; }, [](double v) { g.loops = (int)v; }, IDM_LOOPS_BASE, nullptr, kLoopNames,

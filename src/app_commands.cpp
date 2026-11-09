@@ -68,13 +68,17 @@ void OnCommand(int id, int code, HWND ctl) {
         return;
     }
     FlushSearch();
-    if (id == IDM_SKIP_SHUFFLE || id == IDM_RADIO) {
+    if (id == IDM_SKIP_SHUFFLE || id == IDM_RADIO || id == IDM_TASTE) {
         if (id == IDM_SKIP_SHUFFLE) {
             g.skipAwareShuffle = !g.skipAwareShuffle;
             IniWrite(L"Player", L"SkipAwareShuffle", g.skipAwareShuffle ? L"1" : L"0");
-        } else {
+        } else if (id == IDM_RADIO) {
             g.radio = !g.radio;
             IniWrite(L"Player", L"Radio", g.radio ? L"1" : L"0");
+        } else {
+            g.taste = !g.taste;
+            IniWrite(L"Player", L"Taste", g.taste ? L"1" : L"0");
+            ShowMessage(g.taste ? L"Choosing by taste." : L"Taste is off.");
         }
         for (auto& [token, info] : g.tokens) info.radioNext = UINT32_MAX;
         g.shuffleQueue.clear();

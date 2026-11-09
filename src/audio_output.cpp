@@ -250,9 +250,12 @@ HRESULT FinishOpen(HANDLE event, Device& d) {
 }
 
 // Shared mode runs at the device mix rate in 32-bit float; AUTOCONVERTPCM lets WASAPI resample
-// when the format isn't natively accepted.
+// when the format isn't natively accepted. The buffer request stays 100 ms. The engine period
+// is raised toward 20 ms (the same period the Linux stream asks for) when the device allows
+// it, so the render thread is not woken on a 10 ms cadence to refill a few milliseconds.
 HRESULT OpenShared(IMMDevice* device, HANDLE event, Device& d) {
-    HRESULT hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &d.client);
+    auto activate = [&] { return device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &d.client); };
+    HRESULT hr = activate();
     if (FAILED(hr)) return hr;
     WAVEFORMATEX* mix = nullptr;
     hr = d.client->GetMixFormat(&mix);
@@ -260,10 +263,34 @@ HRESULT OpenShared(IMMDevice* device, HANDLE event, Device& d) {
     d.rate = mix->nSamplesPerSec;
     CoTaskMemFree(mix);
     WAVEFORMATEXTENSIBLE fmt = MakeFormat(d.rate, SampleFormat::Float32);
-    hr = d.client->Initialize(AUDCLNT_SHAREMODE_SHARED,
-                              AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
-                                  AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-                              1000000 /* 100 ms */, 0, &fmt.Format, nullptr);
+    const DWORD flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
+                        AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+    ComPtr<IAudioClient3> client3;
+    if (SUCCEEDED(d.client.As(&client3))) {
+        UINT32 def = 0, fund = 0, minPeriod = 0, maxPeriod = 0;
+        if (SUCCEEDED(client3->GetSharedModeEnginePeriod(&fmt.Format, &def, &fund, &minPeriod, &maxPeriod)) && fund &&
+            maxPeriod >= fund) {
+            UINT32 want = (UINT32)std::min<uint64_t>(maxPeriod, std::max<uint64_t>(def, (uint64_t)d.rate / 50));
+            if (want > fund) want -= want % fund;
+            if (want >= fund && want <= maxPeriod && want > def) {
+                hr = client3->InitializeSharedAudioStream(flags, want, &fmt.Format, nullptr);
+                UINT32 frames = 0;
+                if (SUCCEEDED(hr)) hr = d.client->GetBufferSize(&frames);
+                // Keep the buffer inside the 100 ms this function already requested, plus one
+                // period so a driver that rounds up still qualifies.
+                const UINT32 limit = d.rate / 10 + want;
+                if (SUCCEEDED(hr) && frames >= want && frames <= limit) {
+                    d.exclusive = false;
+                    d.format = SampleFormat::Float32;
+                    return FinishOpen(event, d);
+                }
+                d.client.Reset();
+                hr = activate();
+                if (FAILED(hr)) return hr;
+            }
+        }
+    }
+    hr = d.client->Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 1000000 /* 100 ms */, 0, &fmt.Format, nullptr);
     if (FAILED(hr)) return hr;
     d.exclusive = false;
     d.format = SampleFormat::Float32;

@@ -251,6 +251,7 @@ void LoadSettings() {
     s.shuffle = std::clamp(ToInt(v, "shuffle", 0), 0, kShuffleCount - 1);
     s.skipAwareShuffle = ToInt(v, "skip_aware_shuffle", 0) != 0;
     s.radio = ToInt(v, "radio", 0) != 0;
+    s.taste = ToInt(v, "taste", 0) != 0;
     s.resumeOn = ToInt(v, "resume_on", 1) != 0;
     s.resumeInSong = ToInt(v, "resume_in_song", 0) != 0;
     s.resumePlay = ToInt(v, "resume_play", 0) != 0;
@@ -386,6 +387,7 @@ void SaveSettings() {
     text += "shuffle=" + std::to_string(s.shuffle) + "\nexclusive=" + std::to_string(s.exclusive) + "\n";
     text += "skip_aware_shuffle=" + std::to_string(s.skipAwareShuffle) + "\n";
     text += "radio=" + std::to_string(s.radio) + "\n";
+    text += "taste=" + std::to_string(s.taste) + "\n";
     TrackId resume = s.resumeOn ? (g.playing != kNone ? g.playing : g.resumeTrack) : kNone;
     bool haveResume = g_lib.Contains(resume);
     double resumePosition = g.playing != kNone ? g.engine.Position() : g.resumePosition;

@@ -26,6 +26,7 @@
 #include "app.h"
 #include "cue.h"
 #include "peaks.h"
+#include "taste.h"
 #include <array>
 
 namespace app {
@@ -86,7 +87,12 @@ bool Request(TrackId id, Peaks& peaks, uint32_t& request) {
     double start, end;
     if (!PeakSource(id, path, start, end)) { request = 0; return false; }
     const Track& t = g_lib[id];
-    return GetPeaks(path, t.fileSize, t.fileTime, start, end, peaks, request) || GetPeakProgress(request, peaks);
+    if (GetPeaks(path, t.fileSize, t.fileTime, start, end, peaks, request)) {
+        NoteMood(id, peaks);
+        if (ConsumeTasteSave()) g.dirty = true;
+        return true;
+    }
+    return GetPeakProgress(request, peaks);
 }
 
 // The buckets a pixel span [x0, x1) of a channel `width` px wide covers. At least one bucket, so a

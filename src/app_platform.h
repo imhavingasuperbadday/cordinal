@@ -8,6 +8,9 @@
 namespace app {
 
 void InstallCrashReports();
+// A per-machine cache folder (thumbnails, waveforms, crash reports) under %LOCALAPPDATA%\cordinal,
+// or inside the profile when CORDINAL_DATA names one, so a throwaway profile keeps its caches too.
+std::wstring LocalCacheDir(const wchar_t* name);
 void InitPlatform(HWND hwnd);
 void ShutdownPlatform();
 bool OnPlatformMessage(UINT msg, WPARAM wp, LPARAM lp);

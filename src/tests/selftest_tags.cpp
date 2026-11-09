@@ -2,6 +2,21 @@
 // lyrics, Steam soundtracks, crash dumps and ListenBrainz.
 #include "selftest_common.h"
 
+#include "tests/tag_suggest_checks.h"
+
+// The tag editor's completion values, shared with the Linux core test (tag_suggest_checks.h).
+void TestTagSuggestions() {
+    for (const auto& group : tag_suggest_checks::All()) {
+        std::wstring detail;
+        for (const auto& failure : group.failures) {
+            if (!detail.empty()) detail += L" | ";
+            detail += FromUtf8(failure);
+        }
+        const std::wstring name = FromUtf8(group.name);
+        Check(group.Passed(), L"%ls%ls", name.c_str(), detail.empty() ? L"" : (L": " + detail).c_str());
+    }
+}
+
 // Reads tags from every media fixture and checks codec, duration (~8 s), rate, channels and the
 // standard title/artist/album/track tags (WAV and Opus carry no tags by design).
 void TestTags(const std::wstring& dir) {
@@ -408,7 +423,7 @@ void TestCrashDump(const std::wstring& scratch) {
 void TestListenBrainz(const std::wstring& scratch) {
     using namespace listenbrainz;
     const std::string info = "\"media_player\":\"cordinal\",\"submission_client\":\"cordinal\","
-                             "\"submission_client_version\":\"0.1.7\"";
+                             "\"submission_client_version\":\"0.1.8\"";
 
     Listen a;
     a.listenedAt = 1700000000;

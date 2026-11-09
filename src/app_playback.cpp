@@ -8,6 +8,7 @@
 #include "game_music.h"
 #include "peaks.h"
 #include "playlog.h"
+#include "taste.h"
 
 namespace app {
 
@@ -129,7 +130,7 @@ int ComputeNext(unsigned long long fromToken, bool manual, int& plOut) {
         // track. Picks stay within the source playlist, and the explicit queue still comes first.
         if (it != g.tokens.end() && it->second.radioNext < items.size()) return (int)it->second.radioNext;
         TrackId from = it != g.tokens.end() ? it->second.id : kNone;
-        auto weights = ListeningWeights(items, from);
+        auto weights = OrderWeights(g_lib, items, from, UnixNow(), g.taste);
         double total = 0;
         for (int i = 0; i < n; ++i) {
             if (items[i] == from || items[i] >= g_lib.Count() || g_lib[items[i]].Failed()) weights[i] = 0;
@@ -183,7 +184,8 @@ int ComputeNext(unsigned long long fromToken, bool manual, int& plOut) {
         } else {
             for (uint32_t index = 0; index < items.size(); ++index)
                 if ((int)index != cur) g.shuffleQueue.push_back(index);
-            if (g.skipAwareShuffle) ShuffleByListening(g.shuffleQueue, items, g.rng);
+            if (g.taste || g.skipAwareShuffle)
+                ShuffleByWeights(g.shuffleQueue, OrderWeights(g_lib, items, kNone, UnixNow(), g.taste), g.rng);
             else std::shuffle(g.shuffleQueue.begin(), g.shuffleQueue.end(), g.rng);
         }
         g.shuffleStarted = true;
@@ -1044,10 +1046,13 @@ void TrackListening() {
         g.statTrack = g.playing;
         g.listened = 0;
         g.lastPos = pos;
+        NoteSession(g.playing);
         return;
     }
     double delta = pos - g.lastPos;
     if (delta > 0 && delta < 1.5) g.listened += delta;  // seeks jump further and don't count
+    double duration = g.statTrack < g_lib.Count() ? g_lib[g.statTrack].Duration() : 0;
+    ObservePlayback(g.statTrack, g.lastPos, pos, duration);
     g.lastPos = pos;
 }
 
@@ -1056,6 +1061,7 @@ void FinishListening(bool manual) {
     // Credit the last partial tick; after a natural transition the position already belongs
     // to the next track, so only a manual change reads it.
     if (manual) TrackListening();
+    if (ConsumeTasteSave()) g.dirty = true;
     TrackId id = g.statTrack;
     g.statTrack = kNone;
     RecordListening(id, g.listened, manual);
@@ -1070,6 +1076,7 @@ void RecordListening(TrackId id, double seconds, bool manual, uint32_t when) {
     bool counted = seconds >= needed;
     bool skip = !counted && manual && seconds >= 0.5;
     if (!counted && !skip) return;
+    NoteSession(id);
     uint32_t previousLastPlayed = t.lastPlayed;
     uint32_t now = when ? std::min(when, UnixNow()) : UnixNow();
     if (counted) {

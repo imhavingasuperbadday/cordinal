@@ -4,6 +4,7 @@
 // the fields the user changes are written. Writing runs on a worker thread; files the engine
 // has open (playing now, or queued gaplessly) are written once playback lets go of them.
 #include "app.h"
+#include "tag_suggest.h"
 #include "tagundo.h"
 #include "tagwriter.h"
 
@@ -12,6 +13,7 @@ namespace app {
 namespace {
 
 const wchar_t kTagClass[] = L"CordinalTagEditor";
+constexpr int kIdSuggest = 300;
 
 enum Field { Title, Artist, AlbumArtist, Album, Date, Genre, TrackNum, TrackTotal, Disc, DiscTotal, Composer, Grouping,
              Label, Bpm, Comment, Lyrics, FieldCount };
@@ -25,11 +27,14 @@ struct Editor {
     std::vector<TrackId> ids;
     HWND labels[FieldCount] = {}, edits[FieldCount] = {};
     HWND compilation = nullptr, art = nullptr, artReplace = nullptr, artRemove = nullptr, artOnline = nullptr,
-         info = nullptr, save = nullptr, cancel = nullptr;
+         info = nullptr, save = nullptr, cancel = nullptr, suggestionList = nullptr;
     std::wstring initial[FieldCount];
     bool mixed[FieldCount] = {}, changed[FieldCount] = {};
     int initialCompilation = 0;  // BST_* (BST_INDETERMINATE when mixed)
     std::optional<std::string> cover;  // set when replaced or removed
+    TagSuggestionSet suggestionSet;    // values already in the library, built when the editor opens
+    std::vector<std::wstring> suggestions;
+    int suggestionField = -1, suggestionSel = -1;
     ArtImage preview;
     bool loading = false;  // set while filling the controls (EN_CHANGE isn't a user edit)
 } e;
@@ -63,6 +68,99 @@ std::wstring GetText(HWND h) {
     GetWindowTextW(h, s.data(), n + 1);
     s.resize(n);
     return s;
+}
+
+std::optional<TagSuggestField> SuggestFieldFor(int field) {
+    switch (field) {
+        case Artist: return TagSuggestField::Artist;
+        case AlbumArtist: return TagSuggestField::AlbumArtist;
+        case Album: return TagSuggestField::Album;
+        case Genre: return TagSuggestField::Genre;
+        case Composer: return TagSuggestField::Composer;
+        default: return std::nullopt;
+    }
+}
+
+void HideSuggestions() {
+    if (e.suggestionList) {
+        ShowWindow(e.suggestionList, SW_HIDE);
+        SendMessageW(e.suggestionList, LB_RESETCONTENT, 0, 0);
+    }
+    e.suggestions.clear();
+    e.suggestionField = -1;
+    e.suggestionSel = -1;
+}
+
+// Replaces the field with the highlighted completion. The list is hidden first so setting the
+// text cannot immediately reopen it with the now-complete value.
+void AcceptSuggestion() {
+    if (e.suggestionField < 0 || e.suggestionSel < 0 || e.suggestionSel >= (int)e.suggestions.size()) {
+        HideSuggestions();
+        return;
+    }
+    const int field = e.suggestionField;
+    const std::wstring value = e.suggestions[e.suggestionSel];
+    e.loading = true;  // EN_CHANGE must not count this as a user edit
+    SetWindowTextW(e.edits[field], value.c_str());
+    e.loading = false;
+    e.changed[field] = true;
+    const int end = GetWindowTextLengthW(e.edits[field]);
+    SendMessageW(e.edits[field], EM_SETSEL, end, end);
+    HideSuggestions();
+    SetFocus(e.edits[field]);
+}
+
+// A click takes the row under the pointer. LBN_SELCHANGE would miss a click on the row that is
+// already selected, which is the first one after every keystroke.
+LRESULT CALLBACK SuggestionSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
+    if (msg == WM_LBUTTONDOWN) return 0;  // keep focus in the edit while the row is clicked
+    if (msg == WM_LBUTTONUP) {
+        const LRESULT hit = SendMessageW(h, LB_ITEMFROMPOINT, 0, lp);
+        if (HIWORD(hit) == 0) {
+            e.suggestionSel = (int)LOWORD(hit);
+            AcceptSuggestion();
+        } else {
+            const int field = e.suggestionField;
+            HideSuggestions();
+            if (field >= 0) SetFocus(e.edits[field]);
+        }
+        return 0;
+    }
+    if (msg == WM_NCDESTROY) RemoveWindowSubclass(h, SuggestionSubclass, 1);
+    return DefSubclassProc(h, msg, wp, lp);
+}
+
+// Fills the popup under `field` with values beginning with what it holds. The list is rebuilt from
+// the set collected when the editor opened, so typing never walks the library.
+void RefreshSuggestions(int field) {
+    HideSuggestions();
+    const auto suggest = SuggestFieldFor(field);
+    if (!suggest || !e.suggestionList) return;
+    std::vector<std::wstring> matches = MatchTagSuggestions(e.suggestionSet, *suggest, GetText(e.edits[field]));
+    if (matches.empty()) return;
+    e.suggestions = std::move(matches);
+    e.suggestionField = field;
+    e.suggestionSel = 0;
+    for (const auto& text : e.suggestions)
+        SendMessageW(e.suggestionList, LB_ADDSTRING, 0, (LPARAM)text.c_str());
+    SendMessageW(e.suggestionList, LB_SETCURSEL, 0, 0);
+
+    RECT fieldRect{};
+    GetWindowRect(e.edits[field], &fieldRect);
+    MapWindowPoints(HWND_DESKTOP, e.hwnd, reinterpret_cast<POINT*>(&fieldRect), 2);
+    RECT client{};
+    GetClientRect(e.hwnd, &client);
+    const int itemHeight = (int)SendMessageW(e.suggestionList, LB_GETITEMHEIGHT, 0, 0);
+    int height = (int)e.suggestions.size() * itemHeight + S(4);
+    int x = fieldRect.left, y = fieldRect.bottom + S(1);
+    const int width = fieldRect.right - fieldRect.left;
+    // Prefer below; move above only when the field is too low and there is more room there.
+    if (y + height > client.bottom - S(4) && fieldRect.top - height >= client.top + S(4))
+        y = fieldRect.top - height - S(1);
+    height = std::min(height, std::max(itemHeight + S(4), (int)client.bottom - y - S(4)));
+    MoveWindow(e.suggestionList, x, y, width, height, TRUE);
+    ShowWindow(e.suggestionList, SW_SHOWNA);
+    SetWindowPos(e.suggestionList, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
 void ShowPreview() {
@@ -111,6 +209,7 @@ void FindCoverOnline() {
 }
 
 void Layout(HWND h) {
+    HideSuggestions();
     RECT rc;
     GetClientRect(h, &rc);
     int pad = S(14), labelW = S(84), rowH = S(26), gap = S(6);
@@ -307,6 +406,11 @@ LRESULT CALLBACK TagEditorProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 e.edits[f] = make(WS_EX_CLIENTEDGE, WC_EDITW, L"", style, 100 + f);
                 SetWindowTheme(e.edits[f], g.dark ? L"DarkMode_CFD" : L"Explorer", nullptr);
             }
+            e.suggestionList = make(0, WC_LISTBOXW, L"", WS_BORDER | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT, kIdSuggest);
+            SendMessageW(e.suggestionList, LB_SETITEMHEIGHT, 0, S(22));
+            SetWindowTheme(e.suggestionList, g.dark ? L"DarkMode_CFD" : L"Explorer", nullptr);
+            SetWindowSubclass(e.suggestionList, SuggestionSubclass, 1, 0);
+            ShowWindow(e.suggestionList, SW_HIDE);
             e.compilation = make(0, WC_BUTTONW, L"Part of a &compilation (various artists)", BS_AUTO3STATE | WS_TABSTOP, 200);
             e.art = make(0, WC_STATICW, L"", SS_OWNERDRAW);
             e.artReplace = make(0, WC_BUTTONW, L"Choose &cover...", BS_PUSHBUTTON | WS_TABSTOP, 201);
@@ -317,6 +421,7 @@ LRESULT CALLBACK TagEditorProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             e.cancel = make(0, WC_BUTTONW, L"Cancel", BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL);
             for (HWND c : {e.compilation, e.artReplace, e.artRemove, e.artOnline, e.save, e.cancel}) ApplyControlTheme(c, g.dark);
             ApplyWindowTheme(h, P());
+            e.suggestionSet = BuildTagSuggestions(g_lib);
             Fill();
             return 0;
         }
@@ -344,10 +449,23 @@ LRESULT CALLBACK TagEditorProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_CTLCOLORBTN:
             return SurfaceControlColor((HDC)wp, (HWND)lp == e.info ? SubColor() : TextColor());
         case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
             return FieldControlColor((HDC)wp);
+        case WM_LBUTTONDOWN:
+            HideSuggestions();
+            return 0;
         case WM_COMMAND: {
-            int id = LOWORD(wp);
-            if (id >= 100 && id < 100 + FieldCount && HIWORD(wp) == EN_CHANGE && !e.loading) e.changed[id - 100] = true;
+            int id = LOWORD(wp), code = HIWORD(wp);
+            if (id >= 100 && id < 100 + FieldCount) {
+                int field = id - 100;
+                if (code == EN_CHANGE && !e.loading) {
+                    e.changed[field] = true;
+                    RefreshSuggestions(field);
+                } else if (code == EN_SETFOCUS && e.suggestionField >= 0 && e.suggestionField != field) {
+                    HideSuggestions();
+                }
+            }
+            if (id == 201 || id == 202 || id == 203 || id == IDOK || id == IDCANCEL) HideSuggestions();
             if (id == 201) LoadCoverFromFile();
             if (id == 202) {
                 e.cover = std::string();
@@ -363,6 +481,11 @@ LRESULT CALLBACK TagEditorProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case WM_DESTROY:
             e.hwnd = nullptr;
+            e.suggestionList = nullptr;
+            e.suggestionSet = TagSuggestionSet{};
+            e.suggestions.clear();
+            e.suggestionField = -1;
+            e.suggestionSel = -1;
             e.preview = ArtImage{};
             return 0;
     }
@@ -371,7 +494,39 @@ LRESULT CALLBACK TagEditorProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 
 }  // namespace
 
-bool TagEditorDialogMessage(MSG* msg) { return e.hwnd && IsDialogMessageW(e.hwnd, msg); }
+bool TagEditorDialogMessage(MSG* msg) {
+    if (!e.hwnd) return false;
+    if (e.suggestionField >= 0 && msg->message == WM_KEYDOWN && msg->hwnd == e.edits[e.suggestionField]) {
+        switch (msg->wParam) {
+            case VK_UP:
+            case VK_DOWN:
+                if (!e.suggestions.empty()) {
+                    const int count = (int)e.suggestions.size();
+                    e.suggestionSel = std::clamp(e.suggestionSel + (msg->wParam == VK_DOWN ? 1 : -1), 0, count - 1);
+                    SendMessageW(e.suggestionList, LB_SETCURSEL, e.suggestionSel, 0);
+                    return true;
+                }
+                break;
+            case VK_RETURN:
+                AcceptSuggestion();
+                return true;
+            case VK_ESCAPE:
+                HideSuggestions();
+                return true;
+            case VK_TAB:
+                AcceptSuggestion();  // then let the dialog move to the next field
+                break;
+            case VK_LEFT:
+            case VK_RIGHT:
+            case VK_HOME:
+            case VK_END:
+                HideSuggestions();  // the caret is leaving the completion's prefix
+                break;
+            default: break;
+        }
+    }
+    return IsDialogMessageW(e.hwnd, msg) != FALSE;
+}
 
 void ShowTagEditor(const std::vector<TrackId>& ids) {
     if (ids.empty()) return;

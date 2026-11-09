@@ -13,16 +13,46 @@ native image) on a Windows 11 machine; the stock UPX 5.2.1 build of the same ima
 | First paint | about 116 ms | about 111 ms |
 | Idle private memory | 14.7 MB | 16.1 MB |
 
-Every pack is verified byte for byte against the original file before it is published, and the
+Item 1 has newer memory figures. Every pack is verified byte for byte against the original file before it is published, and the
 loader refuses to run anything whose checksums do not match.
 
-## 1. Idle memory
+## 1. Memory
 
-cdpack's player holds about 1.3 MB more private memory once idle than the stock build of the same
-image. Neither the chunked format nor the decode threads changed it, so it comes from the image
-layout: which pages stay writable or get copied after start-up. The plan is to map the committed
-regions of both builds, find the pages that differ, and give them back (release the probability
-workspace, keep read-only data read-only and file-backed).
+A packed player keeps its decoded image as private memory, which a native one shares with the file.
+Measured November 9, 2026 with `cordinal-test.exe --memory-report` on one native player
+(4,601,344 bytes, a 5.21 MiB image). `program` is the image's private memory: 3.09 MB at an empty
+start and 3.11 MB while playing with code on demand, and 4.48 MB in every scenario before it.
+
+| Same native player | `program` | Player bytes |
+|---|---:|---:|
+| format 2 | 6.71 MB | 1,731,072 |
+| with the IAT directory | 5.21 MB | 1,731,072 |
+| format 3 (zero pages left out) | 4.48 MB | 1,735,168 |
+| format 3 with code decoded on demand | 3.09 MB | 1,823,232 |
+| unpacked | 0.10 MB (1.9 to 2.3 MB resident, shared) | 4,601,344 |
+
+The window appears in 35.6 ms with code on demand, 40.8 ms with every chunk eager and 20.8 ms
+unpacked (median of five starts on this machine). Format 2 and the IAT build measured 39.4 and
+38.5 ms by the older launch-and-exit method, so those two are not directly comparable.
+
+- **The 1.3 MB above stock was `CDP1`.** The packed image had no IAT directory, so while binding
+  its few imports Windows made the whole section writable, and all 1.5 MB of the compressed stream
+  became private, although only three pages differ from the file. An IAT directory over the thunks
+  keeps it shared.
+- **Format 3 leaves out zero pages.** The decoder wrote `.data`'s uninitialized tail (207 pages)
+  as zeros. Chunks now skip such runs, which stay demand-zero (`spec.md`, "Zero pages").
+- **Code the profile marks cold stays compressed.** A profile of the functions the scenarios run,
+  found again through the linker map, leaves 373 of the 845 `.text` pages cold: 1.46 MB in twelve
+  128 KiB blocks that decode on first use (`spec.md`, "Code decoded on demand"). They cost 88 KB
+  of file and save 1.39 MB of private memory, and start-up decodes less, so the window appears
+  sooner than with every chunk eager. A first version used blocks of consecutive code, which
+  decoded 2.75 of 3.30 MB because resident code is scattered over the section; choosing pages by
+  function, and suspending the other threads across the copy so a page is never read half-written,
+  is what made it pay.
+
+What stays private is the rest of the image: `.text` 1.84 MB, `.rdata` 0.71, `.pdata` 0.20, `.rsrc`
+0.15, `.data` 0.10. The native player keeps 1.5 to 1.8 MB of `.text` and 0.3 MB of `.rdata`
+resident.
 
 ## 2. Windows 10 and other machines
 

@@ -9,25 +9,36 @@ struct Header {
     uint32_t version, metadata_bytes, metadata_adler;
     uint32_t memory_rva, memory_bytes, compressed_offset, compressed_bytes, memory_adler;
     uint32_t file_bytes, native_header_bytes, gap_count, copy_count, tls_index_rva, chunk_count;
+    uint32_t extent_count;
     uint8_t file_sha256[32];
 };
 struct ResourceCopy {
     uint32_t source, destination, bytes;
 };
-// Version 2 decodes the memory image as independent streams, one per chunk, in parallel. `output`
-// is relative to memory_rva and `input` to compressed_offset; `adler` covers the chunk's filtered
-// bytes. Chunks are in output order, contiguous and cover the whole image.
+// Version 3 decodes the image as independent streams, one per chunk. `output_bytes` is the sum of
+// the chunk's extents, `input` is relative to compressed_offset, `adler` covers the chunk's
+// filtered bytes in extent order and `input_adler` its compressed bytes, checked before any native
+// code runs. `flags & lazy` marks a chunk of cold code that is decoded on its first fault instead
+// of at start-up.
 struct Chunk {
-    uint32_t output, output_bytes, input, input_bytes, adler;
+    uint32_t output_bytes, input, input_bytes, adler, input_adler, flags;
 };
-constexpr uint32_t version = 2, max_chunks = 8;
+constexpr uint32_t lazy = 1;
+// A chunk's output as page-aligned runs of the image; `offset` is relative to memory_rva. The
+// table is sorted by offset and each chunk's runs appear in that order. Pages outside every run
+// are zero and are never written.
+struct Extent {
+    uint32_t offset, bytes, chunk;
+};
+constexpr uint32_t version = 3, max_chunks = 64, max_extents = 4096;
 // Per decoding thread: one model set in its own slot after the 4096-byte state page.
 constexpr uint32_t workspace_slot = 32768;
 struct Anchor {
     uint8_t magic[16];
     uint32_t self, metadata, metadata_bytes, workspace;
 };
-static_assert(sizeof(Header) == 96 && sizeof(Anchor) == 32 && sizeof(ResourceCopy) == 12 && sizeof(Chunk) == 20);
+static_assert(sizeof(Header) == 100 && sizeof(Anchor) == 32 && sizeof(ResourceCopy) == 12 &&
+              sizeof(Chunk) == 24 && sizeof(Extent) == 12);
 
 inline uint16_t read16(const uint8_t *p) { return uint16_t(p[0] | unsigned(p[1]) << 8); }
 inline uint32_t read32(const uint8_t *p) {

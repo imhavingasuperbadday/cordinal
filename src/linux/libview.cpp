@@ -185,9 +185,17 @@ float RowH() { return F(26); }
 float Margin() { return F(18); }
 float TileArt() { return F((float)g.settings.coverSize); }
 float TileH() { return TileArt() + F(44); }
-float GroupArt() { return F((float)(g.settings.coverSize + g.settings.coverSize / 4)); }
+// The narrowest a column of track rows gets beside a cover; a narrow window shrinks the cover
+// rather than squeezing the rows under it (as on Windows).
+float MinRowsW() { return F(220); }
+// Albums & Tracks: the grid's cover a quarter larger, smaller when the album item (`width`) is narrow.
+float GroupArt(float width) {
+    return std::clamp(width - F(20) - MinRowsW(), F(48), F((float)(g.settings.coverSize + g.settings.coverSize / 4)));
+}
 float GroupHead() { return F(56); }
-float GroupX(const Rect& rc) { return rc.x + GroupArt() + F(20); }
+float GroupX(const Rect& rc) { return rc.x + GroupArt(rc.w) + F(20); }
+// A row shows its rating stars only when the title keeps a useful width beside them.
+bool RowStars(const Rect& r) { return r.w >= F(34 + 120 + 72 + 56 + 6); }
 Rect GroupRow(const Rect& rc, int t) { return {GroupX(rc) - F(6), rc.y + GroupHead() + t * RowH(), rc.R() - (GroupX(rc) - F(6)), RowH()}; }
 
 std::wstring AlbumTitle(const Album& a) {
@@ -223,15 +231,27 @@ wchar_t SectionLetter(StringPool::Handle artist) {
     return L'#';
 }
 
+// The open album panel's large cover: up to 280 px, smaller in a narrow view, and left out (the
+// tile above shows it) when it would leave the rows too little room.
+float PanelCover(float width) {
+    float side = std::min(F(280), width - Margin() * 2 - F(56) - MinRowsW());
+    return side >= F(96) ? side : 0;
+}
+// The right edge of the panel's heading and rows: left of the cover, with a gap, when there is one.
+float PanelRight(const Rect& rc) {
+    float side = PanelCover(rc.w);
+    return rc.R() - Margin() - (side ? F(28) + side : F(10));
+}
+
 int PanelColumns(const Album& a, float width) {
-    float listW = width - Margin() * 2 - F(40) - F(280);
+    float listW = PanelRight({0, 0, width, 0}) - Margin() - F(40);
     return a.tracks.size() > 10 && listW > F(760) ? 2 : 1;
 }
 
 float PanelHeight(const Album& a, float width) {
     int cols = PanelColumns(a, width);
     int rows = (int)(a.tracks.size() + cols - 1) / cols;
-    return std::max(F(280) + F(40), F(84) + rows * RowH() + F(28));
+    return std::max(PanelCover(width) + F(40), F(84) + rows * RowH() + F(28));
 }
 
 void BuildGroups() {
@@ -415,7 +435,7 @@ void LayoutItems(float W) {
         if (col) endRow((int)v.albums.size() - 1);
     } else if (mode == LibraryMode::AlbumTracks) {
         for (int i = 0; i < (int)v.albums.size(); ++i) {
-            float h = std::max(GroupHead() + v.albums[i].tracks.size() * RowH(), GroupArt()) + F(8);
+            float h = std::max(GroupHead() + v.albums[i].tracks.size() * RowH(), GroupArt(W - 2 * Margin())) + F(8);
             v.albumItem[i] = (int)v.items.size();
             v.items.push_back({ItemKind::AlbumGroup, {Margin(), y, W - 2 * Margin(), h}, i});
             y += h + F(24);
@@ -449,8 +469,8 @@ void Relayout(const Rect& area) {
 }
 
 Rect PanelArea(const Item& it) {
-    float x = Margin() + F(28), right = it.rc.R() - Margin() - F(28) - F(280);
-    return {x, it.rc.y + F(84), right - x, it.rc.h - F(104)};
+    float x = Margin() + F(28), right = PanelRight(it.rc);
+    return {x, it.rc.y + F(84), std::max(0.0f, right - x), it.rc.h - F(104)};
 }
 
 Rect PanelRow(const Album& a, const Rect& area, int t) {
@@ -468,8 +488,8 @@ Rect PlayButton(const Item& it) {
 Rect PanelClose(const Item& it) { return {it.rc.x + Margin(), it.rc.y + F(14), F(22), F(22)}; }
 bool HasEditionSwitch(const Album& a) { return a.group && a.editions > 1; }
 Rect PanelEditionRect(const Item& it) {
-    float right = it.rc.R() - Margin() - F(28) - F(280);
-    return {right - F(210), it.rc.y + F(48), F(210), F(24)};
+    float right = PanelRight(it.rc), left = std::max(right - F(210), Margin() + F(28));
+    return {left, it.rc.y + F(48), std::max(0.0f, right - left), F(24)};
 }
 
 // Selection, as the views show it, into g.selected (and the focus row, for Play and the menus).
@@ -551,8 +571,8 @@ Hit HitTest(const Rect& area, float x, float y) {
         auto rowAt = [&](const Rect& row, int t) {
             if (!row.In(cx, cy)) return;
             h.row = t;
-            float starsRight = row.R() - F(6) - F(56);  // as DrawTrackRow places them
-            if (cx >= starsRight - F(64) && cx < starsRight + F(4)) {
+            float starsRight = row.R() - F(6) - F(56);  // as DrawTrackRow places them, when it shows them
+            if (RowStars(row) && cx >= starsRight - F(64) && cx < starsRight + F(4)) {
                 h.stars = true;
                 h.starsX = cx - (starsRight - F(64));
             }
@@ -619,6 +639,7 @@ void PlayTriangle(const Rect& r, uint32_t color) {
 }
 
 // One track row: number, title (and the artist when it differs from the album's), stars, length.
+// The stars show only when the title keeps a useful width beside them (RowStars).
 void DrawTrackRow(const Album& a, int t, const Rect& r, bool hover, const Palette& p) {
     TrackId id = a.tracks[t];
     const Track& tr = g_lib[id];
@@ -632,10 +653,12 @@ void DrawTrackRow(const Album& a, int t, const Rect& r, bool hover, const Palett
     float right = r.R() - F(6);
     DrawText(Font::Small, Utf8(FormatDuration(tr.Duration())), right - F(48), TextY(r, Font::Small), sub, F(48), 2);
     right -= F(56);
-    DrawStars({right - F(64), r.y, F(64), r.h}, tr.rating, sel, hover, p);
-    right -= F(72);
+    if (RowStars(r)) {
+        DrawStars({right - F(64), r.y, F(64), r.h}, tr.rating, sel, hover, p);
+        right -= F(72);
+    }
     if (tr.artist && tr.artist != a.artist) {
-        float aw = std::min(F(220), (right - r.x) * 0.4f);
+        float aw = std::min(F(220), std::max(0.0f, right - r.x - F(34)) * 0.4f);
         DrawText(Font::Small, std::string(g_lib.View(tr.artist)), right - aw, TextY(r, Font::Small), sub, aw);
         right -= aw + F(8);
     }
@@ -695,7 +718,7 @@ void DrawItem(const Item& item, int index, float ox, float oy, const Palette& p)
             float m = F(5);
             ThickLine(close.x + m, close.y + m, close.R() - m, close.B() - m, std::max(1.0f, F(1.2f)), p.sub);
             ThickLine(close.R() - m, close.y + m, close.x + m, close.B() - m, std::max(1.0f, F(1.2f)), p.sub);
-            float x = Margin() + F(28), right = rc.R() - Margin() - F(28) - F(280);
+            float x = Margin() + F(28), right = PanelRight(rc);
             DrawText(Font::Title, Utf8(AlbumTitle(a) + L"  \x25B8"), x, rc.y + F(16), p.text, right - x);
             float subtitleRight = right;
             if (HasEditionSwitch(a)) {
@@ -715,13 +738,14 @@ void DrawItem(const Item& item, int index, float ox, float oy, const Palette& p)
             DrawText(Font::Normal, Utf8(AlbumSubtitle(a)), x, rc.y + F(52), p.sub, subtitleRight - x);
             Rect area = PanelArea(it);
             for (int t = 0; t < (int)a.tracks.size(); ++t) DrawTrackRow(a, t, PanelRow(a, area, t), hover && g_hover.row == t, p);
-            float side = std::min(F(280), rc.h - F(40));
-            DrawAlbumCover(ArtTrackOf(a), a.album, AlbumTitle(a), {rc.R() - Margin() - side, rc.y + F(20), side, side}, p);
+            float side = std::min(PanelCover(rc.w), rc.h - F(40));
+            if (side > 0) DrawAlbumCover(ArtTrackOf(a), a.album, AlbumTitle(a), {rc.R() - Margin() - side, rc.y + F(20), side, side}, p);
             break;
         }
         case ItemKind::AlbumGroup: {
             const Album& a = v.albums[it.index];
-            DrawAlbumCover(ArtTrackOf(a), a.album, AlbumTitle(a), {rc.x, rc.y + F(4), GroupArt(), GroupArt()}, p);
+            float side = GroupArt(rc.w);
+            DrawAlbumCover(ArtTrackOf(a), a.album, AlbumTitle(a), {rc.x, rc.y + F(4), side, side}, p);
             // The heading: the title and the year on the right, then the details and a rule.
             float x = GroupX(rc), right = rc.R() - F(6);
             std::wstring year = AlbumYear(a);

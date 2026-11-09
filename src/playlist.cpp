@@ -11,19 +11,23 @@
 #include <cwctype>
 #include <unordered_map>
 
-void ShuffleByListening(std::vector<uint32_t>& order, const std::vector<TrackId>& items, std::mt19937& rng) {
-    auto weights = ListeningWeights(items);
+void ShuffleByWeights(std::vector<uint32_t>& order, const std::vector<double>& weights, std::mt19937& rng) {
     struct Pick { double key; uint32_t index; };
     std::vector<Pick> picks;
     picks.reserve(order.size());
     for (uint32_t index : order) {
         if (index >= weights.size()) return;
         double u = std::max(1e-12, std::generate_canonical<double, 53>(rng));
-        picks.push_back({-std::log(u) / weights[index], index});
+        double weight = weights[index] > 1e-12 ? weights[index] : 1e-12;
+        picks.push_back({-std::log(u) / weight, index});
     }
     // Exponential keys give a weighted permutation without dropping any occurrence.
     SortRecords(picks.begin(), picks.end(), [](const Pick& a, const Pick& b) { return a.key > b.key; });
     for (size_t i = 0; i < picks.size(); ++i) order[i] = picks[i].index;
+}
+
+void ShuffleByListening(std::vector<uint32_t>& order, const std::vector<TrackId>& items, std::mt19937& rng) {
+    ShuffleByWeights(order, ListeningWeights(items), rng);
 }
 
 void ShuffleAlbums(std::vector<uint32_t>& order, const std::vector<TrackId>& items, std::mt19937& rng, int current) {

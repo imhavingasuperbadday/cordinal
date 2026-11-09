@@ -82,8 +82,8 @@ namespace {
 // Monotonic clock for retry scheduling, immune to wall-clock changes.
 using Clock = std::chrono::steady_clock;
 
-const wchar_t kUserAgent[] = L"cordinal/0.1.7";
-const char kClientVersion[] = "0.1.7";
+const wchar_t kUserAgent[] = L"cordinal/0.1.8";
+const char kClientVersion[] = "0.1.8";
 
 #ifdef _WIN32
 const wchar_t kSep[] = L"\\";

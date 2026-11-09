@@ -874,12 +874,14 @@ struct Engine::Impl {
             }
             Housekeeping();
 
+            size_t refillNeed = 0;
             if (dec) {
                 const size_t chunk = 2048;
                 double ratio = rs.InRate() ? (double)rate / rs.InRate() : 1.0;
                 // A slower tempo makes more frames, and one more segment can come out with them.
                 if (stretch.Active()) ratio /= stretch.Tempo();
-                if (RingSpace() >= (size_t)(chunk * ratio) + (stretch.Active() ? rate / 20 : 0) + 64) {
+                refillNeed = (size_t)(chunk * ratio) + (stretch.Active() ? rate / 20 : 0) + 64;
+                if (RingSpace() >= refillNeed) {
                     size_t n = dec->Read(readBuf.data(), chunk);
                     if (n) {
                         Estimate(readBuf.data(), n, false);
@@ -943,10 +945,22 @@ struct Engine::Impl {
                 std::unique_lock<std::mutex> lock(cmdMx);
                 auto commanded = [&] { return quit.load() || !cmds.empty(); };
                 // No audio can advance while stopped or after a pause has faded out and stopped
-                // the device. Commands, resume and shutdown wake us directly;
-                // keep the short timed wait only while playback needs housekeeping/refilling.
+                // the device. Commands, resume and shutdown wake us directly.
+                // A full ring already holds a second of audio, so wait until playback will have
+                // made room for another chunk instead of polling every 10 ms. Pause settling,
+                // the end of a track and an exclusive rate switch stay on the short wait: those
+                // are not paced by how full the ring is, and a late rate switch would gap.
+                int waitMs = 10;
+                if (dec && refillNeed && !pauseReq.load()) {
+                    const size_t space = RingSpace();
+                    if (space < refillNeed) {
+                        const unsigned outputRate = std::max(1u, rate.load());
+                        const unsigned long long deficit = refillNeed - space;
+                        waitMs = (int)std::clamp(deficit * 1000 / outputRate, 15ull, 40ull);
+                    }
+                }
                 if ((idle || pauseReq) && out.Paused()) cv.wait(lock, [&] { return commanded() || !out.Paused(); });
-                else cv.wait_for(lock, std::chrono::milliseconds(10), commanded);
+                else cv.wait_for(lock, std::chrono::milliseconds(waitMs), commanded);
             }
         }
         dec.reset();

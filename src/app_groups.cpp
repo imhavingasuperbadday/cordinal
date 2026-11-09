@@ -68,13 +68,7 @@ const ArtImage* Cover(const TrackGroup& gr, int size) {
     if (MiniPlayerWindow() && !IsWindowVisible(g.hwnd)) return nullptr;
     auto& c = Covers();
     if (!c.started) {
-        PWSTR local = nullptr;
-        std::wstring cache = g.dataDir + L"\\thumbs";
-        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &local))) {
-            cache = std::wstring(local) + L"\\cordinal\\thumbs";
-            CoTaskMemFree(local);
-        }
-        c.loader.Start(g.hwnd, WM_APP_GROUP_ART, cache, 1, ReducedMemoryMode());
+        c.loader.Start(g.hwnd, WM_APP_GROUP_ART, LocalCacheDir(L"thumbs"),1, ReducedMemoryMode());
         c.started = true;
     }
     TrackId id = Active().items[g.view[gr.firstView]];

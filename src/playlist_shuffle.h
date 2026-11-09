@@ -13,3 +13,6 @@ void ShuffleAlbums(std::vector<uint32_t>& order, const std::vector<TrackId>& ite
 // Reorders the supplied positions by early-skip weights, keeping every occurrence. The next
 // position is at the back, matching the Windows playback queue.
 void ShuffleByListening(std::vector<uint32_t>& order, const std::vector<TrackId>& items, std::mt19937& rng);
+// The same permutation for weights already chosen (one per playlist position). A missing or
+// non-positive weight sorts to the end instead of dropping the row.
+void ShuffleByWeights(std::vector<uint32_t>& order, const std::vector<double>& weights, std::mt19937& rng);

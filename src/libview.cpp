@@ -8,6 +8,7 @@
 // Covers come from ThumbLoader and are kept as Direct2D bitmaps in a small LRU cache.
 #include "album_editions.h"
 #include "app.h"
+#include "soft_canvas.h"
 #include "thumbs.h"
 
 #include <d2d1.h>
@@ -68,7 +69,9 @@ struct LibView {
     HWND hwnd = nullptr;
     ComPtr<ID2D1Factory> d2d;
     ComPtr<IDWriteFactory> dw;
-    ComPtr<ID2D1HwndRenderTarget> rt;
+    ComPtr<ID2D1RenderTarget> rt;      // what Paint draws on: the canvas's context, or the GPU's window target
+    SoftCanvas soft;                   // the usual target, drawn in software on this thread
+    ComPtr<ID2D1HwndRenderTarget> gpu; // with "Draw with the graphics card"
     ComPtr<ID2D1SolidColorBrush> brush;
     ComPtr<IDWriteTextFormat> fTitle, fText, fSmall, fNum, fHeading, fSection, fBig, fStars, fGlyph;
     ComPtr<IDWriteInlineObject> ellipsis;
@@ -111,11 +114,7 @@ bool EnsureGraphics() {
                                           reinterpret_cast<IUnknown**>(v.dw.GetAddressOf())))) return false;
     if (!v.fText) CreateFormats();
     if (!v.loaderStarted) {
-        PWSTR local = nullptr;
-        std::wstring cache = g.dataDir + L"\\thumbs";
-        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &local))) cache = std::wstring(local) + L"\\cordinal\\thumbs";
-        CoTaskMemFree(local);
-        v.loader.Start(v.hwnd, WM_APP_THUMB, cache, ReducedMemoryMode() ? 1 : 2, ReducedMemoryMode());
+        v.loader.Start(v.hwnd, WM_APP_THUMB, LocalCacheDir(L"thumbs"),ReducedMemoryMode() ? 1 : 2, ReducedMemoryMode());
         v.loaderStarted = true;
     }
     return v.fText && v.fGlyph;
@@ -129,11 +128,15 @@ float RowH() { return F(26); }
 float Margin() { return F(18); }
 float TileArt() { return F(v.tile); }
 float TileH() { return TileArt() + F(44); }
+// The narrowest a column of track rows gets beside a cover; a narrow window (the compact one)
+// shrinks the cover rather than squeezing the rows under it.
+float MinRowsW() { return F(220); }
 // Albums & Tracks: the cover follows the grid's size, a quarter larger, so Ctrl+wheel sizes both
 // views; the heading (title and year, the details, a rule) sits over the album's track rows.
-float GroupArt() { return F(v.tile + v.tile / 4); }
+// `width` is the album item's.
+float GroupArt(float width) { return std::clamp(width - F(20) - MinRowsW(), F(48), F(v.tile + v.tile / 4)); }
 float GroupHead() { return F(56); }
-float GroupX(const D2D1_RECT_F& rc) { return rc.left + GroupArt() + F(20); }
+float GroupX(const D2D1_RECT_F& rc) { return rc.left + GroupArt(rc.right - rc.left) + F(20); }
 D2D1_RECT_F GroupRow(const D2D1_RECT_F& rc, int t) {
     float y = rc.top + GroupHead() + t * RowH();
     return {GroupX(rc) - F(6), y, rc.right, y + RowH()};
@@ -167,16 +170,28 @@ wchar_t SectionLetter(StringPool::Handle artist) {
     return L'#';
 }
 
+// The open album panel's large cover, on the right: up to 280 px, smaller in a narrow view, and
+// left out (the tile above shows it) when it would leave the rows too little room.
+float PanelCover(float width) {
+    float side = std::min(F(280), width - Margin() * 2 - F(56) - MinRowsW());
+    return side >= F(96) ? side : 0;
+}
+// The right edge of the panel's heading and rows: left of the cover, with a gap, when there is one.
+float PanelRight(float width) {
+    float side = PanelCover(width);
+    return width - Margin() - (side ? F(28) + side : F(10));
+}
+
 // Track rows two columns wide when an open album has many tracks and the panel is wide.
 int PanelColumns(const Album& a, float width) {
-    float listW = width - Margin() * 2 - F(40) - F(280);
+    float listW = PanelRight(width) - Margin() - F(40);
     return a.tracks.size() > 10 && listW > F(760) ? 2 : 1;
 }
 
 float PanelHeight(const Album& a, float width) {
     int cols = PanelColumns(a, width);
     int rows = (int)(a.tracks.size() + cols - 1) / cols;
-    return std::max(F(280) + F(40), F(84) + rows * RowH() + F(28));
+    return std::max(PanelCover(width) + F(40), F(84) + rows * RowH() + F(28));
 }
 
 // ---------------------------------------------------------------------------
@@ -383,7 +398,7 @@ void LayoutItems() {
         if (col) endRow((int)v.albums.size() - 1);
     } else if (g.libMode == LibraryMode::AlbumTracks) {
         for (int i = 0; i < (int)v.albums.size(); ++i) {
-            float h = std::max(GroupHead() + v.albums[i].tracks.size() * RowH(), GroupArt()) + F(8);
+            float h = std::max(GroupHead() + v.albums[i].tracks.size() * RowH(), GroupArt(W - Margin() * 2)) + F(8);
             v.albumItem[i] = (int)v.items.size();
             v.items.push_back({ItemKind::AlbumGroup, {Margin(), y, W - Margin(), y + h}, i});
             y += h + F(24);
@@ -495,6 +510,8 @@ void DropBitmaps() {
 // Drawing
 
 void Text(const std::wstring& s, IDWriteTextFormat* f, D2D1_RECT_F r, D2D1_COLOR_F c) {
+    // An empty or inverted box would lay the text out leftward, over whatever is beside it.
+    if (r.right <= r.left || r.bottom <= r.top) return;
     v.brush->SetColor(c);
     v.rt->DrawTextW(s.c_str(), (UINT32)s.size(), f, r, v.brush.Get(),
                     D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
@@ -565,6 +582,9 @@ void DrawSpinnerD2D(D2D1_POINT_2F c, Rgb color) {
     v.busyDrawn = true;
 }
 
+// A row shows its rating stars only when the title keeps a useful width beside them.
+bool RowStars(const D2D1_RECT_F& r) { return r.right - r.left >= F(34 + 120 + 72 + 56 + 6); }
+
 // One track row: number, title (and the artist when it differs from the album's), stars, length.
 void DrawTrackRow(const Album& a, int t, D2D1_RECT_F r, bool hover) {
     TrackId id = a.tracks[t];
@@ -584,11 +604,13 @@ void DrawTrackRow(const Album& a, int t, D2D1_RECT_F r, bool hover) {
     std::wstring len = FormatDuration(tr.Duration());
     Text(len, v.fNum.Get(), {right - F(48), r.top, right, r.bottom}, Col(sub));
     right -= F(56);
-    DrawStarsD2D({right - F(64), r.top, right, r.bottom}, tr.rating, sel, hover);
-    right -= F(72);
+    if (RowStars(r)) {
+        DrawStarsD2D({right - F(64), r.top, right, r.bottom}, tr.rating, sel, hover);
+        right -= F(72);
+    }
     StringPool::Handle artist = tr.artist;
     if (artist && artist != a.artist) {
-        float aw = std::min(F(220), (right - r.left) * 0.4f);
+        float aw = std::min(F(220), std::max(0.f, right - r.left - F(34)) * 0.4f);
         Text(g_lib.Str(artist), v.fSmall.Get(), {right - aw, r.top, right, r.bottom}, Col(sub));
         right -= aw + F(8);
     }
@@ -619,7 +641,7 @@ D2D1_RECT_F PanelRow(const Album& a, D2D1_RECT_F area, int t) {
 }
 
 D2D1_RECT_F PanelArea(const Item& it) {
-    return {Margin() + F(28), it.rc.top + F(84), it.rc.right - Margin() - F(28) - F(280), it.rc.bottom - F(20)};
+    return {Margin() + F(28), it.rc.top + F(84), PanelRight(it.rc.right), it.rc.bottom - F(20)};
 }
 // The square play button in the corner of a tile's cover.
 D2D1_RECT_F PlayButton(const Item& it) {
@@ -630,8 +652,8 @@ D2D1_RECT_F PanelClose(const Item& it) { return {it.rc.left + Margin(), it.rc.to
 bool HasEditionSwitch(const Album& a) { return a.group && a.editions > 1; }
 // The edition chip sits at the right end of the subtitle row, before the large cover.
 D2D1_RECT_F PanelEditionRect(const Item& it) {
-    float right = it.rc.right - Margin() - F(28) - F(280);
-    return {right - F(210), it.rc.top + F(48), right, it.rc.top + F(72)};
+    float right = PanelRight(it.rc.right);
+    return {std::max(right - F(210), Margin() + F(28)), it.rc.top + F(48), right, it.rc.top + F(72)};
 }
 
 void DrawItem(const Item& it, int index) {
@@ -693,7 +715,7 @@ void DrawItem(const Item& it, int index) {
             D2D1_RECT_F close = PanelClose(it);
             if (v.hoverClose && hover) Fill(close, Col(P().hover));
             Text(L"\x2715", v.fText.Get(), {close.left + F(5), close.top + F(2), close.right, close.bottom}, Col(P().sub));
-            float x = Margin() + F(28), right = it.rc.right - Margin() - F(28) - F(280);
+            float x = Margin() + F(28), right = PanelRight(it.rc.right);
             Text(AlbumTitle(a) + L"  \x25B8", v.fSection.Get(), {x, it.rc.top + F(14), right, it.rc.top + F(50)}, Col(P().text));
             D2D1_RECT_F subtitle{x, it.rc.top + F(50), right, it.rc.top + F(72)};
             if (HasEditionSwitch(a)) {
@@ -716,14 +738,15 @@ void DrawItem(const Item& it, int index) {
             D2D1_RECT_F area = PanelArea(it);
             for (int t = 0; t < (int)a.tracks.size(); ++t)
                 DrawTrackRow(a, t, PanelRow(a, area, t), hover && v.hoverRow == t);
-            float side = std::min(F(280), it.rc.bottom - it.rc.top - F(40));
+            float side = std::min(PanelCover(it.rc.right), it.rc.bottom - it.rc.top - F(40));
             D2D1_RECT_F art{it.rc.right - Margin() - side, it.rc.top + F(20), it.rc.right - Margin(), it.rc.top + F(20) + side};
-            DrawCover(a, art, AlbumTitle(a));
+            if (side > 0) DrawCover(a, art, AlbumTitle(a));
             break;
         }
         case ItemKind::AlbumGroup: {
             const Album& a = v.albums[it.index];
-            D2D1_RECT_F art{it.rc.left, it.rc.top + F(4), it.rc.left + GroupArt(), it.rc.top + F(4) + GroupArt()};
+            float side = GroupArt(it.rc.right - it.rc.left);
+            D2D1_RECT_F art{it.rc.left, it.rc.top + F(4), it.rc.left + side, it.rc.top + F(4) + side};
             DrawCover(a, art, AlbumTitle(a));
             // The heading: the title, and the year on the right over the rows' lengths, then the
             // details and a rule that ties the heading to its tracks.
@@ -758,22 +781,35 @@ void DrawItem(const Item& it, int index) {
     }
 }
 
-void Paint() {
+void ReleaseTarget() {
+    v.brush.Reset();
+    v.rt.Reset();
+    v.gpu.Reset();
+    v.soft.Reset();
+}
+
+void Paint(HDC dc) {
     if (!IsWindowVisible(v.hwnd)) return;
     if (!EnsureGraphics()) return;
+    RECT rc;
+    GetClientRect(v.hwnd, &rc);
     if (!v.rt) {
-        RECT rc;
-        GetClientRect(v.hwnd, &rc);
-        D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties();
-        if (!GpuDrawing()) props.type = D2D1_RENDER_TARGET_TYPE_SOFTWARE;
-        props.dpiX = props.dpiY = 96.0f;  // work in pixels; S() does the scaling
-        if (FAILED(v.d2d->CreateHwndRenderTarget(props, D2D1::HwndRenderTargetProperties(v.hwnd, D2D1::SizeU(rc.right, rc.bottom)),
-                                                 &v.rt)))
-            return;
+        if (GpuDrawing()) {
+            D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties();
+            props.dpiX = props.dpiY = 96.0f;  // work in pixels; S() does the scaling
+            if (FAILED(v.d2d->CreateHwndRenderTarget(
+                    props, D2D1::HwndRenderTargetProperties(v.hwnd, D2D1::SizeU(rc.right, rc.bottom)), &v.gpu)))
+                return;
+            v.rt = v.gpu;
+        } else {
+            v.rt = v.soft.Context(v.d2d.Get());
+            if (!v.rt) return;
+        }
         v.rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
         v.rt->CreateSolidColorBrush(D2D1::ColorF(0), &v.brush);
     }
-    v.rt->BeginDraw();
+    if (v.gpu) v.rt->BeginDraw();
+    else if (!v.soft.Begin(rc.right, rc.bottom)) return;
     v.busyDrawn = false;
     v.rt->Clear(Col(P().bg));
     v.rt->SetTransform(D2D1::Matrix3x2F::Translation(0, (float)-v.scroll));
@@ -787,9 +823,8 @@ void Paint() {
         if (it.rc.bottom + F(12) < top || it.rc.top - F(12) > bottom) continue;
         DrawItem(it, i);
     }
-    if (v.rt->EndDraw() == D2DERR_RECREATE_TARGET) {
-        v.rt.Reset();
-        v.brush.Reset();
+    if ((v.gpu ? v.rt->EndDraw() : v.soft.End(dc, 0, 0)) == D2DERR_RECREATE_TARGET) {
+        ReleaseTarget();
         DropBitmaps();
         InvalidateRect(v.hwnd, nullptr, FALSE);
     }
@@ -856,9 +891,10 @@ Hit HitTest(int x, int y) {
         auto rowAt = [&](D2D1_RECT_F row, int t) {
             if (cx >= row.left && cx < row.right && cy >= row.top && cy < row.bottom) {
                 h.row = t;
-                // Stars sit 56..120 px from the row's right edge (see DrawTrackRow).
+                // Stars sit 56..120 px from the row's right edge when the row is wide enough to
+                // show them (see DrawTrackRow).
                 float starsRight = row.right - F(6) - F(56);
-                if (cx >= starsRight - F(64) && cx < starsRight + F(4)) {
+                if (RowStars(row) && cx >= starsRight - F(64) && cx < starsRight + F(4)) {
                     h.stars = true;
                     h.starsX = cx - (starsRight - F(64));
                 }
@@ -1203,7 +1239,7 @@ LRESULT CALLBACK LibViewProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_SIZE: {
             v.width = LOWORD(lp);
             v.height = HIWORD(lp);
-            if (v.rt) v.rt->Resize(D2D1::SizeU(v.width, v.height));
+            if (v.gpu) v.gpu->Resize(D2D1::SizeU(v.width, v.height));
             LayoutItems();
             TrimCovers();
             return 0;
@@ -1227,7 +1263,7 @@ LRESULT CALLBACK LibViewProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_PAINT: {
             PAINTSTRUCT ps;
             BeginPaint(h, &ps);
-            Paint();
+            Paint(ps.hdc);
             EndPaint(h, &ps);
             return 0;
         }
@@ -1362,7 +1398,8 @@ void LibViewReleaseGraphics() {
     v.loaderStarted = false;
     DropBitmaps();
     v.bitmaps.rehash(0);
-    v.brush.Reset(); v.rt.Reset(); v.ellipsis.Reset();
+    ReleaseTarget();
+    v.ellipsis.Reset();
     v.fTitle.Reset(); v.fText.Reset(); v.fSmall.Reset(); v.fNum.Reset(); v.fHeading.Reset(); v.fSection.Reset();
     v.fBig.Reset(); v.fStars.Reset(); v.fGlyph.Reset();
     v.dw.Reset(); v.d2d.Reset();

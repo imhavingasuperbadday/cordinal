@@ -8,7 +8,8 @@
 //   varint count, then count playlists (kind, name, rules, varint n + n track indices)
 //   version 2 only: sections, each varint tag, varint byte length, payload; tag 0 ends the list
 //     1 = the play log (playlog.cpp), 2 = cordinal points (points.cpp), 8 = album groups and
-//     editions (album_editions.h), 9 = explicit group-cover choices. Readers skip unknown tags.
+//     editions (album_editions.h), 9 = explicit group-cover choices, 10 = taste mood sketches and
+//     11 = taste part bins (taste.cpp). Readers skip unknown tags.
 //
 // Integers are LEB128 varints (signed ones zigzag-encoded) so typical libraries stay small.
 // Saving writes a temp file and swaps it in with ReplaceFile, keeping the previous file as
@@ -19,6 +20,7 @@
 #include "playlog.h"
 #include "points.h"
 #include "sections.h"
+#include "taste.h"
 #include "streamfile.h"
 #include <climits>
 
@@ -34,9 +36,10 @@ constexpr uint64_t kMaxSectionBytes = 1ull << 30;
 
 // The payloads of the sections a file carries, copied out of the file.
 struct Sections {
-    std::string playLog, points, audioHash, views, loudness, albums, firstPlayed, albumEditions, albumArt;
+    std::string playLog, points, audioHash, views, loudness, albums, firstPlayed, albumEditions, albumArt, taste, tasteParts;
     bool hasPlayLog = false, hasPoints = false, hasAudioHash = false, hasViews = false, hasLoudness = false,
-         hasAlbums = false, hasFirstPlayed = false, hasAlbumEditions = false, hasAlbumArt = false;
+         hasAlbums = false, hasFirstPlayed = false, hasAlbumEditions = false, hasAlbumArt = false, hasTaste = false,
+         hasTasteParts = false;
 };
 
 // Optional version-2 section: old readers skip it, so the database format stays compatible.
@@ -447,7 +450,8 @@ bool ReadSections(Reader& r, Sections& out) {
             (tag == kSectionLoudness && out.hasLoudness) || (tag == kSectionAlbumMeasurement && out.hasAlbums) ||
             (tag == kSectionFirstPlayed && out.hasFirstPlayed) ||
             (tag == kSectionAlbumEditions && out.hasAlbumEditions) ||
-            (tag == kSectionAlbumArt && out.hasAlbumArt)) return false;
+            (tag == kSectionAlbumArt && out.hasAlbumArt) || (tag == kSectionTaste && out.hasTaste) ||
+            (tag == kSectionTasteParts && out.hasTasteParts)) return false;
         if (tag == kSectionPlaylistViews) {
             out.views.assign(body);
             out.hasViews = true;
@@ -475,6 +479,12 @@ bool ReadSections(Reader& r, Sections& out) {
         } else if (tag == kSectionAlbumArt) {
             out.albumArt.assign(body);
             out.hasAlbumArt = true;
+        } else if (tag == kSectionTaste) {
+            out.taste.assign(body);
+            out.hasTaste = true;
+        } else if (tag == kSectionTasteParts) {
+            out.tasteParts.assign(body);
+            out.hasTasteParts = true;
         }
     }
 }
@@ -541,6 +551,8 @@ bool ValidateLibrary(FileSource& input, uint64_t& stringCount, uint64_t& trackCo
         if (sections.hasAlbumEditions &&
             !DecodeAlbumDatabase(sections.albumEditions, trackCount, nullptr, nullptr, nullptr)) return false;
         if (sections.hasAlbumArt && !DecodeAlbumArt(sections.albumArt, trackCount, nullptr, nullptr)) return false;
+        if (sections.hasTaste && !DecodeTaste(sections.taste, trackCount, nullptr, nullptr)) return false;
+        if (sections.hasTasteParts && !DecodeTasteParts(sections.tasteParts, trackCount, nullptr, nullptr)) return false;
         if (sections.hasViews && !DecodeViews(sections.views, playlistCount, trackCount, nullptr, nullptr)) return false;
     }
     return r.ok && r.Remaining() == 0;
@@ -552,7 +564,8 @@ static bool WriteDatabase(const std::wstring& file, const Library& library,
                           const std::vector<Playlist>& playlists, const std::vector<PlayEvent>& log,
                           const PointsState* points, const std::map<AlbumId, AlbumMeasurement>& measurements,
                           const std::vector<AlbumGroup>& albumGroups,
-                          const std::map<TrackId, TrackMusicBrainz>& musicBrainz, std::wstring* error) {
+                          const std::map<TrackId, TrackMusicBrainz>& musicBrainz, const TasteState& taste,
+                          std::wstring* error) {
     std::wstring ignored;
     std::wstring& failure = error ? *error : ignored;
     failure.clear();
@@ -666,6 +679,10 @@ static bool WriteDatabase(const std::wstring& file, const Library& library,
     w.Bytes(EncodeAlbumDatabase(albumGroups, musicBrainz, newId));
     w.U(kSectionAlbumArt);
     w.Bytes(EncodeAlbumArt(albumGroups, newId));
+    w.U(kSectionTaste);
+    w.Bytes(EncodeTaste(taste, newId));
+    w.U(kSectionTasteParts);
+    w.Bytes(EncodeTasteParts(taste, newId));
     w.U(kSectionEnd);
     std::vector<uint32_t>().swap(newId);
     return w.Commit();
@@ -781,6 +798,9 @@ bool ReadLibraryArchive(const std::wstring& file, LibraryArchive& out) {
         return reject();
     if (sections.hasAlbumArt && !DecodeAlbumArt(sections.albumArt, trackCount, savedToId, &data.albumGroups))
         return reject();
+    if (sections.hasTaste && !DecodeTaste(sections.taste, trackCount, savedToId, &data.taste)) return reject();
+    if (sections.hasTasteParts && !DecodeTasteParts(sections.tasteParts, trackCount, savedToId, &data.taste.parts))
+        return reject();
     for (const auto& e : data.log) if (e.flags & PlayEvent::kCounted) {
         auto& first = data.library[e.id].firstPlayed;
         if (!first || e.time < first) first = e.time;
@@ -792,7 +812,7 @@ bool ReadLibraryArchive(const std::wstring& file, LibraryArchive& out) {
 
 bool WriteLibraryArchive(const std::wstring& file, const LibraryArchive& data, std::wstring& error) {
     return WriteDatabase(file, data.library, data.playlists, data.log, data.hasPoints ? &data.points : nullptr,
-                         data.albums, data.albumGroups, data.trackMusicBrainz, &error);
+                         data.albums, data.albumGroups, data.trackMusicBrainz, data.taste, &error);
 }
 
 LibraryArchive CaptureLibraryArchive(const std::vector<Playlist>& playlists) {
@@ -818,12 +838,13 @@ LibraryArchive CaptureLibraryArchive(const std::vector<Playlist>& playlists) {
     data.albumGroups = g_albumGroups;
     for (const auto& [id, value] : g_trackMusicBrainz)
         if (data.library.Contains(id)) data.trackMusicBrainz[id] = value;
+    data.taste = CurrentTaste();
     return data;
 }
 
 bool SaveLibrary(const std::wstring& file, const std::vector<Playlist>& playlists, std::wstring* error) {
     return WriteDatabase(file, g_lib, playlists, PlayLog(), PointsInitialized() ? &CurrentPointsState() : nullptr,
-                         g_albumMeasurements, g_albumGroups, g_trackMusicBrainz, error);
+                         g_albumMeasurements, g_albumGroups, g_trackMusicBrainz, CurrentTaste(), error);
 }
 
 bool LoadLibrary(const std::wstring& file, std::vector<Playlist>& playlists, std::wstring* preserved) {
@@ -849,5 +870,6 @@ bool LoadLibrary(const std::wstring& file, std::vector<Playlist>& playlists, std
     else ReconcileAlbumGroups();
     if (data.hasPoints) SetPointsState(std::move(data.points));
     else ResetPoints();
+    SetTaste(std::move(data.taste));
     return true;
 }

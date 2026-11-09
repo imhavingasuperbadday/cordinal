@@ -23,7 +23,13 @@ None of these build tools is a player runtime dependency. Standalone output defa
 `src/decoder/stream.h` decodes the packed stream, `src/stub/loader.cpp` restores a PE64 image, and `tools/pack.py`
 encodes and verifies the container. Every player pack requires exact native-file and resource
 equality. Tests include guards, corrupted/truncated streams, checksums, deterministic output,
-overlays, EXE/DLL and TLS loading, forced ASLR and unsupported CFG rejection.
+overlays, EXE/DLL and TLS loading, forced ASLR, zero pages left demand-zero, code decoded on first
+fault (including a fixup inside a cold page), the IAT directory and unsupported CFG rejection.
+
+`build.bat cdpack` gives the player cold code from `tools/code-profile.txt`: the functions the
+memory-budget scenarios run, which `tools/make-code-profile.py` regenerates from a native build and
+which the packer finds again through `build/cordinal.map`. Without those files every chunk is eager
+and the image is about 88 KB smaller.
 
 See `spec.md`, `PROVENANCE.md`, `PORTING.md` and `origin.json` for the format and source history.
 The imported original code is GPL-2.0-or-later; `COPYING` preserves the license text. It contains

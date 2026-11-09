@@ -58,6 +58,15 @@ for name in ("fixture.exe", "fixture.dll"):
     packed, _, _ = pack.pack_image(native, out / "loader.exe")
     again, _, _ = pack.pack_image(native, out / "loader.exe")
     assert packed == again, "nondeterministic packing"
+    # Every thunk Windows binds lies inside the IAT directory, so the loader unprotects only those
+    # pages and the rest of CDP1 stays shared with the file instead of becoming private memory.
+    image = pack.Pe(packed)
+    iat, iat_bytes = image.directory(12)
+    imports, import_bytes = image.directory(1)
+    assert iat and iat_bytes <= 4096, (iat, iat_bytes)
+    for at in range(imports, imports + import_bytes - 20, 20):
+        thunk = pack.u32(packed, image.offset(at) + 16)
+        assert iat <= thunk and thunk + 16 <= iat + iat_bytes, "import thunks outside the IAT directory"
     assert pack.unpack_image(packed, out / "decode.exe", scratch) == native
     candidate = scratch / name
     candidate.write_bytes(packed)
@@ -68,6 +77,34 @@ for name in ("fixture.exe", "fixture.dll"):
     else:
         subprocess.run([str(native_path)], check=True, timeout=10)
         subprocess.run([str(candidate)], check=True, timeout=10)
+    # Code the profile marks cold stays compressed until first touched. The fixture's whole .text
+    # page is cold, so its entry point and the DIR64 fixup inside it are decoded by the fault
+    # handler; fixture_probe checks that the fixup was applied. A DLL stays eager: its handler
+    # would point at code the unload takes away.
+    pe = pack.Pe(native)
+    text = next(s for s in pe.sections if s["name"] == b".text")
+    cold = set(range(text["rva"] // 4096, (text["rva"] + text["raw_bytes"] + 4095) // 4096))
+    if name.endswith(".dll"):
+        try:
+            pack.pack_image(native, out / "loader.exe", cold=cold)
+            raise AssertionError("a DLL accepted cold code")
+        except ValueError:
+            pass
+    else:
+        lazy, _, report = pack.pack_image(native, out / "loader.exe", cold=cold)
+        assert report["LazyChunks"] == 1 and report["LazyBytes"] == 4096, report
+        assert pack.unpack_image(lazy, out / "decode.exe", scratch) == native
+        candidate.write_bytes(lazy)
+        subprocess.run([str(candidate)], check=True, timeout=10)
+        # Damage in a cold stream stops the process at start-up, by the up-front input checksum,
+        # rather than only when the chunk is first decoded.
+        section = next(s for s in pack.Pe(lazy).sections if s["name"] == b"CDP1")["raw"]
+        fields = pack.HEADER.unpack_from(lazy, section)
+        damaged = bytearray(lazy)
+        damaged[section + fields[6] + fields[7] - 1] ^= 1
+        (scratch / "cold-damaged.exe").write_bytes(bytes(damaged))
+        result = subprocess.run([str(scratch / "cold-damaged.exe")], timeout=10)
+        assert result.returncode & 0xffffffff == 0xcd000026, hex(result.returncode & 0xffffffff)
     # Several chunks: an EXE decodes them on worker threads at its entry point and still runs its
     # native process-attach TLS callback exactly once and no thread callback for the workers
     # (pe_fixture.cpp counts both); a DLL decodes them in turn under the loader lock.
@@ -93,7 +130,8 @@ for name in ("fixture.exe", "fixture.dll"):
         broken = scratch / "broken-chunk.exe"
         broken.write_bytes(damaged)
         result = subprocess.run([str(broken)], timeout=10)
-        assert result.returncode & 0xffffffff == 0xcd000017, hex(result.returncode & 0xffffffff)
+        # The up-front input checksums see the damaged stream before any chunk decodes.
+        assert result.returncode & 0xffffffff == 0xcd000026, hex(result.returncode & 0xffffffff)
     damaged = bytearray(packed)
     meta = next(s for s in pack.Pe(packed).sections if s["name"] == b"CDP1")["raw"]
     damaged[meta + 20] ^= 1
@@ -115,7 +153,7 @@ for name in ("fixture.exe", "fixture.dll"):
         broken = scratch / "broken.exe"
         broken.write_bytes(damaged)
         result = subprocess.run([str(broken)], timeout=10)
-        assert result.returncode & 0xffffffff == 0xcd000017, hex(result.returncode & 0xffffffff)
+        assert result.returncode & 0xffffffff == 0xcd000026, hex(result.returncode & 0xffffffff)
     cfg = bytearray(native)
     pe = pack.Pe(cfg)
     struct.pack_into("<H", cfg, pe.opt + 70, pack.u16(cfg, pe.opt + 70) | 0x4000)

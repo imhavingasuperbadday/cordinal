@@ -1,6 +1,7 @@
-// Native PE/TLS/DLL fixture: imports, DIR64 pointers, static TLS and thread callbacks.
+// Native PE/TLS/DLL fixture: imports, DIR64 pointers, static TLS, thread callbacks and zero pages.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <psapi.h>
 
 extern "C" {
 struct Template {
@@ -12,6 +13,13 @@ __attribute__((section(".tls"))) Template template_value = {0x31504b4344544c53ul
 DWORD fixture_tls_index;
 volatile LONG process_attach, thread_attach, thread_detach;
 const void *volatile relocated_pointer = &template_value;
+// One DIR64 fixup inside the code section, so a test that marks that page cold also proves the
+// loader applies a cold chunk's relocations before the page becomes executable.
+__attribute__((section(".text"), used)) const void *const fixture_text_pointer = &template_value;
+// Zero-initialized and longer than pack.py's ZERO_GAP_PAGES: a packed image leaves these pages
+// out of its chunks, so like a native one it must start with them demand-zero (not resident), yet
+// readable as zero and writable.
+volatile unsigned char fixture_zero[40 * 4096];
 
 unsigned long long *tls_value() {
     void **slots;
@@ -46,6 +54,8 @@ __declspec(dllexport) unsigned fixture_probe() {
         return 100 + unsigned(process_attach);
     if (relocated_pointer != &template_value)
         return 12;
+    if (fixture_text_pointer != &template_value)
+        return 15;
     if (*tls_value() != 0x31504b4344544c53ull)
         return 13;
     if (tls_value()[1] != reinterpret_cast<ULONG_PTR>(&template_value))
@@ -63,6 +73,24 @@ __declspec(dllexport) unsigned fixture_probe() {
     if (!VirtualQuery(reinterpret_cast<const void *>(fixture_probe), &page, sizeof(page)) ||
         (page.Protect & 0xff) != PAGE_EXECUTE_READ)
         return 5;
+    // The array's first and last pages may hold other variables; the ones between hold only it.
+    const uintptr_t interior = (reinterpret_cast<uintptr_t>(fixture_zero) + 4095) & ~uintptr_t(4095);
+    PSAPI_WORKING_SET_EX_INFORMATION pages[32];  // no initializer: this fixture has no memset
+    for (unsigned i = 0; i < 32; ++i) {
+        pages[i].VirtualAddress = reinterpret_cast<void *>(interior + i * 4096);
+        pages[i].VirtualAttributes.Flags = 0;
+    }
+    if (!K32QueryWorkingSetEx(GetCurrentProcess(), pages, sizeof(pages)))
+        return 6;
+    for (const auto &item : pages)
+        if (item.VirtualAttributes.Valid)
+            return 7;
+    for (unsigned i = 0; i < sizeof(fixture_zero); ++i)
+        if (fixture_zero[i])
+            return 8;
+    fixture_zero[sizeof(fixture_zero) / 2] = 17;
+    if (fixture_zero[sizeof(fixture_zero) / 2] != 17)
+        return 9;
     return 0;
 }
 #ifdef CDP_TEST_DLL

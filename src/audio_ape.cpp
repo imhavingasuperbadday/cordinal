@@ -3,6 +3,7 @@
 // Supports compressed levels fast/normal/high/extra for versions 3.95 through 3.99.
 #include "native_audio.h"
 #include "audio_file.h"
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cmath>
@@ -106,23 +107,51 @@ struct Residual {
 };
 
 // Mirrored rings keep the entire filter input contiguous at every cursor.
-// Prediction and adaptation share one SIMD walk through the coefficients.
+// Two accumulators overlap independent groups of eight taps. The 32-bit pair-sums
+// wrap modulo 2^32, so either order totals the same value as one running sum.
+// Each group's weights are adapted in that same step; the new weights are for the
+// next sample only.
 class Fir {
 public:
     Fir(unsigned order,unsigned precision,unsigned version):order_(order),precision_(precision),version_(version),
         weights_(order),history_(order*2),adaptation_(order*2) {}
+    void Reset() {
+        std::fill(weights_.begin(),weights_.end(),(int16_t)0);
+        std::fill(history_.begin(),history_.end(),(int16_t)0);
+        std::fill(adaptation_.begin(),adaptation_.end(),(int16_t)0);
+        cursor_=0;average_=0;
+    }
     int32_t Process(int32_t residual) {
-        __m128i sum=_mm_setzero_si128();int direction=Opposite(residual);
-        for (unsigned j=0;j<order_;j+=8) {
-            auto weight=_mm_loadu_si128((const __m128i*)(weights_.data()+j));
-            auto input=_mm_loadu_si128((const __m128i*)(history_.data()+cursor_+j));
-            sum=_mm_add_epi32(sum,_mm_madd_epi16(weight,input));
+        const int direction=Opposite(residual);
+        const int16_t* weight=weights_.data();
+        const int16_t* input=history_.data()+cursor_;
+        const int16_t* adapt=adaptation_.data()+cursor_;
+        __m128i s0=_mm_setzero_si128(),s1=s0;
+        unsigned j=0;
+        for (;j+16<=order_;j+=16) {
+            auto w0=_mm_loadu_si128((const __m128i*)(weight+j));
+            auto w1=_mm_loadu_si128((const __m128i*)(weight+j+8));
+            s0=_mm_add_epi32(s0,_mm_madd_epi16(w0,_mm_loadu_si128((const __m128i*)(input+j))));
+            s1=_mm_add_epi32(s1,_mm_madd_epi16(w1,_mm_loadu_si128((const __m128i*)(input+j+8))));
             if (direction) {
-                auto adjustment=_mm_loadu_si128((const __m128i*)(adaptation_.data()+cursor_+j));
-                weight=direction>0?_mm_add_epi16(weight,adjustment):_mm_sub_epi16(weight,adjustment);
-                _mm_storeu_si128((__m128i*)(weights_.data()+j),weight);
+                auto a0=_mm_loadu_si128((const __m128i*)(adapt+j));
+                auto a1=_mm_loadu_si128((const __m128i*)(adapt+j+8));
+                w0=direction>0?_mm_add_epi16(w0,a0):_mm_sub_epi16(w0,a0);
+                w1=direction>0?_mm_add_epi16(w1,a1):_mm_sub_epi16(w1,a1);
+                _mm_storeu_si128((__m128i*)(weight+j),w0);
+                _mm_storeu_si128((__m128i*)(weight+j+8),w1);
             }
         }
+        for (;j+8<=order_;j+=8) {
+            auto w=_mm_loadu_si128((const __m128i*)(weight+j));
+            s0=_mm_add_epi32(s0,_mm_madd_epi16(w,_mm_loadu_si128((const __m128i*)(input+j))));
+            if (direction) {
+                auto a=_mm_loadu_si128((const __m128i*)(adapt+j));
+                w=direction>0?_mm_add_epi16(w,a):_mm_sub_epi16(w,a);
+                _mm_storeu_si128((__m128i*)(weight+j),w);
+            }
+        }
+        __m128i sum=_mm_add_epi32(s0,s1);
         sum=_mm_add_epi32(sum,_mm_srli_si128(sum,8));sum=_mm_add_epi32(sum,_mm_srli_si128(sum,4));
         int32_t dot=_mm_cvtsi128_si32(sum);
         int32_t value=Wrap(residual+((int64_t(dot)+(int64_t(1)<<(precision_-1)))>>precision_));
@@ -180,8 +209,9 @@ struct Predictor {
         if (!mono) for (unsigned i=0;i<5;++i) p.b[i]+=Opposite(cross[i])*sign;
         p.previousSelf=p.previous;p.previous=current;p.output=current+((p.output*31)>>5);
         p.previousCross=crossValue;p.previousOther=lane[1-channel].output;
-        std::move_backward(p.selfDifferences.begin(),p.selfDifferences.end()-1,p.selfDifferences.end());p.selfDifferences[0]=self[1];
-        std::move_backward(p.crossDifferences.begin(),p.crossDifferences.end()-1,p.crossDifferences.end());p.crossDifferences[0]=cross[1];
+        p.selfDifferences[2]=p.selfDifferences[1];p.selfDifferences[1]=p.selfDifferences[0];p.selfDifferences[0]=self[1];
+        p.crossDifferences[3]=p.crossDifferences[2];p.crossDifferences[2]=p.crossDifferences[1];
+        p.crossDifferences[1]=p.crossDifferences[0];p.crossDifferences[0]=cross[1];
         return Wrap(p.output);
     }
 };
@@ -193,14 +223,7 @@ constexpr auto CrcTable() {
 }
 constexpr auto crcTable=CrcTable();
 // Standard CRC-32 (reflected) over the little-endian PCM samples; APE stores ~crc>>1.
-uint32_t PcmCrc(const std::vector<int32_t>& values,unsigned bits) {
-    uint32_t crc=UINT32_MAX;
-    for (int32_t sample:values) {
-        uint32_t value=(uint32_t)sample+(bits==8?128:0);
-        for (unsigned byte=0;byte<bits/8;++byte) { crc=(crc>>8)^crcTable[(crc^value)&255];value>>=8; }
-    }
-    return ~crc>>1;
-}
+// Emit feeds each integer sample through this table as it writes the float frame.
 
 class ApeDecoder final : public Decoder {
     struct Frame { uint64_t offset=0,end=0;unsigned skip=0,samples=0; };
@@ -291,6 +314,69 @@ public:
     bool Failed() const override { return failed_; }
     double Duration() const override { return (double)frames_/rate_; }
 private:
+    // Per-quality FIR orders and weight precisions; index 0 is "fast" (no filters).
+    // The filters depend only on the file, so they are reset between frames instead of
+    // allocated again. A pseudo-stereo frame uses one channel and leaves the other idle.
+    void PrepareFilters(unsigned count) {
+        constexpr unsigned orders[5][3]={{0,0,0},{16,0,0},{64,0,0},{32,256,0},{16,256,1280}};
+        constexpr unsigned fractions[5][3]={{0,0,0},{11,0,0},{11,0,0},{10,13,0},{11,13,15}};
+        const unsigned quality=level_/1000-1;
+        unsigned stages=0;
+        while (stages<3 && orders[quality][stages]) ++stages;
+        for (unsigned c=0;c<count;++c) {
+            if (filters_[c].size()!=stages || filterQuality_!=quality || filterVersion_!=version_) {
+                filters_[c].clear();
+                for (unsigned i=0;i<stages;++i)
+                    filters_[c].emplace_back(orders[quality][i],fractions[quality][i],version_);
+            } else for (auto& filter:filters_[c]) filter.Reset();
+        }
+        filterQuality_=quality;filterVersion_=version_;
+    }
+    // Recover one frame into `pcm` and check its PCM CRC. `next(i, channel)` is that
+    // sample's filtered residual (zero is never asked for on a silent frame). `wide`
+    // selects whether the stereo sum is wrapped before the shift. The integer samples
+    // are scaled straight into `pcm`. 24-bit stereo keeps the filtered residuals in
+    // `residual_` so a CRC miss can retry the wide predictor; this pass does not copy them again.
+    template<class Next>
+    bool Emit(const Frame& frame,unsigned count,bool wide,bool silent,uint32_t stored,Next next,std::vector<float>& pcm) {
+        Predictor predictor;
+        pcm.resize(size_t(frame.samples)*2);
+        const unsigned shift=32-bits_;
+        // Scaling by the exact power of two is ldexp with the same operand and rounding.
+        const double scale=std::ldexp(1.0,1-(int)bits_);
+        uint32_t crc=UINT32_MAX;
+        auto feed=[&](int32_t sample) {
+            uint32_t value=(uint32_t)sample+(bits_==8?128u:0u);
+            for (unsigned byte=0;byte<bits_/8;++byte) { crc=(crc>>8)^crcTable[(crc^value)&255];value>>=8; }
+        };
+        auto store=[&](unsigned i,unsigned c,int32_t sample) {
+            int32_t value=(int32_t)((uint32_t)sample<<shift)>>shift;
+            pcm[size_t(i)*2+c]=(float)((double)value*scale);
+        };
+        for (unsigned i=0;i<frame.samples;++i) {
+            int32_t first=0;
+            if (!silent) {
+                first=predictor.Apply(next(i,0u),0,count==1,wide);
+                if (!predictor.good) return false;
+            }
+            if (count==1) {
+                feed(first);
+                if (channels_==2) feed(first);
+                store(i,0,first);store(i,1,first);
+            } else {
+                int32_t second=0;
+                if (!silent) {
+                    second=predictor.Apply(next(i,1u),1,false,wide);
+                    if (!predictor.good) return false;
+                }
+                const int32_t left=Wrap(second-(int64_t)(first/2));
+                const int32_t right=Wrap((int64_t)left+first);
+                feed(left);feed(right);
+                store(i,0,left);store(i,1,right);
+            }
+        }
+        return (~crc>>1)==stored;
+    }
     // Decode one frame: optional header, arithmetic residuals, FIR stages and channel
     // prediction, then PCM CRC verification.
     bool Decode(const Frame& frame,std::vector<float>& pcm) {
@@ -298,61 +384,46 @@ private:
         Cursor cursor({bytes,(size_t)(frame.end-frame.offset)},frame.skip);
         uint32_t stored=cursor.Word(),code=0;
         if (stored&0x80000000) { stored&=0x7fffffff;code=cursor.Word(); }
-        bool silent=channels_==1?(code&3)!=0:(code&3)==3,pseudo=channels_==2 && (code&4);
-        unsigned count=channels_==1 || pseudo?1:2;
-        std::vector<int32_t> residual(size_t(frame.samples)*count),values(size_t(frame.samples)*channels_);
+        const bool silent=channels_==1?(code&3)!=0:(code&3)==3,pseudo=channels_==2 && (code&4);
+        const unsigned count=channels_==1 || pseudo?1:2;
+        // 24-bit stereo is stored at either prediction width. The CRC picks it, so those
+        // residuals have to survive a second prediction pass. Every other frame consumes
+        // each residual as it is decoded.
+        const bool retryWide=bits_==24 && count==2 && !silent;
         if (!silent) {
             cursor.Byte();Arithmetic range(cursor);Residual state[2];
-            // Per-quality FIR orders and weight precisions; index 0 is "fast" (no filters).
-            constexpr unsigned orders[5][3]={{0,0,0},{16,0,0},{64,0,0},{32,256,0},{16,256,1280}};
-            constexpr unsigned fractions[5][3]={{0,0,0},{11,0,0},{11,0,0},{10,13,0},{11,13,15}};
-            std::vector<Fir> filters[2];unsigned quality=level_/1000-1;
-            for (unsigned c=0;c<count;++c) for (unsigned i=0;i<3 && orders[quality][i];++i)
-                filters[c].emplace_back(orders[quality][i],fractions[quality][i],version_);
-            for (unsigned i=0;i<frame.samples;++i) for (unsigned c=0;c<count;++c) {
-                int32_t value=state[c].Read(range,version_);
-                for (auto& filter:filters[c]) value=filter.Process(value);
-                residual[i*count+c]=value;
-            }
-            if (!range.Good()) return false;
-        }
-        // Recover stereo from the mono predictor plus a cross-channel residual; `wide`
-        // selects whether the sum is wrapped before the shift.
-        auto predict=[&](bool wide) {
-            Predictor predictor;
-            for (unsigned i=0;i<frame.samples;++i) {
-                int32_t first=silent?0:predictor.Apply(residual[i*count],0,count==1,wide);
-                if (count==1) {
-                    values[i*channels_]=first;if (channels_==2) values[i*2+1]=first;
-                } else {
-                    int32_t second=silent?0:predictor.Apply(residual[i*2+1],1,false,wide);
-                    int32_t left=Wrap(second-(int64_t)(first/2));
-                    values[i*2]=left;values[i*2+1]=Wrap((int64_t)left+first);
+            PrepareFilters(count);
+            if (retryWide) {
+                residual_.resize(size_t(frame.samples)*count);
+                for (unsigned i=0;i<frame.samples;++i) for (unsigned c=0;c<count;++c) {
+                    int32_t value=state[c].Read(range,version_);
+                    for (auto& filter:filters_[c]) value=filter.Process(value);
+                    residual_[i*count+c]=value;
                 }
-                if (!predictor.good) return false;
+                if (!range.Good()) return false;
+                auto fromBuffer=[&](unsigned i,unsigned c) { return residual_[i*count+c]; };
+                if (!Emit(frame,count,false,false,stored,fromBuffer,pcm) &&
+                    !Emit(frame,count,true,false,stored,fromBuffer,pcm)) return false;
+            } else {
+                auto fromStream=[&](unsigned,unsigned c) {
+                    int32_t value=state[c].Read(range,version_);
+                    for (auto& filter:filters_[c]) value=filter.Process(value);
+                    return value;
+                };
+                if (!Emit(frame,count,false,false,stored,fromStream,pcm) || !range.Good()) return false;
             }
-            return true;
-        };
-        bool valid=predict(false);
-        if (!valid || PcmCrc(values,bits_)!=stored) {
-            // 24-bit streams exist with either intermediate prediction width.
-            // The PCM CRC selects the matching arithmetic without guessing.
-            if (bits_!=24 || count!=2 || silent) return false;
-            if (!predict(true) || PcmCrc(values,bits_)!=stored) return false;
+        } else {
+            auto zeros=[&](unsigned,unsigned) { return (int32_t)0; };
+            if (!Emit(frame,count,false,true,stored,zeros,pcm)) return false;
         }
-        if (!cursor.Good()) return false;
-        pcm.resize(size_t(frame.samples)*2);unsigned shift=32-bits_;
-        // Scaling by the exact power of two is ldexp with the same operand and rounding.
-        const double scale=std::ldexp(1.0,1-(int)bits_);
-        for (unsigned i=0;i<frame.samples;++i) for (unsigned c=0;c<2;++c) {
-            int32_t value=(int32_t)((uint32_t)values[i*channels_+(channels_==1?0:c)]<<shift)>>shift;
-            pcm[i*2+c]=(float)((double)value*scale);
-        }
-        return true;
+        return cursor.Good();
     }
     File file_;std::vector<Frame> index_;std::vector<float> pcm_;
+    std::vector<Fir> filters_[2];
+    std::vector<int32_t> residual_;
     uint64_t frames_=0,position_=0;size_t next_=0,used_=0;
-    unsigned version_=0,level_=0,flags_=0,perFrame_=0,bits_=0,channels_=0,rate_=0;bool failed_=false;
+    unsigned version_=0,level_=0,flags_=0,perFrame_=0,bits_=0,channels_=0,rate_=0;
+    unsigned filterQuality_=0,filterVersion_=0;bool failed_=false;
 };
 }
 std::unique_ptr<Decoder> OpenApeDecoder(const std::wstring& path) {

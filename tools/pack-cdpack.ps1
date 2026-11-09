@@ -12,12 +12,23 @@ if (!(Test-Path -LiteralPath (Join-Path $source 'tools\build.ps1'))) { throw 'Bu
 $stage = (New-Item -ItemType Directory -Path (Join-Path $BuildDir ('cdpack-' + [Guid]::NewGuid().ToString('N')))).FullName
 $reports = @()
 $python = @(if ($env:CDPACK_PYTHON) { $env:CDPACK_PYTHON } else { 'py.exe'; '-3.14' })
+# The profile lists the functions the player runs as hashes of their bytes, so a relink does not
+# age it; the map turns those hashes into the addresses of this build. Only the player has a map,
+# so only it is packed with code decoded on demand. Without both files the packager makes an
+# ordinary, all-eager image.
+$profile = Join-Path $root 'tools\code-profile.txt'
+$map = Join-Path $BuildDir 'cordinal.map'
+$hot = @()
+if ((Test-Path -LiteralPath $profile) -and (Test-Path -LiteralPath $map)) {
+    $hot = @('--profile', $profile, '--map', $map)
+}
 foreach ($name in @('cordinal.exe', 'cordinal-test.exe')) {
     $native = Join-Path $BuildDir ('unpacked\' + $name)
     $packed = Join-Path $stage $name
     $report = Join-Path $stage ($name + '.json')
+    $extra = if ($name -eq 'cordinal.exe') { $hot } else { @() }
     & $python[0] @($python | Select-Object -Skip 1) (Join-Path $source 'tools\pack.py') pack $native $packed `
-        --tools $tools --report $report
+        --tools $tools --report $report @extra
     if ($LASTEXITCODE) { throw "Independent packing/verification failed: $name" }
     $reports += Get-Content -Raw -LiteralPath $report | ConvertFrom-Json
 }

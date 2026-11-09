@@ -136,7 +136,9 @@ int RunPerformanceBenchmark(const std::vector<std::wstring>& args) {
     {
         // Wide/high-DPI cover columns: scroll through 32 real WIC/thumbnail requests.
         const std::wstring folder=DirectoryOf(args[2])+L"\\performance-covers";
-        SHCreateDirectoryExW(nullptr,folder.c_str(),nullptr);
+        // The log's folder exists. SHCreateDirectoryExW would refuse a relative log path, and every
+        // cover request would then wait out its timeout.
+        CreateDirectoryW(folder.c_str(),nullptr);
         const std::wstring cover=folder+L"\\cover.png";
         BITMAPFILEHEADER fh{}; BITMAPINFOHEADER ih{};
         fh.bfType=0x4D42; fh.bfOffBits=sizeof(fh)+sizeof(ih); fh.bfSize=fh.bfOffBits+1024*1024*4;

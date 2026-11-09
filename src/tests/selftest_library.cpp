@@ -3,6 +3,9 @@
 // its own testlog group, in the order the groups appear in the log.
 #include "selftest_common.h"
 
+#include "sections.h"
+#include "taste.h"
+
 #include <ctime>
 
 // The original per-track search is the oracle for both correctness and the search benchmark.
@@ -396,6 +399,7 @@ void ResetPlayState() {
     g_lib = Library();
     SetPlayLog({});
     ResetPoints();
+    ClearTaste();
 }
 
 // Logs a listen, sets the track's play count, and awards it.
@@ -403,6 +407,398 @@ PointsAward ListenTest(uint32_t now, TrackId id, uint32_t plays, double seconds,
     g_lib[id].playCount = plays;
     LogPlay(id, now, seconds, counted, skip);
     return AwardListenAt(now, id, seconds, counted, skip, prevLast);
+}
+
+// Logs listens back to back from `t` as one sitting, each starting two seconds after the last one
+// ended. Hearing less than the counting threshold is a skip by hand. Returns the sitting's end.
+uint32_t LogSitting(uint32_t t, std::initializer_list<std::pair<TrackId, int>> listens) {
+    for (auto [id, seconds] : listens) {
+        t += (uint32_t)seconds;
+        bool counted = seconds >= std::clamp(g_lib[id].Duration() * 0.5, 1.0, 240.0);
+        LogPlay(id, t, seconds, counted, !counted);
+        t += 2;
+    }
+    return t;
+}
+
+Peaks FlatMood(uint8_t bass, uint8_t mid, uint8_t treble) {
+    Peaks peaks{};
+    for (int i = 0; i < kPeakBuckets; ++i) {
+        peaks.mood[kMoodBass][i] = bass;
+        peaks.mood[kMoodMid][i] = mid;
+        peaks.mood[kMoodTreble][i] = treble;
+    }
+    return peaks;
+}
+
+// The numbers below are inequalities around the model in taste.cpp. A later tuning can move them;
+// a reversal means the signal stopped mattering.
+void TestTasteImpl(const std::wstring& scratch) {
+    testlog::Batch batch;
+    const uint32_t afternoon = LocalAt(2026, 6, 15, 15);
+    auto score = [](std::initializer_list<TrackId> ids, TrackId from, uint32_t now) {
+        return TasteWeights(g_lib, std::vector<TrackId>(ids), from, now);
+    };
+
+    batch.Next(L"unheard tracks with nothing in common weigh the same");
+    ResetPlayState();
+    TrackId ann = AddTestTrack("Ann song", "Ann", "", 1, 1, 200, true);
+    TrackId bob = AddTestTrack("Bob song", "Bob", "", 1, 1, 200, true);
+    TrackId cy = AddTestTrack("Cy song", "Cy", "", 1, 1, 200, true);
+    auto equal = score({ann, bob, cy}, kInvalidTrack, afternoon);
+    Check(equal.size() == 3 && equal[0] == equal[1] && equal[1] == equal[2] && equal[0] > 0.2,
+          L"unheard tracks with nothing in common weigh the same (%.3f)", equal.empty() ? 0.0 : equal[0]);
+
+    batch.Next(L"ratings outweigh an unheard song, and a top rating outweighs a half star");
+    ResetPlayState();
+    TrackId loved = AddTestTrack("Loved", "Rita", "Rates", 1, 1, 200, true);
+    TrackId mild = AddTestTrack("Mild", "Rita", "Rates", 1, 2, 200, true);
+    TrackId fresh = AddTestTrack("Fresh", "Rita", "Rates", 1, 3, 200, true);
+    g_lib[loved].rating = 100;
+    g_lib[mild].rating = 10;
+    g_lib.Touch();
+    auto rated = score({loved, mild, fresh}, kInvalidTrack, afternoon);
+    Check(rated.size() == 3 && rated[0] > rated[1] * 8 && rated[0] > rated[2] * 2,
+          L"a five-star song beats a half star and an unheard song (%.3f, %.3f, %.3f)",
+          rated.size() == 3 ? rated[0] : 0, rated.size() == 3 ? rated[1] : 0, rated.size() == 3 ? rated[2] : 0);
+
+    batch.Next(L"finishing beats an unheard song, which beats a run of early skips");
+    ResetPlayState();
+    TrackId finished = AddTestTrack("Finished", "Finny", "", 1, 1, 200, true);
+    TrackId unheard = AddTestTrack("Unheard", "Newbie", "", 1, 1, 200, true);
+    TrackId skipped = AddTestTrack("Skipped", "Skippy", "", 1, 1, 200, true);
+    for (int i = 0; i < 10; ++i) LogPlay(skipped, LocalAt(2026, 2, 1, 12, i), 5, false, true);
+    for (int i = 0; i < 2; ++i) LogPlay(finished, LocalAt(2026, 2, 2, 12, i), 200, true, false);
+    g_lib.Touch();
+    auto plays = score({finished, unheard, skipped}, kInvalidTrack, LocalAt(2026, 2, 3, 12));
+    Check(plays.size() == 3 && plays[0] > plays[1] && plays[1] > plays[2],
+          L"a finished song beats an unheard one, and an unheard one beats early skips (%.3f, %.3f, %.3f)",
+          plays.size() == 3 ? plays[0] : 0, plays.size() == 3 ? plays[1] : 0, plays.size() == 3 ? plays[2] : 0);
+
+    batch.Next(L"coming back on later days outweighs the same number of plays in one sitting");
+    ResetPlayState();
+    TrackId loyal = AddTestTrack("Loyal", "Lana", "Days", 1, 1, 180, true);
+    TrackId binge = AddTestTrack("Binge", "Lana", "Days", 1, 2, 180, true);
+    for (int i = 0; i < 5; ++i) LogPlay(loyal, LocalAt(2026, 4, 1 + i, 15), 180, true, false);
+    for (int i = 0; i < 5; ++i) LogPlay(binge, LocalAt(2026, 4, 10, 15, i), 180, true, false);
+    g_lib.Touch();
+    auto days = score({loyal, binge}, kInvalidTrack, LocalAt(2026, 4, 11, 12));
+    Check(days.size() == 2 && days[0] > days[1] * 1.8,
+          L"five days of a song outweigh five plays on one day (%.3f vs %.3f)",
+          days.size() == 2 ? days[0] : 0, days.size() == 2 ? days[1] : 0);
+
+    batch.Next(L"an artist heard through at night but skipped by day leads at night, and the reverse by day");
+    ResetPlayState();
+    TrackId nightPlay = AddTestTrack("Night play", "Ann", "Nights", 1, 1, 200, true);
+    TrackId dayPlay = AddTestTrack("Day play", "Bob", "Days", 1, 1, 200, true);
+    TrackId nightNew = AddTestTrack("Night new", "Ann", "Nights", 1, 2, 200, true);
+    TrackId dayNew = AddTestTrack("Day new", "Bob", "Days", 1, 2, 200, true);
+    for (int day = 1; day <= 3; ++day) {
+        LogSitting(LocalAt(2026, 3, day, 14), {{dayPlay, 200}, {nightPlay, 5}, {dayPlay, 200}});
+        LogSitting(LocalAt(2026, 3, day, 22), {{nightPlay, 200}, {dayPlay, 5}, {nightPlay, 200}});
+    }
+    g_lib.Touch();
+    auto atNight = score({nightNew, dayNew}, kInvalidTrack, LocalAt(2026, 3, 5, 22));
+    auto atDay = score({nightNew, dayNew}, kInvalidTrack, LocalAt(2026, 3, 5, 14));
+    Check(atNight.size() == 2 && atNight[0] > atNight[1] * 1.25,
+          L"at night an unheard song by the night artist wins (%.3f vs %.3f)",
+          atNight.size() == 2 ? atNight[0] : 0, atNight.size() == 2 ? atNight[1] : 0);
+    Check(atDay.size() == 2 && atDay[1] > atDay[0] * 1.25,
+          L"by day an unheard song by the day artist wins (%.3f vs %.3f)",
+          atDay.size() == 2 ? atDay[1] : 0, atDay.size() == 2 ? atDay[0] : 0);
+
+    batch.Next(L"an artist whose songs you finish beats one you only hear more of");
+    ResetPlayState();
+    std::vector<TrackId> big;
+    for (int i = 0; i < 6; ++i) big.push_back(AddTestTrack(("Big " + std::to_string(i)).c_str(), "Big", "", 1, 1, 200, true));
+    TrackId fewSong = AddTestTrack("Small", "Small", "", 1, 1, 200, true);
+    TrackId bigNew = AddTestTrack("Big new", "Big", "", 1, 1, 200, true);
+    TrackId smallNew = AddTestTrack("Small new", "Small", "", 1, 1, 200, true);
+    // Six songs heard once each, half of them skipped, against one song finished twice. Totals would
+    // favor Big for owning more; per listen, Small does better.
+    LogSitting(LocalAt(2026, 3, 10, 15), {{big[0], 200}, {big[1], 5}, {big[2], 200}, {fewSong, 200}});
+    LogSitting(LocalAt(2026, 3, 11, 15), {{big[3], 5}, {big[4], 200}, {big[5], 5}, {fewSong, 200}});
+    g_lib.Touch();
+    auto owned = score({bigNew, smallNew}, kInvalidTrack, LocalAt(2026, 3, 12, 15));
+    Check(owned.size() == 2 && owned[1] > owned[0] * 1.2,
+          L"the artist finished more often wins over the one with more songs (%.3f vs %.3f)",
+          owned.size() == 2 ? owned[1] : 0, owned.size() == 2 ? owned[0] : 0);
+
+    batch.Next(L"Keep playing like this follows a song you actually played next");
+    ResetPlayState();
+    TrackId from = AddTestTrack("From", "Ada", "", 1, 1, 200, true);
+    TrackId followed = AddTestTrack("Followed", "Bea", "", 1, 1, 200, true);
+    TrackId other = AddTestTrack("Other", "Cy", "", 1, 1, 200, true);
+    // The same gaps the play log's radio test counts as two transitions, in the afternoon so time of
+    // day does not also favor one of them. The third song's two plays sit outside those gaps.
+    const uint32_t t0 = LocalAt(2026, 5, 4, 15);
+    LogPlay(from, t0, 200, true, false);
+    LogPlay(followed, t0 + 200, 200, true, false);
+    LogPlay(from, t0 + 400, 200, true, false);
+    LogPlay(followed, t0 + 600, 200, true, false);
+    LogPlay(other, t0 + 5000, 200, true, false);
+    LogPlay(other, t0 + 5400, 200, true, false);
+    g_lib.Touch();
+    auto hops = score({followed, other}, from, t0 + 6000);
+    Check(hops.size() == 2 && hops[0] > hops[1] * 2,
+          L"a song that followed this one twice ranks above one that never did (%.3f vs %.3f)",
+          hops.size() == 2 ? hops[0] : 0, hops.size() == 2 ? hops[1] : 0);
+
+    batch.Next(L"the next track of the same album ranks above an unrelated song");
+    ResetPlayState();
+    TrackId first = AddTestTrack("First", "Ada", "Album", 1, 1, 200, true);
+    TrackId second = AddTestTrack("Second", "Ada", "Album", 1, 2, 200, true);
+    TrackId elsewhere = AddTestTrack("Elsewhere", "Bea", "Other", 1, 1, 200, true);
+    auto album = score({second, elsewhere}, first, afternoon);
+    Check(album.size() == 2 && album[0] > album[1] * 2,
+          L"the next track on the album ranks above an unrelated song (%.3f vs %.3f)",
+          album.size() == 2 ? album[0] : 0, album.size() == 2 ? album[1] : 0);
+
+    batch.Next(L"ReplayGain loudness and dynamics pull the next song toward the one playing");
+    ResetPlayState();
+    TrackId quietSeed = AddTestTrack("Quiet seed", "Que", "", 1, 1, 200, true);
+    TrackId quiet = AddTestTrack("Quiet", "Match", "", 1, 1, 200, true);
+    TrackId hot = AddTestTrack("Hot", "Hotty", "", 1, 1, 200, true);
+    g_lib[quietSeed].rgTrackGain = 700;
+    g_lib[quietSeed].rgHigh = 36;
+    g_lib[quiet].rgTrackGain = 700;
+    g_lib[quiet].rgHigh = 36;
+    g_lib[hot].rgTrackGain = -900;
+    g_lib[hot].rgHigh = 3;
+    g_lib.Touch();
+    auto gain = score({quiet, hot}, quietSeed, afternoon);
+    Check(gain.size() == 2 && gain[0] > gain[1] * 1.4,
+          L"a song at the same loudness and dynamics beats a hot master (%.3f vs %.3f)",
+          gain.size() == 2 ? gain[0] : 0, gain.size() == 2 ? gain[1] : 0);
+
+    batch.Next(L"a bright song prefers another bright song over a bass-heavy one");
+    ResetPlayState();
+    TrackId brightSeed = AddTestTrack("Bright seed", "Ada", "", 1, 1, 200, true);
+    TrackId bright = AddTestTrack("Bright", "Bea", "", 1, 1, 200, true);
+    TrackId bassy = AddTestTrack("Bassy", "Cy", "", 1, 1, 200, true);
+    Peaks airy = FlatMood(8, 30, 230), low = FlatMood(230, 30, 8);
+    NoteMood(brightSeed, airy);
+    NoteMood(bright, airy);
+    NoteMood(bassy, low);
+    auto mood = score({bright, bassy}, brightSeed, afternoon);
+    Check(mood.size() == 2 && mood[0] > mood[1] * 1.6,
+          L"a bright song prefers another bright song (%.3f vs %.3f)",
+          mood.size() == 2 ? mood[0] : 0, mood.size() == 2 ? mood[1] : 0);
+
+    batch.Next(L"rewinding into a passage lifts that song before it counts as a play");
+    ResetPlayState();
+    TrackId replayed = AddTestTrack("Replayed", "Pat", "Parts", 1, 1, 200, true);
+    TrackId plain = AddTestTrack("Plain", "Pat", "Parts", 1, 2, 200, true);
+    ObservePlayback(replayed, 40, 20, 200);
+    auto parts = score({replayed, plain}, kInvalidTrack, afternoon);
+    Check(parts.size() == 2 && parts[0] > parts[1] * 1.5,
+          L"rewinding into a passage lifts that song (%.3f vs %.3f)",
+          parts.size() == 2 ? parts[0] : 0, parts.size() == 2 ? parts[1] : 0);
+
+    batch.Next(L"leaving a song partway gives it no favorite part and counts for less than finishing");
+    ResetPlayState();
+    TrackId leftEarly = AddTestTrack("Left early", "Lee", "", 1, 1, 200, true);
+    TrackId heardOut = AddTestTrack("Heard out", "Dot", "", 1, 1, 200, true);
+    TrackId notYet = AddTestTrack("Not yet", "Nia", "", 1, 1, 200, true);
+    TrackId after = AddTestTrack("After", "Ned", "", 1, 1, 200, true);
+    for (double at = 0; at < 45; at += 0.25) ObservePlayback(leftEarly, at, at + 0.25, 200);
+    const uint32_t stopDay = LocalAt(2026, 7, 1, 15);
+    LogSitting(stopDay, {{heardOut, 200}, {leftEarly, 45}, {after, 200}});
+    g_lib.Touch();
+    auto stopped = score({leftEarly, heardOut, notYet}, kInvalidTrack, stopDay + 3600);
+    Check(CurrentTaste().parts.empty() && stopped.size() == 3 && stopped[1] > stopped[0] &&
+              stopped[0] <= stopped[2] * 1.001,
+          L"45 seconds of a song marks no part and ranks below finishing it (%.3f vs %.3f; unheard %.3f)",
+          stopped.size() == 3 ? stopped[0] : 0, stopped.size() == 3 ? stopped[1] : 0, stopped.size() == 3 ? stopped[2] : 0);
+
+    batch.Next(L"a skip that ended the listening is not held against the song");
+    ResetPlayState();
+    TrackId lastOne = AddTestTrack("Last one", "Lou", "", 1, 1, 200, true);
+    TrackId midway = AddTestTrack("Midway", "Mo", "", 1, 1, 200, true);
+    TrackId untouched = AddTestTrack("Untouched", "Fay", "", 1, 1, 200, true);
+    TrackId filler = AddTestTrack("Filler", "Fil", "", 1, 1, 200, true);
+    // Each sitting ends on a skip of the same song: Stop, closing the player or shutting down.
+    for (int day = 1; day <= 3; ++day)
+        LogSitting(LocalAt(2026, 8, day, 15), {{filler, 200}, {midway, 5}, {filler, 200}, {lastOne, 5}});
+    g_lib.Touch();
+    auto ended = score({lastOne, midway, untouched}, kInvalidTrack, LocalAt(2026, 8, 5, 15));
+    auto endedPlain = ListeningWeights({lastOne, midway, untouched});
+    Check(ended.size() == 3 && ended[0] == ended[2] && ended[1] < ended[2] && endedPlain[0] == endedPlain[2] &&
+              endedPlain[1] < endedPlain[2],
+          L"skips that ended each sitting leave a song level with an unheard one (%.3f vs %.3f; mid-sitting %.3f)",
+          ended.size() == 3 ? ended[0] : 0, ended.size() == 3 ? ended[2] : 0, ended.size() == 3 ? ended[1] : 0);
+
+    batch.Next(L"a skip in a run of skips counts for less than one right after a song that was heard");
+    ResetPlayState();
+    TrackId inRun = AddTestTrack("In a run", "Bea", "", 1, 1, 200, true);
+    TrackId rightAfter = AddTestTrack("Right after", "Pip", "", 1, 1, 200, true);
+    std::vector<TrackId> others;
+    for (int i = 0; i < 6; ++i)
+        others.push_back(AddTestTrack(("Other " + std::to_string(i)).c_str(), ("Oz " + std::to_string(i)).c_str(), "", 1, 1,
+                                      200, true));
+    LogSitting(LocalAt(2026, 9, 1, 15), {{others[0], 200}, {others[1], 200}, {others[2], 200}, {others[3], 200}});
+    LogSitting(LocalAt(2026, 9, 2, 15), {{others[4], 5}, {others[5], 5}, {others[0], 5}, {inRun, 5}, {others[1], 200}});
+    LogSitting(LocalAt(2026, 9, 3, 15), {{others[2], 200}, {rightAfter, 5}, {others[3], 200}});
+    g_lib.Touch();
+    auto runs = score({inRun, rightAfter}, kInvalidTrack, LocalAt(2026, 9, 4, 15));
+    auto runsPlain = ListeningWeights({inRun, rightAfter});
+    Check(runs.size() == 2 && runs[0] > runs[1] * 1.1 && runsPlain[0] > runsPlain[1] * 1.1,
+          L"the skip while hunting weighs less (%.3f vs %.3f; taste off %.3f vs %.3f)", runs.size() == 2 ? runs[0] : 0,
+          runs.size() == 2 ? runs[1] : 0, runsPlain.size() == 2 ? runsPlain[0] : 0, runsPlain.size() == 2 ? runsPlain[1] : 0);
+
+    batch.Next(L"a song is judged against songs of its genre in the same moments");
+    ResetPlayState();
+    std::vector<TrackId> rock, calm;
+    for (int i = 0; i < 4; ++i) {
+        rock.push_back(AddTestTrack(("Rock " + std::to_string(i)).c_str(), ("Rocker " + std::to_string(i)).c_str(), "", 1, 1,
+                                    200, true));
+        calm.push_back(AddTestTrack(("Calm " + std::to_string(i)).c_str(), ("Drifter " + std::to_string(i)).c_str(), "", 1, 1,
+                                    200, true));
+    }
+    TrackId rockTest = AddTestTrack("Rock test", "Rock tester", "", 1, 1, 200, true);
+    TrackId calmTest = AddTestTrack("Calm test", "Calm tester", "", 1, 1, 200, true);
+    for (TrackId id : rock) g_lib[id].genre = g_lib.Intern("Rock");
+    for (TrackId id : calm) g_lib[id].genre = g_lib.Intern("Ambient");
+    g_lib[rockTest].genre = g_lib.Intern("Rock");
+    g_lib[calmTest].genre = g_lib.Intern("Ambient");
+    // After rock, rock is heard and ambient is skipped. Both test songs then get one skip and one
+    // finish there: normal for an ambient song, out of character for a rock one.
+    for (int day = 1; day <= 4; ++day)
+        LogSitting(LocalAt(2026, 10, day, 15), {{rock[day % 4], 200}, {calm[day % 4], 5}, {rock[(day + 1) % 4], 200},
+                                                {rock[(day + 2) % 4], 200}, {calm[(day + 1) % 4], 5}, {rock[(day + 3) % 4], 200}});
+    LogSitting(LocalAt(2026, 10, 5, 15), {{rock[0], 200}, {calmTest, 5}, {rock[1], 200}, {rockTest, 5}, {rock[2], 200},
+                                          {calmTest, 200}, {rock[3], 200}, {rockTest, 200}});
+    g_lib.Touch();
+    auto kinds = score({calmTest, rockTest}, kInvalidTrack, LocalAt(2026, 10, 6, 15));
+    Check(kinds.size() == 2 && kinds[0] > kinds[1] * 1.2,
+          L"the same skip and finish weigh for the ambient song and against the rock one (%.3f vs %.3f)",
+          kinds.size() == 2 ? kinds[0] : 0, kinds.size() == 2 ? kinds[1] : 0);
+
+    batch.Next(L"a shuffle by taste keeps a plain slice of the draw; Keep playing like this does not");
+    ResetPlayState();
+    TrackId favorite = AddTestTrack("Favorite", "Fran", "", 1, 1, 200, true);
+    TrackId passedOver = AddTestTrack("Passed over", "Pat", "", 1, 1, 200, true);
+    TrackId spacer = AddTestTrack("Spacer", "Sid", "", 1, 1, 200, true);
+    g_lib[favorite].rating = 100;
+    for (int day = 1; day <= 12; ++day)
+        LogSitting(LocalAt(2026, 11, day, 15), {{spacer, 200}, {passedOver, 3}, {spacer, 200}});
+    g_lib.Touch();
+    const uint32_t sliceDay = LocalAt(2026, 11, 20, 15);
+    auto pure = score({favorite, passedOver}, kInvalidTrack, sliceDay);
+    auto mixed = OrderWeights(g_lib, {favorite, passedOver}, kInvalidTrack, sliceDay, true);
+    double pureShare = pure.size() == 2 ? pure[1] / (pure[0] + pure[1]) : 0;
+    double mixedShare = mixed.size() == 2 ? mixed[1] / (mixed[0] + mixed[1]) : 0;
+    Check(pureShare < kPlainShare / 2 && mixedShare >= kPlainShare / 2 - 1e-9,
+          L"the passed-over song keeps a plain share of the draw (%.3f, from %.3f)", mixedShare, pureShare);
+    Check(OrderWeights(g_lib, {favorite, passedOver}, spacer, sliceDay, true) ==
+              score({favorite, passedOver}, spacer, sliceDay),
+          L"Keep playing like this keeps its own weights");
+
+    batch.Next(L"the songs just played make another by that artist less likely");
+    ResetPlayState();
+    TrackId heard = AddTestTrack("Heard", "Ann", "Session", 1, 1, 200, true);
+    TrackId again = AddTestTrack("Again", "Ann", "Session", 1, 2, 200, true);
+    TrackId someone = AddTestTrack("Someone", "Bob", "Session", 1, 1, 200, true);
+    NoteSession(heard);
+    auto session = score({again, someone}, kInvalidTrack, afternoon);
+    Check(session.size() == 2 && session[1] > session[0] * 1.5,
+          L"after Ann, Bob outranks another Ann song (%.3f vs %.3f)",
+          session.size() == 2 ? session[1] : 0, session.size() == 2 ? session[0] : 0);
+
+    batch.Next(L"taste off still uses the play log's skip and transition weights");
+    ResetPlayState();
+    TrackId left = AddTestTrack("Left", "Ann", "", 1, 1, 200, true);
+    TrackId known = AddTestTrack("Known", "Bea", "", 1, 1, 200, true);
+    TrackId right = AddTestTrack("Right", "Cy", "", 1, 1, 200, true);
+    for (unsigned i = 0; i < 12; ++i) LogPlay(known, 1000 + i * 100, 5, false, true);
+    auto plainWeights = ListeningWeights({left, known, right});
+    auto ordered = OrderWeights(g_lib, {left, known, right}, kInvalidTrack, afternoon, false);
+    Check(plainWeights == ordered, L"taste off keeps the skip-aware weights");
+
+    batch.Next(L"rewinds and mood sketches survive a library save, and a bad section does not");
+    ResetPlayState();
+    TrackId seed = AddTestTrack("Seed", "Ada", "Kept", 1, 1, 200, true);
+    TrackId keptBright = AddTestTrack("Kept bright", "Bea", "Kept", 1, 1, 200, true);
+    TrackId keptHeavy = AddTestTrack("Kept heavy", "Cy", "Kept", 1, 1, 200, true);
+    TrackId keptReplay = AddTestTrack("Kept replay", "Dee", "Kept", 1, 1, 200, true);
+    TrackId keptPlain = AddTestTrack("Kept plain", "Eve", "Kept", 1, 1, 200, true);
+    NoteMood(seed, airy);
+    NoteMood(keptBright, airy);
+    NoteMood(keptHeavy, low);
+    ObservePlayback(keptReplay, 40, 20, 200);
+    const std::wstring seedPath = g_lib.Path(seed), brightPath = g_lib.Path(keptBright);
+    const std::wstring heavyPath = g_lib.Path(keptHeavy), replayPath = g_lib.Path(keptReplay);
+    const std::wstring plainPath = g_lib.Path(keptPlain);
+    std::vector<Playlist> playlists;
+    std::wstring error;
+    const std::wstring file = scratch + L"\\taste.cdb";
+    if (!Ready(SaveLibrary(file, playlists, &error), L"save a library with taste")) {
+        ResetPlayState();
+        return;
+    }
+    ClearTaste();
+    g_lib = Library();
+    if (!Ready(LoadLibrary(file, playlists), L"load a library with taste")) {
+        ResetPlayState();
+        return;
+    }
+    seed = g_lib.Find(seedPath);
+    keptBright = g_lib.Find(brightPath);
+    keptHeavy = g_lib.Find(heavyPath);
+    keptReplay = g_lib.Find(replayPath);
+    keptPlain = g_lib.Find(plainPath);
+    auto keptMood = score({keptBright, keptHeavy}, seed, afternoon);
+    auto keptParts = score({keptReplay, keptPlain}, kInvalidTrack, afternoon);
+    Check(keptMood.size() == 2 && keptMood[0] > keptMood[1] * 1.6 && keptParts.size() == 2 &&
+              keptParts[0] > keptParts[1] * 1.5,
+          L"a saved library still prefers the bright song and the rewound one (%.3f vs %.3f, %.3f vs %.3f)",
+          keptMood.size() == 2 ? keptMood[0] : 0, keptMood.size() == 2 ? keptMood[1] : 0,
+          keptParts.size() == 2 ? keptParts[0] : 0, keptParts.size() == 2 ? keptParts[1] : 0);
+
+    batch.Next(L"compaction moves a rewind onto the track's new id");
+    ResetPlayState();
+    TrackId oldFirst = AddTestTrack("Old first", "Pat", "Remap", 1, 1, 200, true);
+    TrackId oldSecond = AddTestTrack("Old second", "Pat", "Remap", 1, 2, 200, true);
+    ObservePlayback(oldFirst, 40, 20, 200);
+    RemapTaste({oldSecond, oldFirst});
+    auto remapped = score({oldFirst, oldSecond}, kInvalidTrack, afternoon);
+    Check(remapped.size() == 2 && remapped[1] > remapped[0] * 1.5,
+          L"after remapping, the rewind belongs to the new id (%.3f vs %.3f)",
+          remapped.size() == 2 ? remapped[1] : 0, remapped.size() == 2 ? remapped[0] : 0);
+
+    std::string broken;
+    ByteWriter writer(broken);
+    writer.U(2);
+    writer.U(0);
+    for (int i = 0; i < 8; ++i) writer.U(1);
+    writer.U(0);
+    for (int i = 0; i < 8; ++i) writer.U(1);
+    writer.U(0);
+    std::string empty = EncodeTaste({}, {0});
+    std::string extra = empty;
+    extra.push_back('\x1');
+    Check(DecodeTaste(empty, 1, nullptr, nullptr) && !DecodeTaste(extra, 1, nullptr, nullptr) &&
+              !DecodeTaste(broken, 4, nullptr, nullptr),
+          L"an empty taste section loads, and trailing bytes or a repeated row reject it");
+    std::string brokenParts = broken.substr(0, broken.size() - 1);  // the same two rows, no mood list
+    std::string emptyParts = EncodeTasteParts({}, {0});
+    std::string extraParts = emptyParts + '\x1';
+    Check(DecodeTasteParts(emptyParts, 1, nullptr, nullptr) && !DecodeTasteParts(extraParts, 1, nullptr, nullptr) &&
+              !DecodeTasteParts(brokenParts, 4, nullptr, nullptr),
+          L"an empty part section loads, and trailing bytes or a repeated row reject it");
+    // Part rows in the taste section date from when plain listening filled them; they are dropped.
+    std::string legacy;
+    ByteWriter legacyWriter(legacy);
+    legacyWriter.U(1);
+    legacyWriter.U(0);
+    for (int i = 0; i < 8; ++i) legacyWriter.U(i ? 0 : 900);
+    legacyWriter.U(1);
+    legacyWriter.U(0);
+    for (int value : {10, 20, 30, 40, 50, 60}) legacyWriter.U(value);
+    TasteState legacyState;
+    Check(DecodeTaste(legacy, 1, nullptr, &legacyState) && legacyState.parts.empty() && legacyState.moods.size() == 1,
+          L"an older taste section keeps its mood sketch and drops its listening-filled part bins");
+    ResetPlayState();
 }
 }  // namespace
 
@@ -434,8 +830,18 @@ void TestListeningModel() {
     batch.Next(L"compaction rebuilds radio transitions with remapped track IDs");
     RemapPlayLog({2, 0, 1, UINT32_MAX});
     Check(ListeningWeights({0, 1}, 2)[0] == 17, L"compaction rebuilds radio transitions with remapped track IDs");
+    batch.Next(L"a skip that ended the listening lowers nothing until another listen follows it");
+    SetPlayLog({{0, 1000, 200, PlayEvent::kCounted}, {1, 1205, 5, PlayEvent::kSkip}, {0, 1407, 200, PlayEvent::kCounted},
+                {2, 1612, 5, PlayEvent::kSkip}});
+    auto ending = ListeningWeights({1, 2});
+    LogPlay(3, 1900, 200, true, false);
+    auto followed = ListeningWeights({1, 2});
+    Check(ending[0] < 1 && ending[1] == 1 && followed[1] < 1,
+          L"the last skip counts only once something follows it (%.3f, then %.3f)", ending[1], followed[1]);
     SetPlayLog(std::move(original));
 }
+
+void TestTaste(const std::wstring& scratch) { TestTasteImpl(scratch); }
 
 void TestPlayLog(const std::wstring& scratch) {
     testlog::Batch batch;

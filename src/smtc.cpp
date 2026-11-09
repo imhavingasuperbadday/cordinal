@@ -66,13 +66,15 @@ Foundation::TimeSpan SpanOf(double seconds) {
     return span;
 }
 
-// The flyout takes a stream, so the bytes go into an in-memory stream first.
+// The flyout takes a stream, so the bytes go into an in-memory stream first. The stream keeps them
+// for as long as the track plays and grows by doubling, so it is sized to the image before the
+// write: unsized, a 1.4 MB cover held 2.9 MB.
 bool SetThumbnail(Media::ISystemMediaTransportControlsDisplayUpdater* updater, const std::string& bytes) {
     ComPtr<IInspectable> insp;
     ComPtr<Streams::IRandomAccessStream> stream;
     if (FAILED(RoActivateInstance(
             HStringReference(RuntimeClass_Windows_Storage_Streams_InMemoryRandomAccessStream).Get(), &insp)) ||
-        FAILED(insp.As(&stream)))
+        FAILED(insp.As(&stream)) || FAILED(stream->put_Size(bytes.size())))
         return false;
     {
         ComPtr<IStream> view;

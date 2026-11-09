@@ -1,6 +1,8 @@
 // CDP1 PE64 startup: decode into RW pages, restore Windows linkage, then make code executable.
-// An EXE decodes its chunks on several threads at the entry point; a DLL, or an EXE on one core,
-// decodes them in turn (spec.md, "Chunks and threads").
+// An EXE decodes its eager chunks on several threads at the entry point; a DLL, or an EXE on one
+// core, decodes them in turn (spec.md, "Chunks and threads"). Code the profile marked cold stays
+// inaccessible and is decoded by the vectored handler on its first fault (spec.md, "Code decoded
+// on demand").
 #include "../decoder/stream.h"
 #include "../filter.h"
 
@@ -35,6 +37,14 @@ using CreateThread = Status (*)(void *, void *, uint8_t, uint32_t, size_t, size_
 using Wait = Status (*)(void *, uint8_t, void *);
 using Close = Status (*)(void *);
 using ExitThread = void (*)(Status);
+using Allocate = Status (*)(void *, void **, uintptr_t, size_t *, uint32_t, uint32_t);
+using Free = Status (*)(void *, void **, size_t *, uint32_t);
+using AddHandler = void *(*)(uint32_t, void *);
+using Suspend = Status (*)(void *, uint32_t *);
+using NextThread = Status (*)(void *, void *, uint32_t, uint32_t, uint32_t, void **);
+using QueryThread = Status (*)(void *, uint32_t, void *, uint32_t, uint32_t *);
+using CreateEvent = Status (*)(void **, uint32_t, void *, uint32_t, uint8_t);
+using Signal = Status (*)(void *, uint32_t *);
 
 constexpr uint32_t name_hash(const char *text) {
     uint32_t hash = 2166136261;
@@ -88,6 +98,16 @@ struct Api {
     Wait wait;
     Close close;
     ExitThread exit_thread;
+    Allocate allocate;
+    Free free;
+    AddHandler add_handler;
+    Suspend suspend;
+    Suspend resume;
+    NextThread next_thread;
+    QueryThread query_thread;
+    CreateEvent create_event;
+    Signal signal_event;
+    Signal reset_event;
 };
 
 Api api() {
@@ -105,7 +125,17 @@ Api api() {
         reinterpret_cast<CreateThread>(exported(module, name_hash("RtlCreateUserThread"))),
         reinterpret_cast<Wait>(exported(module, name_hash("NtWaitForSingleObject"))),
         reinterpret_cast<Close>(exported(module, name_hash("NtClose"))),
-        reinterpret_cast<ExitThread>(exported(module, name_hash("RtlExitUserThread")))};
+        reinterpret_cast<ExitThread>(exported(module, name_hash("RtlExitUserThread"))),
+        reinterpret_cast<Allocate>(exported(module, name_hash("NtAllocateVirtualMemory"))),
+        reinterpret_cast<Free>(exported(module, name_hash("NtFreeVirtualMemory"))),
+        reinterpret_cast<AddHandler>(exported(module, name_hash("RtlAddVectoredExceptionHandler"))),
+        reinterpret_cast<Suspend>(exported(module, name_hash("NtSuspendThread"))),
+        reinterpret_cast<Suspend>(exported(module, name_hash("NtResumeThread"))),
+        reinterpret_cast<NextThread>(exported(module, name_hash("NtGetNextThread"))),
+        reinterpret_cast<QueryThread>(exported(module, name_hash("NtQueryInformationThread"))),
+        reinterpret_cast<CreateEvent>(exported(module, name_hash("NtCreateEvent"))),
+        reinterpret_cast<Signal>(exported(module, name_hash("NtSetEvent"))),
+        reinterpret_cast<Signal>(exported(module, name_hash("NtResetEvent")))};
 }
 
 [[noreturn]] void fail(const Api &calls, unsigned reason) {
@@ -156,6 +186,65 @@ Native native(const Api &calls, const cdp::Header *header) {
             cdp::read64(optional + 24), (cdp::read16(bytes + pe + 22) & 0x2000) != 0};
 }
 
+const cdp::Chunk *chunk_table(const cdp::Header *header) {
+    const auto *bytes = reinterpret_cast<const Byte *>(header);
+    return reinterpret_cast<const cdp::Chunk *>(bytes + header->metadata_bytes -
+                                                header->extent_count * sizeof(cdp::Extent) -
+                                                header->chunk_count * sizeof(cdp::Chunk));
+}
+
+const cdp::Extent *extent_table(const cdp::Header *header) {
+    const auto *bytes = reinterpret_cast<const Byte *>(header);
+    return reinterpret_cast<const cdp::Extent *>(bytes + header->metadata_bytes -
+                                                 header->extent_count * sizeof(cdp::Extent));
+}
+
+// The chunk whose extents cover `offset` (relative to memory_rva), or UINT32_MAX.
+uint32_t extent_owner(const cdp::Header *header, uint32_t offset) {
+    const cdp::Extent *extents = extent_table(header);
+    uint32_t low = 0, high = header->extent_count;
+    while (low < high) {
+        const uint32_t middle = low + (high - low) / 2;
+        if (extents[middle].offset <= offset)
+            low = middle + 1;
+        else
+            high = middle;
+    }
+    if (!low)
+        return UINT32_MAX;
+    const cdp::Extent &extent = extents[low - 1];
+    return offset - extent.offset < extent.bytes ? extent.chunk : UINT32_MAX;
+}
+
+// Where `offset` (relative to memory_rva) lands in a decoding chunk's scratch buffer.
+uint32_t scratch_offset(const cdp::Header *header, uint32_t chunk, uint32_t offset) {
+    const cdp::Extent *extents = extent_table(header);
+    uint32_t at = 0;
+    for (uint32_t i = 0; i < header->extent_count; ++i) {
+        if (extents[i].chunk != chunk)
+            continue;
+        if (offset - extents[i].offset < extents[i].bytes)
+            return at + offset - extents[i].offset;
+        at += extents[i].bytes;
+    }
+    return UINT32_MAX;
+}
+
+bool code_section(const Native &old, uint32_t rva) {
+    for (unsigned i = 0; i < old.count; ++i) {
+        const Byte *section = old.sections + i * 40;
+        const uint32_t at = cdp::read32(section + 12), bytes = cdp::read32(section + 16);
+        if ((cdp::read32(section + 36) & 0x20000000) && at <= rva && rva < at + bytes)
+            return true;
+    }
+    return false;
+}
+
+void copy_bytes(Byte *to, const Byte *from, size_t bytes) {
+    for (size_t i = 0; i < bytes; ++i)
+        to[i] = from[i];
+}
+
 const cdp::Header *metadata(Byte *base, const Api &calls) {
     const auto *optional = base + cdp::read32(base + 60) + 24;
     const uint32_t size = cdp::read32(optional + 56);
@@ -163,7 +252,8 @@ const cdp::Header *metadata(Byte *base, const Api &calls) {
         cdp_anchor.metadata_bytes < sizeof(cdp::Header))
         fail(calls, 5);
     const auto *header = reinterpret_cast<const cdp::Header *>(base + cdp_anchor.metadata);
-    if (!header->chunk_count || header->chunk_count > cdp::max_chunks ||
+    if (!header->chunk_count || header->chunk_count > cdp::max_chunks || !header->extent_count ||
+        header->extent_count > cdp::max_extents ||
         !extent(cdp_anchor.workspace, 4096 + header->chunk_count * cdp::workspace_slot, size))
         fail(calls, 5);
     if (cdp::read64(header->magic) != UINT64_C(0x00314b4341504443) || header->version != cdp::version ||
@@ -171,19 +261,26 @@ const cdp::Header *metadata(Byte *base, const Api &calls) {
         cdp::adler32(reinterpret_cast<const Byte *>(header), header->metadata_bytes,
                      offsetof(cdp::Header, metadata_adler)) != header->metadata_adler)
         fail(calls, 6);
+    const size_t tables = size_t(header->chunk_count) * sizeof(cdp::Chunk) +
+                          size_t(header->extent_count) * sizeof(cdp::Extent);
     if (!header->memory_rva || header->memory_rva % 4096 || !header->memory_bytes ||
         header->memory_bytes > 128 * 1024 * 1024 ||
         !extent(header->memory_rva, header->memory_bytes, cdp_anchor.metadata) ||
         !extent(cdp_anchor.metadata + header->compressed_offset, header->compressed_bytes, size) ||
         header->compressed_offset < header->metadata_bytes ||
         !extent(sizeof(cdp::Header), header->native_header_bytes, header->metadata_bytes) ||
-        header->copy_count > 4096 || header->gap_count > 97)
+        header->metadata_bytes < sizeof(cdp::Header) + tables || header->copy_count > 4096 ||
+        header->gap_count > 97)
         fail(calls, 7);
     return header;
 }
 
-void relocate(Byte *base, const Api &calls, const Native &old) {
+// Applies the image's DIR64 fixups. `selected` is a chunk index when its scratch is being decoded,
+// or UINT32_MAX at start-up, when every target outside a cold chunk is applied in the image.
+void relocate(Byte *base, const Api &calls, const cdp::Header *header, const Native &old,
+              uint32_t selected, Byte *scratch) {
     const uint64_t delta = uint64_t(reinterpret_cast<uintptr_t>(base)) - old.preferred;
+    const cdp::Chunk *chunks = chunk_table(header);
     uint32_t at = old.directory(5), bytes = old.directory_bytes(5);
     if (!extent(at, bytes, old.size) || (delta && !bytes))
         fail(calls, 8);
@@ -201,7 +298,21 @@ void relocate(Byte *base, const Api &calls, const Native &old) {
             const uint32_t target = page + (entry & 4095);
             if ((entry >> 12) != 10 || !extent(target, 8, old.size))
                 fail(calls, 11);
-            cdp::write64(base + target, cdp::read64(base + target) + delta);
+            const uint32_t offset = target - header->memory_rva;
+            if (scratch) {
+                const uint32_t place = scratch_offset(header, selected, offset);
+                if (place == UINT32_MAX)
+                    continue;
+                cdp::write64(scratch + place, cdp::read64(scratch + place) + delta);
+            } else {
+                const uint32_t owner = extent_owner(header, offset);
+                if (owner == UINT32_MAX)
+                    fail(calls, 41);
+                // A cold chunk applies its own fixups when it is decoded.
+                if (chunks[owner].flags & cdp::lazy)
+                    continue;
+                cdp::write64(base + target, cdp::read64(base + target) + delta);
+            }
         }
         at += block;
     }
@@ -271,59 +382,193 @@ void imports(Byte *base, const Api &calls, const Native &old) {
 }
 
 // The workspace's first page: initialization state, the reserved argument a deferred EXE TLS
-// callback received, and the chunk counter and failure flag the decoding threads share.
+// callback received, and what the threads decoding cold code share. The suspended thread handles
+// live here too, off the stack of whichever thread faults.
 struct State {
     uint32_t phase;  // 0 not started, 1 initializing, 2 done
     uint32_t next_chunk;
     uint32_t failed;
     uint32_t pad;
     void *reserved;
+    uint32_t lock;        // 0 free, 1 held while one cold chunk is decoded
+    uint32_t owner;       // thread that holds the lock, so a fault inside the decode passes on
+    uint32_t eager;       // chunks [0, eager) decode at start-up; the rest are cold
+    uint32_t decoded[2];  // bitset: cold chunks already copied into the image
+    void *event;          // manual-reset; set whenever a cold decode ends
+    uint32_t suspended;
+    uint32_t pad2;
+    void *threads[480];
 };
 static_assert(sizeof(State) <= 4096 && sizeof(cdp::Models) <= cdp::workspace_slot);
 
 State *state_of(Byte *base) { return reinterpret_cast<State *>(base + cdp_anchor.workspace); }
 
-const cdp::Chunk *chunk_table(const Byte *header_bytes, const cdp::Header *header) {
-    return reinterpret_cast<const cdp::Chunk *>(header_bytes + header->metadata_bytes -
-                                                header->chunk_count * sizeof(cdp::Chunk));
+uint64_t current_thread() {
+    uint64_t id;
+    __asm__("movq %%gs:0x48,%0" : "=r"(id));
+    return id;
 }
 
-// Decodes, checks and unfilters one chunk with the model set in `slot`. Each chunk covers its own
-// share of every code section; the packer cut the image where the filter's scan stops anyway.
-bool decode_chunk(Byte *base, const cdp::Header *header, const Native &old, uint32_t index,
-                  uint32_t slot) {
-    const cdp::Chunk &chunk = chunk_table(reinterpret_cast<const Byte *>(header), header)[index];
+struct ThreadBasic {
+    int32_t status;
+    uint32_t pad;
+    void *teb;
+    void *process;
+    uint64_t thread;
+    uint64_t affinity;
+    int32_t priority, base;
+};
+
+// Decoding cold code copies whole pages. Every other thread is suspended across the protection
+// changes and the copy, so none can execute a half-written page or read one as data. A thread
+// suspended inside the kernel finishes its current system call first, so a lock it holds there
+// cannot block ours.
+void suspend_others(const Api &calls, State *state) {
+    state->suspended = 0;
+    const uint64_t self = current_thread();
+    void *key = nullptr;
+    bool kept = false;
+    for (unsigned i = 0; i < 8192; ++i) {
+        void *thread = nullptr;
+        const Status status = calls.next_thread(reinterpret_cast<void *>(intptr_t(-1)), key, 0x0800, 0,
+                                                0, &thread);
+        if (key && !kept)
+            calls.close(key);
+        key = thread;
+        kept = false;
+        if (status < 0 || !thread)
+            break;
+        ThreadBasic info;
+        uint32_t bytes = 0;
+        if (calls.query_thread(thread, 0, &info, sizeof(info), &bytes) < 0 || info.thread == self)
+            continue;
+        uint32_t previous = 0;
+        if (calls.suspend(thread, &previous) < 0)
+            continue;
+        // More threads than the state page can hold is not a case to copy through unsuspended.
+        if (state->suspended >= 480)
+            fail(calls, 40);
+        state->threads[state->suspended++] = thread;
+        kept = true;
+    }
+    if (key && !kept)
+        calls.close(key);
+}
+
+void resume_all(const Api &calls, State *state) {
+    for (uint32_t i = state->suspended; i; --i) {
+        void *thread = state->threads[i - 1];
+        uint32_t previous = 0;
+        calls.resume(thread, &previous);
+        calls.close(thread);
+    }
+    state->suspended = 0;
+}
+
+// One cold chunk decodes at a time. The event is manual-reset: every release sets it and every
+// acquirer clears it, so a thread that misses one wake-up sleeps until the next release.
+void lock_cold(const Api &calls, State *state) {
+    for (;;) {
+        uint32_t expected = 0;
+        if (__atomic_compare_exchange_n(&state->lock, &expected, 1, false, __ATOMIC_ACQUIRE,
+                                        __ATOMIC_RELAXED)) {
+            state->owner = uint32_t(current_thread());
+            calls.reset_event(state->event, nullptr);
+            return;
+        }
+        if (calls.wait(state->event, 0, nullptr) < 0)
+            fail(calls, 39);
+    }
+}
+
+void unlock_cold(const Api &calls, State *state) {
+    state->owner = 0;
+    calls.signal_event(state->event, nullptr);
+    __atomic_store_n(&state->lock, 0, __ATOMIC_RELEASE);
+}
+
+// One chunk of the image: decode it into a scratch buffer, check it, reverse the filter of each of
+// its extents and apply their relocations, then copy the extents into place. A cold chunk is
+// copied while the process's other threads are suspended, between making its pages writable and
+// executable again.
+bool load_chunk(Byte *base, const Api &calls, const cdp::Header *header, const Native &old,
+                uint32_t index, uint32_t slot) {
+    const cdp::Chunk &chunk = chunk_table(header)[index];
+    const cdp::Extent *extents = extent_table(header);
     auto *model = reinterpret_cast<cdp::Models *>(base + cdp_anchor.workspace + 4096 +
                                                   slot * cdp::workspace_slot);
-    Byte *output = base + header->memory_rva + chunk.output;
-    if (cdp_decode(reinterpret_cast<const Byte *>(header) + header->compressed_offset + chunk.input,
-                   chunk.input_bytes, output, chunk.output_bytes, model,
-                   cdp::workspace_slot) != cdp::DecodeStatus::ok ||
-        cdp::adler32(output, chunk.output_bytes) != chunk.adler)
+    size_t bytes = (size_t(chunk.output_bytes) + 4095) & ~size_t(4095);
+    void *scratch = nullptr;
+    if (!calls.allocate ||
+        calls.allocate(reinterpret_cast<void *>(intptr_t(-1)), &scratch, 0, &bytes, 0x3000, 4) < 0 ||
+        !scratch)
         return false;
-    const uint32_t low = header->memory_rva + chunk.output, high = low + chunk.output_bytes;
-    for (unsigned i = 0; i < old.count; ++i) {
-        const Byte *section = old.sections + i * 40;
-        if (!(cdp::read32(section + 36) & 0x20000000))
-            continue;
-        const uint32_t rva = cdp::read32(section + 12), end = rva + cdp::read32(section + 16);
-        const uint32_t begin = rva > low ? rva : low, stop = end < high ? end : high;
-        if (begin < stop)
-            cdp::filter_code(base + begin, stop - begin, begin, true);
+    auto *output = static_cast<Byte *>(scratch);
+    bool ok = cdp_decode(reinterpret_cast<const Byte *>(header) + header->compressed_offset + chunk.input,
+                         chunk.input_bytes, output, chunk.output_bytes, model,
+                         cdp::workspace_slot) == cdp::DecodeStatus::ok &&
+              cdp::adler32(output, chunk.output_bytes) == chunk.adler;
+    if (ok) {
+        uint32_t at = 0;
+        for (uint32_t i = 0; i < header->extent_count; ++i) {
+            const cdp::Extent &piece = extents[i];
+            if (piece.chunk != index)
+                continue;
+            const uint32_t rva = header->memory_rva + piece.offset;
+            if (code_section(old, rva))
+                cdp::filter_code(output + at, piece.bytes, rva, true);
+            at += piece.bytes;
+        }
+        const bool cold = (chunk.flags & cdp::lazy) != 0;
+        // An eager chunk's fixups wait for the start-up pass, which runs once the whole table is
+        // decoded; a cold chunk applies its own in the scratch, with the table already in place.
+        if (cold)
+            relocate(base, calls, header, old, index, output);
+        State *state = state_of(base);
+        if (cold) {
+            suspend_others(calls, state);
+            for (uint32_t i = 0; i < header->extent_count; ++i)
+                if (extents[i].chunk == index)
+                    permission(calls, base + header->memory_rva + extents[i].offset, extents[i].bytes, 4);
+        }
+        at = 0;
+        for (uint32_t i = 0; i < header->extent_count; ++i) {
+            const cdp::Extent &piece = extents[i];
+            if (piece.chunk != index)
+                continue;
+            copy_bytes(base + header->memory_rva + piece.offset, output + at, piece.bytes);
+            at += piece.bytes;
+        }
+        if (cold) {
+            for (uint32_t i = 0; i < header->extent_count; ++i)
+                if (extents[i].chunk == index)
+                    permission(calls, base + header->memory_rva + extents[i].offset, extents[i].bytes, 0x20);
+            for (uint32_t i = 0; i < header->extent_count; ++i)
+                if (extents[i].chunk == index &&
+                    (!calls.flush ||
+                     calls.flush(reinterpret_cast<void *>(intptr_t(-1)),
+                                 base + header->memory_rva + extents[i].offset, extents[i].bytes) < 0))
+                    ok = false;
+            resume_all(calls, state);
+        }
     }
-    return true;
+    size_t released = 0;
+    if (calls.free)
+        calls.free(reinterpret_cast<void *>(intptr_t(-1)), &scratch, &released, 0x8000);
+    return ok;
 }
 
-// Takes chunks until none is left. Any failure stops every thread at its next chunk.
-void take_chunks(Byte *base, const cdp::Header *header, const Native &old, uint32_t slot) {
+// Takes eager chunks until none is left. Any failure stops every thread at its next chunk.
+void take_chunks(Byte *base, const Api &calls, const cdp::Header *header, const Native &old,
+                 uint32_t slot) {
     State *state = state_of(base);
     for (;;) {
         if (__atomic_load_n(&state->failed, __ATOMIC_RELAXED))
             return;
         const uint32_t index = __atomic_fetch_add(&state->next_chunk, 1, __ATOMIC_RELAXED);
-        if (index >= header->chunk_count)
+        if (index >= state->eager)
             return;
-        if (!decode_chunk(base, header, old, index, slot))
+        if (!load_chunk(base, calls, header, old, index, slot))
             __atomic_store_n(&state->failed, 1, __ATOMIC_RELAXED);
     }
 }
@@ -334,37 +579,78 @@ Status chunk_worker(void *slot) {
     Byte *base = image_base();
     const Api calls = api();
     const auto *header = metadata(base, calls);
-    take_chunks(base, header, native(calls, header), uint32_t(uintptr_t(slot)));
+    take_chunks(base, calls, header, native(calls, header), uint32_t(uintptr_t(slot)));
     calls.exit_thread(0);
     __builtin_trap();
 }
 
-void decode_chunks(Byte *base, const Api &calls, const cdp::Header *header, const Native &old,
-                   bool parallel) {
-    const cdp::Chunk *chunks = chunk_table(reinterpret_cast<const Byte *>(header), header);
-    uint32_t output = 0, input = 0;
+// Checks the chunk and extent tables before any is used: eager chunks first, inputs contiguous,
+// extents page-aligned, sorted, non-overlapping, each chunk's extents adding up to its output.
+// Returns how many chunks decode at start-up.
+uint32_t validate_tables(const Api &calls, const cdp::Header *header) {
+    const cdp::Chunk *chunks = chunk_table(header);
+    const cdp::Extent *extents = extent_table(header);
+    uint32_t input = 0, cursor = 0, totals[cdp::max_chunks], eager = 0;
+    for (uint32_t i = 0; i < cdp::max_chunks; ++i)
+        totals[i] = 0;
+    bool cold = false;
     for (uint32_t i = 0; i < header->chunk_count; ++i) {
-        if (chunks[i].output != output || !chunks[i].output_bytes ||
-            !extent(output, chunks[i].output_bytes, header->memory_bytes) || chunks[i].input != input ||
-            !extent(input, chunks[i].input_bytes, header->compressed_bytes))
+        if ((chunks[i].flags & ~cdp::lazy) || !chunks[i].output_bytes || !chunks[i].input_bytes ||
+            chunks[i].input != input || !extent(input, chunks[i].input_bytes, header->compressed_bytes))
             fail(calls, 36);
-        output += chunks[i].output_bytes;
         input += chunks[i].input_bytes;
+        if (chunks[i].flags & cdp::lazy) {
+            cold = true;
+        } else if (cold) {
+            fail(calls, 36);
+        } else {
+            ++eager;
+        }
     }
-    if (output != header->memory_bytes || input != header->compressed_bytes)
+    if (input != header->compressed_bytes)
         fail(calls, 36);
+    for (uint32_t i = 0; i < header->extent_count; ++i) {
+        const cdp::Extent &piece = extents[i];
+        if (!piece.bytes || piece.bytes % 4096 || piece.offset % 4096 || piece.offset < cursor ||
+            !extent(piece.offset, piece.bytes, header->memory_bytes) ||
+            piece.chunk >= header->chunk_count)
+            fail(calls, 36);
+        cursor = piece.offset + piece.bytes;
+        totals[piece.chunk] += piece.bytes;
+    }
+    for (uint32_t i = 0; i < header->chunk_count; ++i)
+        if (totals[i] != chunks[i].output_bytes)
+            fail(calls, 36);
+    return eager;
+}
+
+// Damage in a cold chunk must stop the process before native code runs, so every stream is
+// checksummed up front; the decoded bytes are checked again when a chunk is decoded.
+void check_stream(const Api &calls, const cdp::Header *header) {
+    const cdp::Chunk *chunks = chunk_table(header);
+    const Byte *stream = reinterpret_cast<const Byte *>(header) + header->compressed_offset;
+    for (uint32_t i = 0; i < header->chunk_count; ++i)
+        if (cdp::adler32(stream + chunks[i].input, chunks[i].input_bytes) != chunks[i].input_adler)
+            fail(calls, 38);
+}
+
+// Decodes chunks [0, eager) on this thread and up to one worker per processor.
+void decode_eager(Byte *base, const Api &calls, const cdp::Header *header, const Native &old,
+                  bool parallel, uint32_t eager) {
     State *state = state_of(base);
+    state->eager = eager;
     state->next_chunk = 0;
     state->failed = 0;
-    // One thread per chunk up to the processors this process may use (PEB NumberOfProcessors).
     Byte *peb;
     __asm__("movq %%gs:0x60,%0" : "=r"(peb));
     const uint32_t processors = cdp::read32(peb + 0xb8);
-    uint32_t workers = header->chunk_count < processors ? header->chunk_count : processors;
+    uint32_t workers = eager < processors ? eager : processors;
     workers = parallel && workers > 1 && calls.create_thread && calls.wait && calls.close && calls.exit_thread
                   ? workers - 1
                   : 0;
-    void *threads[cdp::max_chunks] = {};
+    void *threads[cdp::max_chunks];
+    for (uint32_t i = 0; i < cdp::max_chunks; ++i)
+        threads[i] = nullptr;
     uint32_t started = 0;
     for (uint32_t i = 0; i < workers; ++i) {
         // A thread that cannot be created leaves its chunks to the others.
@@ -374,14 +660,70 @@ void decode_chunks(Byte *base, const Api &calls, const cdp::Header *header, cons
             threads[started])
             ++started;
     }
-    take_chunks(base, header, old, 0);
+    take_chunks(base, calls, header, old, 0);
     for (uint32_t i = 0; i < started; ++i) {
         if (calls.wait(threads[i], 0, nullptr) < 0)
             fail(calls, 37);
         calls.close(threads[i]);
     }
-    if (state->failed || state->next_chunk < header->chunk_count)
+    if (state->failed || state->next_chunk < eager)
         fail(calls, 23);
+}
+
+// Decodes a cold chunk exactly once. A thread that faults on a chunk another is already decoding
+// waits for it, and a fault on an already decoded chunk is none of ours.
+void decode_cold(Byte *base, const Api &calls, const cdp::Header *header, uint32_t index) {
+    State *state = state_of(base);
+    lock_cold(calls, state);
+    const uint32_t word = index >> 5, bit = 1u << (index & 31);
+    bool ok = (__atomic_load_n(&state->decoded[word], __ATOMIC_RELAXED) & bit) != 0;
+    if (!ok)
+        ok = load_chunk(base, calls, header, native(calls, header), index, 0);
+    if (ok)
+        __atomic_store_n(&state->decoded[word],
+                         __atomic_load_n(&state->decoded[word], __ATOMIC_RELAXED) | bit,
+                         __ATOMIC_RELAXED);
+    unlock_cold(calls, state);
+    if (!ok)
+        fail(calls, 23);
+}
+
+struct ExceptionRecord {
+    uint32_t code, flags;
+    void *record;
+    void *address;
+    uint32_t parameters, pad;
+    void *information[15];
+};
+struct ExceptionPointers {
+    ExceptionRecord *record;
+    void *context;
+};
+
+// A cold page starts inaccessible, so its first touch faults. This handler decodes the chunk and
+// lets the instruction run again, before any other handler or debugger sees the fault.
+int32_t cold_fault(ExceptionPointers *info) {
+    if (!info || !info->record || info->record->code != 0xC0000005 || info->record->parameters < 2)
+        return 0;  // EXCEPTION_CONTINUE_SEARCH
+    Byte *base = image_base();
+    const Api calls = api();
+    const auto *header = metadata(base, calls);
+    const auto address = reinterpret_cast<uintptr_t>(info->record->information[1]);
+    const auto start = reinterpret_cast<uintptr_t>(base);
+    if (address < start || address - start < header->memory_rva)
+        return 0;
+    const uintptr_t offset = address - start - header->memory_rva;
+    if (offset >= header->memory_bytes)
+        return 0;
+    const uint32_t index = extent_owner(header, uint32_t(offset));
+    if (index == UINT32_MAX || !(chunk_table(header)[index].flags & cdp::lazy))
+        return 0;
+    // A fault inside the decode itself is a real fault: waiting would hang instead of crashing.
+    const State *state = state_of(base);
+    if (state->lock && state->owner == uint32_t(current_thread()))
+        return 0;
+    decode_cold(base, calls, header, index);
+    return -1;  // EXCEPTION_CONTINUE_EXECUTION
 }
 
 // Returns true when this call restored the image, false when it was already restored.
@@ -408,7 +750,18 @@ bool initialize(Byte *base, const Api &calls, const cdp::Header *header, const N
         if (rva < header->memory_rva || !extent(rva, raw, old.size))
             fail(calls, 24);
     }
-    decode_chunks(base, calls, header, old, parallel);
+    const uint32_t eager = validate_tables(calls, header);
+    check_stream(calls, header);
+    // The fault path needs several system calls; without them every chunk decodes here, which is
+    // still correct but gives up the memory the cold pages save.
+    const bool cold = eager < header->chunk_count;
+    const bool able = calls.allocate && calls.free && calls.add_handler && calls.suspend &&
+                      calls.resume && calls.next_thread && calls.query_thread && calls.create_event &&
+                      calls.wait && calls.signal_event && calls.reset_event && calls.close;
+    if (cold && able && !state->event &&
+        calls.create_event(&state->event, 0x1f0003, nullptr, 0, 0) < 0)
+        fail(calls, 39);
+    decode_eager(base, calls, header, old, parallel, cold && able ? eager : header->chunk_count);
     size_t cursor = sizeof(cdp::Header) + header->native_header_bytes;
     for (unsigned i = 0; i < header->gap_count; ++i) {
         if (cursor > header->metadata_bytes || header->metadata_bytes - cursor < 8)
@@ -420,7 +773,8 @@ bool initialize(Byte *base, const Api &calls, const cdp::Header *header, const N
         cursor += bytes;
     }
     if (cursor > header->metadata_bytes ||
-        cursor + size_t(header->copy_count) * 12 + size_t(header->chunk_count) * sizeof(cdp::Chunk) !=
+        cursor + size_t(header->copy_count) * 12 + size_t(header->chunk_count) * sizeof(cdp::Chunk) +
+                size_t(header->extent_count) * sizeof(cdp::Extent) !=
             header->metadata_bytes)
         fail(calls, 26);
     const auto *copies = reinterpret_cast<const Byte *>(header) + cursor;
@@ -435,7 +789,7 @@ bool initialize(Byte *base, const Api &calls, const cdp::Header *header, const N
         for (uint32_t j = 0; j < bytes; ++j)
             base[destination + j] = base[source + j];
     }
-    relocate(base, calls, old);
+    relocate(base, calls, header, old, UINT32_MAX, nullptr);
     if (header->tls_index_rva)
         cdp::write32(base + header->tls_index_rva, tls_index);
     imports(base, calls, old);
@@ -460,8 +814,21 @@ bool initialize(Byte *base, const Api &calls, const cdp::Header *header, const N
                    : flags & 0x80000000 ? 4
                                         : 2);
     }
+    if (cold && able) {
+        // The handler must exist before a cold page can run, and the pages are taken away only
+        // after every native section has its final protection.
+        if (!calls.add_handler(1, reinterpret_cast<void *>(&cold_fault)))
+            fail(calls, 39);
+        for (uint32_t i = 0; i < header->extent_count; ++i) {
+            const cdp::Extent &piece = extent_table(header)[i];
+            if (chunk_table(header)[piece.chunk].flags & cdp::lazy)
+                permission(calls, base + header->memory_rva + piece.offset, piece.bytes, 1);
+        }
+    }
     state->phase = 2;
-    permission(calls, base + cdp_anchor.workspace + 4096, header->chunk_count * cdp::workspace_slot, 1);
+    // A cold chunk reuses the first model slot when it decodes, so the slots stay writable then.
+    if (!cold)
+        permission(calls, base + cdp_anchor.workspace + 4096, header->chunk_count * cdp::workspace_slot, 1);
     if (!calls.flush ||
         calls.flush(reinterpret_cast<void *>(intptr_t(-1)), output, header->memory_bytes) < 0)
         fail(calls, 30);

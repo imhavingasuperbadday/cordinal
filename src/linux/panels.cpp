@@ -30,6 +30,7 @@
 #include "points.h"
 #include "draw.h"
 #include "tags.h"
+#include "tag_suggest.h"
 #include "tagwriter.h"
 #include "titleformat.h"
 
@@ -474,6 +475,10 @@ struct TagPanel {
     SDL_Texture* preview = nullptr;
     int previewW = 0, previewH = 0;
     std::string info, warning;
+    TagSuggestionSet suggestions;  // values already in the library, built when the editor opens
+    std::vector<std::wstring> matches;
+    int suggestField = -1, suggestSel = -1;
+    Rect suggestRect;
     Rect panel, compilationRect, art, choose, remove, online, save, cancel;
 } g_tags;
 
@@ -500,6 +505,19 @@ std::wstring TrackValue(TrackId id, int f) {
     }
 }
 
+std::optional<TagSuggestField> SuggestFieldFor(int field) {
+    switch (field) {
+        case Artist: return TagSuggestField::Artist;
+        case AlbumArtist: return TagSuggestField::AlbumArtist;
+        case Album: return TagSuggestField::Album;
+        case Genre: return TagSuggestField::Genre;
+        case Composer: return TagSuggestField::Composer;
+        default: return std::nullopt;
+    }
+}
+
+void HideSuggestions();
+
 void SetPreview(const std::string& bytes) {
     g_tags.previewBytes = bytes;
     if (g_tags.preview) SDL_DestroyTexture(g_tags.preview);
@@ -520,7 +538,43 @@ void Focus(int f, bool selectAll) {
     TextField& t = g_tags.fields[f];
     t.caret = t.text.size();
     t.all = selectAll && !t.text.empty();
+    HideSuggestions();
     SDL_StartTextInput(g.window);
+}
+
+void HideSuggestions() {
+    g_tags.matches.clear();
+    g_tags.suggestField = -1;
+    g_tags.suggestSel = -1;
+    g_tags.suggestRect = {};
+}
+
+void RefreshSuggestions() {
+    HideSuggestions();
+    const auto field = SuggestFieldFor(g_tags.focus);
+    if (!field) return;
+    std::vector<std::wstring> matches =
+        MatchTagSuggestions(g_tags.suggestions, *field, g_tags.fields[g_tags.focus].text);
+    if (matches.empty()) return;
+    g_tags.matches = std::move(matches);
+    g_tags.suggestField = g_tags.focus;
+    g_tags.suggestSel = 0;
+    g.redraw = true;
+}
+
+void AcceptSuggestion() {
+    if (g_tags.suggestField < 0 || g_tags.suggestSel < 0 ||
+        g_tags.suggestSel >= (int)g_tags.matches.size()) {
+        HideSuggestions();
+        return;
+    }
+    TextField& t = g_tags.fields[g_tags.suggestField];
+    t.text = g_tags.matches[g_tags.suggestSel];
+    t.caret = t.text.size();
+    t.all = false;
+    t.changed = true;
+    HideSuggestions();
+    g.redraw = true;
 }
 
 // Builds the edit from the fields actually changed; untouched fields stay unset so the writers
@@ -705,6 +759,32 @@ void DrawTags(const Palette& p) {
     g_tags.cancel = {panel.R() - pad - S(100), by, S(100), S(28)};
     DrawButton(g_tags.save, "Save", p, true);
     DrawButton(g_tags.cancel, "Cancel", p);
+    if (g_tags.suggestField == g_tags.focus && !g_tags.matches.empty()) {
+        const Rect& field = g_tags.fields[g_tags.focus].rect;
+        const float rowH = S(22), width = field.w;
+        float height = g_tags.matches.size() * rowH + S(2);
+        float x = field.x, y = field.B() + S(2);
+        if (y + height > panel.B() - S(8) && field.y - height >= panel.y + S(40))
+            y = field.y - height - S(2);
+        height = std::min(height, std::max(rowH + S(2), panel.B() - S(8) - y));
+        g_tags.suggestRect = {x, y, width, height};
+        Fill(g_tags.suggestRect, p.surface2);
+        Frame(g_tags.suggestRect, p.border);
+        SDL_Rect clip{(int)(x + S(1)), (int)(y + S(1)), (int)(width - S(2)), (int)(height - S(2))};
+        SDL_SetRenderClipRect(g.renderer, &clip);
+        for (size_t i = 0; i < g_tags.matches.size(); ++i) {
+            const float top = y + S(1) + i * rowH;
+            if (top + rowH > y + height) break;
+            const Rect row{x + S(1), top, width - S(2), rowH};
+            const bool selected = (int)i == g_tags.suggestSel;
+            if (selected) Fill(row, p.select);
+            DrawText(Font::Normal, Utf8(g_tags.matches[i]), x + S(6), TextY(row),
+                     selected ? p.selectText : p.text, width - S(12));
+        }
+        SDL_SetRenderClipRect(g.renderer, nullptr);
+    } else {
+        g_tags.suggestRect = {};
+    }
 }
 
 void Edited(TextField& t) {
@@ -729,6 +809,7 @@ void InsertText(const std::wstring& s) {
     t.text.insert(t.caret, in);
     t.caret += in.size();
     Edited(t);
+    RefreshSuggestions();
 }
 
 // The caret position for a click at (x, y) inside the field.
@@ -758,6 +839,17 @@ size_t CaretAt(const TextField& t, int f, float x, float y) {
 }
 
 void TagsMouseDown(float x, float y) {
+    if (g_tags.suggestField >= 0 && g_tags.suggestRect.In(x, y)) {
+        const int row = (int)((y - g_tags.suggestRect.y - S(1)) / S(22));
+        if (row >= 0 && row < (int)g_tags.matches.size()) {
+            g_tags.suggestSel = row;
+            AcceptSuggestion();
+        } else {
+            HideSuggestions();
+        }
+        return;
+    }
+    if (g_tags.suggestField >= 0) HideSuggestions();
     if (!g_tags.panel.In(x, y) || g_tags.cancel.In(x, y)) {
         ClosePanel();
         return;
@@ -816,6 +908,24 @@ void TagsKey(const SDL_KeyboardEvent& e) {
         }
         Focus(f, true);
     };
+    if (g_tags.suggestField == g_tags.focus && !g_tags.matches.empty()) {
+        if (e.key == SDLK_UP || e.key == SDLK_DOWN) {
+            const int count = (int)g_tags.matches.size();
+            g_tags.suggestSel = std::clamp(g_tags.suggestSel + (e.key == SDLK_DOWN ? 1 : -1), 0, count - 1);
+            g.redraw = true;
+            return;
+        }
+        if (e.key == SDLK_RETURN || e.key == SDLK_KP_ENTER) {
+            AcceptSuggestion();
+            return;
+        }
+        if (e.key == SDLK_ESCAPE) {
+            HideSuggestions();
+            g.redraw = true;
+            return;
+        }
+        if (e.key == SDLK_TAB) AcceptSuggestion();  // then step to the next field
+    }
     switch (e.key) {
         case SDLK_ESCAPE: ClosePanel(); return;
         case SDLK_TAB: step(shift ? -1 : 1); break;
@@ -843,22 +953,27 @@ void TagsKey(const SDL_KeyboardEvent& e) {
                 t.text.erase(t.caret, 1);
                 Edited(t);
             }
+            RefreshSuggestions();
             break;
         case SDLK_LEFT:
+            HideSuggestions();
             if (t.all) t.caret = 0;
             else if (t.caret > 0) --t.caret;
             t.all = false;
             break;
         case SDLK_RIGHT:
+            HideSuggestions();
             if (t.all) t.caret = t.text.size();
             else if (t.caret < t.text.size()) ++t.caret;
             t.all = false;
             break;
         case SDLK_HOME:
+            HideSuggestions();
             t.caret = Multiline(g_tags.focus) && !ctrl ? LineStart(t.text, t.caret) : 0;
             t.all = false;
             break;
         case SDLK_END: {
+            HideSuggestions();
             size_t end = Multiline(g_tags.focus) && !ctrl ? t.text.find(L'\n', t.caret) : std::wstring::npos;
             t.caret = end == std::wstring::npos ? t.text.size() : end;
             t.all = false;
@@ -893,6 +1008,7 @@ void TagsKey(const SDL_KeyboardEvent& e) {
                 t.text.clear();
                 t.caret = 0;
                 Edited(t);
+                RefreshSuggestions();
             }
             break;
         case SDLK_V:
@@ -913,6 +1029,7 @@ void TagsKey(const SDL_KeyboardEvent& e) {
 
 void OpenTags(const std::vector<TrackId>& ids) {
     g_tags.ids = ids;
+    g_tags.suggestions = BuildTagSuggestions(g_lib);
     bool multi = ids.size() > 1;
     for (int f = 0; f < FieldCount; ++f) {
         TextField& t = g_tags.fields[f];
@@ -1031,11 +1148,16 @@ const Pref kPrefs[] = {
      PrefType::Bool, 0, 1, 0, 1, [] { return (double)Cfg().resumePlay; },
      [](double v) { Cfg().resumePlay = v != 0; ReopenLastTrack(); Saved(); }},
     {"skip_aware_shuffle", "Playback", "Skip-aware shuffle",
-     "Shuffle favors tracks you haven't repeatedly skipped in their first 30 seconds.", PrefType::Bool,
+     "Shuffle favors tracks you haven't repeatedly skipped in their first 30 seconds. A skip while flipping through "
+     "songs counts for less, and one just before you stop doesn't count.", PrefType::Bool,
      0, 1, 0, 1, [] { return (double)Cfg().skipAwareShuffle; }, [](double v) { SetSkipAwareShuffle(v != 0); }},
     {"radio", "Playback", "Keep playing like this",
      "Keeps choosing from the playing playlist, favoring what you tend to play after the current track.",
      PrefType::Bool, 0, 1, 0, 1, [] { return (double)Cfg().radio; }, [](double v) { SetRadio(v != 0); }},
+    {"taste", "Playback", "Choose by taste",
+     "Track shuffle and Keep playing like this follow what you finish, rate, replay and come back to. Skips are judged by "
+     "their moment, and artists by how often you finish them, not how many of their songs you have.",
+     PrefType::Bool, 0, 1, 0, 1, [] { return (double)Cfg().taste; }, [](double v) { SetTaste(v != 0); }},
     {"loops", "Playback", "Game music loops", "How often a game soundtrack rip with loop points plays its loop before fading out.",
      PrefType::Choice, 0, 3, 2, 1, [] { return (double)Cfg().loops; },
      [](double v) { Cfg().loops = (int)v; ApplyEffects(); Saved(); }, kLoopNames},
@@ -3749,6 +3871,39 @@ void OpenTagEditor(const std::vector<TrackId>& ids) {
     g.redraw = true;
 }
 
+// A one-track library of its own, so the check needs no profile. Typing into Artist through the
+// panel's own key and text paths must open the completion list and Enter must take its first value.
+int CheckTagSuggestions() {
+    Library saved = std::move(g_lib);
+    g_lib = Library();
+    TrackId id = g_lib.Add(L"/checks/tag-suggestion.flac");
+    TagData tags;
+    tags.artist = "Test artist";
+    tags.album = "Test album";
+    tags.genre = "Rock";
+    g_lib.ApplyTags(id, tags);
+    g_lib[id].flags |= Track::kInLibrary;
+    ClosePanel();  // whatever the preceding checks left open
+    OpenTagEditor({id});
+    SDL_KeyboardEvent key{};
+    key.key = SDLK_TAB;
+    TagsKey(key);  // Title -> Artist, selecting the field
+    const bool focused = g_tags.focus == Artist;
+    InsertText(L"Test a");
+    const bool shown = g_tags.suggestField == Artist && g_tags.matches.size() == 1 &&
+                       g_tags.matches[0] == L"Test artist";
+    key.key = SDLK_RETURN;
+    TagsKey(key);
+    const bool accepted = g_tags.fields[Artist].text == L"Test artist" && g_tags.matches.empty() &&
+                          g_kind == Kind::Tags;
+    ClosePanel();
+    g_lib = std::move(saved);
+    const bool ok = focused && shown && accepted;
+    printf("%s the tag editor completes artist names from the library and keeps the editor open\n",
+           ok ? "ok  " : "FAIL");
+    return !ok;
+}
+
 void OpenPreferences() {
     g_kind = Kind::Prefs;
     g_prefs.search.clear();
@@ -3964,6 +4119,8 @@ void ClosePanel() {
         g_tags.preview = nullptr;
         g_tags.previewBytes.clear();
         g_tags.ids.clear();
+        HideSuggestions();
+        g_tags.suggestions = TagSuggestionSet{};
     }
     if (g_kind == Kind::Organize) {
         // The preview holds one entry per file, which can be the whole library: let it go now.

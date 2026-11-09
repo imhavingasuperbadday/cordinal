@@ -13,6 +13,7 @@
 //   cordinal-core-test resampler              check treble fidelity, alias rejection and output length
 //   cordinal-core-test waveform               check live notes and whole-track peak previews
 //   cordinal-core-test weighted-shuffle       check that skip-aware shuffle keeps every occurrence
+//   cordinal-core-test tagsuggest             check the tag editor's completion values
 //   cordinal-core-test chapters FILE          list FILE's chapters: the first, the last and the next start
 //   cordinal-core-test library FILE           list a saved library.cdb: files, titles and ReplayGain
 //   cordinal-core-test history FILE           list a saved library.cdb's listens and points
@@ -31,6 +32,7 @@
 #include "collection.h"
 #include "tests/discord_checks.h"
 #include "tests/metadata_checks.h"
+#include "tests/tag_suggest_checks.h"
 #include "convert.h"
 #include "decoder.h"
 #include "devicecopy.h"
@@ -1047,6 +1049,15 @@ int CheckIpod(const char* root) {
 
 int main(int argc, char** argv) {
     if (argc >= 2 && !strcmp(argv[1], "weighted-shuffle")) return CheckWeightedShuffle();
+    if (argc >= 2 && !strcmp(argv[1], "tagsuggest")) {  // tests/tag_suggest_checks.h, shared with the Windows self-test
+        int failures = 0;
+        for (const auto& group : tag_suggest_checks::All()) {
+            printf("%s %s\n", group.Passed() ? "ok  " : "FAIL", group.name.c_str());
+            for (const auto& failure : group.failures) printf("  %s\n", failure.c_str());
+            failures += !group.Passed();
+        }
+        return failures ? 1 : 0;
+    }
     if (argc >= 3 && !strcmp(argv[1], "ipod")) return CheckIpod(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "chapters")) return ListChapters(argv[2]);
     if (argc >= 2 && !strcmp(argv[1], "steam")) {
@@ -1086,6 +1097,6 @@ int main(int argc, char** argv) {
     if (argc >= 3 && !strcmp(argv[1], "decode")) return Decode(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "play")) return Play(argv[2], argc >= 4 ? atof(argv[3]) : 5);
     fprintf(stderr, "usage: cordinal-core-test scan DIR | decode FILE | play FILE [SECONDS] | replaygain FILE... | "
-                    "tags FILE DIR | convert FILE DIR | organize FILE ROOT | copy FILE DEST | collection DIR | ipod DIR | eq | resampler | waveform | helpers DIR | devices | sfx | listenbrainz DIR | weighted-shuffle | chapters FILE | library FILE | history FILE | playlists FILE | steam [cancel] | away DIR | web DIR CONTROL\n");
+                    "tags FILE DIR | convert FILE DIR | organize FILE ROOT | copy FILE DEST | collection DIR | ipod DIR | eq | resampler | waveform | helpers DIR | devices | sfx | listenbrainz DIR | weighted-shuffle | tagsuggest | chapters FILE | library FILE | history FILE | playlists FILE | steam [cancel] | away DIR | web DIR CONTROL\n");
     return 2;
 }

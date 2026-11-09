@@ -24,6 +24,7 @@ void OpenEqualizer();
 void OpenTagEditor(const std::vector<TrackId>& ids);
 void OpenPreferences();
 int CheckPreferences();  // headless control geometry, state and keyboard checks; saves no images
+int CheckTagSuggestions();  // headless tag-editor completion check; saves no images
 void OpenRules(int playlist);  // -1: a new auto-playlist; else that auto-playlist's rules
 void OpenOutputDevice();  // choose the PipeWire sink to play on (Preferences > Output)
 void OpenPoints();  // cordinal points (View > Games and stats, or the chip)

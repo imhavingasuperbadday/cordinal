@@ -176,6 +176,7 @@ struct Settings {
     int shuffle = kShuffleOff;
     bool skipAwareShuffle = false;
     bool radio = false;
+    bool taste = false;
     bool resumeOn = true;
     bool resumeInSong = false;  // reopen with the last track loaded, paused where it stopped
     bool resumePlay = false;    // start a reopened track at once instead of waiting paused
@@ -351,6 +352,7 @@ void SetShuffle(int mode);
 void SetRepeat(Repeat repeat);
 void SetSkipAwareShuffle(bool on);
 void SetRadio(bool on);
+void SetTaste(bool on);
 void SetResumeOn(bool on);
 bool Resume();
 // Opens with the last session's track, paused where it stopped or playing at once, as Preferences asks.

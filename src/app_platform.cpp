@@ -59,16 +59,6 @@ ULONGLONG g_nowPlayingAt = 0;  // when that position was written
 
 const wchar_t* const kTransportCommands[] = {L"--play-pause", L"--play", L"--pause", L"--stop", L"--next", L"--previous", L"--web"};
 
-// A per-machine cache folder under %LOCALAPPDATA%\cordinal, falling back to the data directory
-// when the known folder is unavailable. CoTaskMemFree is required even when the call fails.
-std::wstring LocalCacheDir(const wchar_t* name) {
-    PWSTR local = nullptr;
-    std::wstring dir = g.dataDir + L"\\" + name;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &local))) dir = std::wstring(local) + L"\\cordinal\\" + name;
-    CoTaskMemFree(local);
-    return dir;
-}
-
 // A string-pool handle as UTF-8, which is what the network submission needs.
 std::string Utf8(StringPool::Handle h) { return std::string(g_lib.View(h)); }
 
@@ -285,6 +275,17 @@ LRESULT CALLBACK LbProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 }  // namespace
+
+// Falls back to the data directory when the known folder is unavailable. CoTaskMemFree is required
+// even when the call fails.
+std::wstring LocalCacheDir(const wchar_t* name) {
+    PWSTR local = nullptr;
+    std::wstring dir = g.dataDir + L"\\" + name;
+    if (GetEnvironmentVariableW(L"CORDINAL_DATA", nullptr, 0)) return dir;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &local))) dir = std::wstring(local) + L"\\cordinal\\" + name;
+    CoTaskMemFree(local);
+    return dir;
+}
 
 bool ListenBrainzDialogMessage(MSG* msg) { return lb.hwnd && IsDialogMessageW(lb.hwnd, msg); }
 

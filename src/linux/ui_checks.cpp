@@ -107,7 +107,7 @@ int CheckLayout() {
         g.rows = savedRows;
         g_lib = std::move(saved);
     }
-    off += CheckWindowLayouts() + CheckPreferences() + CheckLinuxPacks() + CheckLinuxHeadsets() + CheckLinuxBig() + CheckLinuxHelperFeed() + CheckLinuxAlternateThemes();
+    off += CheckWindowLayouts() + CheckPreferences() + CheckLinuxPacks() + CheckLinuxHeadsets() + CheckLinuxBig() + CheckLinuxHelperFeed() + CheckLinuxAlternateThemes() + CheckTagSuggestions();
     const bool software = SetGpuDrawing(false) && !g.settings.gpuDrawing &&
         std::string_view(SDL_GetRendererName(g.renderer)) == SDL_SOFTWARE_RENDERER &&
         UiSymbolsAvailable() && DrawText(Font::Normal, "Renderer restored", 0, 0, CurrentPalette().text) > 0;

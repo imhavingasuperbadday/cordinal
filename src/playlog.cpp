@@ -13,7 +13,7 @@ namespace {
 
 std::vector<PlayEvent> g_log;
 bool modelDirty = true;
-struct ListeningCounts { uint32_t plays = 0, earlySkips = 0; };
+struct ListeningCounts { double plays = 0, earlySkips = 0; };  // each weighed against its moment
 std::unordered_map<TrackId, ListeningCounts> listeningCounts;
 std::unordered_map<uint64_t, uint32_t> nextCounts;
 
@@ -86,24 +86,78 @@ const std::vector<PlayEvent>& PlayLog() { return g_log; }
 
 void SetPlayLog(std::vector<PlayEvent>&& events) { g_log = std::move(events); modelDirty = true; }
 
+bool Follows(const PlayEvent& prior, const PlayEvent& e) {
+    int64_t began = (int64_t)e.time - e.seconds;
+    return began >= (int64_t)prior.time - 5 && began <= (int64_t)prior.time + 120 && e.time >= prior.time;
+}
+
+bool EarlySkip(const PlayEvent& e) {
+    return !(e.flags & PlayEvent::kCounted) && (e.flags & PlayEvent::kSkip) && e.seconds < 30;
+}
+
+std::vector<ListenMoment> ListenMoments(size_t start) {
+    std::vector<ListenMoment> moments;
+    if (start >= g_log.size()) return moments;
+    moments.reserve(g_log.size() - start);
+    for (size_t i = start; i < g_log.size(); ++i) {
+        const PlayEvent& e = g_log[i];
+        if (!(e.flags & PlayEvent::kCounted)) {
+            bool continued = i + 1 < g_log.size() &&
+                             (int64_t)g_log[i + 1].time - g_log[i + 1].seconds <= (int64_t)e.time + 600;
+            if (!continued) {
+                moments.push_back(ListenMoment::Left);
+                continue;
+            }
+        }
+        if (i > 0 && Follows(g_log[i - 1], e))
+            moments.push_back(EarlySkip(g_log[i - 1]) ? ListenMoment::AfterSkip : ListenMoment::AfterListen);
+        else
+            moments.push_back(ListenMoment::First);
+    }
+    return moments;
+}
+
+double MomentSkipRate(double skips, double listens, double overall) {
+    return std::clamp((skips + 8 * overall) / (listens + 8), 0.02, 0.98);
+}
+
+double SkipWorth(double overall, double rate) { return std::clamp(overall / rate, 0.25, 2.5); }
+
+double PlayWorth(double overall, double rate) { return std::clamp((1 - overall) / (1 - rate), 0.25, 2.5); }
+
 std::vector<double> ListeningWeights(const std::vector<TrackId>& candidates, TrackId from) {
     if (modelDirty) {
         listeningCounts.clear();
         nextCounts.clear();
-        // Bound memory and let older habits age out. Adjacent counted listens only: an early
-        // skip breaks a transition, as does a break of more than two minutes between tracks.
-        const PlayEvent* previous = nullptr;
+        // Bound memory and let older habits age out.
         size_t start = g_log.size() > 10000 ? g_log.size() - 10000 : 0;
+        std::vector<ListenMoment> moments = ListenMoments(start);
+        double listens[3] = {}, skips[3] = {}, judged = 0, skipped = 0;
+        for (size_t i = start; i < g_log.size(); ++i) {
+            ListenMoment moment = moments[i - start];
+            if (moment == ListenMoment::Left || g_log[i].id == UINT32_MAX) continue;
+            bool early = EarlySkip(g_log[i]);
+            listens[(int)moment] += 1;
+            skips[(int)moment] += early;
+            judged += 1;
+            skipped += early;
+        }
+        const double overall = judged > 0 ? skipped / judged : 0;
+        // Adjacent counted listens only: an early skip breaks a transition, as does a break of more
+        // than two minutes between tracks.
+        const PlayEvent* previous = nullptr;
         for (size_t i = start; i < g_log.size(); ++i) {
             const auto& e = g_log[i];
             if (e.id == UINT32_MAX) { previous = nullptr; continue; }
             auto& counts = listeningCounts[e.id];
             bool counted = (e.flags & PlayEvent::kCounted) != 0;
-            counts.plays += counted;
-            counts.earlySkips += !counted && (e.flags & PlayEvent::kSkip) && e.seconds < 30;
-            int64_t began = (int64_t)e.time - e.seconds;
-            if (counted && previous && previous->id != e.id && began >= (int64_t)previous->time - 5 &&
-                began <= (int64_t)previous->time + 120 && e.time >= previous->time)
+            ListenMoment moment = moments[i - start];
+            if (moment != ListenMoment::Left) {
+                double rate = MomentSkipRate(skips[(int)moment], listens[(int)moment], overall);
+                if (counted) counts.plays += PlayWorth(overall, rate);
+                if (EarlySkip(e)) counts.earlySkips += SkipWorth(overall, rate);
+            }
+            if (counted && previous && previous->id != e.id && Follows(*previous, e))
                 ++nextCounts[((uint64_t)previous->id << 32) | e.id];
             previous = counted ? &e : nullptr;
         }

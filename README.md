@@ -4,12 +4,12 @@
 
 <p align="center">
 A small, fast music player and library for Windows, with a Linux preview.<br>
-One 1.7 MB program. No installer, no runtime, no codecs to add.
+One 1.8 MB program. No installer, no runtime, no codecs to add.
 </p>
 
 <div align="center">
 
-Current release: **0.1.7** · `cordinal.exe`, 1,697,792 bytes<br>
+Current release: **0.1.8**<br>
 **[Download](https://github.com/imhavingasuperbadday/cordinal/releases/latest)** ·
 [Getting started](#getting-started) · [Guide](#guide) · [Building](#building) ·
 [Issues](https://github.com/imhavingasuperbadday/cordinal/issues)
@@ -68,6 +68,7 @@ Game Boy, Genesis, Commodore 64) and cordinal's own lossless `.cord`.
 ### Listening history
 
 - Half-star ratings, play and skip counts, a play log and a year in review
+- Choose by taste: track shuffle and Keep playing like this follow what you finish, rate, replay and come back to
 - Native Last.fm, ListenBrainz and Libre.fm scrobbling with offline queues
 - Discord status showing the song or album you're playing
 
@@ -165,6 +166,16 @@ channels, BPM, file size and measured track gain, in nested ALL/ANY groups with 
 Ctrl+Z undoes changes to a playlist (adding, removing, moving, sorting, clearing) and Ctrl+Y redoes
 them, for the session; Ctrl+Z takes back a tag edit instead when that came last.
 
+**Playback ▸ Choose by taste** (also **Preferences ▸ Playback**) is off until you turn it on. Track
+shuffle and **Keep playing like this** then follow songs you come back to, finish, rate and rewind
+into, and lean toward the loudness, dynamics and mood of what you finish. A skip is judged by its
+moment: one just before you stop or close cordinal doesn't count, one while you flip through songs
+counts for less than one right after a song you heard through, and each song is compared with
+others of its genre that came up in the same kind of moment. Artists and genres count by how often
+you finish them, not by how many of their songs you have, and about one track-shuffle pick in seven
+stays plain shuffle, so songs it passed over still come up. Mood comes from a waveform or a
+ReplayGain scan, so it starts once those exist. Album shuffle still plays each album in order.
+
 ### Sound and ReplayGain
 
 The bitcrusher is in **Playback ▸ Bitcrush**; its depth, sample rate and mix are in
@@ -182,9 +193,11 @@ regardless of the current playlist or search; missing files and Inbox tracks are
 
 ### Tags
 
-Edit every field, the cover and lyrics for one track or hundreds (Alt+Enter). Every write is
-atomic, so a failure leaves the file as it was, and Ctrl+Z undoes the last ten edits. **Organize
-files** renames and moves music from its tags, with a preview and undo.
+Edit every field, the cover and lyrics for one track or hundreds (Alt+Enter). Artist, album artist,
+album, genre and composer suggest values already in your library as you type, so spellings stay
+consistent; a new value is always allowed. Every write is atomic, so a failure leaves the file as it
+was, and Ctrl+Z undoes the last ten edits. **Organize files** renames and moves music from its tags,
+with a preview and undo.
 
 ### Covers
 

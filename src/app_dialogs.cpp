@@ -2,6 +2,7 @@
 // playlist import and export, "Show in Explorer" / Properties on the selection, and the About box
 // (a small themed window with its clickable cardinal).
 #include "app.h"
+#include "memory_report.h"
 
 #include "theme_win.h"
 
@@ -168,7 +169,7 @@ void PaintAbout(HDC dc, RECT rc) {
     const int right = a.width - a.pad;
     if (a.icon) DrawIconEx(dc, a.iconRect.left, a.iconRect.top, a.icon, a.iconSize, a.iconSize, 0, nullptr, DI_NORMAL);
     DrawAboutText(dc, a.titleFont, TextColor(), L"cordinal", a.textLeft, a.titleTop, right - a.textLeft, DT_SINGLELINE);
-    DrawAboutText(dc, g.font, SubColor(), L"Version 0.1.7", a.textLeft, a.versionTop, right - a.textLeft, DT_SINGLELINE);
+    DrawAboutText(dc, g.font, SubColor(), L"Version 0.1.8", a.textLeft, a.versionTop, right - a.textLeft, DT_SINGLELINE);
     DrawAboutText(dc, g.font, TextColor(), kAboutTagline, a.textLeft, a.taglineTop, right - a.textLeft, DT_WORDBREAK);
     FillSolid(dc, {a.pad, a.ruleY, right, a.ruleY + 1}, Ref(P().border));
     int y = a.rowsTop;
@@ -240,11 +241,12 @@ void ShowAbout() {
         SetForegroundWindow(a.hwnd);
         return;
     }
-    PROCESS_MEMORY_COUNTERS_EX pmc{sizeof(pmc)};
-    GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof(pmc));
+    // The figure Task Manager shows, and how much of it is the program's own code: a packed build
+    // holds all of that privately (docs/memory.md).
+    const MemoryReport memory = TakeMemoryReport();
     wchar_t stats[200];
-    swprintf_s(stats, L"Library: %zu tracks in %.1f KB\nMemory: %.1f MB committed, %.1f MB working set", g_lib.Count(),
-               g_lib.MemoryBytes() / 1024.0, pmc.PrivateUsage / 1048576.0, pmc.WorkingSetSize / 1048576.0);
+    swprintf_s(stats, L"Library: %zu tracks in %.1f KB\nMemory: %.1f MB in use, %.1f MB of it the program", g_lib.Count(),
+               g_lib.MemoryBytes() / 1024.0, memory.privateWorkingSet / 1048576.0, memory.program / 1048576.0);
     a.stats = stats;
     a.icon = (HICON)LoadImageW(g.inst, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON, S(64), S(64), 0);
     LOGFONTW lf{};

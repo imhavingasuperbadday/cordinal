@@ -39,3 +39,6 @@ November 4, 2026, format version 2 (in cordinal only): the chunk table, the pack
 cuts and per-chunk verification, and the loader's threaded entry-point decode are original work
 written in cordinal from this specification and the Windows loader behaviour it documents; the
 decoder itself is unchanged. `..\upx\cdpack` keeps version 1 and was not changed.
+
+November 9, 2026, format version 3 (in cordinal only): zero pages left out of the chunks and the
+packed IAT directory are original work written in cordinal; the decoder is unchanged.

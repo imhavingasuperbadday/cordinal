@@ -101,6 +101,7 @@ HMENU BuildMenu() {
     AppendMenuW(playback, MF_STRING, IDM_SHUFFLE, L"S&huffle\tCtrl+H");
     AppendMenuW(playback, MF_STRING, IDM_SHUFFLE_ALBUMS, L"Shuffle al&bums");
     AppendMenuW(playback, MF_STRING, IDM_RADIO, L"Keep playing like this");
+    AppendMenuW(playback, MF_STRING, IDM_TASTE, L"Choose by taste");
     AppendMenuW(playback, MF_STRING, IDM_REPEAT_BASE + (int)Repeat::Off, L"Repeat o&ff");
     AppendMenuW(playback, MF_STRING, IDM_REPEAT_BASE + (int)Repeat::All, L"&Repeat playlist\tCtrl+R");
     AppendMenuW(playback, MF_STRING, IDM_REPEAT_BASE + (int)Repeat::One, L"Repeat &track");
@@ -303,7 +304,7 @@ HACCEL BuildAccelerators() {
 void UpdateMainMenu(HMENU m) {
     const struct { UINT id; bool checked; } checks[] = {
         {IDM_SHUFFLE, g.shuffle == kShuffleTracks}, {IDM_SHUFFLE_ALBUMS, g.shuffle == kShuffleAlbums},
-        {IDM_RADIO, g.radio}, {IDM_MUTE, g.volumePercent == 0},
+        {IDM_RADIO, g.radio}, {IDM_TASTE, g.taste}, {IDM_MUTE, g.volumePercent == 0},
         {IDM_RG_ENABLE, g.rgOn}, {IDM_STOP_AFTER, g.stopAfterCurrent}, {IDM_NIGHT_MODE, g.nightMode}, {IDM_BITCRUSH, g.bitcrush.enabled},
         {IDM_EQUALIZER, g.eq.enabled || g.eq.crossfeed}, {IDM_ALWAYS_ON_TOP, g.alwaysOnTop},
         {IDM_GROUP_ALBUMS, g.groupAlbums}, {IDM_LYRICS, LyricsPanelShown()},

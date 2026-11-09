@@ -1,5 +1,6 @@
 // Route native window messages to the application features.
 #include "app.h"
+#include "memory_report.h"
 
 namespace app {
 
@@ -394,6 +395,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 cds->cbData <= 64 * sizeof(wchar_t)) {
                 RunTransportCommand({static_cast<const wchar_t*>(cds->lpData), cds->cbData / sizeof(wchar_t)});
                 return TRUE;
+            }
+            // A memory report for a measurement tool: a new .txt file at the given path, never
+            // replacing an existing one, so the request cannot be used to overwrite anything.
+            if (cds && cds->dwData == kCopyDataMemoryReport && cds->lpData && cds->cbData % sizeof(wchar_t) == 0 &&
+                cds->cbData <= 32767 * sizeof(wchar_t)) {
+                const std::wstring path(static_cast<const wchar_t*>(cds->lpData), cds->cbData / sizeof(wchar_t));
+                const bool text = path.size() > 4 && !_wcsicmp(path.c_str() + path.size() - 4, L".txt");
+                return text && path.find(L'\0') == std::wstring::npos && WriteMemoryReport(path);
             }
             if (!cds || (cds->dwData != kCopyDataPaths && cds->dwData != kCopyDataAddPaths) || !cds->lpData ||
                 cds->cbData % sizeof(wchar_t) || cds->cbData > (16u << 20)) return FALSE;

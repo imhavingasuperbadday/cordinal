@@ -10,7 +10,7 @@
 // Section tags. 0 ends the list. Never reuse a tag for another meaning.
 enum : uint64_t { kSectionEnd = 0, kSectionPlayLog = 1, kSectionPoints = 2, kSectionAudioHash = 3, kSectionPlaylistViews = 4,
        kSectionLoudness = 5, kSectionAlbumMeasurement = 6, kSectionFirstPlayed = 7, kSectionAlbumEditions = 8,
-       kSectionAlbumArt = 9 };
+       kSectionAlbumArt = 9, kSectionTaste = 10, kSectionTasteParts = 11 };
 
 // Appends LEB128 varints to a string. U writes an unsigned varint, I a zig-zag-encoded signed one,
 // and Bytes a U length followed by the raw bytes.

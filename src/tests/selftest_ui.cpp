@@ -4,6 +4,10 @@
 #include "selftest_common.h"
 #include "metadata_fetch.h"
 #include "radio.h"
+#include "soft_canvas.h"
+
+#include <dwrite.h>
+#include <tlhelp32.h>
 
 void TestPersonalization(const std::wstring& scratch);
 namespace app {
@@ -14,6 +18,78 @@ bool ColumnOffered(int type);   // app_columns.cpp
 
 namespace {
 constexpr int kUiWidth = 1163, kUiHeight = 752;
+
+unsigned ProcessThreads() {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return 0;
+    unsigned threads = 0;
+    THREADENTRY32 entry{sizeof(entry)};
+    for (BOOL more = Thread32First(snapshot, &entry); more; more = Thread32Next(snapshot, &entry))
+        threads += entry.th32OwnerProcessID == GetCurrentProcessId();
+    CloseHandle(snapshot);
+    return threads;
+}
+
+// The library view's software canvas: frames reach the DC it is given, a resize keeps the bitmaps
+// made on it, and WARP draws on this thread. Direct2D's own software target started a pool of nine
+// threads here for a cover grid, each holding 0.9 MB (docs/memory.md).
+void TestSoftCanvas() {
+    using Microsoft::WRL::ComPtr;
+    testlog::Batch batch(L"UI: the library view's software canvas");
+    ComPtr<ID2D1Factory> factory;
+    ComPtr<IDWriteFactory> dw;
+    ComPtr<IDWriteTextFormat> format;
+    SoftCanvas canvas;
+    ID2D1DeviceContext* context = nullptr;
+    if (!Ready(SUCCEEDED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, factory.GetAddressOf())) &&
+                   SUCCEEDED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                                                 reinterpret_cast<IUnknown**>(dw.GetAddressOf()))) &&
+                   SUCCEEDED(dw->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+                                                  DWRITE_FONT_STRETCH_NORMAL, 14.0f, L"", &format)) &&
+                   (context = canvas.Context(factory.Get())) != nullptr,
+               L"a software Direct2D canvas"))
+        return;
+    std::vector<uint32_t> pixels(256 * 256);
+    for (size_t i = 0; i < pixels.size(); ++i) pixels[i] = 0xFF000000u | (uint32_t)(i * 2654435761u >> 8);
+    ComPtr<ID2D1Bitmap> cover;
+    ComPtr<ID2D1SolidColorBrush> brush;
+    context->CreateBitmap(D2D1::SizeU(256, 256), pixels.data(), 256 * 4,
+                          D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE)),
+                          &cover);
+    context->CreateSolidColorBrush(D2D1::ColorF(0x2040C0), &brush);
+    BITMAPINFO info{};
+    info.bmiHeader = {sizeof(info.bmiHeader), 1400, -900, 1, 32, BI_RGB};
+    void* bits = nullptr;
+    HDC memory = CreateCompatibleDC(nullptr);
+    HBITMAP dib = CreateDIBSection(memory, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HGDIOBJ old = SelectObject(memory, dib);
+    const unsigned before = ProcessThreads();
+    // A cover grid at two sizes, as the album view draws it: the second frame reallocates the surface.
+    bool drawn = cover && brush && bits;
+    for (int frame = 0; drawn && frame < 6; ++frame) {
+        const int w = frame < 3 ? 1400 : 1000, h = frame < 3 ? 900 : 700;
+        drawn = canvas.Begin(w, h);
+        if (!drawn) break;
+        context->Clear(D2D1::ColorF(0x102030));
+        for (int y = 40; y + 200 < h; y += 220)
+            for (int x = 20; x + 180 < w; x += 190) {
+                context->DrawBitmap(cover.Get(), D2D1::RectF((float)x, (float)y, x + 170.0f, y + 170.0f));
+                context->DrawTextW(L"Album title", 11, format.Get(), D2D1::RectF((float)x, y + 172.0f, x + 170.0f, y + 192.0f),
+                                   brush.Get());
+            }
+        context->FillRectangle(D2D1::RectF(0, 0, 10, 10), brush.Get());
+        drawn = SUCCEEDED(canvas.End(memory, 0, 0));
+    }
+    const unsigned after = ProcessThreads();
+    const auto* rows = static_cast<const uint32_t*>(bits);
+    const bool painted = drawn && (rows[5 * 1400 + 5] & 0xFFFFFF) == 0x2040C0 && (rows[20 * 1400 + 15] & 0xFFFFFF) == 0x102030;
+    SelectObject(memory, old);
+    DeleteObject(dib);
+    DeleteDC(memory);
+    canvas.Reset();
+    Check(painted, L"UI: the software canvas copies each frame to the DC it is given, across a resize");
+    Check(after <= before + 1, L"UI: the software canvas draws on its own thread (threads %u before, %u after)", before, after);
+}
 
 void TestPlayerSliders() {
     using namespace app;
@@ -549,7 +625,34 @@ void TestUiControls(const std::wstring& scratch) {
     ApplyFonts();
     RefreshTabs();
     Layout();
+    {
+        // The tag editor offers values already in the library; this is the field wiring, while the
+        // shared matching rule is covered by the "tags" suite (tag_suggest_checks.h).
+        ShowTagEditor({0});
+        HWND tag = FindWindowW(L"CordinalTagEditor", nullptr);
+        HWND artist = tag ? GetDlgItem(tag, 101) : nullptr;  // 100 + Artist
+        HWND list = tag ? FindWindowExW(tag, nullptr, WC_LISTBOXW, nullptr) : nullptr;
+        const bool opened = tag && artist && list;
+        bool matched = false, accepted = false;
+        if (opened) {
+            ShowWindow(tag, SW_HIDE);  // the checks need no visible window
+            SetWindowTextW(artist, L"Test a");
+            wchar_t text[128]{};
+            const int count = (int)SendMessageW(list, LB_GETCOUNT, 0, 0);
+            if (count > 0) SendMessageW(list, LB_GETTEXT, 0, (LPARAM)text);
+            const bool shown = (GetWindowLongPtrW(list, GWL_STYLE) & WS_VISIBLE) != 0;
+            matched = shown && count == 1 && !wcscmp(text, L"Test artist");
+            SendMessageW(list, WM_LBUTTONUP, 0, MAKELPARAM(S(6), S(6)));  // click the first row
+            accepted = WindowText(artist) == L"Test artist" &&
+                       (GetWindowLongPtrW(list, GWL_STYLE) & WS_VISIBLE) == 0;
+        }
+        if (tag) DestroyWindow(tag);
+        batch.Next(L"UI: the tag editor completes an artist from the library and accepts it");
+        Check(opened && matched && accepted,
+              L"UI: the tag editor completes an artist from the library and accepts it");
+    }
     TestPlayerSliders();
+    TestSoftCanvas();
     {
         SetWindowTextW(g.search, L"Track 1");
         FlushSearch();
@@ -960,6 +1063,22 @@ void TestUiControls(const std::wstring& scratch) {
               L"UI: Albums & Tracks rows sit beside the larger cover, under the album heading");
     } else {
         Check(false, L"UI: Albums & Tracks rows sit beside the larger cover, under the album heading");
+    }
+    // At the compact window's width the full-size cover left the rows no room, so their titles were
+    // drawn backwards over it: the cover shrinks instead and the rows start right of it.
+    batch.Next(L"UI: a narrow Albums & Tracks view shrinks the cover to keep its rows");
+    if (CanvasActive() && g.view.size() == 3) {
+        RECT saved = rect(g.libView);
+        SetWindowPos(g.libView, nullptr, 0, 0, S(340), saved.bottom - saved.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        LPARAM third = MAKELPARAM(S(150), S(8 + 56 + 2 * 26 + 13));  // left of where the 200 px cover ended
+        SendMessageW(g.libView, WM_LBUTTONDOWN, MK_LBUTTON, third);
+        SendMessageW(g.libView, WM_LBUTTONUP, 0, third);
+        auto picked = SelectedTracks();
+        Check(picked.size() == 1 && picked[0] == Active().items[g.view[2]],
+              L"UI: a narrow Albums & Tracks view shrinks the cover to keep its rows");
+        Layout();
+    } else {
+        Check(false, L"UI: a narrow Albums & Tracks view shrinks the cover to keep its rows");
     }
     // Album group headers: the three tracks of "Test album" sit under one two-row header.
     ActivatePlaylist(0);

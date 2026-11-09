@@ -66,6 +66,8 @@ void TestSearchProperties();
 void TestLibraryWorkflow(const std::wstring& scratch);
 void TestImportedFolders(const std::wstring& scratch);
 void TestMigration(const std::wstring& scratch);
+// The real player's private working set in everyday states, against its budgets (memory_budget.cpp).
+void TestMemoryBudget(const std::wstring& root, const std::wstring& scratch);
 
 // Scratch files: write/read a whole file, and decode a whole file to interleaved float.
 bool WriteTestBytes(const std::wstring& file, std::string_view bytes);
@@ -89,6 +91,7 @@ void TestLibraryDb(const std::wstring& scratch);
 void TestAlbumEditions(const std::wstring& scratch);
 void TestPlayLog(const std::wstring& scratch);
 void TestListeningModel();
+void TestTaste(const std::wstring& scratch);
 void TestEqualizer();
 void TestVisuals();
 void TestHeadsets();
@@ -130,6 +133,7 @@ void TestCordConversion(const std::wstring& root, const std::wstring& scratch);
 
 // Tag checks (selftest_tags.cpp) and DSP checks (selftest_dsp.cpp).
 void TestTags(const std::wstring& dir);
+void TestTagSuggestions();
 void TestExtendedTags(const std::wstring& dir);
 void TestMp4Metadata(const std::wstring& scratch);
 void TestShortTagHeaders(const std::wstring& scratch);

@@ -44,7 +44,7 @@ std::vector<Suite> Suites(const std::wstring& root) {
         {L"migration", L"backups, path remapping and playback statistics import", L"src/tests/selftest_migration.cpp", 0, 0,
             [](const auto& s) { TestMigration(s); }},
         {L"listening-model", L"listening model", L"src/tests/selftest_library.cpp", 0, 0,
-            [](const auto&) { TestListeningModel(); }},
+            [](const auto& s) { TestListeningModel(); TestTaste(s); }},
         {L"headsets", L"headphone recognition and protocol", L"src/tests/selftest_headsets.cpp", 0, 0,
             [](const auto&) { TestHeadsets(); }},
         {L"explorer", L"Explorer folder menu and its command line", L"src/tests/selftest_explorer.cpp", 0, 0,
@@ -60,7 +60,7 @@ std::vector<Suite> Suites(const std::wstring& root) {
         {L"auto-playlists", L"auto-playlist rules and limits", L"src/tests/selftest_library.cpp", 0, 0,
             [](const auto&) { TestAutoPlaylists(); }},
         {L"tags", L"tag reading and extended metadata", L"src/tests/selftest_tags.cpp", Media | Tags, 0,
-            [root](const auto& s) { TestShortTagHeaders(s); TestTags(root + L"\\media"); TestExtendedTags(root + L"\\tags2"); TestMp4Metadata(s); }},
+            [root](const auto& s) { TestShortTagHeaders(s); TestTags(root + L"\\media"); TestExtendedTags(root + L"\\tags2"); TestMp4Metadata(s); TestTagSuggestions(); }},
         {L"native-codecs", L"native codecs without fallback", L"src/tests/native_codecs.cpp", Media | Native, 0,
             [root](const auto& s) { TestNativeCodecs(root, s); }},
         {L"live-audio", L"sequential radio audio decoding", L"src/tests/selftest_live_audio.cpp", Media, 0,
@@ -147,6 +147,8 @@ std::vector<Suite> Suites(const std::wstring& root) {
                     L"engine CUE fixture is prepared independently of the CUE suite");
                 TestEngine(root + L"\\gap2", album, root + L"\\media");
             }},
+        {L"memory-budget", L"the real player's memory in everyday states, against its budgets", L"src/tests/memory_budget.cpp",
+            Media, Window, [root](const auto& s) { TestMemoryBudget(root, s); }},
         {L"ui", L"native UI, commands, preferences, themes and workers", L"src/tests/selftest_ui.cpp", 0, Window,
             [](const auto& s) { TestUiControls(s); }},
         {L"scan-merge", L"scan merging and offline roots", L"src/tests/selftest_library_files.cpp", 0, 0,

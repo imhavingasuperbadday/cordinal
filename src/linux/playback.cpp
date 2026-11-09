@@ -12,6 +12,7 @@
 #include "peaks.h"
 #include "playlog.h"
 #include "points.h"
+#include "taste.h"
 
 #include <algorithm>
 #include <cmath>
@@ -102,11 +103,11 @@ void Reshuffle(int first) {
         return;
     }
     int n = (int)Queue().size();
-    if (g.settings.skipAwareShuffle) {
+    if (g.settings.taste || g.settings.skipAwareShuffle) {
         g.shuffleOrder.clear();
         g.shuffleOrder.reserve(n);
         for (int i = 0; i < n; ++i) if (i != first) g.shuffleOrder.push_back((uint32_t)i);
-        ShuffleByListening(g.shuffleOrder, Queue(), g.rng);
+        ShuffleByWeights(g.shuffleOrder, OrderWeights(g_lib, Queue(), kInvalidTrack, UnixNow(), g.settings.taste), g.rng);
         std::reverse(g.shuffleOrder.begin(), g.shuffleOrder.end());
         if (first >= 0 && first < n) g.shuffleOrder.insert(g.shuffleOrder.begin(), (uint32_t)first);
         g.shufflePos = first >= 0 && first < n ? 0 : -1;
@@ -157,7 +158,7 @@ int Following(unsigned long long token, bool manual) {
         auto& items = Queue();
         if (info.radioNext >= 0 && info.radioNext < (int)items.size() && items[info.radioNext] == info.radioNextId)
             return info.radioNext;
-        auto weights = ListeningWeights(items, info.id);
+        auto weights = OrderWeights(g_lib, items, info.id, UnixNow(), g.settings.taste);
         double total = 0;
         for (size_t i = 0; i < items.size(); ++i) {
             if (items[i] == info.id || !g_lib.Contains(items[i]) || g_lib[items[i]].Failed()) weights[i] = 0;
@@ -249,23 +250,39 @@ int Before(int index) {
     return index > 0 ? index - 1 : (g.settings.repeat != Repeat::Off ? n - 1 : 0);
 }
 
+TrackId g_listenTrack = kNone;
+
 void TrackListening() {
     if (g.playing == kNone || g.engine.Paused()) return;
     double pos = g.engine.Position();
+    // A track change is not a seek. The first sample only starts the next observation.
+    if (g.playing != g_listenTrack) {
+        g_listenTrack = g.playing;
+        g.lastPosition = pos;
+        NoteSession(g.playing);
+        return;
+    }
     double step = pos - g.lastPosition;
     if (step > 0 && step < 1.5) g.listened += step;  // a seek doesn't count as listening
+    double duration = g_lib.Contains(g.playing) ? g_lib[g.playing].Duration() : 0;
+    ObservePlayback(g.playing, g.lastPosition, pos, duration);
     g.lastPosition = pos;
 }
 
 void LeaveTrack(bool manual) {
-    if (g.playing == kNone) return;
+    if (g.playing == kNone) {
+        g_listenTrack = kNone;
+        return;
+    }
     if (manual) TrackListening();
+    if (ConsumeTasteSave()) g.libraryDirty = true;
     if (g.settings.radio && g.listened > 0) {
         g_radioHistory.push_back(g.playing);
         if (g_radioHistory.size() > 256) g_radioHistory.pop_front();
     }
     RecordListening(g.playing, g.listened, manual);
     g.listened = 0;
+    g_listenTrack = kNone;
 }
 
 }  // namespace
@@ -296,6 +313,7 @@ void RecordListening(TrackId id, double seconds, bool manual, uint32_t when) {
     bool counted = seconds >= std::clamp(track.Duration() * 0.5, 1.0, 240.0);
     bool skip = !counted && manual && seconds >= 0.5;
     if (!counted && !skip) return;
+    NoteSession(id);
     uint32_t previous = track.lastPlayed;
     uint32_t now = when ? std::min(when, UnixNow()) : UnixNow();
     if (counted) {
@@ -714,6 +732,20 @@ void SetRadio(bool on) {
     RefreshNext();
     SaveSettings();
     ShowMessage(on ? L"Radio is on." : L"Radio is off.");
+}
+
+void SetTaste(bool on) {
+    if (g.settings.taste == on) return;
+    g.settings.taste = on;
+    for (auto& [token, info] : g_tokens) info.radioNext = -2;
+    if (g.settings.shuffle == kShuffleTracks) {
+        g.shuffleOrder.clear();
+        if (g.queuePos >= 0) Reshuffle(g.queuePos);
+    }
+    RefreshNext();
+    SaveSettings();
+    ShowMessage(on ? L"Choosing by taste." : L"Taste is off.");
+    g.redraw = true;
 }
 
 void SetResumeOn(bool on) {

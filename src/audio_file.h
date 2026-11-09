@@ -52,9 +52,11 @@ public:
     }
     uint64_t Size() const { return size_; }
     // For decoders that read on through the file once their container is parsed. Later windows
-    // are copied into one reused buffer, 64 KiB after a jump and doubling to 1 MiB while reads
+    // are copied into one reused buffer, 64 KiB after a jump and doubling to 256 KiB while reads
     // continue forward. Copying from the file cache costs a fraction of the soft fault that
-    // touching each page of a fresh mapping takes. Larger requests still map.
+    // touching each page of a fresh mapping takes. Larger requests still map. The playing
+    // decoder keeps its buffer for the whole track: 1 MiB decoded a whole FLAC file 2 to 3%
+    // faster, and PCM about 15% (still 40,000 times realtime), but held 768 KiB more while playing.
     void Sequential() { sequential_ = map_ != nullptr; }
     // Return a pointer to [at, at+bytes), mapping or reading a fresh window only when the range
     // is not already covered. Returns nullptr if the range lies outside the file.
@@ -72,7 +74,7 @@ public:
         return view_ ? view_ + (size_t)(at - base_) : nullptr;
     }
 private:
-    static constexpr size_t kRead = 1048576;
+    static constexpr size_t kRead = 262144;
     // A borrowed buffer has no mapping, and unmapping a pointer into the image would unmap the exe.
     void Unmap() {
         if (view_ && map_) UnmapViewOfFile(view_);

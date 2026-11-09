@@ -17,6 +17,8 @@ int RunRuntimeBenchmark(const std::vector<std::wstring>& args);
 int RunWebPreview(const std::vector<std::wstring>& args);
 int RunAwayProbe();
 int RunFakeHelper(const std::vector<std::wstring>& args);
+int RunMemoryProfile(const std::vector<std::wstring>& args);
+int RunMemoryReport(const std::vector<std::wstring>& args);
 
 // Dispatches on the first argument; nullopt means "not a test mode", so the player starts normally.
 // --pipeline-benchmark deliberately shares RunDecodeBenchmark, which switches on args[0] itself.
@@ -25,6 +27,8 @@ std::optional<int> RunTestMode(const std::vector<std::wstring>& args) {
     if (!args.empty() && args[0] == L"--fake-helper") return RunFakeHelper(args);  // the helpers suite's program
     if (!args.empty() && args[0] == L"--web-preview") return RunWebPreview(args);
     if (!args.empty() && args[0] == L"--away-probe") return RunAwayProbe();
+    if (!args.empty() && args[0] == L"--memory-profile") return RunMemoryProfile(args);  // the memory-budget library
+    if (!args.empty() && args[0] == L"--memory-report") return RunMemoryReport(args);
     if (!args.empty() && args[0] == L"--runtime-benchmark") return RunRuntimeBenchmark(args);
     if (!args.empty() && args[0] == L"--performance-benchmark") return RunPerformanceBenchmark(args);
     if (!args.empty() && args[0] == L"--selftest") return RunSelfTest(args);

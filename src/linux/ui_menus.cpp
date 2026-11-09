@@ -141,6 +141,7 @@ std::vector<MenuItem> BarMenu(int m) {
                     Item("Shuffle", kShuffleAction, "Ctrl+H", g.settings.shuffle == kShuffleTracks),
                     Item("Shuffle albums", kShuffleAlbumsAction, {}, g.settings.shuffle == kShuffleAlbums),
                     Item("Keep playing like this", kRadio, {}, g.settings.radio),
+                    Item("Choose by taste", kTaste, {}, g.settings.taste),
                     Radio("Repeat off", kRepeatSet, (int)Repeat::Off, r == Repeat::Off),
                     Radio("Repeat playlist", kRepeatSet, (int)Repeat::All, r == Repeat::All, "Ctrl+R"),
                     Radio("Repeat track", kRepeatSet, (int)Repeat::One, r == Repeat::One),
@@ -421,6 +422,7 @@ void RunAction(const MenuItem& item) {
         case kShuffleAction: SetShuffle(g.settings.shuffle == kShuffleTracks ? kShuffleOff : kShuffleTracks); break;
         case kShuffleAlbumsAction: SetShuffle(g.settings.shuffle == kShuffleAlbums ? kShuffleOff : kShuffleAlbums); break;
         case kRadio: SetRadio(!g.settings.radio); break;
+        case kTaste: SetTaste(!g.settings.taste); break;
         case kRepeatSet:
             SetRepeat((Repeat)item.arg);
             break;

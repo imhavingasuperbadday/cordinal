@@ -4,6 +4,7 @@
 #include "library.h"
 #include "playlog.h"
 #include "points.h"
+#include "taste.h"
 
 struct LibraryArchive {
     Library library;
@@ -15,6 +16,7 @@ struct LibraryArchive {
     std::map<AlbumId, AlbumMeasurement> albums;
     std::vector<AlbumGroup> albumGroups;
     std::map<TrackId, TrackMusicBrainz> trackMusicBrainz;
+    TasteState taste;
 };
 
 LibraryArchive CaptureLibraryArchive(const std::vector<Playlist>& playlists);
