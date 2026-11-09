@@ -9,7 +9,7 @@ One 1.8 MB program. No installer, no runtime, no codecs to add.
 
 <div align="center">
 
-Current release: **0.1.8**<br>
+Current release: **0.1.8** · `cordinal.exe`, 1,804,288 bytes<br>
 **[Download](https://github.com/imhavingasuperbadday/cordinal/releases/latest)** ·
 [Getting started](#getting-started) · [Guide](#guide) · [Building](#building) ·
 [Issues](https://github.com/imhavingasuperbadday/cordinal/issues)
