@@ -40,6 +40,7 @@ struct Deleter {
     void operator()(X509* p) const { X509_free(p); }
     void operator()(X509_REQ* p) const { X509_REQ_free(p); }
     void operator()(X509_EXTENSION* p) const { X509_EXTENSION_free(p); }
+    void operator()(X509_NAME* p) const { X509_NAME_free(p); }
     void operator()(GENERAL_NAMES* p) const { GENERAL_NAMES_free(p); }
     void operator()(BIO* p) const { BIO_free(p); }
     void operator()(BIGNUM* p) const { BN_free(p); }
@@ -164,12 +165,14 @@ std::string SelfSignedCertificate(const std::wstring& keyName, const std::vector
     Own<X509_EXTENSION> usage(X509V3_EXT_conf_nid(nullptr, nullptr, NID_ext_key_usage, "serverAuth"));
     uint32_t serial = 0;
     if (!key || !cert || !alt || !usage || getrandom(&serial, sizeof(serial), 0) != sizeof(serial)) return {};
-    X509_NAME* name = X509_get_subject_name(cert.get());
-    bool ok = X509_set_version(cert.get(), 2) && ASN1_INTEGER_set(X509_get_serialNumber(cert.get()), (long)(serial >> 1) + 1) &&
+    // A name of our own, copied in as subject and issuer: OpenSSL 4 hands back the certificate's
+    // subject as const, so it can no longer be filled in place.
+    Own<X509_NAME> name(X509_NAME_new());
+    bool ok = name && X509_set_version(cert.get(), 2) && ASN1_INTEGER_set(X509_get_serialNumber(cert.get()), (long)(serial >> 1) + 1) &&
         X509_gmtime_adj(X509_getm_notBefore(cert.get()), -3600) && X509_gmtime_adj(X509_getm_notAfter(cert.get()), (long)days * 86400) &&
         X509_set_pubkey(cert.get(), key.get()) &&
-        X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, (const unsigned char*)"cordinal", -1, -1, 0) &&
-        X509_set_issuer_name(cert.get(), name) && X509_add_ext(cert.get(), alt.get(), -1) && X509_add_ext(cert.get(), usage.get(), -1) &&
+        X509_NAME_add_entry_by_txt(name.get(), "CN", MBSTRING_ASC, (const unsigned char*)"cordinal", -1, -1, 0) &&
+        X509_set_subject_name(cert.get(), name.get()) && X509_set_issuer_name(cert.get(), name.get()) && X509_add_ext(cert.get(), alt.get(), -1) && X509_add_ext(cert.get(), usage.get(), -1) &&
         X509_sign(cert.get(), key.get(), EVP_sha256()) > 0;
     return ok ? Der(cert.get()) : std::string{};
 }
