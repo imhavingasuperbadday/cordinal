@@ -126,8 +126,9 @@ enum Action {
     kSectionPlay, kSectionLoop, kSectionStart, kSectionEnd, kSectionClear,
     kRating, kEditTags, kUndoTags, kUndo, kRedo, kEqualizer, kPreferences, kListenBrainz, kRgEnable, kRgScanSel, kRgScanPl, kRgCancel, kRgClear, kRgWrite, kWriteStatistics,
     kNewAuto, kEditAuto, kChoice, kGroupEditions, kPreferredEdition, kRemoveEdition, kSplitEditions,
-    kAlbumEditions, kEditionVersions, kRgScanAll, kFindCover, kFetchCovers, kCancelFetchCovers,
+    kAlbumEditions, kEditionVersions, kRgScanAll, kFindCover, kFetchCovers, kCancelFetchCovers, kRecentAdditions,
     kSaveLyricsTags, kSaveLyricsLrc, kArtistInfo, kRestoreCover,
+    kCoverFile, kCoverPaste, kEditAlbumTags, kMissingInfo,
 };
 extern std::function<void(int)> g_choicePick;  // the choice a panel's OpenChoice menu is for
 struct MenuItem {
@@ -192,6 +193,22 @@ struct ExcludeConfirm {
     Rect panel, confirm, cancel;
 };
 extern ExcludeConfirm g_exclude;
+// Library > Remove recent additions: the tracks added in the last 24 hours, newest first, with a
+// checkbox each (as the Windows window). Checked tracks go through the exclude confirmation.
+struct RecentPanel {
+    bool open = false;
+    std::vector<TrackId> ids;
+    std::vector<char> checked;
+    int scroll = 0, visible = 1;
+    Rect panel, all, remove, close;
+    std::vector<Rect> rows;  // the visible rows, from scroll
+};
+extern RecentPanel g_recent;
+void OpenRecentAdditions();
+void RefreshRecentAdditions();
+void DrawRecentAdditions(const Palette& p);
+bool RecentAdditionsClick(float x, float y);
+void RecentAdditionsWheel(float dy);
 extern bool g_aboutOpen;
 // The Web server window (File > Web server): its controls are 0 the port, 1 Start/Stop, 2 Start with cordinal,
 // 3 Pair device, 4 Remove all, 5 Close, 6 Open web player, 7 Copy phone address, 8 Copy code, 9 Listen away

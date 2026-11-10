@@ -324,7 +324,7 @@ void DrawAbout(const Palette& p) {
         SDL_RenderTexture(g.renderer, g_about.texture, nullptr, &dst);
     }
     float x = g_about.icon.R() + S(18), y = panel.y + S(18);
-    DrawText(Font::Title, "cordinal 0.1.8", x, y, p.text);
+    DrawText(Font::Title, "cordinal 0.1.9", x, y, p.text);
     y += S(34);
     for (const std::string& line : lines) {
         if (y + lineH > panel.B() - S(30)) break;
@@ -338,6 +338,142 @@ void DrawAbout(const Palette& p) {
 void AboutClick(float x, float y) {
     if (g_about.icon.In(x, y)) PlaySfx(Sfx::CardinalSong, 0, true);
     else g_aboutOpen = false;
+}
+
+
+// ---------------------------------------------------------------------------
+// Library > Remove recent additions
+
+namespace {
+constexpr uint32_t kRecentSeconds = 24 * 60 * 60;
+
+std::string RecentAge(uint32_t added, uint32_t now) {
+    uint32_t age = now > added ? now - added : 0;
+    if (age < 3600) return std::to_string(std::max<uint32_t>(1, age / 60)) + " min ago";
+    return std::to_string(age / 3600) + " h ago";
+}
+
+// The buttons sit on the panel's bottom edge; the rows fill the space above them.
+struct RecentLayout {
+    float rowH = 0;
+    float top = 0, bottom = 0;
+};
+RecentLayout RecentRows(const Rect& panel) {
+    RecentLayout l;
+    l.rowH = S(26);
+    l.top = panel.y + S(70);
+    l.bottom = panel.B() - S(56);
+    return l;
+}
+}  // namespace
+
+void RefreshRecentAdditions() {
+    const uint32_t now = UnixNow();
+    g_recent.ids = TracksAddedSince(now > kRecentSeconds ? now - kRecentSeconds : 0);
+    std::reverse(g_recent.ids.begin(), g_recent.ids.end());
+    g_recent.checked.assign(g_recent.ids.size(), 0);
+    g_recent.scroll = 0;
+    g.redraw = true;
+}
+
+void OpenRecentAdditions() {
+    g_recent.open = true;
+    RefreshRecentAdditions();
+}
+
+void DrawRecentAdditions(const Palette& p) {
+    int pw = 0, ph = 0;
+    SDL_GetRenderOutputSize(g.renderer, &pw, &ph);
+    Fill({0, 0, (float)pw, (float)ph}, p.bg, 110);
+    const float w = std::min((float)pw - S(40), S(680));
+    const float rowH = S(26), fixedH = S(130);
+    const size_t count = g_recent.ids.size();
+    // As many rows as fit on the window; the rest scroll with the mouse wheel.
+    const float fit = std::max(1.0f, std::floor(((float)ph - S(40) - fixedH) / rowH));
+    const float rows = std::min<float>(fit, (float)std::max<size_t>(1, count));
+    g_recent.visible = (int)rows;
+    const int maxScroll = std::max(0, (int)count - g_recent.visible);
+    g_recent.scroll = std::clamp(g_recent.scroll, 0, maxScroll);
+    const float h = fixedH + rows * rowH;
+    Rect panel{((float)pw - w) / 2, std::max(S(20), ((float)ph - h) / 2), w, h};
+    g_recent.panel = panel;
+    Fill(panel, p.surface);
+    Frame(panel, p.border);
+    float x = panel.x + S(16), y = panel.y + S(14);
+    std::string title = "Remove recent additions (" + std::to_string(count) + ")";
+    DrawText(Font::Title, title, x, y, p.text, panel.w - S(32));
+    y += S(34);
+    std::string hint = count == 0 ? "No tracks were added in the last 24 hours."
+                                  : "Check the tracks to remove. Their files stay on disk.";
+    DrawText(Font::Normal, hint, x, y, p.sub, panel.w - S(32));
+
+    const RecentLayout l = RecentRows(panel);
+    g_recent.rows.clear();
+    const uint32_t now = UnixNow();
+    float ry = l.top;
+    for (size_t i = (size_t)g_recent.scroll; i < count && ry + rowH <= l.bottom + 0.5f; ++i, ry += rowH) {
+        Rect row{panel.x + S(8), ry, panel.w - S(16), rowH};
+        g_recent.rows.push_back(row);
+        const bool on = g_recent.checked[i] != 0;
+        if (row.In(g_mouseX, g_mouseY)) Fill(row, p.hover);
+        Rect box{row.x + S(6), row.y + (rowH - S(14)) / 2, S(14), S(14)};
+        Fill(box, on ? p.accent : p.surface2);
+        Frame(box, p.border);
+        const Track& t = g_lib[g_recent.ids[i]];
+        std::string name = Utf8(g_lib.Str(t.title ? t.title : t.file));
+        std::string artist = Utf8(g_lib.Str(t.artist));
+        std::string age = RecentAge(t.added, now);
+        float ageW = TextWidth(Font::Normal, age);
+        DrawText(Font::Normal, age, row.R() - S(8) - ageW, TextY(row), p.sub);
+        float textX = row.x + S(30), textW = row.R() - S(16) - ageW - textX;
+        DrawText(Font::Normal, artist.empty() ? name : name + "  -  " + artist, textX, TextY(row), p.text, textW);
+    }
+
+    g_recent.close = {panel.R() - S(96), panel.B() - S(44), S(80), S(28)};
+    g_recent.remove = {g_recent.close.x - S(180), panel.B() - S(44), S(170), S(28)};
+    g_recent.all = {panel.x + S(16), panel.B() - S(44), S(110), S(28)};
+    for (auto [r, label, accent] : {std::tuple{g_recent.all, "Check all", false},
+                                    std::tuple{g_recent.remove, "Remove checked", true},
+                                    std::tuple{g_recent.close, "Close", false}}) {
+        bool enabled = r.x == g_recent.close.x || count > 0;  // Close always works
+        bool hover = r.In(g_mouseX, g_mouseY) && enabled;
+        Fill(r, accent ? p.accent : (hover ? p.hover : p.surface2));
+        if (!accent) Frame(r, p.border);
+        uint32_t ink = accent ? TextOn(p.accent) : p.text;
+        DrawText(Font::Normal, label, r.x, r.y + (r.h - LineHeight(Font::Normal)) / 2,
+                 enabled ? ink : p.sub, r.w, 1);
+    }
+}
+
+bool RecentAdditionsClick(float x, float y) {
+    if (!g_recent.panel.In(x, y) || g_recent.close.In(x, y)) {
+        g_recent.open = false;
+        return true;
+    }
+    if (g_recent.all.In(x, y)) {
+        std::fill(g_recent.checked.begin(), g_recent.checked.end(), 1);
+    } else if (g_recent.remove.In(x, y)) {
+        std::vector<TrackId> chosen;
+        for (size_t i = 0; i < g_recent.ids.size(); ++i)
+            if (g_recent.checked[i]) chosen.push_back(g_recent.ids[i]);
+        if (chosen.empty()) ShowMessage(L"Check the tracks to remove first.");
+        else ExcludeFromLibrary(chosen);  // asks first; ConfirmExclude refreshes this list
+    } else {
+        for (size_t k = 0; k < g_recent.rows.size(); ++k)
+            if (g_recent.rows[k].In(x, y)) {
+                size_t i = (size_t)g_recent.scroll + k;
+                if (i < g_recent.checked.size()) g_recent.checked[i] = !g_recent.checked[i];
+                break;
+            }
+    }
+    g.redraw = true;
+    return true;
+}
+
+void RecentAdditionsWheel(float dy) {
+    const int maxScroll = std::max(0, (int)g_recent.ids.size() - g_recent.visible);
+    g_recent.scroll = std::clamp(g_recent.scroll - (int)std::lround(dy * 3), 0, maxScroll);
+    g.redraw = true;
 }
 
 }  // namespace lx

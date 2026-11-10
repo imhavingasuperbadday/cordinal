@@ -9,7 +9,7 @@ One 1.8 MB program. No installer, no runtime, no codecs to add.
 
 <div align="center">
 
-Current release: **0.1.8** · `cordinal.exe`, 1,804,288 bytes<br>
+Current release: **0.1.9**<br>
 **[Download](https://github.com/imhavingasuperbadday/cordinal/releases/latest)** ·
 [Getting started](#getting-started) · [Guide](#guide) · [Building](#building) ·
 [Issues](https://github.com/imhavingasuperbadday/cordinal/issues)
@@ -199,13 +199,31 @@ consistent; a new value is always allowed. Every write is atomic, so a failure l
 was, and Ctrl+Z undoes the last ten edits. **Organize files** renames and moves music from its tags,
 with a preview and undo.
 
+**Edit album tags...** (the Edit menu or a track's right-click menu) opens the editor on every track
+of the selected tracks' albums, so one selected song is enough to give a whole album its year,
+genre or album artist. **Library ▸ Find missing information** lists the library tracks missing a
+title, artist, album, album artist, year, genre, track number or composer, or any of the basic ones;
+it is a search, so you can also type `missing:year`, `missing:genre`, `missing:any` and so on in the
+search box, and combine it with other words. Select the tracks it finds and press Alt+Enter to fill
+the gap; each track leaves the list once it has the tag.
+
+When a track has no title, artist or track number in its tags (the list then shows its file name),
+the editor offers them from the file name, such as `03 - Artist - Title`, as gray hints in the empty
+fields. **Fill empty title, artist and track number from the file name** writes them on Save, for
+one track or many; type your own value to use that instead, or untick the box.
+
 ### Covers
 
-Right-click an album or some of its tracks and choose **Change cover...** (in the tag editor:
-**Find cover online...**, beside **Choose cover...**). Use **From file...**, paste an image with
-Ctrl+V, or drag one in from a browser or a folder; a copied image address works too. **Google
-Images** opens your browser on a search for the album: copy the picture you like there, then paste
-it. cordinal never contacts Google itself.
+The quickest way to give an album a cover is to drag a JPEG or PNG file onto one of its tracks (or
+onto cordinal with the album selected). A track's right-click menu has **Cover ▸ Choose image
+file...** and **Cover ▸ Paste image from clipboard** too. Each of these applies to the whole album at
+once, with no window to go through, and keeps the cover the way **Preferences ▸ Online** says.
+
+To look online, right-click an album or some of its tracks and choose **Cover ▸ Search online...**
+(in the tag editor: **Find cover online...**, beside **Choose cover...**). Use **From file...**,
+paste an image with Ctrl+V, or drag one in from a browser or a folder; a copied image address works
+too. **Google Images** opens your browser on a search for the album: copy the picture you like
+there, then paste it. cordinal never contacts Google itself.
 
 With a cover source on, the picker also shows covers from Deezer, iTunes and MusicBrainz side by
 side, with their sizes. Fix the artist or album and search again, then double-click the one you
@@ -305,6 +323,8 @@ protected purchases in their authorized app.
 - **Waveform reflection** is **Mirrored** below the centre line, **Upper half**, or **Full height**
   (mirrored as bright below the line as above; the Moodbar stripe keeps the upper half).
 - **Smooth seek bar** rounds the outline and blends the colours.
+- **Smooth scrolling** eases the library toward where the mouse wheel or Page Up and Page Down take
+  it instead of jumping. Scrollbar drags and keyboard focus still move at once. It is off by default.
 
 Over the whole song, both moodbar looks draw a playhead line in the playback state's colour: amber
 while paused, red when playback will stop or the track failed. The track list's **Mood** column

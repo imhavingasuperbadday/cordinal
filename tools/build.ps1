@@ -254,9 +254,9 @@ $common += $themeDefine
 $size = @('/O1', '/Oi', '/Gy', '/Gw', '/D_USE_STD_VECTOR_ALGORITHMS=0')
 $hot = @('/O2', '/Ob3', '/Oi', '/Gy', '/Gw', '/D_USE_STD_VECTOR_ALGORITHMS=0')
 $unicode = @('/DUNICODE', '/D_UNICODE')
-$slowCodecs = @('audio_pcm')
-$hotCodecs = @('audio_flac', 'audio_mpeg', 'audio_alac', 'audio_aac', 'audio_resample', 'engine', 'audio_cord', 'cord_encode',
-    'audio_vorbis', 'audio_wma', 'audio_wavpack', 'audio_ac3', 'audio_opus_celt', 'audio_tta', 'audio_opus_silk', 'audio_ape')
+$slowCodecs = @('audio_pcm', 'audio_ac3', 'audio_wma', 'cord_encode')
+$hotCodecs = @('audio_flac', 'audio_mpeg', 'audio_alac', 'audio_aac', 'audio_resample', 'engine', 'audio_cord',
+    'audio_vorbis', 'audio_wavpack', 'audio_opus_celt', 'audio_tta', 'audio_opus_silk', 'audio_ape')
 
 $groups = [ordered]@{}
 function Add-Group([string]$Name, [string]$ObjSubdir, [string[]]$Flags, $Sources) {

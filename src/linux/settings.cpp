@@ -216,6 +216,7 @@ void LoadSettings() {
     s.waveColor = std::clamp(ToInt(v, "wave_color", 0), 0, kWaveColorChoices - 1);
     s.waveRestColor = std::clamp(ToInt(v, "wave_rest_color", 0), 0, kWaveRestChoices - 1);
     s.smoothSeek = ToInt(v, "smooth_seek", 0) != 0;
+    s.smoothScroll = ToInt(v, "smooth_scroll", 0) != 0;
     s.waveReflection = ToInt(v, "wave_reflection", 1) != 0;
     s.waveFullHeight = ToInt(v, "wave_full_height", 1) != 0;
     s.seekGlow = ToInt(v, "seek_glow", 1) != 0;
@@ -448,7 +449,7 @@ void SaveSettings() {
     text += "seek_style=" + std::to_string(s.seekStyle) + "\nmood_colors=" + std::to_string(s.moodColors) +
             "\nsmooth_seek=" + std::to_string(s.smoothSeek) + "\nwave_reflection=" +
             std::to_string(s.waveReflection) + "\nwave_full_height=" + std::to_string(s.waveFullHeight) +
-            "\nseek_glow=" + std::to_string(s.seekGlow) + "\n";
+            "\nseek_glow=" + std::to_string(s.seekGlow) + "\nsmooth_scroll=" + std::to_string(s.smoothScroll) + "\n";
     text += "format_title=" + ToUtf8(s.fmtTitle) + "\nformat_subtitle=" + ToUtf8(s.fmtSub) + "\nformat_status=" + ToUtf8(s.fmtStatus) +
             "\nformat_window=" + ToUtf8(s.fmtWindow) + "\n";
     text += "sound_effects=" + std::to_string(s.soundEffects) + "\nrobotic_sounds=" + std::to_string(s.roboticSounds) + "\n";

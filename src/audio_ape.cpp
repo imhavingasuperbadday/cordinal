@@ -3,6 +3,8 @@
 // Supports compressed levels fast/normal/high/extra for versions 3.95 through 3.99.
 #include "native_audio.h"
 #include "audio_file.h"
+#include "audio_kernels.h"
+#include "cord_codec.h"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -21,6 +23,18 @@ constexpr uint16_t olderModel[]{0,14824,28224,39348,47855,53994,58171,60926,6268
     64878,65126,65276,65365,65419,65450,65469,65480,65487,65491,65493};
 constexpr uint16_t newerModel[]{0,19578,36160,48417,56323,60899,63265,64435,64971,65232,65351,
     65416,65447,65466,65476,65482,65485,65488,65490,65491,65492,65493};
+// The symbol whose interval holds the first value with each high byte: a search starts there
+// and usually stops at once.
+constexpr auto ModelStarts(const uint16_t* model) {
+    std::array<uint8_t,256> starts{};
+    for (unsigned high=0;high<256;++high) {
+        unsigned symbol=0;
+        while (symbol<20 && model[symbol+1]<=high*256) ++symbol;
+        starts[high]=(uint8_t)symbol;
+    }
+    return starts;
+}
+constexpr auto olderStarts=ModelStarts(olderModel),newerStarts=ModelStarts(newerModel);
 
 // Reads the APE byte stream. The logical stream is big-endian but is stored in little-endian
 // DWORDs, so the low address bits are flipped on every byte access.
@@ -50,8 +64,9 @@ public:
     unsigned Symbol(bool modern) {
         uint32_t value=Frequency(65536);
         if (value>=65493) { Update(value,1);return value-65472; }
-        const auto& model=modern?newerModel:olderModel;
-        unsigned symbol=(unsigned)(std::upper_bound(std::begin(model),std::end(model),value)-std::begin(model)-1);
+        const uint16_t* model=modern?newerModel:olderModel;
+        unsigned symbol=(modern?newerStarts:olderStarts)[value>>8];
+        while (value>=model[symbol+1]) ++symbol;
         Update(model[symbol],model[symbol+1]-model[symbol]);return symbol;
     }
     bool Good() const { return good_ && cursor_.Good(); }
@@ -107,10 +122,10 @@ struct Residual {
 };
 
 // Mirrored rings keep the entire filter input contiguous at every cursor.
-// Two accumulators overlap independent groups of eight taps. The 32-bit pair-sums
-// wrap modulo 2^32, so either order totals the same value as one running sum.
+// Two accumulators overlap independent groups of taps. The 32-bit pair-sums
+// wrap modulo 2^32, so any order totals the same value as one running sum.
 // Each group's weights are adapted in that same step; the new weights are for the
-// next sample only.
+// next sample only. Every order is a multiple of 16.
 class Fir {
 public:
     Fir(unsigned order,unsigned precision,unsigned version):order_(order),precision_(precision),version_(version),
@@ -123,48 +138,46 @@ public:
     }
     int32_t Process(int32_t residual) {
         const int direction=Opposite(residual);
-        const int16_t* weight=weights_.data();
-        const int16_t* input=history_.data()+cursor_;
-        const int16_t* adapt=adaptation_.data()+cursor_;
-        __m128i s0=_mm_setzero_si128(),s1=s0;
-        unsigned j=0;
-        for (;j+16<=order_;j+=16) {
-            auto w0=_mm_loadu_si128((const __m128i*)(weight+j));
-            auto w1=_mm_loadu_si128((const __m128i*)(weight+j+8));
-            s0=_mm_add_epi32(s0,_mm_madd_epi16(w0,_mm_loadu_si128((const __m128i*)(input+j))));
-            s1=_mm_add_epi32(s1,_mm_madd_epi16(w1,_mm_loadu_si128((const __m128i*)(input+j+8))));
-            if (direction) {
-                auto a0=_mm_loadu_si128((const __m128i*)(adapt+j));
-                auto a1=_mm_loadu_si128((const __m128i*)(adapt+j+8));
-                w0=direction>0?_mm_add_epi16(w0,a0):_mm_sub_epi16(w0,a0);
-                w1=direction>0?_mm_add_epi16(w1,a1):_mm_sub_epi16(w1,a1);
-                _mm_storeu_si128((__m128i*)(weight+j),w0);
-                _mm_storeu_si128((__m128i*)(weight+j+8),w1);
+        int16_t* weight=weights_.data();
+        int16_t* history=history_.data();
+        int16_t* adaptation=adaptation_.data();
+        const int16_t* input=history+cursor_;
+        const int16_t* adapt=adaptation+cursor_;
+        int32_t dot;
+        if (wide_) dot=ApeFilterAvx2(weight,input,adapt,order_,direction);
+        else {
+            // The residual's sign is close to random, so the weight step is applied without a
+            // branch: (a^negate)-negate is -a under the mask, and `moves` clears it for zero.
+            const __m128i negate=_mm_set1_epi16((short)(direction>>1)),moves=_mm_set1_epi16((short)-(direction&1));
+            auto step=[&](__m128i w,const int16_t* a) {
+                __m128i change=_mm_sub_epi16(_mm_xor_si128(_mm_loadu_si128((const __m128i*)a),negate),negate);
+                return _mm_add_epi16(w,_mm_and_si128(change,moves));
+            };
+            __m128i s0=_mm_setzero_si128(),s1=s0;
+            for (unsigned j=0;j<order_;j+=16) {
+                auto w0=_mm_loadu_si128((const __m128i*)(weight+j));
+                auto w1=_mm_loadu_si128((const __m128i*)(weight+j+8));
+                s0=_mm_add_epi32(s0,_mm_madd_epi16(w0,_mm_loadu_si128((const __m128i*)(input+j))));
+                s1=_mm_add_epi32(s1,_mm_madd_epi16(w1,_mm_loadu_si128((const __m128i*)(input+j+8))));
+                _mm_storeu_si128((__m128i*)(weight+j),step(w0,adapt+j));
+                _mm_storeu_si128((__m128i*)(weight+j+8),step(w1,adapt+j+8));
             }
+            __m128i sum=_mm_add_epi32(s0,s1);
+            sum=_mm_add_epi32(sum,_mm_srli_si128(sum,8));sum=_mm_add_epi32(sum,_mm_srli_si128(sum,4));
+            dot=_mm_cvtsi128_si32(sum);
         }
-        for (;j+8<=order_;j+=8) {
-            auto w=_mm_loadu_si128((const __m128i*)(weight+j));
-            s0=_mm_add_epi32(s0,_mm_madd_epi16(w,_mm_loadu_si128((const __m128i*)(input+j))));
-            if (direction) {
-                auto a=_mm_loadu_si128((const __m128i*)(adapt+j));
-                w=direction>0?_mm_add_epi16(w,a):_mm_sub_epi16(w,a);
-                _mm_storeu_si128((__m128i*)(weight+j),w);
-            }
-        }
-        __m128i sum=_mm_add_epi32(s0,s1);
-        sum=_mm_add_epi32(sum,_mm_srli_si128(sum,8));sum=_mm_add_epi32(sum,_mm_srli_si128(sum,4));
-        int32_t dot=_mm_cvtsi128_si32(sum);
         int32_t value=Wrap(residual+((int64_t(dot)+(int64_t(1)<<(precision_-1)))>>precision_));
-        auto store=[&](std::vector<int16_t>& ring,unsigned at,int v) { ring[at]=ring[at+order_]=(int16_t)v; };
-        store(history_,cursor_,std::clamp(value,-32768,32767));
-        if (version_<3980) store(adaptation_,cursor_,value?((value>>28)&8)-4:0);
+        auto store=[&](int16_t* ring,unsigned at,int v) { ring[at]=ring[at+order_]=(int16_t)v; };
+        store(history,cursor_,std::clamp(value,-32768,32767));
+        if (version_<3980) store(adaptation,cursor_,value?((value>>28)&8)-4:0);
         else {
             uint32_t magnitude=value<0?0u-(uint32_t)value:(uint32_t)value;
             unsigned scale=8u<<((magnitude>uint64_t(average_)*3)+(magnitude>average_+average_/3));
-            store(adaptation_,cursor_,Opposite(value)*(int)scale);
+            store(adaptation,cursor_,Opposite(value)*(int)scale);
             average_+=(int32_t)(magnitude-average_)/16;
         }
-        auto halve=[&](unsigned back) { unsigned at=(cursor_+order_-back)%order_;store(adaptation_,at,adaptation_[at]>>1); };
+        // `back` is at most 8 and the smallest order is 16, so one wrap is enough.
+        auto halve=[&](unsigned back) { unsigned at=cursor_>=back?cursor_-back:cursor_+order_-back;store(adaptation,at,adaptation[at]>>1); };
         if (version_<3980) { halve(4);halve(8); }
         else { halve(1);halve(2);halve(8); }
         if (++cursor_==order_) cursor_=0;
@@ -172,6 +185,8 @@ public:
     }
 private:
     unsigned order_,precision_,version_,cursor_=0;uint32_t average_=0;
+    // Orders from 32 up are multiples of 32 and take the AVX2 kernel when the CPU has it.
+    bool wide_=order_>=32 && order_%32==0 && FastAudioKernels();
     std::vector<int16_t> weights_,history_,adaptation_;
 };
 
@@ -216,14 +231,8 @@ struct Predictor {
     }
 };
 
-constexpr auto CrcTable() {
-    std::array<uint32_t,256> table{};
-    for (unsigned i=0;i<256;++i) { uint32_t value=i;for (int k=0;k<8;++k) value=(value>>1)^((value&1)?0xEDB88320:0);table[i]=value; }
-    return table;
-}
-constexpr auto crcTable=CrcTable();
 // Standard CRC-32 (reflected) over the little-endian PCM samples; APE stores ~crc>>1.
-// Emit feeds each integer sample through this table as it writes the float frame.
+// Emit packs each integer sample for it as it writes the float frame.
 
 class ApeDecoder final : public Decoder {
     struct Frame { uint64_t offset=0,end=0;unsigned skip=0,samples=0; };
@@ -344,10 +353,15 @@ private:
         const unsigned shift=32-bits_;
         // Scaling by the exact power of two is ldexp with the same operand and rounding.
         const double scale=std::ldexp(1.0,1-(int)bits_);
+        // The CRC runs over the little-endian samples. They are packed into a small buffer and
+        // checked eight bytes a step; each store writes four bytes and keeps the sample's width.
         uint32_t crc=UINT32_MAX;
+        uint8_t packed[4096];size_t held=0;
+        const unsigned width=bits_/8;const uint32_t bias=bits_==8?128u:0u;
         auto feed=[&](int32_t sample) {
-            uint32_t value=(uint32_t)sample+(bits_==8?128u:0u);
-            for (unsigned byte=0;byte<bits_/8;++byte) { crc=(crc>>8)^crcTable[(crc^value)&255];value>>=8; }
+            uint32_t value=(uint32_t)sample+bias;
+            memcpy(packed+held,&value,4);held+=width;
+            if (held>sizeof packed-8) { crc=cord::Crc32Update(crc,packed,held);held=0; }
         };
         auto store=[&](unsigned i,unsigned c,int32_t sample) {
             int32_t value=(int32_t)((uint32_t)sample<<shift)>>shift;
@@ -375,6 +389,7 @@ private:
                 store(i,0,left);store(i,1,right);
             }
         }
+        crc=cord::Crc32Update(crc,packed,held);
         return (~crc>>1)==stored;
     }
     // Decode one frame: optional header, arithmetic residuals, FIR stages and channel

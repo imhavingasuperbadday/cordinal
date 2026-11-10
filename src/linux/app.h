@@ -151,6 +151,7 @@ struct Settings {
     int waveColor = 0;           // the plain waveform's colour and the moodbar's base: WaveColors (peaks.h)
     int waveRestColor = 0;       // the waveform's unplayed part: WaveRestColors (peaks.h)
     bool smoothSeek = false;     // soften the whole song's outline and blend its moodbar colours
+    bool smoothScroll = false;   // the library canvas eases toward wheel and paging moves (off by default)
     bool waveReflection = true;  // mirror the waveform below its center line, for the waveform and moodbar styles
     bool waveFullHeight = true;  // unmirrored, the waveforms still fill both halves, the lower as bright
     bool seekGlow = true;        // the seek bar's colours glow softly past its edges, every style and source alike
@@ -547,6 +548,9 @@ bool HelperVisualizersRunning();
 void ToggleHelperVisualizer(size_t index);
 void OpenHelperVisualizers(float x, float y);
 void TickHelperVisualizers();
+// The library canvas's Smooth scrolling glide (libview.cpp): the loop ticks it while it runs.
+void TickCanvasScroll();
+bool CanvasScrollAnimating();
 int CheckLinuxHelperFeed();
 std::vector<std::wstring> HelperToolLabels();  // the tools of the helpers that are on, in menu order
 int RunningHelperTool();                       // its index, or -1

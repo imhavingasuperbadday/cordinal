@@ -215,6 +215,10 @@ void MouseDown(const SDL_MouseButtonEvent& e) {
         else if (e.button == SDL_BUTTON_LEFT && g_exclude.cancel.In(x, y)) ConfirmExclude(false);
         return;
     }
+    if (g_recent.open) {
+        if (e.button == SDL_BUTTON_LEFT) RecentAdditionsClick(x, y);
+        return;
+    }
     if (g_renameIndex >= 0) {
         if (g_renameIndex < (int)L.tabRects.size() && L.tabRects[g_renameIndex].In(x, y)) return;
         EndRename(true);
@@ -539,6 +543,10 @@ void MouseUp(const SDL_MouseButtonEvent& e) {
 
 void Wheel(const SDL_MouseWheelEvent& e) {
     if (g_exclude.open) return;
+    if (g_recent.open) {
+        RecentAdditionsWheel(e.y);
+        return;
+    }
     if (PanelOpen()) {
         PanelWheel(e.mouse_x * Density(), e.mouse_y * Density(), e.y);
         return;
@@ -619,6 +627,10 @@ void Key(const SDL_KeyboardEvent& e) {
     if (g_exclude.open) {
         if (e.key == SDLK_ESCAPE) ConfirmExclude(false);
         else if (e.key == SDLK_RETURN || e.key == SDLK_KP_ENTER) ConfirmExclude(true);
+        return;
+    }
+    if (g_recent.open) {
+        if (e.key == SDLK_ESCAPE) g_recent.open = false;
         return;
     }
     if (e.key == SDLK_ESCAPE && g_drag == Drag::Tracks) {

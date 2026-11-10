@@ -134,9 +134,13 @@ constexpr int kVolumeGap = 24;     // between the remaining time's room and the 
 constexpr int kSliderInset = 8;    // from each end to the handle's centre, also used for hit testing
 constexpr int kSliderTrackHeight = 4, kSliderThumbWidth = 3, kSliderThumbHeight = 14;
 constexpr int kBandGap = 4;        // under the band and under the now playing line
-constexpr int kCover = 32;         // the now playing cover
+constexpr int kCover = 48;         // the now playing cover
+constexpr int kLargeCover = 96;    // the same with Customize layout > Large cover
 constexpr int kCoverGap = 8;       // between the cover and the title
 constexpr int kLineHeight = 16;    // the title and the artist line
+constexpr int kLargeLineHeight = 18, kLargeLineGap = 2;  // the two lines beside a large cover
+// The title's distance below the cover's top: the title and artist lines centred beside it.
+constexpr int NowPlayingTextTop(int cover, int line, int gap) { return (cover - 2 * line - gap) / 2; }
 constexpr int kTabRow = 24;        // the tab strip
 constexpr int kRadioTabWidth = 84;  // Radio and its close box at the right end of the tab strip
 constexpr int kSearchWidth = 200;  // the search box (at most a third of the window)
@@ -174,13 +178,13 @@ inline constexpr LayoutRect kLayout[] = {
     {"remaining", 928, 8, 58, 18},
     {"speaker", 990, 7, 20, 18},
     {"volume", 1010, 3, 90, 26},
-    {"cover", 4, 33, 32, 32},
-    {"title", 44, 33, 1056, 16},
-    {"subtitle", 44, 49, 1056, 16},
-    {"tabs", 0, 69, 810, 24},
-    {"radio_tab", 810, 69, 84, 24},
-    {"search", 900, 70, 200, 22},
-    {"list", 0, 123, 1104, 494},
+    {"cover", 4, 33, 48, 48},
+    {"title", 60, 41, 1040, 16},
+    {"subtitle", 60, 57, 1040, 16},
+    {"tabs", 0, 85, 810, 24},
+    {"radio_tab", 810, 85, 84, 24},
+    {"search", 900, 86, 200, 22},
+    {"list", 0, 139, 1104, 478},
     {"status", 0, 617, 1104, 23},
 };
 

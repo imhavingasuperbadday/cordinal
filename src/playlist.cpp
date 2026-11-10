@@ -140,6 +140,31 @@ bool MatchesTrack(const Library& library, TrackId id, const std::vector<std::wst
     return TrackMatcher(library, words).Matches(id);
 }
 
+int MissingTagTerm(const Library& library, TrackId id, std::wstring_view word) {
+    constexpr std::wstring_view prefix = L"missing:";
+    if (word.size() <= prefix.size() || (word[0] | 0x20) != L'm') return -1;
+    auto same = [](std::wstring_view a, std::wstring_view b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i)
+            if (towlower(a[i]) != b[i]) return false;
+        return true;
+    };
+    if (!same(word.substr(0, prefix.size()), prefix)) return -1;
+    const std::wstring_view field = word.substr(prefix.size());
+    if (!library.Contains(id)) return 0;
+    const Track& t = library[id];
+    if (same(field, L"title")) return !t.title;
+    if (same(field, L"artist")) return !t.artist;
+    if (same(field, L"album")) return !t.album;
+    if (same(field, L"albumartist")) return !t.albumArtist;
+    if (same(field, L"year") || same(field, L"date")) return !t.date;
+    if (same(field, L"genre")) return !t.genre;
+    if (same(field, L"track")) return !t.trackNo;
+    if (same(field, L"composer")) return !t.composer;
+    if (same(field, L"any")) return !t.title || !t.artist || !t.album || !t.date || !t.genre || !t.trackNo;
+    return -1;  // an unknown field is searched for as ordinary text
+}
+
 bool TrackMatcher::Matches(TrackId id) {
     if (!library_.Contains(id)) return false;
     if (words_.empty()) return true;
@@ -149,6 +174,10 @@ bool TrackMatcher::Matches(TrackId id) {
                                          (StringPool::Handle)track.codec + 1};
     for (size_t wordIndex = 0; wordIndex < words_.size(); ++wordIndex) {
         const auto& word = words_[wordIndex];
+        if (int missing = MissingTagTerm(library_, id, word); missing >= 0) {
+            if (!missing) return false;
+            continue;
+        }
         // Long queries retain their full meaning; words beyond the mask are searched normally.
         const uint64_t bit = wordIndex < 64 ? uint64_t(1) << wordIndex : 0;
         bool match = false;

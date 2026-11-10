@@ -59,6 +59,7 @@ void LibViewRebuild();
 // Sets the covers' tile size (96-DPI pixels) for this session and relayouts the view.
 void LibViewSetCoverSize(int pixels);
 void LibViewInvalidate();
+void LibViewSmoothScrollChanged();  // Preferences: Smooth scrolling was turned off
 void LibViewForgetCovers(const std::vector<TrackId>& ids);  // their covers changed on disk
 void LibViewBusyTick(bool any);
 void LibViewTheme();
@@ -97,6 +98,8 @@ void LibViewFocusFirst();
 void LibViewRememberPosition(PlaylistPosition& position);
 void LibViewRestorePosition(const PlaylistPosition& position);
 bool MatchesFilter(TrackId id, const std::vector<std::wstring>& words);
+// Library > Find missing information: the Library tab searched for kMissingFields[field].
+void ShowMissingInformation(size_t field);
 void RebuildView(bool preserveSelection = false);
 // Row ↔ view-position mapping. Album grouping inserts two header rows per album, so a list row is
 // a view position plus the groups before it; nothing is stored per track.

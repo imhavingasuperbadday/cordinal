@@ -1227,6 +1227,7 @@ void Draw() {
     DrawStatus(p);
     DrawMenuBar(p);
     if (g_folders.open) DrawFoldersDialog(p);
+    if (g_recent.open) DrawRecentAdditions(p);
     if (g_aboutOpen) DrawAbout(p);
     if (g_web.open) DrawWeb(p);
     if (PanelOpen()) DrawPanel(p, g_mouseX, g_mouseY);

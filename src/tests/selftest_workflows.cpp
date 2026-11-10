@@ -322,6 +322,22 @@ void TestImportedFolders(const std::wstring& scratch) {
 void TestLibraryWorkflow(const std::wstring& scratch) {
     testlog::Batch batch;
     LibraryScope restore;
+    {
+        // Library > Remove recent additions: the 24-hour window lists by date added, and removing a
+        // track leaves its file and the other tracks alone. Its own library, so later counts hold.
+        LibraryScope isolated;
+        TrackId fresh = g_lib.Add(scratch + L"\\recent-new.flac"), old = g_lib.Add(scratch + L"\\recent-old.flac");
+        g_lib[fresh].flags |= Track::kInLibrary; g_lib[fresh].added = UnixNow();
+        g_lib[old].flags |= Track::kInLibrary; g_lib[old].added = UnixNow() - 3 * 86400;
+        auto recent = TracksAddedSince(UnixNow() - 86400);
+        bool listed = std::find(recent.begin(), recent.end(), fresh) != recent.end() &&
+                      std::find(recent.begin(), recent.end(), old) == recent.end();
+        ExcludeTracks({fresh});
+        bool removed = (g_lib[fresh].flags & Track::kExcluded) && !(g_lib[fresh].flags & Track::kInLibrary) &&
+                       (g_lib[old].flags & Track::kInLibrary);
+        testlog::Check(listed && removed, L"LIBRARY recent additions list only the last 24 hours, and removal keeps other tracks");
+        ExcludeTracks({old});
+    }
     const std::wstring db = scratch + L"\\workflow.cdb", exported = scratch + L"\\favorites.m3u8";
     // An unreferenced track forces the save to compact IDs. Comparisons below use paths.
     g_lib.Add(scratch + L"\\not-retained.flac");

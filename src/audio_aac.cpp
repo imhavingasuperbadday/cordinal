@@ -128,18 +128,6 @@ const auto& SpectralTuples() {
     return table;
 }
 const std::array<float,8192>& Powers();
-const auto& SpectralPowers() {
-    static const auto table=[] {
-        std::array<std::array<std::array<float,4>,289>,11> v{};
-        const auto& tuples=SpectralTuples(); const auto& powers=Powers();
-        for (unsigned book=1;book<11;++book) for (unsigned symbol=0;symbol<289;++symbol)
-            for (unsigned j=0;j<4;++j) {
-                int q=tuples[book][symbol][j];v[book][symbol][j]=(q<0?-1:1)*powers[std::abs(q)];
-            }
-        return v;
-    }();
-    return table;
-}
 struct SignedPowerTables {
     std::array<std::array<float,4>,625> quads;
     std::array<std::array<float,2>,1089> pairs;
@@ -160,62 +148,81 @@ const SignedPowerTables& SignedPowers() {
     }();
     return tables;
 }
-// 12-bit prefix lookup per signed codebook: packs the symbol, its sign bits and the consumed
-// bit count so DirectSpectrum can decode without re-walking the tree.
+// 12-bit prefix lookup per spectral codebook: an entry packs the consumed bit count (low four
+// bits) and the index of the signed tuple in SignedPowers, for every codeword whose code and
+// sign bits fit the prefix. Zero marks the rest: longer codes, and book 11's escape values.
 const auto& SignedSpectralLookup() {
     static const auto tables=[] {
-        std::array<std::array<uint32_t,4096>,11> v{};
+        std::array<std::array<uint16_t,4096>,12> v{};
         const auto& books=Books(); const auto& tuples=SpectralTuples();
-        for (unsigned book=1;book<11;++book) for (unsigned prefix=0;prefix<4096;++prefix) {
+        for (unsigned book=1;book<12;++book) for (unsigned prefix=0;prefix<4096;++prefix) {
             int node=0; unsigned bits=0;
             while (node>=0 && bits<12) node=books[book].nodes[node].child[(prefix>>(11-bits++))&1];
             if (node>=0) continue;
             unsigned symbol=-node-1,dim=book<5?4:2;
             int values[4];for (unsigned j=0;j<dim;++j) values[j]=tuples[book][symbol][j];
+            if (book==11 && (values[0]==16 || values[1]==16)) continue;
             if (book==3 || book==4 || book>=7) for (unsigned j=0;j<dim;++j) if (values[j]) {
                 if (bits==12) { bits=13;break; }
                 if ((prefix>>(11-bits++))&1) values[j]=-values[j];
             }
             unsigned tuple=0;
             for (unsigned j=0;j<dim;++j) tuple=tuple*(dim==4?5:33)+values[j]+(dim==4?2:16);
-            if (bits<=12) v[book][prefix]=(tuple<<4)|bits;
+            if (bits<=12) v[book][prefix]=(uint16_t)((tuple<<4)|bits);
         }
         return v;
     }();
     return tables;
 }
-// Decode count spectral lines with codebook book. The lookup short-circuits the common
-// case; otherwise the tree walk reads any sign bits in a separate pass.
-template<unsigned Dim,bool Signs> __forceinline bool DirectSpectrum(Bits& b,const PrefixBook& book,
-    const std::array<std::array<float,4>,289>& powers,const std::array<uint32_t,4096>& lookup,
-    const SignedPowerTables& signedPowers,float scale,float* out,unsigned count) {
-    if (count%Dim) return false;
-    for (unsigned at=0;at<count;at+=Dim) {
-        if (b.Left()>=12) if (uint32_t entry=lookup[(size_t)b.Peek(12)]) {
-            b.Skip(entry&15);
-            __m128 tuple;
-            if constexpr (Dim==4) tuple=_mm_loadu_ps(signedPowers.quads[entry>>4].data());
-            else tuple=_mm_castsi128_ps(_mm_loadl_epi64((const __m128i*)signedPowers.pairs[entry>>4].data()));
-            __m128 scaled=_mm_mul_ps(tuple,_mm_set1_ps(scale));
-            if constexpr (Dim==4) _mm_storeu_ps(out+at,scaled);
-            else _mm_storel_epi64((__m128i*)(out+at),_mm_castps_si128(scaled));
-            continue;
+// One codeword through the register window: tree symbol, then its sign bits, then book 11's
+// escape sequences, in bitstream order. False on a codeword the book does not contain or an
+// overlong escape. The caller has just refilled the window; its Safe() test covers the two escape refills.
+template<unsigned Dim,bool Signs,bool Escape> __forceinline bool WindowTuple(FastBits& f,const PrefixBook& book,
+    const std::array<int8_t,4>* tuples,const float* powers,float scale,float* out) {
+    unsigned first=book.fast[f.Peek(PrefixBook::lookupBits)];
+    int symbol;
+    if (first&31) { f.Drop(first&31); symbol=int(first>>5); }
+    else {
+        f.Drop(PrefixBook::lookupBits); int at=int(first>>5);
+        for (;;) {
+            at=book.nodes[at].child[f.Get(1)];
+            if (at<0) break;
+            if (!at) return false;
         }
-        const auto& tuple=powers[book.Read(b)];
-        unsigned flags=0,used=0;
-        bool peek=Signs && b.Left()>=Dim;
-        if (peek) flags=(unsigned)b.Peek(Dim);
-        for (unsigned j=0;j<Dim;++j) {
-            float v=tuple[j];
-            if constexpr (Signs) if (v) {
-                bool negative=peek?((flags>>(Dim-1-used++))&1)!=0:b.Get(1)!=0;
-                if (negative) v=-v;
-            }
-            out[at+j]=v*scale;
-        }
-        if (peek) b.Skip(used);
+        symbol=-at-1;
     }
-    return b.Good();
+    int value[4];
+    for (unsigned j=0;j<Dim;++j) value[j]=tuples[symbol][j];
+    if constexpr (Signs) for (unsigned j=0;j<Dim;++j) if (value[j] && f.Get(1)) value[j]=-value[j];
+    if constexpr (Escape) for (unsigned j=0;j<Dim;++j) if (value[j]==16 || value[j]==-16) {
+        f.Refill();
+        uint64_t zeros=~f.Window();
+        unsigned ones=zeros?63-HighestBit(zeros):64;
+        if (ones>8) return false;
+        f.Drop(ones+1);
+        int magnitude=(1<<(ones+4))+(int)f.Get(ones+4);
+        value[j]=value[j]<0?-magnitude:magnitude;
+    }
+    for (unsigned j=0;j<Dim;++j) out[j]=(value[j]<0?-1:1)*powers[std::abs(value[j])]*scale;
+    return true;
+}
+// Decode a band's lines from the register window. Most codewords resolve in the signed lookup:
+// one table load names the scaled tuple and its length. False reports a damaged stream.
+template<unsigned Dim,bool Signs,bool Escape> __forceinline bool WindowBand(FastBits& f,FastBits::Tail& tail,const PrefixBook& book,
+    const std::array<int8_t,4>* tuples,const float* powers,const uint16_t* lookup,const SignedPowerTables& signedPowers,
+    float scale,float* out,unsigned count) {
+    const __m128 gain=_mm_set1_ps(scale);
+    for (unsigned at=0;at<count;at+=Dim) {
+        if (!f.Safe() && !f.Pad(tail)) return false;
+        f.Refill();
+        if (unsigned entry=lookup[f.Peek(12)]) {
+            f.Drop(entry&15);
+            if constexpr (Dim==4) _mm_storeu_ps(out+at,_mm_mul_ps(_mm_loadu_ps(signedPowers.quads[entry>>4].data()),gain));
+            else _mm_storel_epi64((__m128i*)(out+at),_mm_castps_si128(_mm_mul_ps(
+                _mm_castsi128_ps(_mm_loadl_epi64((const __m128i*)signedPowers.pairs[entry>>4].data())),gain)));
+        } else if (!WindowTuple<Dim,Signs,Escape>(f,book,tuples,powers,scale,out+at)) return false;
+    }
+    return true;
 }
 // x^(4/3), the AAC inverse-quantization nonlinearity, evaluated once for 0..8191.
 const std::array<float,8192>& Powers() {
@@ -332,7 +339,7 @@ private:
         transform_[0].Init(2048); transform_[1].Init(256);
         for (int shortBlock=0;shortBlock<2;++shortBlock) for (int k=0;k<2;++k) window_[shortBlock][k]=Window(shortBlock?128:1024,k!=0);
         simd_=FastAudioKernels();
-        (void)Books(); (void)Powers(); (void)SpectralTuples(); (void)SpectralPowers(); (void)SignedPowers(); (void)SignedSpectralLookup(); (void)Scale(0);
+        (void)Books(); (void)Powers(); (void)SpectralTuples(); (void)SignedPowers(); (void)SignedSpectralLookup(); (void)Scale(0);
         if (live) { rate_=rate; return true; }
         return Ready(rate,true);
     }
@@ -354,12 +361,13 @@ private:
     // and noise (13) bands carry their own running prediction across bands.
     bool Factors(Bits& b,Ics& info,int gain) {
         int normal=gain,intensity=0,noise=gain-90; bool firstNoise=true;
+        const PrefixBook& factors=Books()[0];
         for (unsigned g=0;g<info.groups;++g) for (unsigned s=0;s<info.max;++s) {
             unsigned book=info.book[g][s]; int& v=info.sf[g][s]; v=0;
             if (!book) continue;
-            if (book>=14) { intensity+=Books()[0].Read(b)-60; v=intensity; if (v<-1024 || v>1024) return false; }
-            else if (book==13) { noise+=firstNoise?(int)b.Get(9)-256:Books()[0].Read(b)-60; firstNoise=false; v=noise; if (v<-100 || v>255) return false; }
-            else { normal+=Books()[0].Read(b)-60; if (normal<0 || normal>255) return false; v=normal; }
+            if (book>=14) { intensity+=factors.Read(b)-60; v=intensity; if (v<-1024 || v>1024) return false; }
+            else if (book==13) { noise+=firstNoise?(int)b.Get(9)-256:factors.Read(b)-60; firstNoise=false; v=noise; if (v<-100 || v>255) return false; }
+            else { normal+=factors.Read(b)-60; if (normal<0 || normal>255) return false; v=normal; }
         }
         return b.Good();
     }
@@ -387,38 +395,77 @@ private:
         }
         return b.Good();
     }
-    // Quantized spectrum. Books <11 use the direct fast path; 11 adds escape codes; 13 (PNS)
-    // synthesizes random lines normalized to the band's energy.
-    bool Spectrum(Bits& b,Channel& c,const std::vector<std::pair<unsigned,unsigned>>& pulses) {
+    // The seed is a hash of the packet, so seeks reproduce the noise without a song-sized state
+    // cache. Most packets carry no noise band and never pay for it.
+    uint32_t Random() {
+        if (!seeded_) {
+            seeded_=true; random_=2166136261u;
+            for (size_t i=0;i<seedBytes_;++i) random_=(random_^seed_[i])*16777619u;
+        }
+        return random_=random_*1664525u+1013904223u;
+    }
+    // Perceptual noise substitution: random lines normalized to each noise band's energy.
+    void Noise(Channel& c) {
         const Ics& info=c.info; unsigned window=0, size=info.sequence==2?128:1024;
-        // Only bands decoded through the integer path (escape book or pulse data)
-        // read quant, and every such line is written before the second pass. A pulse
-        // may still point at a band that was skipped (zero or noise codebook), so
-        // clear the array whenever pulses can touch it.
-        std::array<int,1024> quant;
-        if (!pulses.empty()) quant.fill(0);
-        const auto& books=Books(); const auto& tuples=SpectralTuples(); const auto& powers=Powers();
-        const auto& directPowers=SpectralPowers();
-        const auto& signedLookup=SignedSpectralLookup();
+        for (unsigned g=0;g<info.groups;window+=info.group[g++]) for (unsigned s=0;s<info.max;++s) {
+            if (info.book[g][s]!=13) continue;
+            float scale=Scale(info.sf[g][s]-100)*(1.0f/32768);
+            for (unsigned w=0;w<info.group[g];++w) {
+                float* dst=c.spectrum.data()+(window+w)*size;
+                double energy=0;
+                for (unsigned i=info.bands[s];i<info.bands[s+1];++i) { dst[i]=(float)(int32_t)Random(); energy+=double(dst[i])*dst[i]; }
+                float norm=scale/(float)std::sqrt(std::max(energy,1.0));
+                for (unsigned i=info.bands[s];i<info.bands[s+1];++i) dst[i]*=norm;
+            }
+        }
+    }
+    // Quantized spectrum, scaled as it is decoded from the register window. Pulse data needs the
+    // integer lines and takes PulsedSpectrum instead.
+    bool Spectrum(Bits& b,Channel& c,const std::vector<std::pair<unsigned,unsigned>>& pulses) {
+        if (!pulses.empty()) return PulsedSpectrum(b,c,pulses);
+        const Ics& info=c.info; unsigned window=0, size=info.sequence==2?128:1024;
+        const auto& books=Books(); const auto& tuples=SpectralTuples(); const float* powers=Powers().data();
+        const auto& lookup=SignedSpectralLookup();
         const auto& signedPowers=SignedPowers();
         c.spectrum.fill(0);
+        bool noise=false;
+        FastBits::Tail tail;
+        FastBits f(b);
+        for (unsigned g=0;g<info.groups;window+=info.group[g++]) for (unsigned s=0;s<info.max;++s) {
+            unsigned book=info.book[g][s];
+            if (!book || book>=13) { noise|=book==13; continue; }
+            const unsigned start=info.bands[s],count=info.bands[s+1]-start;
+            if (count%(book<5?4:2)) return false;
+            const float scale=Scale(info.sf[g][s]-100)*(1.0f/32768);
+            const auto* tuple=tuples[book].data(); const uint16_t* table=lookup[book].data();
+            for (unsigned w=0;w<info.group[g];++w) {
+                float* dst=c.spectrum.data()+(window+w)*size+start;
+                bool ok;
+                if (book<3) ok=WindowBand<4,false,false>(f,tail,books[book],tuple,powers,table,signedPowers,scale,dst,count);
+                else if (book<5) ok=WindowBand<4,true,false>(f,tail,books[book],tuple,powers,table,signedPowers,scale,dst,count);
+                else if (book<7) ok=WindowBand<2,false,false>(f,tail,books[book],tuple,powers,table,signedPowers,scale,dst,count);
+                else if (book<11) ok=WindowBand<2,true,false>(f,tail,books[book],tuple,powers,table,signedPowers,scale,dst,count);
+                else ok=WindowBand<2,true,true>(f,tail,books[book],tuple,powers,table,signedPowers,scale,dst,count);
+                if (!ok) return false;
+            }
+        }
+        if (!f.Commit()) return false;
+        if (noise) Noise(c);
+        return true;
+    }
+    // The integer path: every line is decoded to its quantized value, the pulses are added, and a
+    // second pass scales the result.
+    bool PulsedSpectrum(Bits& b,Channel& c,const std::vector<std::pair<unsigned,unsigned>>& pulses) {
+        const Ics& info=c.info; unsigned window=0, size=info.sequence==2?128:1024;
+        // A pulse may point at a band that was skipped (zero or noise codebook), so clear first.
+        std::array<int,1024> quant;
+        quant.fill(0);
+        const auto& books=Books(); const auto& tuples=SpectralTuples(); const auto& powers=Powers();
+        c.spectrum.fill(0);
+        bool noise=false;
         for (unsigned g=0;g<info.groups;++g) {
             for (unsigned s=0;s<info.max;++s) {
-                unsigned book=info.book[g][s]; if (!book || book>=13) continue;
-                if (book<11 && pulses.empty()) {
-                    unsigned start=info.bands[s],count=info.bands[s+1]-start;
-                    float scale=Scale(info.sf[g][s]-100)*(1.0f/32768);
-                    for (unsigned w=0;w<info.group[g];++w) {
-                        float* dst=c.spectrum.data()+(window+w)*size+start;
-                        bool ok;
-                        if (book<3) ok=DirectSpectrum<4,false>(b,books[book],directPowers[book],signedLookup[book],signedPowers,scale,dst,count);
-                        else if (book<5) ok=DirectSpectrum<4,true>(b,books[book],directPowers[book],signedLookup[book],signedPowers,scale,dst,count);
-                        else if (book<7) ok=DirectSpectrum<2,false>(b,books[book],directPowers[book],signedLookup[book],signedPowers,scale,dst,count);
-                        else ok=DirectSpectrum<2,true>(b,books[book],directPowers[book],signedLookup[book],signedPowers,scale,dst,count);
-                        if (!ok) return false;
-                    }
-                    continue;
-                }
+                unsigned book=info.book[g][s]; if (!book || book>=13) { noise|=book==13; continue; }
                 unsigned dim=book<5?4:2;
                 bool signs=book==3 || book==4 || book>=7;
                 for (unsigned w=0;w<info.group[g];++w) for (unsigned at=info.bands[s];at<info.bands[s+1];at+=dim) {
@@ -440,20 +487,11 @@ private:
         window=0;
         for (unsigned g=0;g<info.groups;++g) {
             for (unsigned s=0;s<info.max;++s) {
-                unsigned book=info.book[g][s]; if (!book || book>=14) continue;
-                if (book<11 && pulses.empty()) continue;
+                unsigned book=info.book[g][s]; if (!book || book>=13) continue;
                 float scale=Scale(info.sf[g][s]-100)*(1.0f/32768);
                 for (unsigned w=0;w<info.group[g];++w) {
                     float* dst=c.spectrum.data()+(window+w)*size;
-                    if (book==13) {
-                        double energy=0;
-                        for (unsigned i=info.bands[s];i<info.bands[s+1];++i) {
-                            random_=random_*1664525u+1013904223u;
-                            dst[i]=(float)(int32_t)random_; energy+=double(dst[i])*dst[i];
-                        }
-                        float norm=scale/(float)std::sqrt(std::max(energy,1.0));
-                        for (unsigned i=info.bands[s];i<info.bands[s+1];++i) dst[i]*=norm;
-                    } else for (unsigned i=info.bands[s];i<info.bands[s+1];++i) {
+                    for (unsigned i=info.bands[s];i<info.bands[s+1];++i) {
                         int v=quant[(window+w)*size+i]; if (std::abs(v)>8191) return false;
                         dst[i]=(v<0?-1:1)*powers[std::abs(v)]*scale;
                     }
@@ -461,6 +499,7 @@ private:
             }
             window+=info.group[g];
         }
+        if (noise) Noise(c);
         return b.Good();
     }
     // One channel's raw stream: ICS info (unless shared), sections, scalefactors, pulses,
@@ -607,8 +646,7 @@ private:
     bool Decode(const uint8_t* p,size_t bytes,std::vector<float>& out) override {
         // A raw_data_block is a 3-bit-tagged sequence of elements that fill channels in order.
         Bits b(p,bytes); unsigned channels=0;
-        // Packet-derived PNS seed makes seeks reproducible without a song-sized state cache.
-        random_=2166136261u; for (size_t i=0;i<bytes;++i) random_=(random_^p[i])*16777619u;
+        seed_=p; seedBytes_=bytes; seeded_=false;
         while (b.Good() && b.Left()>=3) {
             unsigned tag=(unsigned)b.Get(3); if (tag==7) break;
             if (tag==6) {
@@ -656,6 +694,9 @@ private:
     bool liveFirst_=false,liveFailed_=false;
     bool simd_=false;
     uint32_t random_=0;
+    const uint8_t* seed_=nullptr;
+    size_t seedBytes_=0;
+    bool seeded_=false;
     Channel channel_[8];
     Mdct transform_[2];
     std::vector<float> window_[2][2];

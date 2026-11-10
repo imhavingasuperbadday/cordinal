@@ -88,6 +88,7 @@ HMENU BuildMenu() {
     AppendMenuW(edit, MF_STRING, IDM_FIND, L"&Search\tCtrl+F");
     AppendMenuW(edit, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(edit, MF_STRING, IDM_PROPERTIES, L"Edit &tags...\tAlt+Enter");
+    AppendMenuW(edit, MF_STRING, IDM_EDIT_ALBUM_TAGS, L"Edit al&bum tags...");
     AppendMenuW(edit, MF_STRING, IDM_TAG_UNDO, L"Undo last ta&g edit");
     AppendHelperTools(edit, true);  // the tools of the helpers that are on, when there are any
 
@@ -157,6 +158,7 @@ HMENU BuildMenu() {
     AppendMenuW(library, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(library, MF_STRING, IDM_INBOX_ACCEPT_ALL, L"Add everything in the &Inbox");
     AppendMenuW(library, MF_STRING, IDM_REMOVE_MISSING, L"Forget &missing files...");
+    AppendMenuW(library, MF_STRING, IDM_RECENT_ADDITIONS, L"Remove &recent additions (24 hours)...");
     AppendMenuW(library, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(library, MF_STRING, IDM_ORGANIZE, L"&Organize files...");
     AppendMenuW(library, MF_STRING, IDM_ORGANIZE_UNDO, L"&Undo last organize");
@@ -183,6 +185,10 @@ HMENU BuildMenu() {
     AppendMenuW(editions, MF_STRING, IDM_EDITION_VERSIONS, L"Other &versions...");
     AppendMenuW(library, MF_POPUP, (UINT_PTR)editions, L"Album &editions");
     AppendMenuW(library, MF_SEPARATOR, 0, nullptr);
+    HMENU missing = CreatePopupMenu();
+    for (size_t i = 0; i < std::size(kMissingFields); ++i)
+        AppendMenuW(missing, MF_STRING, IDM_MISSING_BASE + (UINT)i, FromUtf8(kMissingFields[i].label).c_str());
+    AppendMenuW(library, MF_POPUP, (UINT_PTR)missing, L"Fi&nd missing information");
     AppendMenuW(library, MF_STRING, IDM_FETCH_COVERS, L"Fetch missing &covers...");
     AppendMenuW(library, MF_STRING, IDM_DUPLICATES, L"Find &duplicate audio");
     AppendMenuW(library, MF_STRING, IDM_STEAM, L"Add &Steam soundtracks");
@@ -341,7 +347,7 @@ void UpdateMainMenu(HMENU m) {
         {IDM_RENAME_PL, removable}, {IDM_REMOVE_PL, RadioActive() || removable},
         {IDM_REMOVE, selected && (editable || LibraryActive())}, {IDM_CROP, selected && editable},
         {IDM_CLEAR, populated}, {IDM_REMOVE_DUPES, populated}, {IDM_REMOVE_DEAD, populated},
-        {IDM_PROPERTIES, selected}, {IDM_TAG_UNDO, CanUndoTagEdit(undoDescription)},
+        {IDM_PROPERTIES, selected}, {IDM_EDIT_ALBUM_TAGS, selected}, {IDM_TAG_UNDO, CanUndoTagEdit(undoDescription)},
         {IDM_RG_SCAN_PL, !manualScan}, {IDM_RG_SCAN_SEL, selected && !manualScan},
         {IDM_RG_SCAN_ALL, replaygain::HasLibraryTracks() && !manualScan},
         {IDM_RG_CLEAR, selected && !manualScan},

@@ -1325,6 +1325,160 @@ std::vector<std::wstring> PathsOf(const std::vector<TrackId>& ids) {
 
 bool HasCustomCover(const std::vector<TrackId>& ids) { return customcover::Count(PathsOf(ids)) > 0; }
 
+// --- covers without the picker -------------------------------------------------------------------
+
+namespace {
+
+// Dropping and OLE's clipboard need OLE on the UI thread, already in COM's apartment.
+void EnsureOle() {
+    static const bool ole = SUCCEEDED(OleInitialize(nullptr));
+    (void)ole;
+}
+
+// Gives every album of `ids`, whole, the image. A cover belongs to the album, so one selected track
+// is enough; an album spread over disc folders gets it in each.
+void UseImageFor(const std::vector<TrackId>& ids, std::string image) {
+    int w = 0, h = 0;
+    if (online::InspectImage(image, w, h) == online::ImageType::None) {
+        ShowMessage(L"Covers have to be complete JPEG or PNG images of at most 20 MB.");
+        return;
+    }
+    auto albums = coverfetch::AlbumsOf(AlbumTracksOf(ids));
+    if (albums.empty()) {
+        ShowMessage(L"Select an album or one of its tracks first.");
+        return;
+    }
+    std::vector<coverfetch::CoverChoice> choices;
+    for (auto& album : albums) choices.push_back({std::move(album), image, {}});
+    SaveCovers(std::move(choices));
+}
+
+}  // namespace
+
+bool IsCoverImageFile(const std::wstring& path) {
+    std::wstring ext = ExtOf(path);
+    for (wchar_t& c : ext) c = (wchar_t)towlower(c);
+    return ext == L"jpg" || ext == L"jpeg" || ext == L"png";
+}
+
+void SetCoverFromFile(const std::vector<TrackId>& ids, const std::wstring& file) {
+    std::string bytes;
+    if (!backup::ReadBytes(file, bytes, online::kMaxImageBytes)) {
+        ShowMessage(L"Couldn't read " + FileNameOf(file) + L". Covers can be JPEG or PNG images of at most 20 MB.");
+        return;
+    }
+    UseImageFor(ids, std::move(bytes));
+}
+
+void ChooseCoverFile(const std::vector<TrackId>& ids) {
+    if (ids.empty()) {
+        ShowMessage(L"Select an album or one of its tracks first.");
+        return;
+    }
+    ComPtr<IFileOpenDialog> dlg;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg)))) return;
+    COMDLG_FILTERSPEC filters[] = {{L"Images", L"*.jpg;*.jpeg;*.png"}};
+    dlg->SetFileTypes(1, filters);
+    dlg->SetTitle(L"Choose a cover image");
+    // Start in the album's folder, where a scan or download usually left its pictures.
+    if (g_lib.Contains(ids.front())) {
+        ComPtr<IShellItem> folder;
+        std::wstring dir = DirectoryOf(g_lib.Path(ids.front()));
+        if (SUCCEEDED(SHCreateItemFromParsingName(dir.c_str(), nullptr, IID_PPV_ARGS(&folder)))) dlg->SetFolder(folder.Get());
+    }
+    ComPtr<IShellItem> item;
+    PWSTR path = nullptr;
+    if (FAILED(dlg->Show(g.hwnd)) || FAILED(dlg->GetResult(&item)) || FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)))
+        return;
+    std::wstring file = path;
+    CoTaskMemFree(path);
+    SetCoverFromFile(ids, file);
+}
+
+bool ClipboardMayHoldCover() {
+    return IsClipboardFormatAvailable(CF_HDROP) || IsClipboardFormatAvailable(CF_DIB) ||
+           IsClipboardFormatAvailable(RegisterClipboardFormatW(L"PNG")) ||
+           IsClipboardFormatAvailable(RegisterClipboardFormatW(CFSTR_FILECONTENTS)) ||
+           IsClipboardFormatAvailable(CF_UNICODETEXT);
+}
+
+// The clipboard's picture in the order the picker takes it: a copied file, a virtual file, PNG data,
+// then a bitmap. An address is handed to the picker, which downloads it and shows it first.
+void PasteCover(const std::vector<TrackId>& ids) {
+    if (ids.empty()) {
+        ShowMessage(L"Select an album or one of its tracks first.");
+        return;
+    }
+    EnsureOle();
+    ComPtr<IDataObject> data;
+    if (FAILED(OleGetClipboard(&data))) {
+        ShowMessage(L"The clipboard couldn't be read.");
+        return;
+    }
+    FORMATETC drop{CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+    STGMEDIUM m{};
+    if (SUCCEEDED(data->GetData(&drop, &m))) {
+        std::wstring file;
+        if (UINT len = m.tymed == TYMED_HGLOBAL ? DragQueryFileW((HDROP)m.hGlobal, 0, nullptr, 0) : 0) {
+            file.resize(len + 1);
+            DragQueryFileW((HDROP)m.hGlobal, 0, file.data(), len + 1);
+            file.resize(len);
+        }
+        ReleaseStgMedium(&m);
+        if (!file.empty()) {
+            if (IsCoverImageFile(file)) SetCoverFromFile(ids, file);
+            else ShowMessage(L"The copied file isn't a JPEG or PNG image.");
+            return;
+        }
+    }
+    std::string bytes, png;
+    int w = 0, h = 0;
+    if ((ReadFormat(data.Get(), (CLIPFORMAT)RegisterClipboardFormatW(CFSTR_FILECONTENTS), bytes, 0) &&
+         online::InspectImage(bytes, w, h) != online::ImageType::None) ||
+        (ReadFormat(data.Get(), (CLIPFORMAT)RegisterClipboardFormatW(L"PNG"), bytes) &&
+         online::InspectImage(bytes, w, h) != online::ImageType::None)) {
+        UseImageFor(ids, std::move(bytes));
+        return;
+    }
+    if (ReadFormat(data.Get(), CF_DIB, bytes) && DibToPng(bytes, png)) {
+        UseImageFor(ids, std::move(png));
+        return;
+    }
+    if (ReadFormat(data.Get(), CF_UNICODETEXT, bytes) && bytes.size() >= sizeof(wchar_t)) {
+        std::wstring text(reinterpret_cast<const wchar_t*>(bytes.data()), bytes.size() / sizeof(wchar_t));
+        text.resize(wcsnlen(text.c_str(), text.size()));
+        if (text.starts_with(L"https://") || text.starts_with(L"http://")) {
+            ShowCoverSearch(AlbumTracksOf(ids));
+            if (pk.hwnd) PasteImage();
+            return;
+        }
+    }
+    ShowMessage(L"The clipboard holds no image. In the browser, choose Copy image, then paste it as the cover.");
+}
+
+void DropCover(const std::wstring& file, POINT client) {
+    std::vector<TrackId> ids;
+    POINT pt = client;
+    MapWindowPoints(g.hwnd, g.list, &pt, 1);
+    RECT list{};
+    if (g.list && IsWindowVisible(g.list) && GetClientRect(g.list, &list) && PtInRect(&list, pt)) {
+        LVHITTESTINFO hit{};
+        hit.pt = pt;
+        int row = ListView_HitTest(g.list, &hit);
+        if (row >= 0 && (hit.flags & LVHT_ONITEM)) {
+            TrackId id = RowTrack(row);
+            if (g_lib.Contains(id)) ids.push_back(id);
+        }
+    }
+    if (ids.empty()) ids = SelectedTracks();
+    if (ids.empty() && g.playing != kNone && g_lib.Contains(g.playing)) ids.push_back(g.playing);
+    if (ids.empty()) {
+        ShowMessage(L"Select an album, then drop its cover image on cordinal.");
+        return;
+    }
+    SetCoverFromFile(ids, file);
+}
+
 void RestoreOriginalCovers(const std::vector<TrackId>& ids) {
     auto paths = PathsOf(ids);
     size_t had = customcover::Count(paths), restored = customcover::Clear(paths);

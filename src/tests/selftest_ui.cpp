@@ -651,6 +651,33 @@ void TestUiControls(const std::wstring& scratch) {
         Check(opened && matched && accepted,
               L"UI: the tag editor completes an artist from the library and accepts it");
     }
+    {
+        // A track with no title, artist or number: the editor offers its file name's, shown as the
+        // empty fields' hints, and turning the box off takes the hints away (nothing is saved here).
+        TrackId bare = g_lib.Add(L"C:\\UiChecks\\07 - Name Band - Name Song.flac");
+        ShowTagEditor({bare});
+        HWND tag = FindWindowW(L"CordinalTagEditor", nullptr);
+        HWND fill = tag ? GetDlgItem(tag, 204) : nullptr;
+        auto cue = [&](int field) {
+            wchar_t text[128]{};
+            HWND edit = tag ? GetDlgItem(tag, 100 + field) : nullptr;
+            if (edit) SendMessageW(edit, EM_GETCUEBANNER, (WPARAM)text, (LPARAM)std::size(text));
+            return std::wstring(text);
+        };
+        bool offered = false, withdrawn = false;
+        if (tag && fill) {
+            ShowWindow(tag, SW_HIDE);
+            offered = (GetWindowLongPtrW(fill, GWL_STYLE) & WS_VISIBLE) && Button_GetCheck(fill) == BST_CHECKED &&
+                      cue(0) == L"Name Song" && cue(1) == L"Name Band" && cue(6) == L"7";  // Title, Artist, Track
+            Button_SetCheck(fill, BST_UNCHECKED);
+            SendMessageW(tag, WM_COMMAND, MAKEWPARAM(204, BN_CLICKED), (LPARAM)fill);
+            withdrawn = Button_GetCheck(fill) == BST_UNCHECKED && cue(0).empty() && cue(1).empty();
+        }
+        if (tag) DestroyWindow(tag);
+        batch.Next(L"UI: the tag editor offers an untagged track's title, artist and number from its file name");
+        Check(offered && withdrawn,
+              L"UI: the tag editor offers an untagged track's title, artist and number from its file name");
+    }
     TestPlayerSliders();
     TestSoftCanvas();
     {

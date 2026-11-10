@@ -636,6 +636,55 @@ size_t Library::MemoryBytes() const {
     return tracks_.Bytes() + byPath_.capacity() * sizeof(TrackId) + strings_.Bytes();
 }
 
+std::vector<TrackId> TracksAddedSince(uint32_t since) {
+    std::vector<TrackId> out;
+    for (TrackId id = 0; id < (TrackId)g_lib.Count(); ++id) {
+        const Track& t = g_lib[id];
+        if ((t.flags & (Track::kInLibrary | Track::kInbox)) && t.added >= since) out.push_back(id);
+    }
+    std::stable_sort(out.begin(), out.end(), [](TrackId a, TrackId b) { return g_lib[a].added < g_lib[b].added; });
+    return out;
+}
+
+std::vector<TrackId> AlbumTracksOf(const std::vector<TrackId>& ids) {
+    std::vector<bool> take(g_lib.Count());
+    struct Seed { StringPool::Handle album, dir, artist; };
+    std::vector<Seed> seeds;
+    for (TrackId id : ids) {
+        if (!g_lib.Contains(id)) continue;
+        take[id] = true;
+        const Track& t = g_lib[id];
+        Seed s{t.album, t.dir, t.albumArtist ? t.albumArtist : t.artist};
+        if (std::none_of(seeds.begin(), seeds.end(), [&](const Seed& o) {
+                return o.album == s.album && o.dir == s.dir && o.artist == s.artist;
+            }))
+            seeds.push_back(s);
+    }
+    if (!seeds.empty())
+        for (TrackId id = 0; id < (TrackId)g_lib.Count(); ++id) {
+            const Track& t = g_lib[id];
+            if (take[id] || !(t.flags & (Track::kInLibrary | Track::kInbox))) continue;
+            const StringPool::Handle artist = t.albumArtist ? t.albumArtist : t.artist;
+            for (const Seed& s : seeds)
+                if (t.album == s.album && (t.dir == s.dir || (s.album && artist && artist == s.artist))) {
+                    take[id] = true;
+                    break;
+                }
+        }
+    std::vector<TrackId> out;
+    for (TrackId id = 0; id < (TrackId)take.size(); ++id)
+        if (take[id]) out.push_back(id);
+    return out;
+}
+
+void ExcludeTracks(const std::vector<TrackId>& ids) {
+    if (ids.empty()) return;
+    for (TrackId id : ids)
+        g_lib[id].flags = (uint16_t)((g_lib[id].flags | Track::kExcluded) &
+                                     ~(Track::kInLibrary | Track::kInbox | Track::kSteamDuplicate));
+    g_lib.Touch();
+}
+
 // Seconds since the Unix epoch in UTC, as the 32-bit stat fields use; wraps in 2106.
 uint32_t UnixNow() {
     FILETIME ft;

@@ -851,6 +851,141 @@ void CoverPanelFile(const std::wstring& path) {
     if (pk.open && !rv.open) TakeFile(path);
 }
 
+// --- covers without the picker, as on Windows ------------------------------------------------------
+
+namespace {
+
+std::vector<TrackId> g_coverFileFor;  // the selection Choose image file... was asked for
+
+// Gives every album of `ids`, whole, the image. A cover belongs to the album, so one selected track
+// is enough; an album spread over disc folders gets it in each.
+void UseImageFor(const std::vector<TrackId>& ids, std::string image) {
+    int w = 0, h = 0;
+    if (online::InspectImage(image, w, h) == online::ImageType::None) {
+        ShowMessage(L"Covers have to be complete JPEG or PNG images of at most 20 MB.");
+        return;
+    }
+    auto albums = coverfetch::AlbumsOf(AlbumTracksOf(ids));
+    if (albums.empty()) {
+        ShowMessage(L"Select an album or one of its tracks first.");
+        return;
+    }
+    std::vector<coverfetch::CoverChoice> choices;
+    for (auto& album : albums) choices.push_back({std::move(album), image, {}});
+    SaveCovers(std::move(choices));
+}
+
+}  // namespace
+
+bool IsCoverImageFile(const std::wstring& path) {
+    std::wstring ext = ExtOf(path);
+    for (wchar_t& c : ext) c = (wchar_t)towlower(c);
+    return ext == L"jpg" || ext == L"jpeg" || ext == L"png";
+}
+
+void SetCoverFromFile(const std::vector<TrackId>& ids, const std::wstring& file) {
+    std::string bytes;
+    if (!backup::ReadBytes(file, bytes, online::kMaxImageBytes)) {
+        ShowMessage(L"Couldn't read " + FileNameOf(file) + L". Covers can be JPEG or PNG images of at most 20 MB.");
+        return;
+    }
+    UseImageFor(ids, std::move(bytes));
+}
+
+void ChooseCoverFile(const std::vector<TrackId>& ids) {
+    if (ids.empty()) {
+        ShowMessage(L"Select an album or one of its tracks first.");
+        return;
+    }
+    g_coverFileFor = ids;
+    static const SDL_DialogFileFilter filter{"Images", "jpg;jpeg;png"};
+    auto chosen = [](void*, const char* const* list, int) {
+        if (!list || !*list) return;
+        auto* path = new std::wstring(compat::Widen(*list));
+        if (!PostMessageW(nullptr, WM_APP_FILE, (WPARAM)kFileCoverDirect, (LPARAM)path)) delete path;
+    };
+    // Start in the album's folder, where a scan or download usually left its pictures.
+    std::string folder = g_lib.Contains(ids.front()) ? ToUtf8(DirectoryOf(g_lib.Path(ids.front()))) : std::string();
+    SDL_ShowOpenFileDialog(chosen, nullptr, g.window, &filter, 1, folder.empty() ? nullptr : folder.c_str(), false);
+}
+
+void CoverFileChosen(const std::wstring& path) {
+    auto ids = std::move(g_coverFileFor);
+    g_coverFileFor.clear();
+    std::erase_if(ids, [](TrackId id) { return !g_lib.Contains(id); });
+    if (!ids.empty()) SetCoverFromFile(ids, path);
+}
+
+bool ClipboardMayHoldCover() {
+    return SDL_HasClipboardData("image/png") || SDL_HasClipboardData("image/jpeg") ||
+           SDL_HasClipboardData("text/uri-list") || SDL_HasClipboardText();
+}
+
+// The clipboard's picture: image data, or a copied file. An address is handed to the picker, which
+// downloads it and shows it first.
+void PasteCover(const std::vector<TrackId>& ids) {
+    if (ids.empty()) {
+        ShowMessage(L"Select an album or one of its tracks first.");
+        return;
+    }
+    for (const char* mime : {"image/png", "image/jpeg"}) {
+        size_t size = 0;
+        void* data = SDL_HasClipboardData(mime) ? SDL_GetClipboardData(mime, &size) : nullptr;
+        if (!data) continue;
+        std::string bytes(static_cast<const char*>(data), size);
+        SDL_free(data);
+        UseImageFor(ids, std::move(bytes));
+        return;
+    }
+    std::string text;
+    size_t size = 0;
+    if (void* data = SDL_HasClipboardData("text/uri-list") ? SDL_GetClipboardData("text/uri-list", &size) : nullptr) {
+        text.assign(static_cast<const char*>(data), size);
+        SDL_free(data);
+    } else if (char* clip = SDL_HasClipboardText() ? SDL_GetClipboardText() : nullptr) {
+        text = clip;
+        SDL_free(clip);
+    }
+    text = text.substr(0, text.find_first_of("\r\n"));
+    if (text.starts_with("file://") || text.starts_with("/")) {
+        std::string path = text.starts_with("file://") ? text.substr(text.find('/', 7)) : text, decoded;
+        for (size_t i = 0; i < path.size(); ++i) {
+            if (path[i] == '%' && i + 2 < path.size() && isxdigit((unsigned char)path[i + 1]) &&
+                isxdigit((unsigned char)path[i + 2])) {
+                decoded += (char)std::stoi(path.substr(i + 1, 2), nullptr, 16);
+                i += 2;
+            } else {
+                decoded += path[i];
+            }
+        }
+        std::wstring file = compat::Widen(decoded.c_str());
+        if (IsCoverImageFile(file)) SetCoverFromFile(ids, file);
+        else ShowMessage(L"The copied file isn't a JPEG or PNG image.");
+        return;
+    }
+    if (text.starts_with("https://") || text.starts_with("http://")) {
+        OpenPicker(AlbumTracksOf(ids), {}, false);
+        if (pk.open) PasteImage();
+        return;
+    }
+    ShowMessage(L"The clipboard holds no image. In the browser, choose Copy image, then paste it as the cover.");
+}
+
+bool DropCover(const char* data, float x, float y) {
+    if (pk.open || !data || !*data) return false;
+    const std::wstring file = compat::Widen(data);
+    if (!IsCoverImageFile(file)) return false;
+    std::vector<TrackId> ids;
+    int line = !CanvasActive() && L.rows.In(x, y) ? LineAt(y) : -1;
+    if (line >= 0 && line < (int)g_lines.size() && g_lines[line].row >= 0 && g_lines[line].row < (int)g.rows.size())
+        ids.push_back(g.rows[(size_t)g_lines[line].row]);
+    if (ids.empty()) ids = SelectedTracks();
+    if (ids.empty() && g.playing != kNone && g_lib.Contains(g.playing)) ids.push_back(g.playing);
+    if (ids.empty()) ShowMessage(L"Select an album, then drop its cover image on cordinal.");
+    else SetCoverFromFile(ids, file);
+    return true;
+}
+
 bool CoverPanelDrop(const char* data, bool file) {
     if (!pk.open || rv.open || !data || !*data) return false;
     std::string text = data;

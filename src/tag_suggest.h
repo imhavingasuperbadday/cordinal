@@ -37,3 +37,14 @@ TagSuggestionSet BuildTagSuggestions(const Library& library);
 // offered again; typing the whole name should close the list rather than suggest itself.
 std::vector<std::wstring> MatchTagSuggestions(const TagSuggestionSet& set, TagSuggestField field,
                                               std::wstring_view prefix, size_t limit = 8);
+
+// What a file's name says when its tags are empty, for the tag editor's "Fill empty title, artist and
+// track number from the file name". `stem` is the name without folder or extension. A leading
+// "01 ", "1. ", "03 - " or "7) " is the track number (a plain number and space is not, so "99
+// Luftballons" stays a title, unless it starts with 0); then "Artist - Title" splits at the first
+// spaced dash (-, en or em dash). Underscores stand for spaces in a name that has none.
+struct FileNameGuess {
+    std::wstring artist, title;
+    uint32_t track = 0;
+};
+FileNameGuess GuessTagsFromFileName(std::wstring_view stem);

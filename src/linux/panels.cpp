@@ -479,8 +479,35 @@ struct TagPanel {
     std::vector<std::wstring> matches;
     int suggestField = -1, suggestSel = -1;
     Rect suggestRect;
-    Rect panel, compilationRect, art, choose, remove, online, save, cancel;
+    // What each track's file name says (by ids index); "Fill empty title, artist and track number from
+    // the file name" writes it on Save for the fields a track leaves empty and nobody typed in.
+    std::vector<FileNameGuess> guesses;
+    bool guessable[FieldCount] = {}, fillNames = false, anyGuess = false;
+    Rect panel, compilationRect, fillNamesRect, art, choose, remove, online, save, cancel;
 } g_tags;
+
+// The guess for one track's field, or "" when its tag already has a value or the name says nothing.
+std::wstring NameGuessFor(size_t index, int f) {
+    const Track& t = g_lib[g_tags.ids[index]];
+    const FileNameGuess& guess = g_tags.guesses[index];
+    switch (f) {
+        case Title: return t.title ? std::wstring() : guess.title;
+        case Artist: return t.artist ? std::wstring() : guess.artist;
+        case TrackNum: return t.trackNo || !guess.track ? std::wstring() : std::to_wstring(guess.track);
+        default: return {};
+    }
+}
+
+// The gray hint an empty field shows: what Save fills in from the file name, as on Windows.
+std::string FieldHint(int f) {
+    const TextField& t = g_tags.fields[f];
+    if (g_tags.fillNames && (f == Title || f == Artist || f == TrackNum) && g_tags.guessable[f]) {
+        if (g_tags.ids.size() == 1) return Utf8(NameGuessFor(0, f));
+        if (f == TrackNum) return "(names)";
+        return t.mixed ? "(multiple values; empty ones from the file names)" : "(from each file name)";
+    }
+    return !t.enabled ? "(select one track to edit lyrics)" : !t.mixed ? "" : Numeric(f) ? "(mixed)" : "(multiple values)";
+}
 
 std::wstring TrackValue(TrackId id, int f) {
     const Track& t = g_lib[id];
@@ -610,12 +637,22 @@ void SaveTags() {
     edit.bpm = number(Bpm);
     if (g_tags.compilation != g_tags.initialCompilation && g_tags.compilation != 2) edit.compilation = g_tags.compilation == 1;
     edit.cover = g_tags.cover;
-    std::vector<TrackId> ids = g_tags.ids;
-    ClosePanel();
-    if (edit.Empty()) return;
+    // Each track takes its own name's guesses for the fields it leaves empty and nobody typed in; all
+    // of it is still one write and one undo.
     std::vector<std::pair<TrackId, TagEdit>> items;
-    for (TrackId id : ids) items.emplace_back(id, edit);
-    SubmitTagWrites(items, true);
+    const bool names = g_tags.anyGuess && g_tags.fillNames;
+    for (size_t i = 0; i < g_tags.ids.size(); ++i) {
+        TagEdit item = edit;
+        if (names && i < g_tags.guesses.size()) {
+            if (!g_tags.fields[Title].changed) if (auto v = NameGuessFor(i, Title); !v.empty()) item.title = ToUtf8(v);
+            if (!g_tags.fields[Artist].changed) if (auto v = NameGuessFor(i, Artist); !v.empty()) item.artist = ToUtf8(v);
+            if (!g_tags.fields[TrackNum].changed)
+                if (auto v = NameGuessFor(i, TrackNum); !v.empty()) item.track = (uint32_t)wcstoul(v.c_str(), nullptr, 10);
+        }
+        if (!item.Empty()) items.emplace_back(g_tags.ids[i], std::move(item));
+    }
+    ClosePanel();
+    if (!items.empty()) SubmitTagWrites(items, true);
 }
 
 void ChooseCover(const std::wstring& path) {
@@ -642,10 +679,10 @@ void DrawField(int f, const Palette& p) {
     float pad = S(5), lineH = LineHeight(Font::Normal);
     SDL_Rect clip{(int)(r.x + S(2)), (int)(r.y + S(1)), (int)(r.w - S(4)), (int)(r.h - S(2))};
     SDL_SetRenderClipRect(g.renderer, &clip);
-    if (t.text.empty() && !focused) {
-        const char* cue = !t.enabled ? "(select one track to edit lyrics)" : !t.mixed ? "" : Numeric(f) ? "(mixed)" : "(multiple values)";
+    // A file-name hint stays visible in the focused field too, so the guess is seen before typing.
+    if (std::string cue = t.text.empty() ? FieldHint(f) : std::string();
+        !cue.empty() && (!focused || (g_tags.fillNames && g_tags.guessable[f])))
         DrawText(Font::Normal, cue, r.x + pad, Multiline(f) ? r.y + S(4) : TextY(r), p.faint);
-    }
     if (Multiline(f)) {
         // Lines from the text's line breaks; the caret's line stays visible.
         size_t lineStart = 0, caretLine = 0, line = 0;
@@ -723,6 +760,13 @@ void DrawTags(const Palette& p) {
     g_tags.compilationRect = {x0 + labelW, y, S(320), S(24)};
     DrawCheck(g_tags.compilationRect, "Part of a compilation (various artists)", g_tags.compilation, p);
     y += S(30);
+    g_tags.fillNamesRect = {};
+    if (g_tags.anyGuess) {
+        g_tags.fillNamesRect = {x0 + labelW, y, S(460), S(24)};
+        DrawCheck(g_tags.fillNamesRect, "Fill empty title, artist and track number from the file name",
+                  g_tags.fillNames ? 1 : 0, p);
+        y += S(30);
+    }
     float full = panel.R() - pad - x0;
     DrawText(Font::Normal, kLabels[Comment], x0, y + S(4), p.sub, labelW - S(8), 2);
     g_tags.fields[Comment].rect = {x0 + labelW, y, full - labelW, S(54)};
@@ -879,6 +923,10 @@ void TagsMouseDown(float x, float y) {
     }
     if (g_tags.compilationRect.In(x, y)) {
         g_tags.compilation = g_tags.compilation == 1 ? 0 : 1;
+        return;
+    }
+    if (g_tags.fillNamesRect.In(x, y)) {
+        g_tags.fillNames = !g_tags.fillNames;
         return;
     }
     for (int f = 0; f < FieldCount; ++f) {
@@ -1050,6 +1098,17 @@ void OpenTags(const std::vector<TrackId>& ids) {
     int on = 0;
     for (TrackId id : ids) on += (g_lib[id].flags & Track::kCompilation) ? 1 : 0;
     g_tags.compilation = g_tags.initialCompilation = on == 0 ? 0 : on == (int)ids.size() ? 1 : 2;
+    // Names are guessed only for whole files: a CUE track's name is its sheet's.
+    g_tags.guesses.assign(ids.size(), {});
+    for (size_t i = 0; i < ids.size(); ++i)
+        if (!IsSubtrack(g_lib.Path(ids[i]))) g_tags.guesses[i] = GuessTagsFromFileName(StemOf(g_lib.Str(g_lib[ids[i]].file)));
+    g_tags.anyGuess = false;
+    for (int f : {Title, Artist, TrackNum}) {
+        g_tags.guessable[f] = false;
+        for (size_t i = 0; i < ids.size() && !g_tags.guessable[f]; ++i) g_tags.guessable[f] = !NameGuessFor(i, f).empty();
+        g_tags.anyGuess |= g_tags.guessable[f];
+    }
+    g_tags.fillNames = g_tags.anyGuess;
     g_tags.cover.reset();
     SetPreview(TrackCoverBytes(g_lib.Path(ids[0])));
     std::wstring info = FormatTitle(L"[%codec%][  \x2022  %bitrate% kbps][  \x2022  %samplerate% Hz][  \x2022  %length%]  \x2022  %path%",
@@ -1240,7 +1299,7 @@ const Pref kPrefs[] = {
      "In the DELTARUNE theme, Dark Fountain follows the audio being heard, including Radio. "
      "Song seeking still works.", PrefType::Bool, 0, 1, 0, 1,
      [] { return (double)Cfg().liveFountain; }, [](double v) { Cfg().liveFountain = v != 0; Saved(); }},
-    {"band_wave_size", "View", "Top/bottom waveform size",
+    {"band_wave_size", "View", "Waveform height in the top or bottom bar",
      "Sets the waveform's height in the normal player bar. Other player modes keep their own sizes.",
      PrefType::Choice, 0, 5, 0, 1, [] { return (double)Cfg().bandWaveSize; },
      [](double v) { Cfg().bandWaveSize = (int)v; Saved(); }, kBandWaveSizes},
@@ -1268,6 +1327,11 @@ const Pref kPrefs[] = {
      "The live waveform keeps its detail.",
      PrefType::Bool, 0, 1, 0, 1, [] { return (double)Cfg().smoothSeek; },
      [](double v) { Cfg().smoothSeek = v != 0; Saved(); }},
+    {"smooth_scroll", "View", "Smooth scrolling",
+     "The library eases toward where the mouse wheel or Page Up and Page Down take it, instead of "
+     "jumping. Scrollbar drags and keyboard focus still move at once.",
+     PrefType::Bool, 0, 1, 0, 1, [] { return (double)Cfg().smoothScroll; },
+     [](double v) { Cfg().smoothScroll = v != 0; Saved(); }},
     {"wave_reflection", "View", "Waveform reflection",
      "Mirrored reflects the seek bar below its center line, dimmer. Upper half stops at the center line; "
      "Full height mirrors the waveforms as bright below as above (the Moodbar stripe keeps the upper "
@@ -4355,6 +4419,7 @@ void PanelFileChosen(int purpose, const std::wstring& path) {
     else if (purpose == kFilePack && g_kind == Kind::Packs) InstallPack(path);
     else if (purpose == kFileCover && g_kind == Kind::Tags) ChooseCover(path);
     else if (purpose == kFileCoverPick && g_kind == Kind::Covers) CoverPanelFile(path);
+    else if (purpose == kFileCoverDirect) CoverFileChosen(path);
     else if (purpose == kFileAutoEq && g_kind == Kind::Eq) ImportAutoEq(path);
     else if (purpose == kFileOrganizeRoot && g_kind == Kind::Organize) {
         g_org.root.text = path;

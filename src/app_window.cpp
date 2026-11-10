@@ -382,7 +382,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 p.resize(len);
                 paths.push_back(p);
             }
+            // One picture dropped on its own is a cover for the album it lands on, not music to add.
+            POINT at{};
+            DragQueryPoint(drop, &at);
             DragFinish(drop);
+            if (paths.size() == 1 && IsCoverImageFile(paths[0])) {
+                DropCover(paths[0], at);
+                return 0;
+            }
             PlaySfx(Sfx::Drop, (int)paths.size());
             AddPaths(paths, false);
             return 0;

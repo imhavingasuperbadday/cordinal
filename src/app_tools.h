@@ -42,6 +42,17 @@ void StopIpod();
 void ShowCoverSearch(const std::vector<TrackId>& ids, std::function<void(const std::string&)> pick = {});
 bool HasCustomCover(const std::vector<TrackId>& ids);
 void RestoreOriginalCovers(const std::vector<TrackId>& ids);
+// Covers without the picker: an image file chosen in a dialog, the clipboard's picture, or an image
+// file dropped on the main window becomes the cover of the whole album of `ids` (AlbumTracksOf),
+// kept as Preferences > Online says. A pasted address still needs the picker to download it.
+bool IsCoverImageFile(const std::wstring& path);
+void ChooseCoverFile(const std::vector<TrackId>& ids);
+void SetCoverFromFile(const std::vector<TrackId>& ids, const std::wstring& file);
+bool ClipboardMayHoldCover();
+void PasteCover(const std::vector<TrackId>& ids);
+// An image file dropped at `client` (main-window client coordinates): the album of the track row
+// under it, else the selection, else the playing track's.
+void DropCover(const std::wstring& file, POINT client);
 bool CoverSearchDialogMessage(MSG* msg);
 void FetchMissingCovers();
 void CancelCoverFetch();
@@ -98,6 +109,8 @@ void RestoreProfile();
 void ReviewBackupFolder(const std::wstring& folder);
 void ImportPlaybackStatistics();
 bool BackupDialogMessage(MSG* msg);
+void ShowRecentAdditions();
+bool RecentAdditionsDialogMessage(MSG* msg);
 void OnBackupMessage(LPARAM lp);
 void StopBackup();
 bool BackupBusy();

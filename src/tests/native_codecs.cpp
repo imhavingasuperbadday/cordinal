@@ -4,6 +4,10 @@
 // duration, seeking, clean endings and sticky failures, without a device or screenshots.
 #include "native_audio.h"
 #include "audio_bits.h"
+#include "audio_kernels.h"
+#include "audio_lsb.h"
+#include "cord_codec.h"
+#include "inflate.h"
 #include "audio_packets.h"
 #include "testlog.h"
 #include "selftest_common.h"
@@ -93,6 +97,53 @@ bool RescaleMp4Fixture(std::string& bytes, unsigned factor, bool removeEdit, boo
                 if (!(read(pos, width) & (uint64_t(1) << (width * 8 - 1))) && !multiply(pos, width)) return false;
             }
         }
+    }
+    return true;
+}
+
+// The same packets as a fragmented file: ftyp, the moov with its sample count cleared, then one
+// moof/mdat pair per 32 packets. Every fragment points at the same bytes and times as the plain file.
+bool FragmentMp4Fixture(const std::wstring& path, const std::string& plain, std::string& out) {
+    nativeaudio::PacketFile source;
+    if (!source.OpenMp4(path) || source.packets.empty()) return false;
+    TestMp4Box ftyp{}, moov{}, trak{}, tkhd{}, mdia{}, minf{}, stbl{}, stsz{};
+    size_t at = 0;
+    if (!NextMp4Box(plain, at, plain.size(), ftyp) || plain.compare(ftyp.type, 4, "ftyp") != 0) return false;
+    if (!Mp4Child(plain, 0, plain.size(), "moov", moov) || !Mp4Child(plain, moov.body, moov.end, "trak", trak) ||
+        !Mp4Child(plain, trak.body, trak.end, "tkhd", tkhd) || !Mp4Child(plain, trak.body, trak.end, "mdia", mdia) ||
+        !Mp4Child(plain, mdia.body, mdia.end, "minf", minf) || !Mp4Child(plain, minf.body, minf.end, "stbl", stbl) ||
+        !Mp4Child(plain, stbl.body, stbl.end, "stsz", stsz) || stsz.end - stsz.body < 12) return false;
+    size_t idAt = tkhd.body + ((uint8_t)plain[tkhd.body] == 1 ? 20 : 12);
+    if (idAt + 4 > tkhd.end) return false;
+    uint64_t trackId = 0;
+    for (size_t i = 0; i < 4; ++i) trackId = (trackId << 8) | (uint8_t)plain[idAt + i];
+    std::string patched = plain;
+    for (size_t i = 0; i < 4; ++i) patched[stsz.body + 8 + i] = 0;
+    out = plain.substr(0, ftyp.end) + patched.substr(moov.type - 4, moov.end - (moov.type - 4));
+    auto be = [](uint64_t value, int width) {
+        std::string s;
+        for (int i = width - 1; i >= 0; --i) s += (char)(value >> (8 * i));
+        return s;
+    };
+    auto box = [&](const char* type, const std::string& body) { return be(8 + body.size(), 4) + type + body; };
+    const auto& packets = source.packets;
+    for (size_t first = 0; first < packets.size(); first += 32) {
+        size_t last = std::min<size_t>(packets.size(), first + 32);
+        auto moofAt = [&](uint64_t dataOffset) {
+            std::string runs = be(0x000301, 4) + be(last - first, 4) + be(dataOffset, 4);
+            for (size_t i = first; i < last; ++i) runs += be(packets[i].frames, 4) + be(packets[i].bytes, 4);
+            return box("moof", box("mfhd", be(0, 4) + be(first / 32 + 1, 4)) +
+                               box("traf", box("tfhd", be(0x020000, 4) + be(trackId, 4)) +
+                                           box("tfdt", be(0x01000000, 4) + be(packets[first].start, 8)) +
+                                           box("trun", runs)));
+        };
+        const std::string moof = moofAt(moofAt(0).size() + 8);
+        std::string payload;
+        for (size_t i = first; i < last; ++i) {
+            if (packets[i].offset + packets[i].bytes > plain.size()) return false;
+            payload += plain.substr(packets[i].offset, packets[i].bytes);
+        }
+        out += moof + box("mdat", payload);
     }
     return true;
 }
@@ -228,6 +279,28 @@ void TestMp4TimeScales(const std::wstring& root, const std::wstring& scratch) {
     if (Ready(!inexact.empty() && RescaleMp4Fixture(inexact, 10, false, true) && WriteTestBytes(path, inexact),
               L"the inexact MP4 clock fixture is prepared"))
         testlog::Check(!OpenDecoder(path, 48000, error), L"MP4 packet boundaries that fall between samples are rejected");
+
+    std::string plain = ReadTestBytes(root + L"\\media\\sine.m4a"), fragmented;
+    const std::wstring plainPath = scratch + L"\\mp4-fragments-plain.m4a";
+    const std::wstring fragmentPath = scratch + L"\\mp4-fragments.m4a";
+    const bool prepared = !plain.empty() && WriteTestBytes(plainPath, plain) &&
+                          FragmentMp4Fixture(plainPath, plain, fragmented) && WriteTestBytes(fragmentPath, fragmented);
+    if (Ready(prepared, L"the fragmented MP4 fixture is prepared")) {
+        auto readAll = [](auto& decoder) {
+            std::vector<float> pcm;
+            float block[4096 * 2];
+            while (size_t n = decoder.Read(block, 4096)) pcm.insert(pcm.end(), block, block + n * 2);
+            return pcm;
+        };
+        auto plainDecoder = OpenDecoder(plainPath, 48000, error), fragmentDecoder = OpenDecoder(fragmentPath, 48000, error);
+        bool matches = plainDecoder && fragmentDecoder && plainDecoder->Rate() == fragmentDecoder->Rate() &&
+                       plainDecoder->Duration() == fragmentDecoder->Duration();
+        if (matches) {
+            const std::vector<float> expected = readAll(*plainDecoder), got = readAll(*fragmentDecoder);
+            matches = !expected.empty() && !plainDecoder->Failed() && !fragmentDecoder->Failed() && expected == got;
+        }
+        testlog::Check(matches, L"fragmented MP4 (moof/trun runs, empty sample tables) decodes exactly like its plain copy");
+    }
 }
 
 // A failed packet may follow good PCM in the same read. Nothing from it may leak on later calls,
@@ -439,6 +512,149 @@ void TestCrc16() {
                    cases.failed.c_str());
 }
 
+// The entropy loops read through register-held windows (FastBits, BitWindow, LittleWindow). On
+// every packet length they must return the bounded cursor's bits, hand back its position, and
+// fail where it fails: a read past the limit, including one that only the padded tail could serve.
+void TestBitWindows() {
+    uint32_t seed = 0x9E3779B9;
+    auto next = [&] { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+    testlog::Cases msb, padded, lsb;
+    for (unsigned size = 0; size <= 96; ++size) for (unsigned trial = 0; trial < 6; ++trial) {
+        std::vector<uint8_t> data(size + 4096);
+        for (auto& byte : data) byte = (uint8_t)next();
+        // Sometimes the limit stops short of the bytes, and sometimes the cursor starts mid-byte.
+        const size_t limit = trial & 1 ? size * 8 - std::min<size_t>(size * 8, next() % 19) : size * 8;
+        const unsigned start = (unsigned)std::min<size_t>(limit, next() % 13);
+        std::vector<unsigned> widths(1 + next() % 80);
+        for (auto& width : widths) width = 1 + next() % 24;
+        const std::wstring name = std::to_wstring(size) + L" bytes, trial " + std::to_wstring(trial);
+
+        nativeaudio::Bits reference(data.data(), size, limit);
+        reference.Skip(start);
+        std::vector<uint64_t> expected;
+        for (unsigned width : widths) { uint64_t v = reference.Get(width); if (!reference.Good()) break; expected.push_back(v); }
+        const bool overrun = !reference.Good();
+
+        nativeaudio::Bits cursor(data.data(), size, limit);
+        cursor.Skip(start);
+        bool same = true, stopped = false;
+        {
+            nativeaudio::FastBits::Tail tail;
+            nativeaudio::FastBits window(cursor);
+            for (size_t i = 0; i < widths.size(); ++i) {
+                if (!window.Safe() && !window.Pad(tail)) { stopped = true; break; }
+                window.Refill();
+                const unsigned v = window.Get(widths[i]);
+                if (i < expected.size()) same &= v == expected[i];
+            }
+            const bool committed = window.Commit();
+            // A stream that ran past its limit must fail; one that did not must land where the
+            // bounded cursor did.
+            if (overrun) same &= (stopped || !committed) && !cursor.Good();
+            else same &= !stopped && committed && cursor.Good() && cursor.Position() == reference.Position();
+        }
+        msb.Add(same, name);
+
+        // BitWindow leaves bounding to the caller: over a padded buffer it must agree bit for bit
+        // and report the position the caller compares with its limit.
+        nativeaudio::BitWindow plain(data.data(), start);
+        bool plainSame = true;
+        size_t position = start;
+        for (size_t i = 0; i < widths.size(); ++i) {
+            plain.Refill();
+            const unsigned v = i & 1 ? plain.Get(widths[i]) : plain.GetWide(widths[i]);
+            position += widths[i];
+            if (i < expected.size()) plainSame &= v == expected[i];
+        }
+        plain.Refill();
+        plainSame &= plain.GetWide(0) == 0 && plain.Position() == position;
+        padded.Add(plainSame, name);
+
+        // LittleWindow shares the bounded cursor's state, so a loop may alternate between them.
+        const std::span<const uint8_t> bytes(data.data(), size);
+        nativeaudio::LittleBits little(bytes), mixed(bytes);
+        nativeaudio::LittleWindow fast(mixed);
+        bool littleSame = true;
+        for (unsigned width : widths) {
+            const unsigned run = little.Ones(1u << 20);
+            const uint32_t value = little.Get(width);
+            unsigned gotRun = 0; uint32_t gotValue = 0;
+            bool usedWindow = false;
+            if (fast.Safe()) {
+                fast.Refill();
+                gotRun = fast.Run();
+                if (gotRun < 32) { fast.Drop(gotRun + 1); fast.Refill(); gotValue = fast.Get(width); usedWindow = true; }
+            }
+            if (!usedWindow) {
+                fast.Commit();
+                gotRun = mixed.Ones(1u << 20); gotValue = mixed.Get(width);
+                fast.Load();
+            }
+            if (!little.Good()) { fast.Commit(); littleSame &= !mixed.Good(); break; }
+            littleSame &= gotRun == run && gotValue == value;
+        }
+        lsb.Add(littleSame, name);
+    }
+    testlog::Check(msb.Passed(), L"FastBits matches the bounded cursor's bits, position and overrun failure on every "
+                   L"packet length%ls", msb.failed.c_str());
+    testlog::Check(padded.Passed(), L"BitWindow matches the bounded cursor's bits and position over a padded buffer%ls",
+                   padded.failed.c_str());
+    testlog::Check(lsb.Passed(), L"LittleWindow matches the bounded LSB cursor and hands its state back and forth%ls",
+                   lsb.failed.c_str());
+}
+
+// Monkey's Audio and True Audio run their adaptive filters in the AVX2 unit where the CPU has it,
+// and check their PCM with a CRC-32 fed in pieces. Each must give the scalar definition's result.
+void TestLosslessKernels() {
+    uint32_t seed = 0x1234ABCD;
+    auto next = [&] { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+    std::vector<uint8_t> data(9001);
+    for (auto& byte : data) byte = (uint8_t)next();
+    testlog::Cases crc;
+    for (size_t n : {0, 1, 7, 8, 9, 63, 64, 4088, 4096, 9001}) for (size_t split : {size_t(0), n / 3, n}) {
+        const uint32_t whole = Crc32(data.data(), n);
+        const uint32_t pieces = ~cord::Crc32Update(cord::Crc32Update(~0u, data.data(), split), data.data() + split, n - split);
+        crc.Add(whole == pieces && cord::Crc32(data.data(), n) == whole, std::to_wstring(n) + L" bytes split at " + std::to_wstring(split));
+    }
+    testlog::Check(crc.Passed(), L"CRC-32 continued over pieces matches the bytewise CRC%ls", crc.failed.c_str());
+    if (!nativeaudio::FastAudioKernels()) { testlog::Skip(L"APE and TTA AVX2 filter comparison requires AVX2"); return; }
+    testlog::Cases ape, tta;
+    for (unsigned order : {32u, 64u, 256u, 1280u}) for (int direction : {-1, 0, 1}) {
+        std::vector<int16_t> weight(order), input(order), adapt(order);
+        for (unsigned i = 0; i < order; ++i) {
+            weight[i] = (int16_t)next(); input[i] = (int16_t)next();
+            // Real steps are small; the extremes check the wrapping negation as well.
+            adapt[i] = i % 7 == 0 ? (int16_t)(i & 1 ? -32768 : 32767) : (int16_t)((int)(next() % 65) - 32);
+        }
+        auto expected = weight;
+        uint32_t dot = 0;
+        for (unsigned i = 0; i < order; ++i) {
+            dot += (uint32_t)((int32_t)weight[i] * input[i]);
+            expected[i] = (int16_t)(uint16_t)((uint16_t)weight[i] + (uint16_t)(direction * (int)adapt[i]));
+        }
+        const int32_t got = nativeaudio::ApeFilterAvx2(weight.data(), input.data(), adapt.data(), order, direction);
+        ape.Add((uint32_t)got == dot && weight == expected, L"order " + std::to_wstring(order) + L" direction " + std::to_wstring(direction));
+    }
+    for (int32_t error : {-900000, -1, 0, 1, 77}) for (unsigned trial = 0; trial < 8; ++trial) {
+        int32_t weights[8], dx[8], history[8], expected[8];
+        for (unsigned i = 0; i < 8; ++i) {
+            weights[i] = (int32_t)(next() << 8 | (next() & 255)); history[i] = (int32_t)(next() << 8 | (next() & 255));
+            dx[i] = trial == 0 ? INT32_MIN : (int32_t)(next() % 9) - 4;
+        }
+        const uint32_t round = next();
+        uint32_t sum = round;
+        for (unsigned i = 0; i < 8; ++i) {
+            const uint32_t step = error > 0 ? (uint32_t)dx[i] : error < 0 ? 0u - (uint32_t)dx[i] : 0u;
+            expected[i] = (int32_t)((uint32_t)weights[i] + step);
+            sum += (uint32_t)history[i] * (uint32_t)expected[i];
+        }
+        const uint32_t got = nativeaudio::TtaFilterAvx2(weights, dx, history, error, round);
+        tta.Add(got == sum && !memcmp(weights, expected, sizeof expected), L"error " + std::to_wstring(error) + L" trial " + std::to_wstring(trial));
+    }
+    testlog::Check(ape.Passed(), L"APE AVX2 filter step matches the scalar dot product and weight update%ls", ape.failed.c_str());
+    testlog::Check(tta.Passed(), L"TTA AVX2 filter step matches the scalar weight update and dot product%ls", tta.failed.c_str());
+}
+
 // Musepack: no encoder can run here, so two small embedded clips stand in (mpc_vectors.h). Their
 // sine must come out at its level and pitch, at its exact length, seek exactly, and show its tags.
 void TestMusepack(const std::wstring& scratch) {
@@ -491,6 +707,8 @@ void TestNativeCodecs(const std::wstring& root, const std::wstring& scratch) {
     TestWaveformPreviews(root, scratch);
     TestPcmBlocks(scratch);
     TestCrc16();
+    TestBitWindows();
+    TestLosslessKernels();
     TestMp4TimeScales(root, scratch);
     batch.Next(L"empty audio placeholders report their actual problem instead of a codec failure");
     const std::wstring empty = scratch + L"\\empty.ogg";
@@ -584,6 +802,46 @@ void TestNativeCodecs(const std::wstring& root, const std::wstring& scratch) {
                    lengths.failed.c_str());
     testlog::Check(seeks.Passed(),L"native codec seeks restore the exact native output samples%ls",seeks.failed.c_str());
     testlog::Check(edges.Passed(),L"native codecs refuse zero-size and end reads and non-finite seeks%ls",edges.failed.c_str());
+
+    batch.Next(L"an MP3 whose second ID3 tag is shorter than its frames still plays from its first frame");
+    {
+        // Two tags first: a 1 MB one, then one whose declared size (18 bytes) ends inside its own
+        // frames, as some rips carry. The first real frame lies about 300 KB past them, and a false
+        // sync at the start of that gap is not followed by a frame, so it must be skipped.
+        auto tag = [](size_t size, char fill) {
+            std::string t("ID3\x03\x00\x00", 6);
+            t += char((size >> 21) & 127);
+            t += char((size >> 14) & 127);
+            t += char((size >> 7) & 127);
+            t += char(size & 127);
+            t.append(size, fill);
+            return t;
+        };
+        const std::string frame = std::string("\xFF\xFB\x90\x00", 4) + std::string(413, '\0');  // 128 kbps, 44.1 kHz silence
+        // The first tag carries TIT2 "Trailer" (Latin-1), then zeros; the second tag is the short one.
+        std::string title = "TIT2" + std::string("\x00\x00\x00\x08\x00\x00\x00", 7) + "Trailer";
+        std::string bytes = tag(1000000, '\0');
+        bytes.replace(10, title.size(), title);
+        bytes += tag(18, 'T');
+        // A zero-bitrate sync (free format, which cordinal can't size here) and a 128 kbps one come first.
+        bytes += std::string("\xFF\xFB\x00\x00", 4) + std::string("\xFF\xFB\x90\x00", 4) +
+                 std::string(299988, '\x55');
+        for (int i = 0; i < 40; ++i) bytes += frame;
+        const std::wstring path = scratch + L"\\stacked-tags.mp3";
+        auto d = Ready(WriteTestBytes(path, bytes), L"stacked-tag MP3 fixture is written") ? OpenMpegDecoder(path) : nullptr;
+        TagData tags;
+        Check(ReadTags(path, tags) && tags.title == "Trailer" && tags.codec == Codec::MP3,
+              L"TAGS an MP3 whose first frame lies past 64 KiB keeps its title and codec");
+        uint64_t total = 0;
+        float pcm[4096 * 2];
+        while (d) {
+            size_t n = d->Read(pcm, 4096);
+            if (!n) break;
+            total += n;
+        }
+        testlog::Check(d && total >= 39 * 1152 && !d->Failed(),
+                       L"MP3 frames past 64 KiB after a short second ID3 tag are found, not reported as damaged");
+    }
 
     batch.Next(L"damaged streams fail sticky without leaking PCM, recover on seek, and stay within their range");
     for (const wchar_t* name : {L"sine.flac", L"sine.mp3", L"sine.m4a", L"alac.m4a"}) {

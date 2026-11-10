@@ -69,7 +69,7 @@ Rect PlayerLayout(Rect area) {
     float waveH = S(overrideSize ? ui::kBandWaveHeights[overrideSize] : heights[l.waveSize]);
     float rowH = l.waveOwnRow || !wave ? tb : std::max(tb, waveH);
     float playerH = player ? rowH + (wave && l.waveOwnRow ? S(4) + waveH : 0) : 0;
-    float art = now ? S(l.largeCover ? 64 : ui::kCover) : 0;
+    float art = now ? S(l.largeCover ? ui::kLargeCover : ui::kCover) : 0;
     float zone = l.dock == 0 ? S(ui::kBandTop) + (player ? playerH + S(ui::kBandGap) : 0) +
         (now ? art + S(ui::kBandGap) : 0) : (now ? S(6) + art : 0) + (player ? S(8) + playerH : 0);
     float top = l.dock == 0 ? area.y : std::max(area.y, area.B() - zone);
@@ -106,15 +106,16 @@ Rect PlayerLayout(Rect area) {
     }
     if (now) {
         L.cover = {area.x + pad, ny, art, art};
-        float x = L.cover.R() + S(ui::kCoverGap), textY = ny + (l.largeCover ? art / 2 - S(18) : 0);
+        float line = S(l.largeCover ? ui::kLargeLineHeight : ui::kLineHeight), gap = l.largeCover ? S(ui::kLargeLineGap) : 0;
+        float x = L.cover.R() + S(ui::kCoverGap), textY = ny + (art - 2 * line - gap) / 2;
         float w = std::max(0.f, area.R() - pad - x);
         if (l.points) {
             float chipW = std::min(S(220), area.w / 3);
             L.chip = {area.R() - pad - chipW, ny + (art - S(32)) / 2, chipW, S(32)};
             w = std::max(0.f, L.chip.x - S(8) - x);
         }
-        L.title = {x, textY, w, S(l.largeCover ? 18 : ui::kLineHeight)};
-        L.subtitle = {x, textY + S(l.largeCover ? 20 : ui::kLineHeight), w, L.title.h};
+        L.title = {x, textY, w, line};
+        L.subtitle = {x, textY + line + gap, w, line};
     }
     if (l.dock == 0) { area.y += zone; area.h = std::max(0.f, area.h - zone); }
     else area.h = std::max(0.f, area.h - zone);

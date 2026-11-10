@@ -1,5 +1,6 @@
 // ISO base media (MP4) sample tables: the moov box, track/sample descriptions and the
-// stsz/stts/stsc/stco tables. Own parser, no operating-system or external demuxer.
+// stsz/stts/stsc/stco tables, or the moof/trun runs of a fragmented file. Own parser, no
+// operating-system or external demuxer.
 #include "audio_packets.h"
 #include <span>
 
@@ -58,36 +59,9 @@ Bytes DecoderConfig(Bytes esds) {
     while (Descriptor(data,tag,value)) if (tag == 5) return value;
     return {};
 }
-// Parse the first audio trak: sample description, codec config and the sample tables that
-// link every packet to a file offset, size and start time.
-bool Track(PacketFile& out,Bytes track,uint32_t movieScale) {
-    Bytes mdia=Child(track,Tag("mdia")), handler=Child(mdia,Tag("hdlr"));
-    if (handler.size()<12 || Be(handler.data()+8)!=Tag("soun")) return false;
-    Bytes stbl=Path(mdia,{Tag("minf"),Tag("stbl")}), stsd=Child(stbl,Tag("stsd"));
-    if (stsd.size()<8 || Be(stsd.data()+4)!=1) return false;
-    Bytes entries=stsd.subspan(8); Box entry{};
-    if (!Next(entries,entry) || entry.bytes.size()<28) return false;
-    if (entry.tag!=Tag("alac") && entry.tag!=Tag("mp4a") && entry.tag!=Tag("Opus") && entry.tag!=Tag("ac-3")) return false;
-    out.codec=entry.tag;
-    out.channels=U16(entry.bytes.data()+16,true); out.rate=Be(entry.bytes.data()+24)>>16;
-    unsigned version=U16(entry.bytes.data()+8,true);
-    size_t extra=version==1?16:version==2?36:0;
-    if (entry.bytes.size()<28+extra) return false;
-    Bytes children=entry.bytes.subspan(28+extra), config;
-    if (out.codec==Tag("alac")) { config=Child(children,Tag("alac")); if (config.size()<28) return false; config=config.subspan(4); }
-    else if (out.codec==Tag("mp4a")) config=DecoderConfig(Child(children,Tag("esds")));
-    else if (out.codec==Tag("Opus")) config=Child(children,Tag("dOps"));
-    else config=Child(children,Tag("dac3"));
-    if (config.empty() || config.size()>65536) return false;
-    out.config.assign(config.begin(),config.end());
-    if (out.codec==Tag("alac")) out.rate=Be(config.data()+20);
-
-    // Sample sizes: either one constant size or a table of per-sample sizes.
-    Bytes stsz=Child(stbl,Tag("stsz"));
-    if (stsz.size()<12) return false;
-    uint32_t constant=Be(stsz.data()+4), samples=Be(stsz.data()+8);
-    if (!samples || samples>8000000 || samples>out.file.Size() ||
-        (!constant && samples>(stsz.size()-12)/4)) return false;
+// Non-fragmented files: stsz gives each sample's size, stts its duration, and stsc with
+// stco/co64 the file offset of every sample.
+bool SampleTables(PacketFile& out,Bytes stbl,Bytes stsz,uint32_t constant,uint32_t samples) {
     out.packets.assign(samples,{});
     for (uint32_t i=0;i<samples;++i) { uint32_t n=constant?constant:Be(stsz.data()+12+i*4); if (!n || n>16*1024*1024) return false; out.packets[i].bytes=n; }
     // Time-to-sample: run-length coded (count, duration) pairs give each packet its start.
@@ -126,7 +100,129 @@ bool Track(PacketFile& out,Bytes track,uint32_t movieScale) {
             packet.offset=at; at+=packet.bytes;
         }
     }
-    if (sample!=samples) return false;
+    return sample==samples;
+}
+
+// Fragmented files (moov with an empty sample table, then moof/mdat pairs): each traf's trun lists
+// its samples' sizes, durations and data offsets. tfhd and trex supply defaults, tfdt the decode
+// time, and a traf without tfdt continues from the previous run. Other tracks' runs are skipped.
+bool ReadFragments(PacketFile& out,Bytes track,Bytes movie) {
+    Bytes tkhd=Child(track,Tag("tkhd"));
+    if (tkhd.size()<24) return false;
+    const uint32_t trackId=Be(tkhd.data()+(tkhd[0]==1?20:12));
+    uint32_t defaultDuration=0,defaultSize=0;
+    Bytes mvex=Child(movie,Tag("mvex")); Box box{};
+    while (Next(mvex,box)) {
+        if (box.tag==Tag("trex") && box.bytes.size()>=20 && Be(box.bytes.data()+4)==trackId) {
+            defaultDuration=Be(box.bytes.data()+12); defaultSize=Be(box.bytes.data()+16);
+        }
+    }
+    uint64_t time=0;
+    for (uint64_t at=0;at+8<=out.file.Size();) {
+        const uint8_t* p=out.file.View(at,16); if (!p) p=out.file.View(at,8); if (!p) return false;
+        uint64_t n=Be(p); uint32_t tag=Be(p+4); size_t head=8;
+        if (n==1) { p=out.file.View(at,16); if (!p) return false; n=U64(p+8,true); head=16; }
+        if (!n) n=out.file.Size()-at;
+        if (n<head || n>out.file.Size()-at) break;
+        if (tag==Tag("moof")) {
+            if (n>16*1024*1024) return false;
+            p=out.file.View(at,(size_t)n); if (!p) return false;
+            const std::vector<uint8_t> copy(p,p+(size_t)n);  // the file view may move on the next call
+            Bytes moof=Bytes(copy).subspan(head);
+            uint64_t dataEnd=at;  // a traf without a base offset starts after the previous traf's data
+            Box traf{};
+            while (Next(moof,traf)) {
+                if (traf.tag!=Tag("traf")) continue;
+                Bytes header=Child(traf.bytes,Tag("tfhd"));
+                if (header.size()<8) return false;
+                const uint32_t flags=Be(header.data())&0xFFFFFF, id=Be(header.data()+4);
+                const size_t need=8+((flags&1)?8:0)+((flags&2)?4:0)+((flags&8)?4:0)+((flags&0x10)?4:0)+((flags&0x20)?4:0);
+                if (header.size()<need) return false;
+                const bool ours=id==trackId;
+                const bool explicitBase=(flags&1)!=0;
+                uint64_t base=explicitBase?U64(header.data()+8,true):(flags&0x20000)?at:dataEnd;
+                size_t field=explicitBase?16:8;
+                if (flags&2) field+=4;
+                uint32_t defDuration=defaultDuration,defSize=defaultSize;
+                if (flags&8) { defDuration=Be(header.data()+field); field+=4; }
+                if (flags&0x10) { defSize=Be(header.data()+field); field+=4; }
+                Bytes decode=Child(traf.bytes,Tag("tfdt"));
+                if (!decode.empty()) {
+                    if (decode.size()<(decode[0]==1?12u:8u)) return false;
+                    if (ours) time=decode[0]==1?U64(decode.data()+4,true):Be(decode.data()+4);
+                }
+                uint64_t cursor=base;
+                Bytes runs=traf.bytes; Box run{};
+                while (Next(runs,run)) {
+                    if (run.tag!=Tag("trun")) continue;
+                    const Bytes r=run.bytes;
+                    if (r.size()<8) return false;
+                    const uint32_t runFlags=Be(r.data())&0xFFFFFF, count=Be(r.data()+4);
+                    size_t at3=8;
+                    if (runFlags&1) {
+                        if (r.size()<12) return false;
+                        cursor=uint64_t(int64_t(base)+int32_t(Be(r.data()+8)));
+                        at3=12;
+                    }
+                    if (runFlags&4) at3+=4;
+                    const size_t stride=4*(((runFlags>>8)&1)+((runFlags>>9)&1)+((runFlags>>10)&1)+((runFlags>>11)&1));
+                    if (r.size()<at3 || count>8000000 || (count && stride && count>(r.size()-at3)/stride)) return false;
+                    for (uint32_t i=0;i<count;++i) {
+                        uint32_t duration=defDuration,bytes=defSize;
+                        if (runFlags&0x100) { duration=Be(r.data()+at3); at3+=4; }
+                        if (runFlags&0x200) { bytes=Be(r.data()+at3); at3+=4; }
+                        if (runFlags&0x400) at3+=4;
+                        if (runFlags&0x800) at3+=4;
+                        if (!duration || !bytes || bytes>16*1024*1024) return false;
+                        if (ours) {
+                            if (cursor>out.file.Size() || bytes>out.file.Size()-cursor || out.packets.size()>=8000000) return false;
+                            if (!out.packets.empty() && time<out.packets.back().start) return false;
+                            out.packets.push_back({cursor,time,bytes,duration});
+                            time+=duration;
+                        }
+                        cursor+=bytes;
+                    }
+                }
+                dataEnd=cursor;
+            }
+        }
+        at+=n;
+    }
+    out.frames=time;
+    return !out.packets.empty();
+}
+
+// Parse the first audio trak: sample description, codec config and the sample tables that
+// link every packet to a file offset, size and start time.
+bool Track(PacketFile& out,Bytes track,Bytes movie,uint32_t movieScale) {
+    Bytes mdia=Child(track,Tag("mdia")), handler=Child(mdia,Tag("hdlr"));
+    if (handler.size()<12 || Be(handler.data()+8)!=Tag("soun")) return false;
+    Bytes stbl=Path(mdia,{Tag("minf"),Tag("stbl")}), stsd=Child(stbl,Tag("stsd"));
+    if (stsd.size()<8 || Be(stsd.data()+4)!=1) return false;
+    Bytes entries=stsd.subspan(8); Box entry{};
+    if (!Next(entries,entry) || entry.bytes.size()<28) return false;
+    if (entry.tag!=Tag("alac") && entry.tag!=Tag("mp4a") && entry.tag!=Tag("Opus") && entry.tag!=Tag("ac-3")) return false;
+    out.codec=entry.tag;
+    out.channels=U16(entry.bytes.data()+16,true); out.rate=Be(entry.bytes.data()+24)>>16;
+    unsigned version=U16(entry.bytes.data()+8,true);
+    size_t extra=version==1?16:version==2?36:0;
+    if (entry.bytes.size()<28+extra) return false;
+    Bytes children=entry.bytes.subspan(28+extra), config;
+    if (out.codec==Tag("alac")) { config=Child(children,Tag("alac")); if (config.size()<28) return false; config=config.subspan(4); }
+    else if (out.codec==Tag("mp4a")) config=DecoderConfig(Child(children,Tag("esds")));
+    else if (out.codec==Tag("Opus")) config=Child(children,Tag("dOps"));
+    else config=Child(children,Tag("dac3"));
+    if (config.empty() || config.size()>65536) return false;
+    out.config.assign(config.begin(),config.end());
+    if (out.codec==Tag("alac")) out.rate=Be(config.data()+20);
+
+    // Sample sizes: either one constant size or a table of per-sample sizes. A fragmented file
+    // has no samples here; its runs come from the moof boxes instead.
+    Bytes stsz=Child(stbl,Tag("stsz"));
+    if (stsz.size()<12) return false;
+    uint32_t constant=Be(stsz.data()+4), samples=Be(stsz.data()+8);
+    if (samples>8000000 || samples>out.file.Size() || (!constant && samples>(stsz.size()-12)/4)) return false;
+    if (samples ? !SampleTables(out,stbl,stsz,constant,samples) : !ReadFragments(out,track,movie)) return false;
     Bytes mdhd=Child(mdia,Tag("mdhd"));
     if (mdhd.size()<24 || (mdhd[0]==1 && mdhd.size()<36)) return false;
     uint32_t scale=Be(mdhd.data()+(mdhd[0]==1?20:12));
@@ -212,7 +308,8 @@ bool PacketFile::OpenMp4(const std::wstring& path) {
     Bytes moov=storage, mvhd=Child(moov,Tag("mvhd"));
     if (mvhd.size()<24 || (mvhd[0]==1 && mvhd.size()<36)) return false;
     uint32_t movieScale=Be(mvhd.data()+(mvhd[0]==1?20:12));
-    Box b{}; while (Next(moov,b)) if (b.tag==Tag("trak") && Track(*this,b.bytes,movieScale)) return true;
+    const Bytes movie=moov;
+    Box b{}; while (Next(moov,b)) if (b.tag==Tag("trak") && Track(*this,b.bytes,movie,movieScale)) return true;
     return false;
 }
 } // namespace nativeaudio

@@ -17,7 +17,8 @@ void RunMenuCommand(size_t index);           // ui.cpp: runs the index-th item o
 // What a file chosen in a dialog is for (WM_APP_FILE's wParam).
 enum FilePurpose : int {
     kFileCover = 1, kFileAutoEq = 2, kFileOrganizeRoot = 3, kFileCopyDest = 4, kFilePack = 5, kFileHelper = 6,
-    kFileCoverPick = 7  // the cover picker's From file...
+    kFileCoverPick = 7,  // the cover picker's From file...
+    kFileCoverDirect = 8  // the track menu's Cover > Choose image file...
 };
 
 void OpenEqualizer();
@@ -78,6 +79,17 @@ void CoverPanelFile(const std::wstring& path);
 bool CoverPanelDrop(const char* data, bool file);
 bool HasCustomCover(const std::vector<TrackId>& ids);
 void RestoreOriginalCovers(const std::vector<TrackId>& ids);
+// Covers without the picker: an image file chosen in a dialog, the clipboard's picture, or an image
+// file dropped on the window becomes the cover of the whole album of `ids` (AlbumTracksOf), kept as
+// Preferences > Online says. A pasted address still opens the picker to download it. DropCover is
+// false when the drop isn't an image for it (the picker is open, or the file isn't JPEG or PNG).
+bool IsCoverImageFile(const std::wstring& path);
+void ChooseCoverFile(const std::vector<TrackId>& ids);
+void CoverFileChosen(const std::wstring& path);  // kFileCoverDirect
+void SetCoverFromFile(const std::vector<TrackId>& ids, const std::wstring& file);
+bool ClipboardMayHoldCover();
+void PasteCover(const std::vector<TrackId>& ids);
+bool DropCover(const char* data, float x, float y);
 void FetchMissingCovers();
 void CancelCoverFetch();
 bool CoverFetchBusy();

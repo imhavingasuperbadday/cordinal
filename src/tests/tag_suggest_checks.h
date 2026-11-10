@@ -127,6 +127,30 @@ inline Group Limit() {
     return group;
 }
 
-inline std::vector<Group> All() { return {Collected(), Matching(), Limit()}; }
+inline Group FileNames() {
+    Group group{"file names give an empty tag's title, artist and track number"};
+    auto is = [](const wchar_t* stem, const wchar_t* artist, const wchar_t* title, uint32_t track) {
+        const FileNameGuess g = GuessTagsFromFileName(stem);
+        return g.artist == artist && g.title == title && g.track == track;
+    };
+    Add(group, is(L"DELTARUNE - Blood Crushers (Album Mix)", L"DELTARUNE", L"Blood Crushers (Album Mix)", 0),
+        "Artist - Title splits at the spaced dash");
+    Add(group, is(L"BOSSA NOVA DELTARUNE_ VOLUME 3", L"", L"BOSSA NOVA DELTARUNE_ VOLUME 3", 0),
+        "a name without a dash is all title, underscores kept beside spaces");
+    Add(group, is(L"1. The Sun Rising on Our Hometown", L"", L"The Sun Rising on Our Hometown", 1),
+        "1. is a track number");
+    Add(group, is(L"03 - Band \x2013 Song", L"Band", L"Song", 3), "03 - then an en dash: track, artist and title");
+    Add(group, is(L"07 Song", L"", L"Song", 7), "a leading zero and space is a track number");
+    Add(group, is(L"99 Luftballons", L"", L"99 Luftballons", 0), "a plain number and space stays in the title");
+    Add(group, is(L"2001 A Space Odyssey", L"", L"2001 A Space Odyssey", 0), "a four-digit year is not a track");
+    Add(group, is(L"my_song_name", L"", L"my song name", 0), "underscores are spaces when there are none");
+    Add(group, is(L"Help Desk (FULL ALBUM)  NAPCAST", L"", L"Help Desk (FULL ALBUM) NAPCAST", 0),
+        "runs of spaces close up");
+    Add(group, is(L"Twenty-One Pilots-Song", L"", L"Twenty-One Pilots-Song", 0), "an unspaced dash is not a split");
+    Add(group, is(L"12", L"", L"12", 0), "a name that is only a number stays the title");
+    return group;
+}
+
+inline std::vector<Group> All() { return {Collected(), Matching(), Limit(), FileNames()}; }
 
 }  // namespace tag_suggest_checks

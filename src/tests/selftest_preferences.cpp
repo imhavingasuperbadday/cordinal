@@ -661,6 +661,7 @@ void TestTweaks(const std::wstring& scratch) {
         batch.Next(L"the reverb preset row matches the slider's default amount");
         Check(preset->get() == 1 && !TweakChanged(*preset), L"the reverb preset row sits at 40 percent when the slider does");
         g.reverb.mix = live;
+        Check(!TweakShown(*preset), L"Preferences leaves the reverb preset to the slider instead of a second row");
     } else {
         Check(false, L"Preferences lists the reverb preset");
     }
@@ -754,7 +755,7 @@ void TestTweaks(const std::wstring& scratch) {
         SetTweak(*size, 0); g.bandWaveSize = 5; LoadPreferences();
         Check(tall && g.bandWaveSize == 0 && IniRead(L"Window", L"BandWaveSize", L"") == L"0",
               L"top/bottom waveform size persists and can return to the layout's own size");
-    } else Check(false, L"View preferences includes Top/bottom waveform size");
+    } else Check(false, L"View preferences includes the top or bottom bar waveform height");
     const Tweak* colors = FindTweak("view.mood_colors");
     const Tweak* smooth = FindTweak("view.smooth_seek");
     if (colors && smooth) {
@@ -764,6 +765,13 @@ void TestTweaks(const std::wstring& scratch) {
         Check(kept && g.moodColors == kMoodTheme && !g.smoothSeek && IniRead(L"Window", L"MoodColors", L"") == L"0",
               L"moodbar colours and the smooth seek bar persist both ways");
     } else Check(false, L"View preferences includes Moodbar colours and Smooth seek bar");
+    if (const Tweak* scroll = FindTweak("view.smooth_scroll")) {
+        SetTweak(*scroll, 1); g.smoothScroll = false; LoadPreferences();
+        bool kept = g.smoothScroll && scroll->def == 0;
+        SetTweak(*scroll, 0); LoadPreferences();
+        Check(kept && !g.smoothScroll && IniRead(L"Window", L"SmoothScroll", L"") == L"0",
+              L"smooth scrolling persists both ways and is off by default");
+    } else Check(false, L"View preferences includes Smooth scrolling");
     // Waveform colour, its unplayed part and the mood waveform's own scheme persist, and the colours
     // the seek bar draws with follow them.
     const Tweak* waveColor = FindTweak("view.wave_color");
@@ -983,7 +991,7 @@ void TestTweaks(const std::wstring& scratch) {
 
     int effects = 0, nightRow = -1;
     for (const Tweak& t : Tweaks())
-        if (!strncmp(t.key, "effects.", 8)) {
+        if (TweakShown(t) && !strncmp(t.key, "effects.", 8)) {
             if (!strcmp(t.key, "effects.night_mode")) nightRow = effects;
             ++effects;
         }

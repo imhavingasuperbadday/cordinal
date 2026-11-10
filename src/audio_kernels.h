@@ -62,4 +62,10 @@ void AudioResampleAvx2(const float* history,const float* table,unsigned taps,siz
 // interleaved values, both channels at once; memory is each channel's stored history and
 // weight the two adaptive weights, updated in place. Same integer results as the scalar pass.
 void WavPackPredictAvx2(int32_t* values,size_t frames,int term,int* weight,int step,const int32_t (*memory)[8]);
+// One step of a Monkey's Audio adaptive filter whose order is a multiple of 32: the wrapping
+// 32-bit dot product of weight and input, then weight += direction*adapt for direction -1, 0 or 1.
+int32_t ApeFilterAvx2(int16_t* weight,const int16_t* input,const int16_t* adapt,unsigned order,int direction);
+// One step of True Audio's eight-tap filter: weights += sign(error)*dx, then round plus the
+// wrapping dot product of history and the new weights.
+uint32_t TtaFilterAvx2(int32_t* weights,const int32_t* dx,const int32_t* history,int32_t error,uint32_t round);
 }

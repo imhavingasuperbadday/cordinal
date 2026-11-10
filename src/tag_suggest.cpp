@@ -96,3 +96,43 @@ std::vector<std::wstring> MatchTagSuggestions(const TagSuggestionSet& set, TagSu
     }
     return matches;
 }
+
+FileNameGuess GuessTagsFromFileName(std::wstring_view stem) {
+    std::wstring name(stem);
+    if (name.find(L' ') == std::wstring::npos)
+        for (wchar_t& c : name)
+            if (c == L'_') c = L' ';
+    // One space between words, none at the ends.
+    std::wstring s;
+    for (wchar_t c : name) {
+        const bool space = std::iswspace(c) != 0;
+        if (space && (s.empty() || s.back() == L' ')) continue;
+        s += space ? L' ' : c;
+    }
+    while (!s.empty() && s.back() == L' ') s.pop_back();
+    FileNameGuess guess;
+    size_t digits = 0;
+    while (digits < s.size() && digits < 4 && std::iswdigit(s[digits])) ++digits;
+    if (digits >= 1 && digits <= 3 && digits < s.size()) {
+        size_t rest = digits;
+        const wchar_t after = s[digits];
+        if (after == L'.' || after == L'-' || after == L')' || after == L'_' || (after == L' ' && s[0] == L'0')) {
+            while (rest < s.size() && (s[rest] == L' ' || s[rest] == L'.' || s[rest] == L'-' || s[rest] == L')' ||
+                                       s[rest] == L'_'))
+                ++rest;
+            if (rest < s.size()) {
+                guess.track = (uint32_t)std::stoul(s.substr(0, digits));
+                s = s.substr(rest);
+            }
+        }
+    }
+    for (const wchar_t* dash : {L" - ", L" \x2013 ", L" \x2014 "}) {
+        const size_t at = s.find(dash);
+        if (at == std::wstring::npos || at == 0 || at + 3 >= s.size()) continue;
+        guess.artist = s.substr(0, at);
+        guess.title = s.substr(at + 3);
+        return guess;
+    }
+    guess.title = s;
+    return guess;
+}

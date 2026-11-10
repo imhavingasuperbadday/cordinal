@@ -4,7 +4,9 @@
 // against its trailing CRC-32 before any of its samples are returned.
 #include "native_audio.h"
 #include "audio_file.h"
+#include "audio_kernels.h"
 #include "audio_lsb.h"
+#include "cord_codec.h"
 #include "inflate.h"
 
 #include <array>
@@ -136,7 +138,8 @@ private:
         const uint32_t up = 0u - (uint32_t)(c.error > 0);
         const uint32_t down = 0u - (uint32_t)(c.error < 0);
         uint32_t sum = round_;
-        for (unsigned i = 0; i < 8; ++i) {
+        if (fast_) sum = TtaFilterAvx2(c.qm, c.dx, c.dl, c.error, round_);
+        else for (unsigned i = 0; i < 8; ++i) {
             qm[i] += ((uint32_t)c.dx[i] & up) - ((uint32_t)c.dx[i] & down);
             sum += (uint32_t)c.dl[i] * qm[i];
         }
@@ -159,20 +162,9 @@ private:
         return in;
     }
 
-    // One Rice-coded residual and its two predictions. k may only grow while the
-    // running sum stays above the next threshold; the loop is the decoder's hot spot.
-    __forceinline int32_t Sample(TtaChannel& c, LittleBits& bits) {
-        uint32_t unary = bits.Ones(1u << 20);
-        const bool second = unary != 0;
-        if (second) --unary;
-        const uint32_t k = second ? c.k1 : c.k0;
-        uint32_t value;
-        if (k) {
-            if (k > 31 || unary > (uint32_t)INT32_MAX >> k) { bits.Fail(); return 0; }
-            value = (unary << k) | bits.Get(k);
-        } else {
-            value = unary;
-        }
+    // The Rice parameters follow the running sums; then the adaptive filter and the fixed
+    // first-order prediction with the reference's wrapping unsigned shift.
+    __forceinline int32_t Adapt(TtaChannel& c, uint32_t value, bool second) {
         if (second) {
             c.sum1 += value - (c.sum1 >> 4);
             const bool lower = c.k1 > 0 && c.sum1 < riceTables.sixteen[c.k1];
@@ -186,28 +178,71 @@ private:
         if (c.k1 > 31) c.k1 = 31;
         int32_t residual = 1 + ((value >> 1) ^ ((value & 1) - 1));
         residual = Filter(c, residual);
-        // Fixed first-order prediction with the reference's wrapping unsigned shift.
         const uint64_t previous = (uint64_t)(int64_t)c.predictor;
         residual += (int32_t)(((previous << predictionShift_) - previous) >> predictionShift_);
         c.predictor = residual;
         return residual;
     }
 
+    // One Rice-coded residual through the bounded cursor. k may only grow while the
+    // running sum stays above the next threshold.
+    __forceinline int32_t Sample(TtaChannel& c, LittleBits& bits) {
+        uint32_t unary = bits.Ones(1u << 20);
+        const bool second = unary != 0;
+        if (second) --unary;
+        const uint32_t k = second ? c.k1 : c.k0;
+        uint32_t value;
+        if (k) {
+            if (k > 31 || unary > (uint32_t)INT32_MAX >> k) { bits.Fail(); return 0; }
+            value = (unary << k) | bits.Get(k);
+        } else {
+            value = unary;
+        }
+        return Adapt(c, value, second);
+    }
+
+    // The same residual from the register window, the decoder's hot spot. A unary run of 32
+    // or more, and the frame's last bytes, go back through the bounded cursor.
+    __forceinline int32_t Sample(TtaChannel& c, LittleBits& bits, LittleWindow& w) {
+        if (w.Safe()) {
+            w.Refill();
+            uint32_t unary = w.Run();
+            if (unary < 32) {
+                w.Drop(unary + 1);
+                const bool second = unary != 0;
+                if (second) --unary;
+                const uint32_t k = second ? c.k1 : c.k0;
+                uint32_t value = unary;
+                if (k) {
+                    if (k > 31 || unary > (uint32_t)INT32_MAX >> k) { w.Commit(); bits.Fail(); return 0; }
+                    w.Refill();
+                    value = (unary << k) | w.Get(k);
+                }
+                return Adapt(c, value, second);
+            }
+        }
+        w.Commit();
+        const int32_t sample = Sample(c, bits);
+        w.Load();
+        return sample;
+    }
+
     bool DecodeFrame(size_t index) {
         const Frame& frame = framesIndex_[index];
         const uint8_t* bytes = file_.View(frame.offset, frame.bytes);
         if (!bytes) return false;
-        // The trailing CRC covers the compressed frame body.
-        if (Crc32(bytes, frame.bytes - 4) != U32(bytes + frame.bytes - 4)) return false;
+        // The trailing CRC covers the compressed frame body; cord's CRC-32 is the same polynomial
+        // taken eight bytes a step.
+        if (cord::Crc32(bytes, frame.bytes - 4) != U32(bytes + frame.bytes - 4)) return false;
         LittleBits bits({bytes, (size_t)(frame.bytes - 4)});
         std::array<TtaChannel, 8> state{};
         pcm_.resize((size_t)frame.samples * 2);
         const unsigned channels = channels_;
+        LittleWindow window(bits);
         if (channels == 1) {
             TtaChannel& c = state[0];
             for (uint32_t i = 0; i < frame.samples; ++i) {
-                bits.Prepare();
-                const float value = (float)Sample(c, bits) * scale_;
+                const float value = (float)Sample(c, bits, window) * scale_;
                 pcm_[i * 2] = value;
                 pcm_[i * 2 + 1] = value;
             }
@@ -215,9 +250,8 @@ private:
             TtaChannel& left = state[0];
             TtaChannel& right = state[1];
             for (uint32_t i = 0; i < frame.samples; ++i) {
-                bits.Prepare();
-                int32_t first = Sample(left, bits);
-                int32_t last = Sample(right, bits);
+                int32_t first = Sample(left, bits, window);
+                int32_t last = Sample(right, bits, window);
                 // TTA's two-channel decorrelation: the second channel carries the sum;
                 // the first is the difference from it.
                 last = WrapAdd(last, first / 2);
@@ -228,8 +262,7 @@ private:
         } else {
             int32_t values[8];
             for (uint32_t i = 0; i < frame.samples; ++i) {
-                bits.Prepare();
-                for (unsigned c = 0; c < channels; ++c) values[c] = Sample(state[c], bits);
+                for (unsigned c = 0; c < channels; ++c) values[c] = Sample(state[c], bits, window);
                 // The last channel carries the running sum; walk backwards turning each
                 // pair into the difference and its reconstruction.
                 values[channels - 1] = WrapAdd(values[channels - 1], values[channels - 2] / 2);
@@ -239,8 +272,8 @@ private:
                 Mix(mixed, channels, pcm_.data() + i * 2);
             }
         }
-        if (!bits.Good()) return false;
-        return true;
+        window.Commit();
+        return bits.Good();
     }
 
     File file_;
@@ -252,6 +285,7 @@ private:
     uint32_t round_ = 0;
     float scale_ = 0;
     bool failed_ = false;
+    const bool fast_ = FastAudioKernels();
 };
 
 }  // namespace

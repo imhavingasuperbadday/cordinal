@@ -34,6 +34,37 @@ MenuItem Submenu(std::string label, std::vector<MenuItem> items) {
     return m;
 }
 
+// Library > Find missing information: one item per kMissingFields entry, as on Windows.
+std::vector<MenuItem> MissingInfoItems() {
+    std::vector<MenuItem> items;
+    for (size_t i = 0; i < std::size(kMissingFields); ++i) {
+        MenuItem item = Item(kMissingFields[i].label, kMissingInfo);
+        item.arg = (int)i;
+        items.push_back(std::move(item));
+    }
+    return items;
+}
+
+// The search box is the list of gaps: the tracks stay in the Library tab, ready to select and fill
+// in with Edit tags (or Edit album tags), and the list shrinks as they are filled.
+void ShowMissingInformation(size_t field) {
+    if (field >= std::size(kMissingFields)) return;
+    int library = -1;
+    for (int i = 0; i < (int)g.playlists.size() && library < 0; ++i)
+        if (g.playlists[i].kind == PlaylistKind::Library) library = i;
+    if (library < 0) return;
+    if (g.active != library || InternetRadio().active) SetActiveTab(library);
+    g.search = kMissingFields[field].term;
+    g.scroll = 0;
+    RebuildRows();
+    std::wstring what = field ? compat::Widen(kMissingFields[field].label) : L"some basic information";
+    if (field) for (wchar_t& c : what) c = (wchar_t)towlower(c);
+    const size_t n = g.rows.size();
+    ShowMessage(!n ? L"No library track is missing " + what + L"."
+                   : std::to_wstring(n) + (n == 1 ? L" track is missing " : L" tracks are missing ") + what +
+                         L". Select them and press Alt+Enter to fill it in; clear the search to see everything.");
+}
+
 std::vector<MenuItem> CordExportItems() {
     std::vector<MenuItem> items;
     for (unsigned f = 1; f < (unsigned)CordExport::Count; ++f) {
@@ -118,6 +149,7 @@ std::vector<MenuItem> BarMenu(int m) {
                     Item("Remove dead items", kRemoveDead, {}, false, editable && any && !g_playlistFileBusy && !g_playlistImport),
                     Separator(), Item("Search", kFind, "Ctrl+F"), Separator(),
                     Item("Edit tags...", kEditTags, "Alt+Enter", false, g.focus >= 0 && any),
+                    Item("Edit album tags...", kEditAlbumTags, {}, false, !SelectedTracks().empty()),
                     Item("Undo last tag edit", kUndoTags, {}, false, CanUndoTagEdit())};
             if (g_checkingDead && g_playlistFileBusy) items.insert(items.begin() + 11, Item("Cancel checking dead items", kCancelDead));
             if (auto labels = HelperToolLabels(); !labels.empty()) {  // the tools of the helpers that are on
@@ -207,8 +239,9 @@ std::vector<MenuItem> BarMenu(int m) {
                                           Item("Other versions...", kEditionVersions, {}, false,
                                                SelectedTracks().size() == 1 &&
                                                    AlbumGroupForTrack(SelectedTracks().front()) != nullptr)}),
-                Separator(),
+                Separator(), Submenu("Find missing information", MissingInfoItems()),
                 Item("Fetch missing covers...", kFetchCovers, {}, false, !CoverFetchBusy()),
+                Item("Remove recent additions (24 hours)...", kRecentAdditions),
                 Item("Find duplicate audio", kDuplicateAudio, {}, false, !g_playlistFileBusy && !g_playlistImport),
                 Item("Add Steam soundtracks", kSteam, {}, false, !g_playlistFileBusy && !g_playlistImport)};
             if (ConvertBusy()) items.push_back(Item("Cancel conversion", kCancelConvert));
@@ -340,8 +373,17 @@ void OpenRowMenu(float x, float y) {
     items.push_back(Item("Copy to folder or device...", kCopyTo, {}, false, !CopyBusy()));
     items.push_back(Item("Sync to iPod...", kIpodSync, {}, false, !IpodBusy()));
     items.push_back(Item("Edit tags...", kEditTags, "Alt+Enter"));
-    items.push_back(Item("Change cover...", kFindCover));
-    if (HasCustomCover(SelectedTracks())) items.push_back(Item("Restore original cover", kRestoreCover));
+    items.push_back(Item("Edit album tags...", kEditAlbumTags));
+    // The cover as a submenu: a file or the clipboard's picture becomes the album's cover at once;
+    // only an online search needs the picker. Dropping an image on a row does the same.
+    std::vector<MenuItem> cover{Item("Choose image file...", kCoverFile),
+                                Item("Paste image from clipboard", kCoverPaste, {}, false, ClipboardMayHoldCover()),
+                                Item("Search online...", kFindCover)};
+    if (HasCustomCover(SelectedTracks())) {
+        cover.push_back(Separator());
+        cover.push_back(Item("Restore original cover", kRestoreCover));
+    }
+    items.push_back(Submenu("Cover", std::move(cover)));
     items.push_back(Item("Artist info...", kArtistInfo));
     g_barOpen = -1;
     OpenPopup(x, y, std::move(items));
@@ -466,9 +508,16 @@ void RunAction(const MenuItem& item) {
         case kCancelDuplicates: g_playlistFileCancel = true; break;
         case kSteam: AddSteamSoundtracks(); break;
         case kFetchCovers: FetchMissingCovers(); break;
+        case kRecentAdditions: OpenRecentAdditions(); break;
         case kCancelFetchCovers: CancelCoverFetch(); break;
         case kFindCover: OpenCoverSearch(SelectedTracks()); break;
         case kRestoreCover: RestoreOriginalCovers(SelectedTracks()); break;
+        case kCoverFile: ChooseCoverFile(SelectedTracks()); break;
+        case kCoverPaste: PasteCover(SelectedTracks()); break;
+        case kEditAlbumTags:
+            if (auto sel = SelectedTracks(); !sel.empty()) OpenTagEditor(AlbumTracksOf(sel));
+            break;
+        case kMissingInfo: ShowMissingInformation((size_t)std::max(0, item.arg)); break;
         case kSaveLyricsTags: SaveFetchedLyrics(true); break;
         case kSaveLyricsLrc: SaveFetchedLyrics(false); break;
         case kCancelSteam: g_playlistFileCancel = true; break;

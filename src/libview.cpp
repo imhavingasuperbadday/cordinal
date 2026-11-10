@@ -23,6 +23,7 @@ namespace {
 
 constexpr UINT WM_APP_THUMB = WM_APP + 20;
 const wchar_t kLibViewClass[] = L"CordinalLibraryView";
+constexpr UINT_PTR kScrollTimer = 0x5CA1;  // Smooth scrolling's frame timer on the library view
 
 // One album in the view: its album artist and album name, the tracks grouped under it, and the
 // lazily-derived cover identity. `letter` is the section heading it lands under in Albums.
@@ -82,6 +83,8 @@ struct LibView {
     std::vector<int> albumItem;  // album -> its tile / group item
     float contentHeight = 0;
     int scroll = 0, width = 0, height = 0;
+    int scrollGoal = 0;             // Smooth scrolling: where the wheel or paging is taking the view
+    bool scrollAnimating = false;   // the scroll timer is running
     int tile = 160;  // cover size at 96 DPI (Ctrl+wheel), in the grid and, a quarter larger, beside tracks
 
     int expanded = -1;              // Albums: the open album
@@ -928,13 +931,54 @@ void ClearCanvasSelection() {
     v.selTrack.clear();
 }
 
-void ScrollTo(int y) {
-    int maxScroll = std::max(0, (int)v.contentHeight - v.height);
-    y = std::clamp(y, 0, maxScroll);
+int MaxScroll() { return std::max(0, (int)v.contentHeight - v.height); }
+
+void PlaceScroll(int y) {
+    y = std::clamp(y, 0, MaxScroll());
     if (y == v.scroll) return;
     v.scroll = y;
     SetScrollPos(v.hwnd, SB_VERT, v.scroll, TRUE);
     InvalidateRect(v.hwnd, nullptr, FALSE);
+}
+
+void StopSmoothScroll() {
+    if (v.scrollAnimating && v.hwnd) KillTimer(v.hwnd, kScrollTimer);
+    v.scrollAnimating = false;
+}
+
+// Jumps at once; scrollbar drags, focus moves and restored positions use this.
+void ScrollTo(int y) {
+    StopSmoothScroll();
+    PlaceScroll(y);
+}
+
+// Wheel and paging with Smooth scrolling on: the goal moves now and the timer eases the view to it.
+// Repeated wheel notches add to the goal that is already pending, so a fast spin keeps going.
+void SmoothScrollTo(int y) {
+    if (!g.smoothScroll || !v.hwnd) {
+        ScrollTo(y);
+        return;
+    }
+    v.scrollGoal = std::clamp(y, 0, MaxScroll());
+    if (v.scrollGoal == v.scroll) {
+        StopSmoothScroll();
+        return;
+    }
+    if (!v.scrollAnimating && SetTimer(v.hwnd, kScrollTimer, 16, nullptr)) v.scrollAnimating = true;
+}
+
+// One frame: close a quarter of the gap, at least one pixel, so the view lands exactly on the goal.
+void StepSmoothScroll() {
+    v.scrollGoal = std::clamp(v.scrollGoal, 0, MaxScroll());  // the content may have shrunk meanwhile
+    int gap = v.scrollGoal - v.scroll;
+    if (gap == 0) {
+        StopSmoothScroll();
+        return;
+    }
+    int step = gap / 4;
+    if (step == 0) step = gap > 0 ? 1 : -1;
+    PlaceScroll(v.scroll + step);
+    if (v.scroll == v.scrollGoal) StopSmoothScroll();
 }
 
 void EnsureVisible(const D2D1_RECT_F& r) {
@@ -1197,10 +1241,10 @@ void OnKey(WPARAM key) {
         case VK_RIGHT: MoveFocus(1, 0); break;
         case VK_UP: MoveFocus(0, -1); break;
         case VK_DOWN: MoveFocus(0, 1); break;
-        case VK_HOME: ScrollTo(0); break;
-        case VK_END: ScrollTo((int)v.contentHeight); break;
-        case VK_PRIOR: ScrollTo(v.scroll - v.height + (int)F(40)); break;
-        case VK_NEXT: ScrollTo(v.scroll + v.height - (int)F(40)); break;
+        case VK_HOME: SmoothScrollTo(0); break;
+        case VK_END: SmoothScrollTo((int)v.contentHeight); break;
+        case VK_PRIOR: SmoothScrollTo((v.scrollAnimating ? v.scrollGoal : v.scroll) - v.height + (int)F(40)); break;
+        case VK_NEXT: SmoothScrollTo((v.scrollAnimating ? v.scrollGoal : v.scroll) + v.height - (int)F(40)); break;
         case VK_ESCAPE:
             if (v.expanded >= 0) {
                 v.expanded = -1;
@@ -1246,6 +1290,7 @@ LRESULT CALLBACK LibViewProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_SHOWWINDOW:
             if (!wp) {
+                StopSmoothScroll();
                 LibViewReleaseGraphics();
                 std::vector<Album>().swap(v.albums);
                 std::vector<Artist>().swap(v.artists);
@@ -1295,7 +1340,7 @@ LRESULT CALLBACK LibViewProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 LayoutItems();
                 InvalidateRect(h, nullptr, FALSE);
             } else {
-                ScrollTo(v.scroll - MulDiv(delta, (int)F(120), WHEEL_DELTA));
+                SmoothScrollTo((v.scrollAnimating ? v.scrollGoal : v.scroll) - MulDiv(delta, (int)F(120), WHEEL_DELTA));
             }
             return 0;
         }
@@ -1338,6 +1383,12 @@ LRESULT CALLBACK LibViewProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_KEYDOWN:
             OnKey(wp);
             return 0;
+        case WM_TIMER:
+            if (wp == kScrollTimer) {
+                StepSmoothScroll();
+                return 0;
+            }
+            break;
         case WM_GETDLGCODE:
             return DLGC_WANTARROWS | DLGC_WANTCHARS;
         case WM_APP_THUMB:
@@ -1345,6 +1396,7 @@ LRESULT CALLBACK LibViewProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             while (auto result = v.loader.TakeResult()) OnThumb(result.release());
             return 0;
         case WM_DESTROY:
+            StopSmoothScroll();
             LibViewReleaseGraphics();
             v.hwnd = nullptr;
             return 0;
@@ -1418,6 +1470,11 @@ void LibViewBusyTick(bool any) {
 
 void LibViewInvalidate() {
     if (v.hwnd && IsWindowVisible(v.hwnd)) InvalidateRect(v.hwnd, nullptr, FALSE);
+}
+
+// Turning Smooth scrolling off ends a glide already under way; the view stays where it is.
+void LibViewSmoothScrollChanged() {
+    if (!g.smoothScroll) StopSmoothScroll();
 }
 
 void LibViewForgetCovers(const std::vector<TrackId>& ids) {

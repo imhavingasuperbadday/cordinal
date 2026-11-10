@@ -593,9 +593,20 @@ void ParseId3v1(sv b, TagData& t) {
 // ---------------------------------------------------------------------------
 // MP3
 
+bool ScanMpegHead(sv b, bool complete, uint64_t start, uint64_t audioEnd, TagData& t);
+
+// The first MPEG frame after the tags. Most files have it within 64 KiB; a rip with an undersized
+// second ID3 tag can put it about 300 KB in, so the wider window is read only when the first misses.
 bool ParseMpegAudio(const File& f, uint64_t start, uint64_t audioEnd, TagData& t) {
-    std::string head = f.Read(start, 64 * 1024);
-    sv b = head;
+    constexpr size_t kNear = 64 * 1024, kFar = 2u << 20;
+    std::string head = f.Read(start, kNear);
+    if (ScanMpegHead(head, head.size() < kNear, start, audioEnd, t)) return true;
+    if (head.size() < kNear) return false;
+    head = f.Read(start, kFar);
+    return ScanMpegHead(head, head.size() < kFar, start, audioEnd, t);
+}
+
+bool ScanMpegHead(sv b, bool complete, uint64_t start, uint64_t audioEnd, TagData& t) {
     static const int kBitrates[2][3][15] = {
         {{0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448},
          {0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384},
@@ -614,6 +625,15 @@ bool ParseMpegAudio(const File& f, uint64_t start, uint64_t audioEnd, TagData& t
         int kbps = kBitrates[lsf][li][bri];
         bool mono = (U8(b, i + 3) >> 6) == 3;
         int spf = li == 0 ? 384 : (li == 2 && lsf) ? 576 : 1152;
+        // A sync pattern inside tag data can look like a header, so the next frame must sync too,
+        // unless the window ends before it (then the next, wider window decides).
+        size_t frameLen = li == 0 ? (12 * kbps * 1000 / rate + (U8(b, i + 2) >> 1 & 1)) * 4
+                                  : (lsf && li == 2 ? 72 : 144) * kbps * 1000 / rate + (U8(b, i + 2) >> 1 & 1);
+        if (i + frameLen + 4 <= b.size()) {
+            if (U8(b, i + frameLen) != 0xFF || (U8(b, i + frameLen + 1) & 0xE0) != 0xE0) continue;
+        } else if (!complete) {
+            continue;
+        }
         t.codec = li == 2 ? Codec::MP3 : Codec::MP2;
         t.sampleRate = (uint32_t)rate;
         t.channels = mono ? 1 : 2;

@@ -168,6 +168,8 @@ struct Canvas {
     std::vector<Item> items;
     std::vector<int> albumItem;  // album -> its tile or group item
     float contentHeight = 0, scroll = 0, laidWidth = -1, viewH = 0;
+    float scrollGoal = 0;           // Smooth scrolling: where the wheel or paging is taking the view
+    bool scrollGliding = false;     // TickCanvasScroll moves the view toward scrollGoal
     bool layoutDirty = true;
     int expanded = -1;              // Albums: the open album
     TrackId expandedTrack = kNone;  // ... by its first track, across rebuilds
@@ -594,7 +596,51 @@ Hit HitTest(const Rect& area, float x, float y) {
     return h;
 }
 
+float CanvasMaxScroll() { return std::max(0.0f, v.contentHeight - v.viewH); }
+
+// Where a wheel notch or paging key starts from: the pending goal while a glide is under way.
+float CanvasScrollBase() { return v.scrollGliding ? v.scrollGoal : v.scroll; }
+
+// Wheel and paging with Smooth scrolling on: the goal moves now and TickCanvasScroll eases to it.
+// Scrollbar-free jumps (Home, End, focus moves) set the view directly.
+void CanvasScrollTo(float y) {
+    if (!g.settings.smoothScroll) {
+        v.scroll = y;
+        v.scrollGliding = false;
+        return;
+    }
+    v.scrollGoal = std::clamp(y, 0.0f, CanvasMaxScroll());
+    v.scrollGliding = std::fabs(v.scrollGoal - v.scroll) > 0.5f;
+    if (!v.scrollGliding) v.scroll = v.scrollGoal;
+}
+
+}  // namespace
+
+// Declared in app.h: the main loop asks whether a glide is under way and ticks it.
+bool CanvasScrollAnimating() { return v.scrollGliding; }
+
+// One frame of the glide: close a quarter of the gap each tick and land exactly on the goal.
+void TickCanvasScroll() {
+    if (!v.scrollGliding) return;
+    if (!g.settings.smoothScroll) {  // turned off mid-glide: stop where the view is
+        v.scrollGliding = false;
+        return;
+    }
+    v.scrollGoal = std::clamp(v.scrollGoal, 0.0f, CanvasMaxScroll());  // the content may have shrunk
+    float gap = v.scrollGoal - v.scroll;
+    if (std::fabs(gap) <= 0.5f) {
+        v.scroll = v.scrollGoal;
+        v.scrollGliding = false;
+    } else {
+        v.scroll += gap * 0.25f;
+    }
+    g.redraw = true;
+}
+
+namespace {
+
 void EnsureVisible(const Rect& r, float viewH) {
+    v.scrollGliding = false;
     if (r.y - F(10) < v.scroll) v.scroll = r.y - F(10);
     else if (r.B() + F(10) > v.scroll + viewH) v.scroll = r.B() + F(10) - viewH;
     v.scroll = std::clamp(v.scroll, 0.0f, std::max(0.0f, v.contentHeight - viewH));
@@ -1269,7 +1315,7 @@ void CanvasWheel(const Rect& area, float dy, bool ctrl) {
         SaveSettings();
         v.layoutDirty = true;
     } else {
-        v.scroll -= dy * S(120);
+        CanvasScrollTo(CanvasScrollBase() - dy * S(120));
     }
     Relayout(area);
     g.redraw = true;
@@ -1338,10 +1384,10 @@ bool CanvasKey(const SDL_KeyboardEvent& e) {
         case SDLK_RIGHT: if (ctrl) return false; MoveCanvasFocus(1, 0, width, viewH); return true;
         case SDLK_UP: MoveCanvasFocus(0, -1, width, viewH); return true;
         case SDLK_DOWN: MoveCanvasFocus(0, 1, width, viewH); return true;
-        case SDLK_HOME: v.scroll = 0; break;
-        case SDLK_END: v.scroll = v.contentHeight; break;
-        case SDLK_PAGEUP: v.scroll -= viewH - F(40); break;
-        case SDLK_PAGEDOWN: v.scroll += viewH - F(40); break;
+        case SDLK_HOME: CanvasScrollTo(0); break;
+        case SDLK_END: CanvasScrollTo(v.contentHeight); break;
+        case SDLK_PAGEUP: CanvasScrollTo(CanvasScrollBase() - viewH + F(40)); break;
+        case SDLK_PAGEDOWN: CanvasScrollTo(CanvasScrollBase() + viewH - F(40)); break;
         case SDLK_ESCAPE:
             if (v.expanded < 0) return false;
             v.expanded = -1;

@@ -138,7 +138,7 @@ enum : int {
     IDM_ALWAYS_ON_TOP, IDM_ABOUT, IDM_PLAY_SEL, IDM_SHOW_IN_EXPLORER, IDM_PROPERTIES,
     IDM_EQUALIZER, IDM_RG_SCAN_SEL, IDM_RG_SCAN_PL, IDM_RG_ENABLE,
     IDM_RG_AUTO_SCAN, IDM_RG_CANCEL, IDM_RG_CLEAR, IDM_RG_WRITE_TAGS,
-    IDM_LIBRARY_FOLDERS, IDM_RESCAN, IDM_REMOVE_MISSING, IDM_INBOX_ACCEPT, IDM_INBOX_ACCEPT_ALL, IDM_EXCLUDE,
+    IDM_LIBRARY_FOLDERS, IDM_RESCAN, IDM_REMOVE_MISSING, IDM_RECENT_ADDITIONS, IDM_INBOX_ACCEPT, IDM_INBOX_ACCEPT_ALL, IDM_EXCLUDE,
     IDM_COLUMNS_RESET, IDM_QUEUE_NEXT, IDM_QUEUE_ADD, IDM_QUEUE_CLEAR, IDM_NEW_AUTO, IDM_EDIT_AUTO, IDM_ORGANIZE, IDM_ORGANIZE_UNDO,
     IDM_TAG_UNDO, IDM_OUTPUT_SHARED, IDM_OUTPUT_EXCLUSIVE,
     IDM_SOUND_EFFECTS, IDM_FORMAT, IDM_TASKBAR_PROGRESS, IDM_GAME_NAME_THAT_TRACK, IDM_GAME_WHICH_CAME_FIRST,
@@ -206,8 +206,10 @@ enum : int {
     IDM_IPOD_SYNC = 4200,
     // Covers (app_coverfetch.cpp) and artist info.
     IDM_FIND_COVER = 4210, IDM_FETCH_COVERS, IDM_FETCH_COVERS_CANCEL, IDM_ARTIST_INFO, IDM_RESTORE_COVER,
+    IDM_COVER_FILE, IDM_COVER_PASTE, IDM_EDIT_ALBUM_TAGS,  // the track menu's Cover submenu, Edit album tags
     // File > Export collection and Import collection (app_collection.cpp), and Cancel.
     IDM_EXPORT_COLLECTION = 4220, IDM_IMPORT_COLLECTION, IDM_COLLECTION_CANCEL,
+    IDM_MISSING_BASE = 4230,  // + kMissingFields index: Library > Find missing information
 };
 constexpr int kMaxPacks = 64, kMaxPackThemes = 64, kMaxPackAutoPlaylists = 64, kMaxPackColumnSets = 30;
 constexpr int kMaxHelpers = 32, kMaxHelperVisualizers = 16, kMaxHelperTools = 40;
@@ -346,6 +348,7 @@ struct App {
     int waveColor = 0;          // the plain waveform's colour and the moodbar's base: WaveColors (peaks.h)
     int waveRestColor = 0;      // the waveform's unplayed part: WaveRestColors (peaks.h)
     bool smoothSeek = false;    // soften the whole song's outline and blend its moodbar colours
+    bool smoothScroll = false;  // the library view eases toward wheel and paging moves (off by default)
     bool waveReflection = true; // mirror the waveform below its center line, for the waveform and moodbar styles
     bool waveFullHeight = true; // unmirrored, the waveforms still fill both halves, the lower as bright
     bool seekGlow = true;       // the seek bar's colours glow softly past its edges, every style and source alike

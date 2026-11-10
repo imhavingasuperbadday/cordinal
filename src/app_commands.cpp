@@ -164,6 +164,10 @@ void OnCommand(int id, int code, HWND ctl) {
         ToggleColumn(id - IDM_COLUMN_BASE);
         return;
     }
+    if (id >= IDM_MISSING_BASE && id < IDM_MISSING_BASE + (int)std::size(kMissingFields)) {
+        ShowMissingInformation((size_t)(id - IDM_MISSING_BASE));
+        return;
+    }
     if (id >= IDM_RATE_BASE && id <= IDM_RATE_BASE + 10) {
         SetRating(SelectedTracks(), (uint8_t)((id - IDM_RATE_BASE) * 10));
         return;
@@ -239,6 +243,12 @@ void OnCommand(int id, int code, HWND ctl) {
         {IDM_STEAM, AddSteamSoundtracks},
         {IDM_FIND_COVER, [] { ShowCoverSearch(SelectedTracks()); }},
         {IDM_RESTORE_COVER, [] { RestoreOriginalCovers(SelectedTracks()); }},
+        {IDM_COVER_FILE, [] { ChooseCoverFile(SelectedTracks()); }},
+        {IDM_COVER_PASTE, [] { PasteCover(SelectedTracks()); }},
+        {IDM_EDIT_ALBUM_TAGS, [] {
+             auto sel = SelectedTracks();
+             if (!sel.empty()) ShowTagEditor(AlbumTracksOf(sel));
+         }},
         {IDM_FETCH_COVERS, FetchMissingCovers},
         {IDM_FETCH_COVERS_CANCEL, CancelCoverFetch},
         {IDM_ARTIST_INFO, ShowArtistInfo},
@@ -259,6 +269,7 @@ void OnCommand(int id, int code, HWND ctl) {
         {IDC_VIEW4, ToggleBrowser},
         {IDM_LIBRARY_FOLDERS, ShowLibraryFolders},
         {IDM_REMOVE_MISSING, RemoveMissingTracks},
+        {IDM_RECENT_ADDITIONS, ShowRecentAdditions},
         {IDM_INBOX_ACCEPT, [] { AcceptInbox(SelectedTracks()); }},
         {IDM_EXCLUDE, [] { ExcludeFromLibrary(SelectedTracks()); }},
         {IDM_PLAY_SEL, PlayFocusedOrFirst},

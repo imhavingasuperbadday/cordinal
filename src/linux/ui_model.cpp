@@ -254,6 +254,7 @@ void ConfirmExclude(bool confirm) {
     g.libraryDirty = true;
     UpdateInboxTab();
     RebuildRows();
+    if (g_recent.open) RefreshRecentAdditions();
     ShowMessage(L"Removed from the library. The files were kept.");
 }
 

@@ -5,6 +5,7 @@
 #include "audio_file.h"
 #include "audio_packets.h"
 #include "audio_kernels.h"
+#include "audio_bits.h"
 #include "audio_mpeg_tables.h"
 #include "audio_mpeg_alloc.h"
 #include "audio_polyphase.h"
@@ -17,8 +18,8 @@ using namespace nativeaudio;
 using namespace nativeaudio::mpeg;
 constexpr double pi = 3.14159265358979323846;
 
-// MSB-first cursor over one MPEG frame. Peek is non-consuming so the Huffman
-// fast path can test an 8-bit prefix before deciding how many bits to drop.
+// MSB-first cursor over one MPEG frame: side info, Layer I/II fields and each granule's
+// position and limit in the reservoir. Layer III's main data is read through a BitWindow.
 class MpegBits {
 public:
     MpegBits(const uint8_t* p, size_t bytes) : data(p), size(bytes), limit(bytes*8) {}
@@ -65,6 +66,12 @@ FastBooksTable fastBooks;
 // 12-bit first-lookup tables that resolve a codeword straight to a signed (x,y)
 // pair, including the sign bits after the code and the linear escape values.
 std::array<std::array<uint16_t,4096>,15> signedBooks;
+// 10-bit first-lookup tables for the two count1 books: a quadruple's code and sign bits never
+// exceed ten bits. An entry holds the bits consumed (low four) and four 2-bit signed values.
+std::array<std::array<uint16_t,1024>,2> countBooks;
+// Readable bytes kept past the reservoir's data. A damaged granule is only compared with its
+// limit after the big-values regions, and 288 pairs of 47 bits are 1,692 bytes.
+constexpr size_t reservoirPad = 2048;
 void InitFastBooks() {
     static const bool ready=[] {
         for (unsigned i = 0; i < 17; ++i) fastBooks[i] = FastBook(huffman[bookNumbers[i]]);
@@ -78,26 +85,21 @@ void InitFastBooks() {
             if (y) { if (bits==12) continue; if ((prefix>>(11-bits++))&1) y=-y; }
             signedBooks[book][prefix]=(uint16_t)(0x8000|(bits<<10)|((x&31)<<5)|(y&31));
         }
+        for (unsigned book=0;book<2;++book) for (unsigned prefix=0;prefix<1024;++prefix) {
+            int node=0; unsigned bits=0;
+            while (node>=0 && bits<10) node=huffman[32+book][node].child[(prefix>>(9-bits++))&1];
+            if (node>=0) continue;
+            unsigned packed=(unsigned)(-node-1),entry=0;
+            for (unsigned j=0;j<4 && bits<=10;++j) if ((packed>>(3-j))&1) {
+                if (bits==10) { bits=11;break; }
+                entry|=((prefix>>(9-bits++))&1?3u:1u)<<(4+j*2);
+            }
+            if (bits<=10) countBooks[book][prefix]=(uint16_t)(entry|bits);
+        }
         return true;
     }();
     (void)ready;
 }
-// Return a packed (x << 4) | y codeword pair, or -1 on an invalid table or a
-// codeword that runs past the frame. Escape and sign bits are left to the caller.
-int Huffman(MpegBits& b, unsigned table) {
-    if (table == 0) return 0;
-    if (table >= 34 || !huffman[table]) return -1;
-    unsigned fast = fastBooks[bookIndex[table]][b.Peek(8)];
-    if (fast & 0x8000) { b.Drop((fast >> 8) & 15); return (int)(fast & 255); }
-    b.Drop(8);
-    int node = (int)fast;
-    for (unsigned i = 8; i < 20; ++i) {
-        node = huffman[table][node].child[b.Get(1)];
-        if (node < 0) return -node-1;
-    }
-    return -1;
-}
-
 // Decoded frame header. version: 0 = MPEG 2.5, 2 = MPEG 2, 3 = MPEG 1;
 // layer: 1..3. channels drops to 1 in single-channel mode.
 struct MpegHeader {
@@ -205,18 +207,21 @@ bool SideInfo(MpegBits& b, const MpegHeader& h, Granule (&gr)[2][2], unsigned& b
 // and block type; MPEG-2 uses a different variable-length scheme from MPEG-1.
 // Invalid (all-ones) scalefactors are remembered so intensity stereo skips them.
 bool ScaleFactors(MpegBits& b, const MpegHeader& h, Granule& gr, const Granule& first, unsigned channel) {
+    // The reservoir is padded (reservoirPad), so the fields come from a register window.
+    BitWindow w(b.data,b.pos);
+    auto get = [&](unsigned n) { w.Refill(); return w.GetWide(n); };
     if (h.version == 3) {
         constexpr unsigned slen1[] = {0,0,0,0,3,1,1,1,2,2,2,3,3,3,4,4};
         constexpr unsigned slen2[] = {0,1,2,3,0,1,2,3,1,2,3,1,2,3,2,3};
         unsigned a = slen1[gr.compress], c = slen2[gr.compress];
         if (gr.type == 2) {
-            if (gr.mixed) for (unsigned band = 0; band < 8; ++band) gr.sfLong[band] = (int)b.Get(a);
+            if (gr.mixed) for (unsigned band = 0; band < 8; ++band) gr.sfLong[band] = (int)get(a);
             for (unsigned band = gr.mixed ? 3 : 0; band < 12; ++band)
-                for (unsigned win = 0; win < 3; ++win) gr.sfShort[band][win] = (int)b.Get(band < 6 ? a : c);
+                for (unsigned win = 0; win < 3; ++win) gr.sfShort[band][win] = (int)get(band < 6 ? a : c);
         } else {
             constexpr unsigned edges[] = {0,6,11,16,21};
             for (unsigned group = 0; group < 4; ++group) for (unsigned band = edges[group]; band < edges[group+1]; ++band)
-                gr.sfLong[band] = gr.reuse & (8u >> group) ? first.sfLong[band] : (int)b.Get(band < 11 ? a : c);
+                gr.sfLong[band] = gr.reuse & (8u >> group) ? first.sfLong[band] : (int)get(band < 11 ? a : c);
         }
         for (auto& v : gr.invalidLong) v = 7;
         for (auto& band : gr.invalidShort) for (auto& v : band) v = 7;
@@ -239,7 +244,7 @@ bool ScaleFactors(MpegBits& b, const MpegHeader& h, Granule& gr, const Granule& 
             {{6,6,6,3},{12,9,9,6},{6,12,9,6}}, {{8,8,5,0},{15,12,9,0},{6,18,9,0}}};
         unsigned kind = gr.type == 2 ? (gr.mixed ? 2u : 1u) : 0u, at = 0;
         for (unsigned g = 0; g < 4; ++g) for (unsigned i = 0; i < counts[group][kind][g]; ++i,++at) {
-            int value = (int)b.Get(slen[g]), invalid = (1 << slen[g])-1;
+            int value = (int)get(slen[g]), invalid = (1 << slen[g])-1;
             if (kind == 0 || (kind == 2 && at < 6)) { gr.sfLong[at] = value; gr.invalidLong[at] = invalid; }
             else {
                 unsigned off = kind == 2 ? at-6+9 : at;
@@ -248,66 +253,74 @@ bool ScaleFactors(MpegBits& b, const MpegHeader& h, Granule& gr, const Granule& 
         }
     }
     gr.sfLong[21] = gr.sfLong[20]; gr.invalidLong[21] = gr.invalidLong[20];
-    for (unsigned w = 0; w < 3; ++w) { gr.sfShort[12][w] = gr.sfShort[11][w]; gr.invalidShort[12][w] = gr.invalidShort[11][w]; }
+    for (unsigned win = 0; win < 3; ++win) { gr.sfShort[12][win] = gr.sfShort[11][win]; gr.invalidShort[12][win] = gr.invalidShort[11][win]; }
+    b.pos = w.Position();
+    if (b.pos > b.limit) b.good = false;
     return b.good;
 }
 
 // Decode the quantized spectral lines. Region boundaries select the Huffman
 // table per pair; count1 quadruples use tables 32/33. Any remaining main data is
-// skipped so the next granule starts at the right bit.
+// skipped so the next granule starts at the right bit. The bits come from a register
+// window over the padded reservoir, so the granule's limit is compared once after the
+// big values: running past it there fails the frame, as each bounded read used to.
 bool Spectral(MpegBits& b, const MpegHeader& h, Granule& gr) {
     const unsigned* bands = h.rate == 8000 ? long8k : longBands[h.rateIndex];
     unsigned region1 = gr.type == 2 ? (h.rate == 8000 ? 72 : 36) : bands[std::min(22u,gr.region[0]+1)];
     unsigned region2 = gr.type == 2 ? 576 : bands[std::min(22u,gr.region[0]+gr.region[1]+2)];
     unsigned at = 0;
     const unsigned pairsEnd = gr.pairs*2;
+    BitWindow w(b.data,b.pos);
     for (unsigned region = 0; region < 3; ++region) {
         const unsigned stop = std::min(region == 0 ? region1 : region == 1 ? region2 : pairsEnd,pairsEnd);
+        if (at >= stop) continue;
         const unsigned table = gr.tables[region];
-        // Pairs the 12-bit signed book resolves are read from a register window, reloaded only
-        // when fewer than 12 bits remain in it. Longer codes, escapes and the last bytes of the
-        // reservoir take the general path one pair at a time.
-        const uint16_t* book = table && table<32 && table!=4 && table!=14 ? signedBooks[bookIndex[table]].data() : nullptr;
-        while (at < stop) {
-            if (book) {
-                size_t pos = b.pos;
-                uint64_t window = 0;
-                unsigned held = 0;
-                while (at < stop && pos+12 <= b.limit) {
-                    if (held < 12) {
-                        if ((pos>>3)+8 > b.size) break;
-                        window = U64(b.data+(pos>>3),true) << (pos&7); held = 64-unsigned(pos&7);
-                    }
-                    unsigned entry = book[window>>52];
-                    if (!entry) break;
-                    unsigned length = (entry>>10)&15;
-                    window <<= length; held -= length; pos += length;
-                    gr.quant[at] = (int16_t)(int32_t(entry<<22)>>27);
-                    gr.quant[at+1] = (int16_t)(int32_t(entry<<27)>>27);
-                    at += 2;
+        if (!table) { memset(gr.quant+at,0,(stop-at)*sizeof(int16_t)); at = stop; continue; }
+        if (!huffman[table]) return false;
+        // The 12-bit signed book resolves most pairs with their sign bits in one load. Longer
+        // codes and escapes walk the tree from its 8-bit first lookup; a pair is at most 47 bits.
+        const uint16_t* book = signedBooks[bookIndex[table]].data();
+        const uint16_t* first = fastBooks[bookIndex[table]].data();
+        const HuffNode* tree = huffman[table];
+        const unsigned escape = linbits[table];
+        do {
+            w.Refill();
+            if (unsigned entry = book[w.Peek(12)]) {
+                w.Drop((entry>>10)&15);
+                gr.quant[at] = (int16_t)(int32_t(entry<<22)>>27);
+                gr.quant[at+1] = (int16_t)(int32_t(entry<<27)>>27);
+            } else {
+                unsigned fast = first[w.Peek(8)];
+                int pair;
+                if (fast & 0x8000) { w.Drop((fast >> 8) & 15); pair = (int)(fast & 255); }
+                else {
+                    w.Drop(8);
+                    int node = (int)fast;
+                    for (unsigned i = 8; i < 20 && node >= 0; ++i) node = tree[node].child[w.Get(1)];
+                    if (node >= 0) return false;
+                    pair = -node-1;
                 }
-                b.pos = pos;
-                if (at >= stop) break;
+                int x = pair >> 4, y = pair & 15;
+                if (x == 15 && escape) x += (int)w.Get(escape);
+                if (x && w.Get(1)) x = -x;
+                if (y == 15 && escape) y += (int)w.Get(escape);
+                if (y && w.Get(1)) y = -y;
+                gr.quant[at] = (int16_t)x; gr.quant[at+1] = (int16_t)y;
             }
-            int pair = Huffman(b,table);
-            if (pair < 0) return false;
-            int x = pair >> 4, y = pair & 15;
-            if (x == 15 && linbits[table]) x += (int)b.Get(linbits[table]);
-            if (x && b.Get(1)) x = -x;
-            if (y == 15 && linbits[table]) y += (int)b.Get(linbits[table]);
-            if (y && b.Get(1)) y = -y;
-            if (!b.good) return false;
-            gr.quant[at] = (int16_t)x; gr.quant[at+1] = (int16_t)y;
             at += 2;
-        }
+        } while (at < stop);
     }
-    for (; at+4 <= 576 && b.pos < b.limit; at += 4) {
-        int packed = Huffman(b,gr.countTable ? 33 : 32);
-        if (packed < 0) return false;
-        int values[4]{};
-        for (unsigned j = 0; j < 4; ++j) { int v = (packed >> (3-j)) & 1; values[j] = v && b.Get(1) ? -v : v; }
-        if (!b.good) { b.good = true; break; }
-        for (unsigned j = 0; j < 4; ++j) gr.quant[at+j] = (int16_t)values[j];
+    size_t pos = w.Position();
+    if (pos > b.limit) return false;
+    // A quadruple that runs past the granule is dropped and ends the region.
+    const uint16_t* quads = countBooks[gr.countTable].data();
+    for (; at+4 <= 576 && pos < b.limit; at += 4) {
+        w.Refill();
+        const unsigned entry = quads[w.Peek(10)];
+        if (!entry) return false;
+        w.Drop(entry&15); pos += entry&15;
+        if (pos > b.limit) break;
+        for (unsigned j = 0; j < 4; ++j) gr.quant[at+j] = (int16_t)(int32_t(entry<<(26-j*2))>>30);
     }
     gr.end = at;
     b.pos = b.limit;
@@ -615,10 +628,17 @@ void Filterbank::Hybrid(Granule& g,unsigned channel,float* pcm) {
     unsigned nonzero = NonzeroEnd(g.spectral,576);
     // A butterfly whose eight lines below the boundary are all zero leaves its lines zero.
     unsigned alias = std::min(g.type == 2 ? (g.mixed ? 2u : 1u) : 32u,(nonzero+25)/18);
-    for (unsigned sb = 1; sb < alias; ++sb) for (unsigned i = 0; i < 8; ++i) {
-        unsigned lo = sb*18-1-i, hi = sb*18+i;
-        float a = g.spectral[lo], b = g.spectral[hi];
-        g.spectral[lo] = a*cs[i]-b*ca[i]; g.spectral[hi] = b*cs[i]+a*ca[i];
+    // Eight butterflies per boundary, four at a time: the lines below the boundary are read and
+    // written in reverse so each lane pairs line -1-i with line i.
+    for (unsigned sb = 1; sb < alias; ++sb) for (unsigned i = 0; i < 8; i += 4) {
+        float* lo = g.spectral+sb*18-4-i;
+        float* hi = g.spectral+sb*18+i;
+        const __m128 c = _mm_loadu_ps(cs+i), s = _mm_loadu_ps(ca+i);
+        __m128 a = _mm_loadu_ps(lo), b = _mm_loadu_ps(hi);
+        a = _mm_shuffle_ps(a,a,0x1B);
+        __m128 low = _mm_sub_ps(_mm_mul_ps(a,c),_mm_mul_ps(b,s));
+        _mm_storeu_ps(hi,_mm_add_ps(_mm_mul_ps(b,c),_mm_mul_ps(a,s)));
+        _mm_storeu_ps(lo,_mm_shuffle_ps(low,low,0x1B));
     }
     // Butterflies reach at most 15 lines past the last nonzero one.
     nonzero = NonzeroEnd(g.spectral,std::min(576u,nonzero+16));
@@ -628,8 +648,29 @@ void Filterbank::Hybrid(Granule& g,unsigned channel,float* pcm) {
     float subbands[18][32];
     if (limit < 32) for (auto& slot : subbands) memset(slot+limit,0,(32-limit)*sizeof(float));
     unsigned sb=0;
-    if (g.type!=2) for (;sb+4<=active;sb+=4)
-        Long4(g.spectral+sb*18,g.type,overlap_[channel][sb],subbands[0]+sb);
+    if (g.type!=2) {
+        for (;sb+4<=active;sb+=4)
+            Long4(g.spectral+sb*18,g.type,overlap_[channel][sb],subbands[0]+sb);
+        // The last one to three active subbands share a group with silent ones. The group still
+        // runs in lanes; the silent subbands then get what the loop below gives them: their
+        // overlap as output and a cleared overlap, or untouched zeros at and past limit.
+        if (sb<active && sb+4<=32) {
+            float previous[3][18];
+            memcpy(previous,overlap_[channel][active],(sb+4-active)*sizeof previous[0]);
+            Long4(g.spectral+sb*18,g.type,overlap_[channel][sb],subbands[0]+sb);
+            for (unsigned silent=active;silent<sb+4;++silent) {
+                const float* before=previous[silent-active];
+                float* after=overlap_[channel][silent];
+                if (silent<limit) for (unsigned i=0;i<18;++i) {
+                    // The scalar path adds the overlap to a zero block, which turns -0 into +0.
+                    float value=std::bit_cast<uint32_t>(before[i])==0x80000000u?0.0f:before[i];
+                    subbands[i][silent]=(i&silent&1)?-value:value;
+                    after[i]=0;
+                } else for (unsigned i=0;i<18;++i) { subbands[i][silent]=0;after[i]=before[i]; }
+            }
+            sb+=4;
+        }
+    }
     for (; sb < limit; ++sb) {
         unsigned type = g.type == 2 && g.mixed && sb < 2 ? 0u : g.type;
         float time[36]{};
@@ -690,7 +731,9 @@ private:
     bool liveFirst_ = false;
     MpegHeader header_;
     std::vector<uint64_t> offsets_;
+    // Layer III main data. The vector also holds reservoirPad readable bytes after the data.
     std::vector<uint8_t> reservoir_;
+    size_t reservoirBytes_ = 0;
     Filterbank filters_;
     size_t frame_ = 0, cursor_ = 0, buffered_ = 0;
     uint64_t frameCount_ = 0, indexAt_ = 0;
@@ -819,7 +862,9 @@ bool MpegDecoder::Open(const std::wstring& path) {
         if ((p[6] | p[7] | p[8] | p[9]) & 128) return false;
         at = 10+((uint64_t)p[6] << 21)+((uint64_t)p[7] << 14)+((uint64_t)p[8] << 7)+p[9]+((p[5] & 16) ? 10 : 0);
     }
-    uint64_t searchEnd = std::min(file_.Size(),at+65536);
+    // Some rips carry a second, undersized ID3 tag whose frames run past the first 64 KiB, so the
+    // first frame can lie up to 2 MiB beyond the tags.
+    uint64_t searchEnd = std::min(file_.Size(),at+(2u<<20));
     bool tagged = false;
     unsigned encodedFrames = 0, padding = 0;
     bool streaming = false;
@@ -846,9 +891,27 @@ bool MpegDecoder::Open(const std::wstring& path) {
                 freeSize_ = base;
                 break;
             }
-            if (!freeSize_ || !Header(p,n,h,freeSize_) || !h.bytes) return false;
+            if (!freeSize_ || !Header(p,n,h,freeSize_) || !h.bytes) {
+                // A sync pattern with no bitrate inside tag data is not a free-format stream: keep searching.
+                if (offsets_.empty() && at < searchEnd) { ++at; continue; }
+                return false;
+            }
         }
         if (offsets_.empty()) {
+            // A sync pattern inside tag data (a picture, say) can pass Header, so the first frame
+            // must be followed by another frame of the same stream. View() may remap, so p is
+            // fetched again after this check.
+            uint8_t after[4] = {};
+            const uint8_t* q = at+h.bytes+4 <= file_.Size() ? file_.View(at+h.bytes,4) : nullptr;
+            if (q) memcpy(after,q,4);
+            MpegHeader f;
+            if (!q || !Header(after,4,f,0,true) || f.rate!=h.rate || f.layer!=h.layer || f.version!=h.version ||
+                f.channels!=h.channels) {
+                if (at < searchEnd) { ++at; continue; }
+                break;
+            }
+            p = file_.View(at,n);
+            if (!p) return false;
             header_ = h;
             unsigned side = h.version == 3 ? (h.channels == 1 ? 17 : 32) : (h.channels == 1 ? 9 : 17);
             size_t xing = 4+(h.crc ? 2 : 0)+side;
@@ -954,13 +1017,14 @@ bool MpegDecoder::Frame() {
     Granule gr[2][2];
     unsigned back = 0;
     if (!SideInfo(info,h,gr,back)) return false;
-    bool enough = back <= reservoir_.size();
-    size_t retain = std::min<size_t>(back,reservoir_.size());
-    if (retain) memmove(reservoir_.data(),reservoir_.data()+reservoir_.size()-retain,retain);
-    reservoir_.resize(retain);
-    reservoir_.insert(reservoir_.end(),p+prefix+side,p+h.bytes);
+    bool enough = back <= reservoirBytes_;
+    size_t retain = std::min<size_t>(back,reservoirBytes_), added = h.bytes-prefix-side;
+    if (reservoir_.size() < retain+added+reservoirPad) reservoir_.resize(retain+added+reservoirPad);
+    if (retain) memmove(reservoir_.data(),reservoir_.data()+reservoirBytes_-retain,retain);
+    memcpy(reservoir_.data()+retain,p+prefix+side,added);
+    reservoirBytes_ = retain+added;
     if (!enough) return live_ || raw_ <= target_;
-    MpegBits b(reservoir_.data(),reservoir_.size());
+    MpegBits b(reservoir_.data(),reservoirBytes_);
     for (unsigned g = 0; g < (h.version == 3 ? 2u : 1u); ++g) {
         for (unsigned c = 0; c < h.channels; ++c) {
             auto& v = gr[g][c];
@@ -1007,7 +1071,7 @@ bool MpegDecoder::Seek(double seconds) {
     if (target < total_ && !IndexThrough((size_t)frame)) return false;
     target_ = absolute;
     frame_ = (size_t)(frame > 32 ? frame-32 : 0); raw_ = frame_*header_.samples;
-    filters_.Reset(); reservoir_.clear(); buffered_ = cursor_ = 0; failed_ = false; pos_ = target;
+    filters_.Reset(); reservoirBytes_ = 0; buffered_ = cursor_ = 0; failed_ = false; pos_ = target;
     return true;
 }
 } // namespace

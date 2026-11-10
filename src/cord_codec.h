@@ -494,5 +494,8 @@ bool FoldResidualsAvx2(const double* y, size_t n, const int32_t* coefficients, u
 
 // CRC-32 (the zlib polynomial, as Crc32 in inflate.h) over a block payload, eight bytes a step.
 uint32_t Crc32(const uint8_t* p, size_t n);
+// The same CRC continued over more bytes, for callers that check a stream in pieces (Monkey's
+// Audio frames). `state` is the raw register: start from ~0u and invert the final value.
+uint32_t Crc32Update(uint32_t state, const uint8_t* p, size_t n);
 
 }  // namespace cord

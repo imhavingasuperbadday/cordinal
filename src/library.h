@@ -262,6 +262,34 @@ private:
 // to it as messages rather than touching it themselves.
 extern Library g_lib;
 
+// The library tracks (in the library or the Inbox) whose date added is at or after `since`
+// (UnixNow() seconds), oldest first. Missing files are included: they are still in the library.
+std::vector<TrackId> TracksAddedSince(uint32_t since);
+// Every library or Inbox track of the albums `ids` belong to, plus `ids` themselves, in track id
+// order: Edit album tags and the direct cover choices act on the whole album even when only one of
+// its tracks is selected. Tracks share an album when their album tags match and they sit in the same
+// folder or name the same album artist (or artist), so a year or genre missing from some of them
+// does not split it. A track without an album tag brings the untagged tracks of its own folder.
+std::vector<TrackId> AlbumTracksOf(const std::vector<TrackId>& ids);
+// The search box's "missing:<field>" terms (Library > Find missing information): a track matches
+// when that tag is empty, so the gaps can be listed and then filled in with Edit tags. "any" means
+// any of title, artist, album, year, genre or track number.
+struct MissingField {
+    const wchar_t* term;   // what goes in the search box
+    const char* label;     // the menu item, on both platforms
+};
+inline constexpr MissingField kMissingFields[] = {
+    {L"missing:any", "Any of title, artist, album, year, genre or track"},
+    {L"missing:title", "Title"},       {L"missing:artist", "Artist"},  {L"missing:album", "Album"},
+    {L"missing:albumartist", "Album artist"}, {L"missing:year", "Year"}, {L"missing:genre", "Genre"},
+    {L"missing:track", "Track number"}, {L"missing:composer", "Composer"},
+};
+// -1 when `word` is not a missing: term; otherwise 1 when the track lacks that tag, else 0.
+int MissingTagTerm(const Library& library, TrackId id, std::wstring_view word);
+// Takes tracks out of the library as the Library tab's Remove does: their files stay on disk, and
+// folder scans leave them out. Clears the Inbox and steam-duplicate flags too.
+void ExcludeTracks(const std::vector<TrackId>& ids);
+
 // Group a copied list of nonzero audio hashes off the UI thread; each group contains two or more
 // track IDs, and both the IDs and the groups are sorted.
 std::vector<std::vector<TrackId>> GroupDuplicateAudio(std::vector<std::pair<uint64_t, TrackId>> byHash);

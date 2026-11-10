@@ -93,6 +93,70 @@ void TestSearch() {
         folderCases.Add(folder.Matches(track) == (track >= 20 && track < 30), library.Path(track));
     Check(folderCases.Passed(), L"SEARCH a full folder path isolates its tracks even when tags repeat%ls",
           folderCases.failed.c_str());
+    batch.Next(L"SEARCH missing:<field> finds tracks with that tag empty and combines with ordinary words");
+    {
+        Library gaps;
+        std::vector<TrackId> ids;
+        for (unsigned i = 0; i < 10; ++i) {
+            TrackId gap = gaps.Add(L"C:\\Gaps\\" + std::to_wstring(i) + L".flac");
+            TagData tags;
+            tags.title = i == 4 ? "" : "Song " + std::to_string(i);
+            tags.artist = "Gap Band";
+            tags.album = i == 3 ? "" : "Holes";
+            tags.genre = i % 2 ? "Rock" : "";
+            tags.date = i < 5 ? "2001" : "";
+            tags.track = i == 9 ? 0 : i + 1;
+            gaps.ApplyTags(gap, tags);
+            ids.push_back(gap);
+        }
+        testlog::Cases cases;
+        auto expect = [&](const wchar_t* query, std::vector<unsigned> want) {
+            const auto words = FilterWords(query);
+            TrackMatcher matcher(gaps, words);
+            std::vector<unsigned> got;
+            for (unsigned i = 0; i < ids.size(); ++i) if (matcher.Matches(ids[i])) got.push_back(i);
+            cases.Add(got == want, query);
+        };
+        expect(L"missing:genre", {0, 2, 4, 6, 8});
+        expect(L"MISSING:Year", {5, 6, 7, 8, 9});
+        expect(L"missing:date", {5, 6, 7, 8, 9});
+        expect(L"missing:album", {3});
+        expect(L"missing:title", {4});
+        expect(L"missing:track", {9});
+        expect(L"missing:any", {0, 2, 3, 4, 5, 6, 7, 8, 9});
+        expect(L"missing:year missing:genre", {6, 8});
+        expect(L"missing:genre Song", {0, 2, 6, 8});
+        expect(L"missing:nonsense", {});  // an unknown field is ordinary text, found nowhere
+        for (const MissingField& field : kMissingFields)
+            cases.Add(MissingTagTerm(gaps, ids[0], field.term) >= 0, field.term);
+        Check(cases.Passed(), L"SEARCH missing:<field> finds tracks with that tag empty%ls", cases.failed.c_str());
+    }
+    batch.Next(L"ALBUM tracks of a selection cover the whole album, across disc folders, without crossing albums");
+    {
+        auto add = [](const wchar_t* path, const char* album, const char* artist, const char* date) {
+            TrackId id = g_lib.Add(path);
+            TagData tags;
+            tags.title = "x";
+            tags.album = album;
+            tags.artist = artist;
+            tags.date = date;
+            g_lib.ApplyTags(id, tags);
+            g_lib[id].flags |= Track::kInLibrary;
+            return id;
+        };
+        TrackId a1 = add(L"C:\\AlbumOf\\Disc 1\\01.flac", "Whole Album", "Band", "1999");
+        TrackId a2 = add(L"C:\\AlbumOf\\Disc 1\\02.flac", "Whole Album", "Band", "");  // no year: still the album
+        TrackId a3 = add(L"C:\\AlbumOf\\Disc 2\\01.flac", "Whole Album", "Band", "1999");
+        TrackId stranger = add(L"C:\\AlbumOf\\Other\\01.flac", "Whole Album", "Someone else", "1999");
+        TrackId loose1 = add(L"C:\\AlbumOf\\Loose\\a.flac", "", "Band", "");
+        TrackId loose2 = add(L"C:\\AlbumOf\\Loose\\b.flac", "", "Other", "");
+        TrackId looseElsewhere = add(L"C:\\AlbumOf\\Loose2\\c.flac", "", "Band", "");
+        auto whole = AlbumTracksOf({a2});
+        auto loose = AlbumTracksOf({loose1});
+        Check(whole == std::vector<TrackId>{a1, a2, a3} && loose == std::vector<TrackId>{loose1, loose2} &&
+                  AlbumTracksOf({stranger}) == std::vector<TrackId>{stranger} && looseElsewhere != kInvalidTrack,
+              L"ALBUM tracks of a selection cover the whole album, across disc folders, without crossing albums");
+    }
     batch.Next(L"folder trees keep Music, custom, other-drive, UNC and POSIX roots and folder boundaries");
     testlog::Cases roots;
     auto tree = [&](const wchar_t* path, std::vector<std::wstring> folders, std::vector<std::wstring> expected) {

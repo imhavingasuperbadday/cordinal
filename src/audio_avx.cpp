@@ -41,6 +41,35 @@ void WavPackPredictAvx2(int32_t* values,size_t frames,int term,int* weight,int s
     }
     weight[0]=_mm_cvtsi128_si32(w);weight[1]=_mm_extract_epi32(w,2);
 }
+// All eight taps in one register. The products and their sum wrap modulo 2^32 as the scalar
+// loop's do, so the lane order of the sum does not matter.
+uint32_t TtaFilterAvx2(int32_t* weights,const int32_t* dx,const int32_t* history,int32_t error,uint32_t round) {
+    __m256i w=_mm256_add_epi32(_mm256_loadu_si256((const __m256i*)weights),
+        _mm256_sign_epi32(_mm256_loadu_si256((const __m256i*)dx),_mm256_set1_epi32(error)));
+    _mm256_storeu_si256((__m256i*)weights,w);
+    __m256i products=_mm256_mullo_epi32(w,_mm256_loadu_si256((const __m256i*)history));
+    __m128i sum=_mm_add_epi32(_mm256_castsi256_si128(products),_mm256_extracti128_si256(products,1));
+    sum=_mm_add_epi32(sum,_mm_srli_si128(sum,8));sum=_mm_add_epi32(sum,_mm_srli_si128(sum,4));
+    return round+(uint32_t)_mm_cvtsi128_si32(sum);
+}
+// Thirty-two taps per iteration in two accumulators. Pair sums and the accumulators wrap modulo
+// 2^32 exactly as the SSE2 loop's do, so the total is the same in any order; vpsignw applies the
+// residual's sign to the adaptation step without a branch on it.
+int32_t ApeFilterAvx2(int16_t* weight,const int16_t* input,const int16_t* adapt,unsigned order,int direction) {
+    const __m256i step=_mm256_set1_epi16((short)direction);
+    __m256i s0=_mm256_setzero_si256(),s1=s0;
+    for (unsigned j=0;j<order;j+=32) {
+        __m256i w0=_mm256_loadu_si256((const __m256i*)(weight+j)),w1=_mm256_loadu_si256((const __m256i*)(weight+j+16));
+        s0=_mm256_add_epi32(s0,_mm256_madd_epi16(w0,_mm256_loadu_si256((const __m256i*)(input+j))));
+        s1=_mm256_add_epi32(s1,_mm256_madd_epi16(w1,_mm256_loadu_si256((const __m256i*)(input+j+16))));
+        _mm256_storeu_si256((__m256i*)(weight+j),_mm256_add_epi16(w0,_mm256_sign_epi16(_mm256_loadu_si256((const __m256i*)(adapt+j)),step)));
+        _mm256_storeu_si256((__m256i*)(weight+j+16),_mm256_add_epi16(w1,_mm256_sign_epi16(_mm256_loadu_si256((const __m256i*)(adapt+j+16)),step)));
+    }
+    s0=_mm256_add_epi32(s0,s1);
+    __m128i sum=_mm_add_epi32(_mm256_castsi256_si128(s0),_mm256_extracti128_si256(s0,1));
+    sum=_mm_add_epi32(sum,_mm_srli_si128(sum,8));sum=_mm_add_epi32(sum,_mm_srli_si128(sum,4));
+    return _mm_cvtsi128_si32(sum);
+}
 // CRC folding by carry-less multiplication. Read big-endian, a block is a polynomial with the
 // message's first bit highest. For an accumulator A of 128 bits, A*x^d + B is congruent modulo
 // P = x^16+x^15+x^2+1 to hi(A)*(x^(d+64) mod P) + lo(A)*(x^d mod P) + B, which again fits in

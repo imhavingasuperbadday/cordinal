@@ -106,6 +106,7 @@ std::unique_ptr<PlaylistFile> g_playlistImport;
 // The library folders dialog.
 Folders g_folders;
 ExcludeConfirm g_exclude;
+RecentPanel g_recent;
 bool g_aboutOpen = false;
 // The Web server window (File > Web server): its controls are 0 the port, 1 Start/Stop, 2 Start with cordinal,
 // 3 Pair device, 4 Remove all, 5 Close, 6 Open web player, 7 Copy phone address, 8 Copy code, 9 Listen away
@@ -444,6 +445,8 @@ void HandleEvent(const SDL_Event& e) {
             break;
         case SDL_EVENT_DROP_FILE:
             if (CoverPanelDrop(e.drop.data, true)) break;  // the cover picker takes it as an image
+            // One picture dropped on its own is a cover for the album it lands on, not music to add.
+            if (DropCover(e.drop.data, e.drop.x * Density(), e.drop.y * Density())) break;
             if (e.drop.data) {
                 static uint64_t lastDrop = 0;  // a drop of many files arrives as many events: one plop
                 if (SDL_GetTicks() - lastDrop > 500) PlaySfx(Sfx::Drop, 1);

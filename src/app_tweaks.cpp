@@ -212,7 +212,7 @@ const Tweak kTweaks[] = {
      L"Song seeking still works.", TweakType::Bool, 0, 1, 0,
      [] { return (double)g.liveFountain; }, [](double v) { g.liveFountain = v != 0; }, 0,
      [] { WaveformTrackChanged(true); WaveformTick(); }},
-    {"view.band_wave_size", L"Window", L"BandWaveSize", L"Top/bottom waveform size",
+    {"view.band_wave_size", L"Window", L"BandWaveSize", L"Waveform height in the top or bottom bar",
      L"Sets the waveform's height only in the normal top or bottom player bar. "
      L"Big, compact and side players keep their own sizes.", TweakType::Choice, 0, 5, 0,
      [] { return (double)g.bandWaveSize; }, [](double v) { g.bandWaveSize = (int)v; }, 0,
@@ -269,6 +269,11 @@ const Tweak kTweaks[] = {
          }
          if (g.eqWnd) RedrawWindow(g.eqWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
      }},
+    {"view.smooth_scroll", L"Window", L"SmoothScroll", L"Smooth scrolling",
+     L"The library eases toward where the mouse wheel or Page Up and Page Down take it, instead of "
+     L"jumping. Scrollbar drags and keyboard focus still move at once.", TweakType::Bool, 0, 1, 0,
+     [] { return (double)g.smoothScroll; }, [](double v) { g.smoothScroll = v != 0; }, 0,
+     [] { LibViewSmoothScrollChanged(); }},
     {"view.gpu_drawing", L"Window", L"GpuDrawing", L"Draw with the graphics card",
      L"Draws the library with the graphics card instead of the processor. Off uses less memory; turn it on "
      L"if scrolling is slow on a large, high-resolution screen.", TweakType::Bool, 0, 1, 0,
@@ -439,8 +444,8 @@ const Tweak kTweaks[] = {
      L"The fountain keeps moving while a track plays and slows to a stop on pause, like the game.",
      TweakType::Bool, 0, 1, 1, [] { return (double)WaveMoving(); },
      [](double v) { SetWaveMoving(v != 0); }, IDM_WAVE_MOTION},
-    {"view.wave_deltarune_colors", L"Waveform", L"DeltaruneColors", L"Fountain colors",
-     L"The fountain's light follows DELTARUNE's hue wheel instead of the position's played color.",
+    {"view.wave_deltarune_colors", L"Waveform", L"DeltaruneColors", L"Fountain colours",
+     L"The fountain's light follows DELTARUNE's hue wheel instead of the position's played colour.",
      TweakType::Bool, 0, 1, 1, [] { return (double)WaveDeltaruneColors(); },
      [](double v) { SetWaveDeltaruneColors(v != 0); }, IDM_WAVE_DR_COLORS},
     {"view.wave_glow", L"Waveform", L"Glow", L"Fountain glow",
@@ -996,6 +1001,8 @@ std::span<const Tweak> Tweaks() { return kTweaks; }
 
 bool TweakShown(const Tweak& t) {
     if (!discord::Available() && !strcmp(t.key, "scrobbling.discord")) return false;  // no application id yet
+    // The Reverb amount slider already covers the menu's presets; a second row for them only repeats it.
+    if (!strcmp(t.key, "effects.reverb_mix_choice")) return false;
     if (!kExtraThemes && (!strcmp(t.key, "view.live_fountain") || !strcmp(t.key, "view.robotic_sounds"))) return false;
     // The fountain, Apollo and foobar rows only draw in themes this build leaves out.
     const char* themeOnly[] = {"view.wave_style", "view.wave_moving", "view.wave_deltarune_colors",

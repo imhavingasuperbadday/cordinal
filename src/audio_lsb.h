@@ -6,11 +6,15 @@
 #include <cstdint>
 #include <cstring>
 #include <span>
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
 
 namespace nativeaudio {
 // Consumes the low bits first; Ones counts consecutive set bits up to a limit and
 // fails the cursor if the limit is reached.
 class LittleBits {
+    friend class LittleWindow;
 public:
     explicit LittleBits(std::span<const uint8_t> bytes):bytes_(bytes) {}
     uint32_t Get(unsigned n) {
@@ -62,5 +66,46 @@ private:
     size_t next_=0;
     unsigned available_=0;
     bool good_=true;
+};
+// A LittleBits cursor held in registers for a residual loop. The state is the cursor's own
+// (buffer, bit count, next byte), copied out and handed back by Commit(), so a loop can drop to
+// the bounded cursor for an unusual code and pick the window up again. Refill() reads eight
+// bytes without a test: call it only while Safe() holds, which covers two refills.
+class LittleWindow {
+public:
+    __forceinline explicit LittleWindow(LittleBits& b) : b_(b) { Load(); }
+    __forceinline void Load() {
+        p_ = b_.bytes_.data() + b_.next_; end_ = b_.bytes_.data() + b_.bytes_.size();
+        buffer_ = b_.buffer_; available_ = b_.available_;
+    }
+    __forceinline void Commit() { b_.next_ = size_t(p_ - b_.bytes_.data()); b_.buffer_ = buffer_; b_.available_ = available_; }
+    __forceinline bool Safe() const { return size_t(end_ - p_) >= 16; }
+    // At least 56 bits are buffered afterwards.
+    __forceinline void Refill() {
+        uint64_t word; std::memcpy(&word, p_, 8);
+        buffer_ |= word << available_; p_ += (63 - available_) >> 3; available_ |= 56;
+    }
+    // The length of the run of set bits at the cursor; 64 when the whole buffer is set.
+    __forceinline unsigned Run() const {
+        const uint64_t zeros = ~buffer_;
+        if (!zeros) return 64;
+#ifdef _MSC_VER
+        unsigned long index; _BitScanForward64(&index, zeros); return index;
+#else
+        return (unsigned)__builtin_ctzll(zeros);
+#endif
+    }
+    __forceinline void Drop(unsigned n) { buffer_ >>= n; available_ -= n; }
+    // n is 1..32 and no more than the buffered bits.
+    __forceinline uint32_t Get(unsigned n) {
+        uint32_t value = (uint32_t)(buffer_ & ((uint64_t(1) << n) - 1)); Drop(n);
+        return value;
+    }
+private:
+    LittleBits& b_;
+    const uint8_t* p_;
+    const uint8_t* end_;
+    uint64_t buffer_;
+    unsigned available_;
 };
 } // namespace nativeaudio

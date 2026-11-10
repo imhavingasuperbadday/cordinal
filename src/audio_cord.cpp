@@ -347,16 +347,17 @@ private:
 };
 } // namespace
 
-uint32_t cord::Crc32(const uint8_t* p, size_t n) {
+uint32_t cord::Crc32(const uint8_t* p, size_t n) { return ~Crc32Update(~0u, p, n); }
+
+uint32_t cord::Crc32Update(uint32_t c, const uint8_t* p, size_t n) {
     InitCrc();
-    uint32_t c = ~0u;
     for (; n >= 8; p += 8, n -= 8) {
         const uint32_t a = c ^ Le32(p), b = Le32(p + 4);
         c = crcTable[7][a & 255] ^ crcTable[6][(a >> 8) & 255] ^ crcTable[5][(a >> 16) & 255] ^ crcTable[4][a >> 24] ^
             crcTable[3][b & 255] ^ crcTable[2][(b >> 8) & 255] ^ crcTable[1][(b >> 16) & 255] ^ crcTable[0][b >> 24];
     }
     while (n--) c = crcTable[0][(c ^ *p++) & 255] ^ (c >> 8);
-    return ~c;
+    return c;
 }
 
 std::unique_ptr<Decoder> OpenCordDecoder(const std::wstring& path) {

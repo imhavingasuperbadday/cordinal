@@ -478,12 +478,30 @@ void ExcludeFromLibrary(const std::vector<TrackId>& ids) {
     std::wstring q = L"Remove " + std::to_wstring(ids.size()) + (ids.size() == 1 ? L" track" : L" tracks") +
                      L" from the library?\n\nThe files stay on disk and won't be added back by folder scans.";
     if (MessageBoxW(g.hwnd, q.c_str(), kAppName, MB_YESNO | MB_ICONQUESTION) != IDYES) return;
-    for (TrackId id : ids) g_lib[id].flags = (uint16_t)((g_lib[id].flags | Track::kExcluded) &
-                                                    ~(Track::kInLibrary | Track::kInbox | Track::kSteamDuplicate));
-    g_lib.Touch();
+    ExcludeTracks(ids);
     g.dirty = true;
     ClearSelection();
     RebuildView();
+}
+
+// The search box is the list of gaps: the tracks stay in the Library tab, ready to select and fill in
+// with Edit tags (or Edit album tags), and the list shrinks as they are filled.
+void ShowMissingInformation(size_t field) {
+    if (field >= std::size(kMissingFields)) return;
+    int library = -1;
+    for (int i = 0; i < (int)g.playlists.size() && library < 0; ++i)
+        if (g.playlists[i].kind == PlaylistKind::Library) library = i;
+    if (library < 0) return;
+    if (g.active != library || RadioActive()) ActivatePlaylist(library);
+    SetWindowTextW(g.search, kMissingFields[field].term);
+    FlushSearch();
+    SetFocus(CanvasActive() ? g.libView : g.list);
+    std::wstring what = field ? FromUtf8(kMissingFields[field].label) : L"some basic information";
+    if (field) for (wchar_t& c : what) c = (wchar_t)towlower(c);
+    const size_t n = g.view.size();
+    ShowMessage(!n ? L"No library track is missing " + what + L"."
+                   : std::to_wstring(n) + (n == 1 ? L" track is missing " : L" tracks are missing ") + what +
+                         L". Select them and press Alt+Enter to fill it in; clear the search to see everything.");
 }
 
 void ShowListContextMenu(POINT pt) {
@@ -523,9 +541,19 @@ void ShowListContextMenu(POINT pt) {
     AppendMenuW(m, MF_POPUP | (en == MF_ENABLED && !ConvertBusy() ? MF_ENABLED : MF_GRAYED), (UINT_PTR)CordExportMenu(), L"&Export .cord");
     AppendMenuW(m, MF_STRING | (en == MF_ENABLED && !CopyBusy() ? MF_ENABLED : MF_GRAYED), IDM_COPY_TO, L"Cop&y to folder or device...");
     AppendMenuW(m, MF_STRING | en, IDM_PROPERTIES, L"Edit &tags...\tAlt+Enter");
-    AppendMenuW(m, MF_STRING | en, IDM_FIND_COVER, L"C&hange cover...");
-    if (en == MF_ENABLED && HasCustomCover(SelectedTracks()))
-        AppendMenuW(m, MF_STRING, IDM_RESTORE_COVER, L"Restore origi&nal cover");
+    AppendMenuW(m, MF_STRING | en, IDM_EDIT_ALBUM_TAGS, L"Edit al&bum tags...");
+    // The cover as a submenu: a file or the clipboard's picture becomes the album's cover at once;
+    // only an online search needs the picker window. Dropping an image on a row does the same.
+    HMENU cover = CreatePopupMenu();
+    AppendMenuW(cover, MF_STRING, IDM_COVER_FILE, L"Choose &image file...");
+    AppendMenuW(cover, MF_STRING | (ClipboardMayHoldCover() ? MF_ENABLED : MF_GRAYED), IDM_COVER_PASTE,
+                L"&Paste image from clipboard");
+    AppendMenuW(cover, MF_STRING, IDM_FIND_COVER, L"&Search online...");
+    if (en == MF_ENABLED && HasCustomCover(SelectedTracks())) {
+        AppendMenuW(cover, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(cover, MF_STRING, IDM_RESTORE_COVER, L"Restore origi&nal cover");
+    }
+    AppendMenuW(m, MF_POPUP | en, (UINT_PTR)cover, L"Co&ver");
     AppendMenuW(m, MF_STRING | en, IDM_ARTIST_INFO, L"Arti&st info...");
     AppendHelperTools(m, en == MF_ENABLED);
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);

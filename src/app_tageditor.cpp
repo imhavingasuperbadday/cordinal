@@ -26,7 +26,7 @@ struct Editor {
     HWND hwnd = nullptr;
     std::vector<TrackId> ids;
     HWND labels[FieldCount] = {}, edits[FieldCount] = {};
-    HWND compilation = nullptr, art = nullptr, artReplace = nullptr, artRemove = nullptr, artOnline = nullptr,
+    HWND compilation = nullptr, fillNames = nullptr, art = nullptr, artReplace = nullptr, artRemove = nullptr, artOnline = nullptr,
          info = nullptr, save = nullptr, cancel = nullptr, suggestionList = nullptr;
     std::wstring initial[FieldCount];
     bool mixed[FieldCount] = {}, changed[FieldCount] = {};
@@ -37,7 +37,26 @@ struct Editor {
     int suggestionField = -1, suggestionSel = -1;
     ArtImage preview;
     bool loading = false;  // set while filling the controls (EN_CHANGE isn't a user edit)
+    // What each track's file name says (by e.ids index), and which of Title, Artist and Track some
+    // track leaves empty while its name offers a value. "Fill from the file name" writes those on Save.
+    std::vector<FileNameGuess> guesses;
+    bool guessable[FieldCount] = {};
 } e;
+
+constexpr int kIdFillNames = 204;
+constexpr Field kGuessFields[] = {Title, Artist, TrackNum};
+
+// The guess for one track's field, or "" when its tag already has a value or the name says nothing.
+std::wstring GuessFor(size_t index, Field f) {
+    const Track& t = g_lib[e.ids[index]];
+    const FileNameGuess& guess = e.guesses[index];
+    switch (f) {
+        case Title: return t.title ? std::wstring() : guess.title;
+        case Artist: return t.artist ? std::wstring() : guess.artist;
+        case TrackNum: return t.trackNo || !guess.track ? std::wstring() : std::to_wstring(guess.track);
+        default: return {};
+    }
+}
 
 std::wstring TrackValue(TrackId id, Field f) {
     const Track& t = g_lib[id];
@@ -243,6 +262,8 @@ void Layout(HWND h) {
     y += rowH + gap;
     MoveWindow(e.compilation, x1, y, S(300), S(22), TRUE);
     y += S(28);
+    MoveWindow(e.fillNames, x1, y, rc.right - pad - x1, S(22), TRUE);
+    if (GetWindowLongW(e.fillNames, GWL_STYLE) & WS_VISIBLE) y += S(28);
     MoveWindow(e.labels[Comment], x0, y + S(4), labelW - S(6), S(20), TRUE);
     MoveWindow(e.edits[Comment], x1, y, rc.right - pad - x1, S(52), TRUE);
     y += S(52) + gap;
@@ -258,6 +279,23 @@ void Layout(HWND h) {
     MoveWindow(e.info, pad, rc.bottom - pad - S(26) - S(26), rc.right - pad * 2, S(22), TRUE);
     MoveWindow(e.save, rc.right - pad - S(200) - S(8), rc.bottom - pad - S(28), S(100), S(28), TRUE);
     MoveWindow(e.cancel, rc.right - pad - S(100), rc.bottom - pad - S(28), S(100), S(28), TRUE);
+}
+
+// The empty fields show what Save will fill in from the file name, in the edit's own gray hint
+// text; typing a value replaces it, and turning the box off takes the hints away.
+void UpdateNameHints() {
+    const bool on = e.fillNames && Button_GetCheck(e.fillNames) == BST_CHECKED;
+    for (Field f : kGuessFields) {
+        bool narrow = f == TrackNum;
+        std::wstring cue = !e.mixed[f] ? L"" : narrow ? L"(mixed)" : L"(multiple values)";
+        if (on && e.guessable[f]) {
+            if (e.ids.size() == 1) cue = GuessFor(0, f);
+            else if (!narrow) cue = e.mixed[f] ? L"(multiple values; empty ones from the file names)"
+                                               : L"(from each file name)";
+            else cue = L"(names)";
+        }
+        SendMessageW(e.edits[f], EM_SETCUEBANNER, TRUE, (LPARAM)cue.c_str());
+    }
 }
 
 void Fill() {
@@ -289,6 +327,19 @@ void Fill() {
     for (TrackId id : e.ids) on += (g_lib[id].flags & Track::kCompilation) ? 1 : 0;
     e.initialCompilation = on == 0 ? BST_UNCHECKED : on == (int)e.ids.size() ? BST_CHECKED : BST_INDETERMINATE;
     Button_SetCheck(e.compilation, e.initialCompilation);
+    // Names are guessed only for whole files: a CUE track's name is its sheet's.
+    e.guesses.assign(e.ids.size(), {});
+    for (size_t i = 0; i < e.ids.size(); ++i)
+        if (!IsSubtrack(g_lib.Path(e.ids[i]))) e.guesses[i] = GuessTagsFromFileName(StemOf(g_lib.Str(g_lib[e.ids[i]].file)));
+    bool anyGuess = false;
+    for (Field f : kGuessFields) {
+        e.guessable[f] = false;
+        for (size_t i = 0; i < e.ids.size() && !e.guessable[f]; ++i) e.guessable[f] = !GuessFor(i, f).empty();
+        anyGuess |= e.guessable[f];
+    }
+    ShowWindow(e.fillNames, anyGuess ? SW_SHOW : SW_HIDE);
+    Button_SetCheck(e.fillNames, anyGuess ? BST_CHECKED : BST_UNCHECKED);
+    UpdateNameHints();
     bool multi = e.ids.size() > 1;
     EnableWindow(e.edits[Lyrics], !multi);
     if (multi) SendMessageW(e.edits[Lyrics], EM_SETCUEBANNER, TRUE, (LPARAM)L"(select one track to edit lyrics)");
@@ -358,7 +409,20 @@ void Save() {
     int comp = Button_GetCheck(e.compilation);
     if (comp != e.initialCompilation && comp != BST_INDETERMINATE) edit.compilation = comp == BST_CHECKED;
     edit.cover = e.cover;
-    if (!edit.Empty()) WriteTagsInBackground(e.ids, edit);
+    // Each track takes its own name's guesses for the fields it leaves empty and the user didn't type
+    // in; all of it is still one write and one undo.
+    std::vector<std::pair<TrackId, TagEdit>> items;
+    const bool names = (GetWindowLongW(e.fillNames, GWL_STYLE) & WS_VISIBLE) && Button_GetCheck(e.fillNames) == BST_CHECKED;
+    for (size_t i = 0; i < e.ids.size(); ++i) {
+        TagEdit item = edit;
+        if (names && i < e.guesses.size()) {
+            if (!e.changed[Title]) if (auto v = GuessFor(i, Title); !v.empty()) item.title = ToUtf8(v);
+            if (!e.changed[Artist]) if (auto v = GuessFor(i, Artist); !v.empty()) item.artist = ToUtf8(v);
+            if (!e.changed[TrackNum]) if (auto v = GuessFor(i, TrackNum); !v.empty()) item.track = (uint32_t)_wtoi(v.c_str());
+        }
+        if (!item.Empty()) items.emplace_back(e.ids[i], std::move(item));
+    }
+    if (!items.empty()) SubmitTagWrites(items, true, true);
     DestroyWindow(e.hwnd);
 }
 
@@ -412,6 +476,8 @@ LRESULT CALLBACK TagEditorProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             SetWindowSubclass(e.suggestionList, SuggestionSubclass, 1, 0);
             ShowWindow(e.suggestionList, SW_HIDE);
             e.compilation = make(0, WC_BUTTONW, L"Part of a &compilation (various artists)", BS_AUTO3STATE | WS_TABSTOP, 200);
+            e.fillNames = make(0, WC_BUTTONW, L"&Fill empty title, artist and track number from the file name",
+                               BS_AUTOCHECKBOX | WS_TABSTOP, kIdFillNames);
             e.art = make(0, WC_STATICW, L"", SS_OWNERDRAW);
             e.artReplace = make(0, WC_BUTTONW, L"Choose &cover...", BS_PUSHBUTTON | WS_TABSTOP, 201);
             e.artRemove = make(0, WC_BUTTONW, L"&Remove cover", BS_PUSHBUTTON | WS_TABSTOP, 202);
@@ -419,7 +485,7 @@ LRESULT CALLBACK TagEditorProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             e.info = make(0, WC_STATICW, L"", SS_LEFT | SS_PATHELLIPSIS | SS_NOPREFIX);
             e.save = make(0, WC_BUTTONW, L"&Save", BS_DEFPUSHBUTTON | WS_TABSTOP, IDOK);
             e.cancel = make(0, WC_BUTTONW, L"Cancel", BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL);
-            for (HWND c : {e.compilation, e.artReplace, e.artRemove, e.artOnline, e.save, e.cancel}) ApplyControlTheme(c, g.dark);
+            for (HWND c : {e.compilation, e.fillNames, e.artReplace, e.artRemove, e.artOnline, e.save, e.cancel}) ApplyControlTheme(c, g.dark);
             ApplyWindowTheme(h, P());
             e.suggestionSet = BuildTagSuggestions(g_lib);
             Fill();
@@ -472,6 +538,7 @@ LRESULT CALLBACK TagEditorProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 ShowPreview();
             }
             if (id == 203) FindCoverOnline();
+            if (id == kIdFillNames && code == BN_CLICKED) UpdateNameHints();
             if (id == IDOK) Save();
             if (id == IDCANCEL) DestroyWindow(h);
             return 0;

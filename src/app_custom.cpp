@@ -152,12 +152,13 @@ int PlaceNowPlaying(HDWP& dwp, const RECT& r, int y) {
     bool chip = l.points && l.nowPlaying;
     Show(g.pointsChip, chip);
     if (!l.nowPlaying) return 0;
-    int pad = S(ui::kPad), art = l.largeCover ? S(64) : S(ui::kCover), chipW = S(220);
+    int pad = S(ui::kPad), art = S(l.largeCover ? ui::kLargeCover : ui::kCover), chipW = S(220);
     g.artRect = {r.left + pad, y, r.left + pad + art, y + art};
     int x0 = g.artRect.right + S(ui::kCoverGap), w = (int)r.right - x0 - pad - (chip ? chipW + S(8) : 0);
-    int top = l.largeCover ? y + art / 2 - S(18) : y, line = l.largeCover ? S(18) : S(ui::kLineHeight);
+    int line = S(l.largeCover ? ui::kLargeLineHeight : ui::kLineHeight), gap = l.largeCover ? S(ui::kLargeLineGap) : 0;
+    int top = y + ui::NowPlayingTextTop(art, line, gap);
     Place(dwp, g.npTitle, x0, top, w, line);
-    Place(dwp, g.npSub, x0, top + line + (l.largeCover ? S(2) : 0), w, line);
+    Place(dwp, g.npSub, x0, top + line + gap, w, line);
     if (chip) Place(dwp, g.pointsChip, r.right - pad - chipW, y + (art - S(32)) / 2, chipW, S(32));
     return art;
 }
@@ -203,7 +204,7 @@ RECT LayoutBand(HDWP& dwp, RECT r) {
     int pad = S(4), timeW = S(58), waveH = S(height ? height : kWaveHeights[std::min<int>(l.waveSize, 2)]);
     int rowH = ownRow || !l.wave ? S(26) : std::max(S(26), waveH);
     int playerH = player ? rowH + (ownRow ? S(4) + waveH : 0) : 0;
-    int art = l.nowPlaying ? (l.largeCover ? S(64) : S(32)) : 0;
+    int art = l.nowPlaying ? S(l.largeCover ? ui::kLargeCover : ui::kCover) : 0;
     // Its own line: the waveform under the buttons, as wide as the window, between the times.
     auto waveRow = [&](int y) {
         int x = r.left + S(kGrip), right = r.right - pad, ty = y + (waveH - S(18)) / 2 + S(1);
