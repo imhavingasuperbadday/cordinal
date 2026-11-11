@@ -244,13 +244,18 @@ desktop_escape() {
 
 # Package managers must not read the script when it was started from a pipe.
 # sudo and doas still ask for a password on the terminal.
+# /dev/tty can exist without opening, when there is no controlling terminal (CI, cron, containers).
+have_tty() {
+    (: < /dev/tty) 2>/dev/null
+}
+
 as_root() {
     if command -v sudo >/dev/null 2>&1; then
-        if [ -e /dev/tty ]; then sudo -- "$@" < /dev/tty
+        if have_tty; then sudo -- "$@" < /dev/tty
         else sudo -- "$@" < /dev/null
         fi
     elif command -v doas >/dev/null 2>&1; then
-        if [ -e /dev/tty ]; then doas "$@" < /dev/tty
+        if have_tty; then doas "$@" < /dev/tty
         else doas "$@" < /dev/null
         fi
     else
