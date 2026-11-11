@@ -7,6 +7,8 @@
 #include "app.h"
 #include "archive.h"
 
+#include <algorithm>
+
 namespace app {
 
 void ClearSelection() { ListView_SetItemState(g.list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED); }
@@ -18,10 +20,102 @@ bool MatchesFilter(TrackId id, const std::vector<std::wstring>& words) {
 PlaylistPosition RememberPosition();
 void RestorePosition(const PlaylistPosition& position);
 
-// Drops the bounded formatted-cell cache (also called when it fills up).
+namespace {
+
+// One formatted cell. The characters live in g_cellChars; the index stores slot + 1, and 0 is empty.
+struct CellSlot {
+    uint64_t key = 0;
+    uint32_t begin = 0;
+    uint32_t length = 0;
+};
+
+std::vector<uint32_t> g_cellIndex;
+std::vector<CellSlot> g_cellSlots;
+std::vector<wchar_t> g_cellChars;
+
+uint32_t CellHash(uint64_t key) {
+    key *= 0x9E3779B97F4A7C15ull;
+    return (uint32_t)(key ^ (key >> 32));
+}
+
+bool FindCachedCell(uint64_t key, uint32_t& slot) {
+    if (g_cellIndex.empty()) return false;
+    const uint32_t mask = (uint32_t)g_cellIndex.size() - 1;
+    uint32_t h = CellHash(key) & mask;
+    for (size_t n = 0; n < g_cellIndex.size(); ++n) {
+        const uint32_t stored = g_cellIndex[h];
+        if (!stored) return false;
+        if (g_cellSlots[stored - 1].key == key) {
+            slot = stored - 1;
+            return true;
+        }
+        h = (h + 1) & mask;
+    }
+    return false;
+}
+
+// Grows the index so the next insert stays under about 70% full. Starts at 16 slots.
+void RehashCells(size_t count) {
+    size_t n = 16;
+    while ((n * 7) / 10 < count) n *= 2;
+    if (g_cellIndex.size() == n) return;
+    std::vector<uint32_t> index(n, 0);
+    const uint32_t mask = (uint32_t)n - 1;
+    for (uint32_t i = 0; i < (uint32_t)g_cellSlots.size(); ++i) {
+        uint32_t h = CellHash(g_cellSlots[i].key) & mask;
+        while (index[h]) h = (h + 1) & mask;
+        index[h] = i + 1;
+    }
+    g_cellIndex.swap(index);
+}
+
+}  // namespace
+
+// Drops every formatted cell. The buffers stay, so the next scroll does not allocate them again.
 void ClearCellCache() {
-    g.cellCache.clear();
-    g.cellCacheBytes = 0;
+    std::fill(g_cellIndex.begin(), g_cellIndex.end(), 0u);
+    g_cellSlots.clear();
+    g_cellChars.clear();
+}
+
+void ShrinkCellCache() {
+    ClearCellCache();
+    std::vector<uint32_t>().swap(g_cellIndex);
+    std::vector<CellSlot>().swap(g_cellSlots);
+    std::vector<wchar_t>().swap(g_cellChars);
+}
+
+size_t CellCacheCount() { return g_cellSlots.size(); }
+
+size_t CellCacheBytes() { return g_cellChars.size() * sizeof(wchar_t); }
+
+bool LookupCachedCell(uint64_t key, std::wstring& out) {
+    uint32_t slot = 0;
+    if (!FindCachedCell(key, slot)) return false;
+    const CellSlot& found = g_cellSlots[slot];
+    if (found.length) out.assign(g_cellChars.data() + found.begin, found.length);
+    else out.clear();
+    return true;
+}
+
+// Keeps the first string stored for a key. A repeat does not add another copy.
+void RememberCachedCell(uint64_t key, std::wstring_view text) {
+    uint32_t existing = 0;
+    if (FindCachedCell(key, existing)) return;
+    const size_t next = g_cellSlots.size() + 1;
+    size_t need = 16;
+    while ((need * 7) / 10 < next) need *= 2;
+    if (g_cellIndex.size() < need) RehashCells(next);
+    CellSlot slot;
+    slot.key = key;
+    slot.begin = (uint32_t)g_cellChars.size();
+    slot.length = (uint32_t)text.size();
+    g_cellChars.insert(g_cellChars.end(), text.begin(), text.end());
+    g_cellSlots.push_back(slot);
+    const uint32_t mask = (uint32_t)g_cellIndex.size() - 1;
+    uint32_t h = CellHash(key) & mask;
+    while (g_cellIndex[h]) h = (h + 1) & mask;
+    g_cellIndex[h] = (uint32_t)g_cellSlots.size();
 }
 
 void FlushSearch() {
@@ -250,6 +344,25 @@ int FindPlaylist(PlaylistKind kind) {
     return -1;
 }
 
+// The playing track, when Now Playing lists only its album: Now Playing is open and holds what
+// plays, the track has an album tag, no search is typed and Preferences leaves it on. Otherwise
+// kNone, and the whole list shows.
+TrackId NowPlayingAlbumTrack() {
+    if (!g.npAlbumOnly || ApolloMode() || g.playing == kNone || g.playing >= g_lib.Count() || g.playlists.empty())
+        return kNone;
+    if (Active().kind != PlaylistKind::NowPlaying || g.active != g.playingPl || !g.filter.empty()) return kNone;
+    return g_lib[g.playing].album ? g.playing : kNone;
+}
+
+// Playback moved to another album, stopped, or started: Now Playing's list follows.
+void FollowNowPlayingAlbum() {
+    TrackId want = NowPlayingAlbumTrack(), shown = g.npAlbumTrack;
+    bool same = want == shown ||
+        (want != kNone && shown != kNone && shown < g_lib.Count() && SameAlbum(g_lib[want], g_lib[shown]));
+    if (!same) RebuildView(true);
+    else g.npAlbumTrack = want;
+}
+
 // Rebuilds the visible rows for the active playlist and hands them to the list. Redraw is
 // suppressed so the view doesn't flash; when preserveSelection is set, the selection, focus and
 // scroll are remembered and restored around the rebuild.
@@ -271,8 +384,11 @@ void RebuildView(bool preserveSelection) {
     std::vector<uint8_t> matches;
     if (!words.empty() && items.size() >= g_lib.Count() / 8) matches.resize(g_lib.Count());
     if (words.empty()) g.view.reserve(items.size());
+    g.npAlbumTrack = NowPlayingAlbumTrack();
+    const Track* album = g.npAlbumTrack != kNone ? &g_lib[g.npAlbumTrack] : nullptr;
     for (uint32_t i = 0; i < (uint32_t)items.size(); ++i) {
-        bool match = true;
+        bool match = !album || (items[i] < g_lib.Count() && SameAlbum(g_lib[items[i]], *album));
+        if (!match) continue;
         if (!words.empty()) {
             TrackId id = items[i];
             if (id >= g_lib.Count()) match = false;
@@ -542,6 +658,7 @@ void ShowListContextMenu(POINT pt) {
     AppendMenuW(m, MF_STRING | (en == MF_ENABLED && !CopyBusy() ? MF_ENABLED : MF_GRAYED), IDM_COPY_TO, L"Cop&y to folder or device...");
     AppendMenuW(m, MF_STRING | en, IDM_PROPERTIES, L"Edit &tags...\tAlt+Enter");
     AppendMenuW(m, MF_STRING | en, IDM_EDIT_ALBUM_TAGS, L"Edit al&bum tags...");
+    AppendMenuW(m, MF_STRING | en, IDM_MAKE_ALBUM, L"&Make album...");
     // The cover as a submenu: a file or the clipboard's picture becomes the album's cover at once;
     // only an online search needs the picker window. Dropping an image on a row does the same.
     HMENU cover = CreatePopupMenu();
@@ -569,7 +686,7 @@ void ShowTabContextMenu(POINT pt) {
     TCHITTESTINFO hit{};
     hit.pt = pt;
     ScreenToClient(g.tabs, &hit.pt);
-    int index = TabCtrl_HitTest(g.tabs, &hit);
+    int index = PlaylistOfTab(TabCtrl_HitTest(g.tabs, &hit));
     if (index >= 0 && index != g.active) ActivatePlaylist(index);
     HMENU m = CreatePopupMenu();
     UINT en = index >= 0 && g.playlists[index].kind != PlaylistKind::Library &&
@@ -603,25 +720,24 @@ void CellText(int row, int col, std::wstring& out) {
     if (col == 0 && ApolloMode()) {
         out = std::to_wstring(g.view[pos] + 1) + L".";  // Apollo numbers its playlist rows
     } else if (col == 0) {
-        if (id == g.playing && g.active == g.playingPl && (!Active().Editable() || (int)g.view[pos] == TokenIndex(g.playingToken, g.playingPl))) out = g.engine.Paused() ? L"❙❙" : ThemeInfo(g.themeMode).playingMark;
+        int heard = PlayingIndex(g.playingToken, g.playingPl);
+        if (id == g.playing && g.active == g.playingPl &&
+            (!Active().Editable() || (int)g.view[pos] == (heard >= 0 ? heard : IndexIn(g.playingPl, g.playing))))
+            out = g.engine.Paused() ? L"❙❙" : ThemeInfo(g.themeMode).playingMark;
         else if (int q = QueuePosition(id)) out = L"[" + std::to_wstring(q) + L"]";
         else if (g_lib[id].Failed() || (g_lib[id].flags & Track::kTagFailed)) out = L"⚠";
     } else if (!GroupHidesCell(pos, ColumnType(col), id)) {
         static uint32_t revision = 0;
         if (revision != g_lib.Revision()) { ClearCellCache(); revision = g_lib.Revision(); }
         uint64_t key = (uint64_t)id * kMaxColumnTypes + ColumnType(col);
-        auto cached = g.cellCache.find(key);
-        if (cached == g.cellCache.end()) {
+        if (!LookupCachedCell(key, out)) {
             out = FormatTitle(ColumnAt(ColumnType(col)).display, Lookup(id, false));
             if (out.size() > 4096) out.resize(4096);
             size_t bytes = out.size() * sizeof(wchar_t);
-            if (g.cellCache.size() >= ViewMemoryBudget(2048) ||
-                g.cellCacheBytes + bytes > ViewMemoryBudget(2u << 20)) ClearCellCache();
-            g.cellCacheBytes += bytes;
-            g.cellCache.emplace(key, out);
-            return;  // `out` already holds it
+            if (CellCacheCount() >= ViewMemoryBudget(2048) ||
+                CellCacheBytes() + bytes > ViewMemoryBudget(2u << 20)) ClearCellCache();
+            RememberCachedCell(key, out);
         }
-        out = cached->second;
     }
 }
 
@@ -828,7 +944,10 @@ void MoveTrackBlockImpl(const std::vector<int>& sources, int target) {
 }
 
 void UpdateTrackDrag(POINT pt) {
-    DropSpot spot = DropSpotAt(pt);
+    // Over the queue editor the tracks would be queued, so the list's mark goes.
+    POINT screen = pt;
+    ClientToScreen(g.list, &screen);
+    DropSpot spot = QueueDragOver(&screen) ? DropSpot{0, -1, false} : DropSpotAt(pt);
     if (spot.markRow == g_trackDrag.markRow && spot.after == g_trackDrag.markAfter) return;
     g_trackDrag.markRow = spot.markRow;
     g_trackDrag.markAfter = spot.after;
@@ -842,7 +961,11 @@ void EndTrackDrag(bool drop, POINT pt) {
     LVINSERTMARK mark{sizeof(mark), 0, -1, 0};
     ListView_SetInsertMark(g.list, &mark);
     if (GetCapture() == g.list) ReleaseCapture();
-    if (drop) MoveTrackBlockImpl(g_trackDrag.sources, DropSpotAt(pt).item);
+    std::vector<TrackId> ids;
+    for (int s : g_trackDrag.sources)
+        if (s >= 0 && s < (int)Active().items.size()) ids.push_back(Active().items[s]);
+    if (!drop) QueueDragOver(nullptr);
+    else if (!QueueDrop(ids)) MoveTrackBlockImpl(g_trackDrag.sources, DropSpotAt(pt).item);
     g_trackDrag.sources.clear();
     g_trackDrag.markRow = -1;
 }
@@ -1043,8 +1166,10 @@ LRESULT OnListNotify(NMHDR* hdr) {
                     return CDRF_SKIPDEFAULT;
                 }
                 // Apollo has one playlist, so its playing track is bold wherever it is listed.
+                int heard = PlayingIndex(g.playingToken, g.playingPl);
                 bool playing = id == g.playing && (ApolloMode() || g.active == g.playingPl) &&
-                    (ApolloMode() || !Active().Editable() || (int)g.view[ViewPosOfRow(row)] == TokenIndex(g.playingToken, g.playingPl));
+                    (ApolloMode() || !Active().Editable() ||
+                     (int)g.view[ViewPosOfRow(row)] == (heard >= 0 ? heard : IndexIn(g.playingPl, g.playing)));
                 DrawTrackRow(cd, row, id, playing);
                 if (FoobarMode()) DrawFoobarCover(cd->nmcd.hdc, row, cd->nmcd.rc);
                 return CDRF_SKIPDEFAULT;

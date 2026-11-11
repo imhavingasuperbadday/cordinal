@@ -23,6 +23,7 @@
 #include "theme_palette.h"
 #include "theme_win.h"
 #include "titleformat.h"
+#include "track_set.h"
 #include "ui_spec.h"
 
 #include <commctrl.h>
@@ -144,7 +145,7 @@ enum : int {
     IDM_SOUND_EFFECTS, IDM_FORMAT, IDM_TASKBAR_PROGRESS, IDM_GAME_NAME_THAT_TRACK, IDM_GAME_WHICH_CAME_FIRST,
     IDM_POINTS, IDM_REVIEW, IDM_LISTENBRAINZ, IDM_STEAM, IDM_DUPLICATES, IDM_MUTE,
     IDM_GROUP_ALBUMS, IDM_MINI_PLAYER, IDM_LYRICS,
-    IDM_TRAY_SHOW, IDM_START_WITH_WINDOWS,
+    IDM_START_WITH_WINDOWS,
     IDM_SMALLER, IDM_LARGER, IDM_PANELS_RESET, IDM_STARTUP_DEFAULTS,
     IDM_PREFERENCE_ASK, IDM_PREFERENCE_AUTO, IDM_PREFERENCE_MANUAL,
     IDM_REGION_PLAY, IDM_REGION_START, IDM_REGION_END,  // the seek bar's right-click menu (app_region.cpp)
@@ -152,7 +153,7 @@ enum : int {
     IDM_BACKUP, IDM_RESTORE_BACKUP, IDM_IMPORT_STATISTICS,
     IDM_CANCEL_BACKUP, IDM_OPEN_RADIO, IDM_WRITE_STATISTICS, IDM_RG_SCAN_ALL,
     IDM_DUPLICATE_PL = 4000, IDM_REOPEN_PL, IDM_MOVE_PL_LEFT, IDM_MOVE_PL_RIGHT, IDM_PLAYING_PL,
-    IDM_RELOAD_TAGS, IDM_CANCEL_IMPORT, IDM_WATCH_IMPORTED, IDM_CANCEL_STEAM, IDM_UNDO, IDM_REDO, IDM_SELECT_PL_BASE = 4020,
+    IDM_RELOAD_TAGS, IDM_CANCEL_IMPORT, IDM_WATCH_IMPORTED, IDM_CANCEL_STEAM, IDM_UNDO, IDM_REDO, IDM_QUEUE_SHOW, IDM_SELECT_PL_BASE = 4020,
     // Album editions (album_editions.h): manual grouping, preferred choice and comparison.
     IDM_EDITION_GROUP = 4100, IDM_EDITION_MANAGER, IDM_EDITION_PREFERRED, IDM_EDITION_REMOVE,
     IDM_EDITION_SPLIT, IDM_EDITION_COMPARE, IDM_EDITION_VERSIONS, IDM_EDITION_ART, IDM_EDITION_CLEAR_ART,
@@ -207,6 +208,7 @@ enum : int {
     // Covers (app_coverfetch.cpp) and artist info.
     IDM_FIND_COVER = 4210, IDM_FETCH_COVERS, IDM_FETCH_COVERS_CANCEL, IDM_ARTIST_INFO, IDM_RESTORE_COVER,
     IDM_COVER_FILE, IDM_COVER_PASTE, IDM_EDIT_ALBUM_TAGS,  // the track menu's Cover submenu, Edit album tags
+    IDM_MAKE_ALBUM,  // Edit > Make album (app_albummaker.cpp)
     // File > Export collection and Import collection (app_collection.cpp), and Cancel.
     IDM_EXPORT_COLLECTION = 4220, IDM_IMPORT_COLLECTION, IDM_COLLECTION_CANCEL,
     IDM_MISSING_BASE = 4230,  // + kMissingFields index: Library > Find missing information
@@ -323,7 +325,7 @@ struct ImportBatch {
     size_t added = 0, errors = 0;
 };
 struct ArtRequest { uint64_t generation = 0; std::wstring path; int size = 64; unsigned disc = 0, discTotal = 0; };
-struct ArtResult { uint64_t generation; ArtImage image, disc; };
+struct ArtResult { uint64_t generation; ArtImage image, disc; std::string jpeg; };
 struct ClosedPlaylist { Playlist playlist; int index; };
 
 
@@ -352,6 +354,7 @@ struct App {
     bool waveReflection = true; // mirror the waveform below its center line, for the waveform and moodbar styles
     bool waveFullHeight = true; // unmirrored, the waveforms still fill both halves, the lower as bright
     bool seekGlow = true;       // the seek bar's colours glow softly past its edges, every style and source alike
+    bool pauseFade = true;      // the waveform fades to its paused colour and back instead of switching at once
     bool resumeOn = true;       // remember the stopped / last-playing track's position across restarts
     bool resumeInSong = false;  // reopen with that track loaded, paused where it stopped
     bool resumePlay = false;    // start a reopened track at once instead of waiting paused
@@ -378,11 +381,16 @@ struct App {
     bool searchPending = false, closing = false, restoringView = false, compactPending = false;
     bool startupTheme = true;  // the first ApplyTheme runs before the window can paint
     bool startupPaths = false;  // the command line named files: they play instead of reopening the last track
-    std::unordered_map<uint64_t, std::wstring> cellCache;
-    size_t cellCacheBytes = 0;
     std::vector<uint32_t> view;  // the visible item indices of the active playlist, in order
     std::vector<TrackGroup> groups;  // album headers among them; list rows = view + header and pad rows per group
     bool groupAlbums = true;
+    // Now Playing lists only the playing track's album (when it has one), until a search is typed.
+    bool npAlbumOnly = true;
+    TrackId npAlbumTrack = kNone;  // the track whose album that list was narrowed to, kNone when it wasn't
+    // The auto-playlists share one tab (TabSlots); it shows the one last opened, by identity.
+    bool groupAutoTabs = true;
+    uint64_t autoTabShown = 0;
+    std::vector<int> tabSlots;  // the playlist each tab shows (RefreshTabs)
     std::vector<int> columns;    // list view subitem -> column type (kColumns index)
     std::wstring filter;
     int sortColumn = -1;  // column type
@@ -439,13 +447,24 @@ struct App {
     double regionStart = 0, regionEnd = 0;
     bool regionOn = false;
     int volumePercent = 80, lastAudibleVolume = 80, consecutiveErrors = 0;
+    // Playback > Preferences: the slider's curve (VolumeCurveGain), whether cordinal scales the
+    // samples at all (off leaves the level to the system), and the crossfade between tracks that
+    // follow on their own (kCrossfadeSeconds index), kept gapless within an album unless asked.
+    int volumeCurve = 0, crossfade = 0;
+    bool softwareVolume = true, crossfadeAlbums = false;
     std::vector<TrackId> history;
     std::vector<uint32_t> shuffleQueue;  // playlist positions; duplicate tracks remain distinct
     std::deque<TrackId> queue;  // "Play next" / "Add to queue": played before the playlist continues
+    // Choose by taste's picks are the queue's last `queuePicks` entries, after what you queued
+    // yourself; they were drawn from playlist `picksPl` by track shuffle (1) or Keep playing like
+    // this (2) in `picksMode` (app_playback.cpp, EnsureTastePicks).
+    size_t queuePicks = 0;
+    int picksPl = -1, picksMode = 0;
     LibraryMode libMode = LibraryMode::Albums;
     bool browserVisible = true, browserUpdating = false, splitting = false;
     int browserHeight = 150;  // at 96 DPI
     int coverSize = 160;      // the LibView covers' tile, at 96 DPI (Ctrl+wheel, Preferences)
+    int coverGap = 16;        // the least space between covers in the grid, at 96 DPI (Preferences)
     // The approved startup defaults for the two sizes; a session change is offered by the review.
     int defaultCoverSize = 160, defaultBrowserHeight = 150;
     BrowserPane panes[3];
@@ -489,6 +508,9 @@ struct App {
 
     ArtImage art;
     ArtImage disc;  // the playing album's disc art, with alpha (discart.h); usually empty
+    // `art` as a JPEG for the media flyout, a few tens of KB. The flyout keeps whatever it is given
+    // while the track plays, and the cover file itself can be megabytes.
+    std::string artJpeg;
     TrackId artFor = kNone;
     uint64_t artGeneration = 0;
     std::thread artWorker;
@@ -523,8 +545,8 @@ struct App {
     std::vector<TrackPath> tagBatch;
     bool tagBatchInFlight = false;
     bool tagQuit = false;
-    std::unordered_set<TrackId> tagPending;
-    std::unordered_set<TrackId> tagReading;  // the batch the tag worker has now (UI thread)
+    TrackIdSet tagPending;   // queued or being read; a first import puts the whole library here
+    TrackIdSet tagReading;  // the batch the tag worker has now (UI thread)
     std::vector<TrackId> tagAgain;  // coalesced rereads of changed files in that batch (at most 64)
     bool busyTimer = false;      // kBusyTimer is running
     std::vector<int> busyRows;   // list rows painted with a spinner on the last busy tick
@@ -540,7 +562,7 @@ struct App {
     size_t rgOk = 0, rgFailed = 0;  // the running scan's results so far
     ULONGLONG rgNextAuto = 0;       // the background sweep's next look at the library (0 = not yet)
     uint32_t rgAlbumsRevision = 0;  // library revision whose album gains were last worked out
-    std::unordered_set<TrackId> rgRunIds;     // the running scan's tracks
+    TrackIdSet rgRunIds;            // the running scan's tracks
 };
 extern App g;
 

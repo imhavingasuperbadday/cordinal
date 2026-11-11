@@ -89,6 +89,7 @@ bool ReferenceSearch(const Library& library, TrackId id, const std::vector<std::
 void TestAudioHashSection(const std::wstring& scratch);
 void TestLibraryDb(const std::wstring& scratch);
 void TestAlbumEditions(const std::wstring& scratch);
+void TestAlbumMaker(const std::wstring& scratch);
 void TestPlayLog(const std::wstring& scratch);
 void TestListeningModel();
 void TestTaste(const std::wstring& scratch);
@@ -113,6 +114,7 @@ void TestRanges(const std::wstring& root, const std::wstring& scratch);
 void TestResampler();
 void TestSoundEffects();
 void TestLoops(const std::wstring& scratch);
+void TestCrossfade(const std::wstring& scratch);
 void TestCue(const std::wstring& media, const std::wstring& scratch);
 void TestSampleConversion();
 void TestLiveAudio(const std::wstring& media);

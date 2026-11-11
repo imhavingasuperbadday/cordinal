@@ -30,7 +30,7 @@ LRESULT MainNotify(LPARAM lp) {
     if (hdr->hwndFrom == g.list) return OnListNotify(hdr);
     for (int i = 0; i < 3; ++i)
         if (hdr->hwndFrom == g.panes[i].list) return OnBrowserNotify(i, hdr);
-    if (hdr->hwndFrom == g.tabs && hdr->code == TCN_SELCHANGE) ActivatePlaylist(TabCtrl_GetCurSel(g.tabs));
+    if (hdr->hwndFrom == g.tabs && hdr->code == TCN_SELCHANGE) ActivatePlaylist(PlaylistOfTab(TabCtrl_GetCurSel(g.tabs)));
     if ((hdr->hwndFrom == g.seek || hdr->hwndFrom == g.volume) && hdr->code == NM_CUSTOMDRAW)
         return DrawTrackbar(reinterpret_cast<NMCUSTOMDRAW*>(lp));
     return 0;

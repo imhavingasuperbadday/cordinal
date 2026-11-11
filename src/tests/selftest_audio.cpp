@@ -559,6 +559,69 @@ void TestLoops(const std::wstring& scratch) {
           L"LOOP engine duration: %.3f s with loops (expect 0.475), %.3f s with loops off (expect 0.500)", looped, plain);
 }
 
+// Crossfade: the decode-side mixer's samples offline, the volume curves, and on a real device that
+// the next track takes over the crossfade's length before the first one ends, where gapless waits.
+void TestCrossfade(const std::wstring& scratch) {
+    testlog::Batch batch;
+    batch.Next(L"CROSSFADE mixes a track's last second into the next, equal power, at each track's gain");
+    std::vector<float> a(3000 * 2, 0.5f), b(2000 * 2, 0.25f), shortB(400 * 2, 0.25f);
+    // The outgoing track plays at half the incoming one's gain, so its tail is scaled by half.
+    auto out = CrossfadePcm(a, b, 1000, 1.0, 0.5f, 1.0f);
+    auto expect = [](size_t i, size_t n, float tail, float next) {
+        const double t = ((double)i + 0.5) / (double)n * 1.5707963267948966;
+        return tail * std::cos(t) + next * std::sin(t);
+    };
+    bool mixed = out.size() == 4000 * 2 && out[1999 * 2] == 0.5f && out[3000 * 2] == 0.25f && out[3999 * 2 + 1] == 0.25f;
+    for (size_t i = 0; mixed && i < 1000; i += 97)
+        mixed = std::fabs(out[(2000 + i) * 2] - expect(i, 1000, 0.25f, 0.25f)) < 1e-6;
+    Check(mixed, L"CROSSFADE joins 3 s and 2 s into 4 s, the overlap's middle louder than either alone (%zu frames)",
+          out.size() / 2);
+    auto early = CrossfadePcm(a, shortB, 1000, 1.0);
+    bool faded = early.size() == 3000 * 2 && std::fabs(early[2200 * 2] - expect(200, 1000, 0.5f, 0.25f)) < 1e-6 &&
+                 std::fabs(early[2700 * 2] - expect(700, 1000, 0.5f, 0)) < 1e-6 && std::fabs(early[2999 * 2]) < 0.002;
+    Check(faded, L"CROSSFADE keeps fading the first track out when the next ends inside the overlap");
+    batch.Next(L"VOLUME curves map the slider to gain");
+    Check(VolumeCurveGain(0.5f, 0) == 0.25f && VolumeCurveGain(0.5f, 1) == 0.5f && VolumeCurveGain(0.5f, 2) == 0.125f &&
+              std::fabs(VolumeCurveGain(0.5f, 3) - 0.0316228f) < 1e-6f && VolumeCurveGain(0, 3) == 0 &&
+              VolumeCurveGain(1, 3) == 1 && VolumeCurveGain(2, 1) == 1 && VolumeCurveGain(-1, 0) == 0,
+          L"VOLUME natural, linear, cubic and decibel curves, clamped to the slider's range");
+    batch.End();
+    if (HeadlessTests()) {
+        testlog::Skip(L"crossfade timing on a physical output: headless mode; the mixer's samples were checked");
+        return;
+    }
+    const std::wstring first = scratch + L"\\crossfade-a.wav", second = scratch + L"\\crossfade-b.wav";
+    if (!Ready(WriteTestBytes(first, MakeSineWav(2.0, 2.0)) && WriteTestBytes(second, MakeSineWav(1.5, 1.5)),
+               L"crossfade timing has two short tracks"))
+        return;
+    std::wstring err;
+    Engine engine;
+    if (!engine.Init(nullptr, err)) {
+        testlog::Skip(L"crossfade timing on a physical output: no audio device available");
+        return;
+    }
+    engine.SetVolume(0);
+    // How long after starting the first track the second is the one heard (its 1.5 s length shows).
+    auto handover = [&](double fade, unsigned long long token) {
+        engine.SetCrossfade(fade);
+        PlayItem next{token + 1, second};
+        next.crossfade = true;
+        engine.Play(PlayItem{token, first});
+        engine.SetNext(token, &next);
+        const ULONGLONG start = GetTickCount64();
+        Pump(6000, [&] { return std::fabs(engine.Duration() - 1.5) < 0.01; });
+        const double seconds = (GetTickCount64() - start) / 1000.0;
+        engine.Stop();
+        Pump(150);
+        return seconds;
+    };
+    const double gapless = handover(0, 10), crossfaded = handover(1.0, 20);
+    engine.Shutdown();
+    batch.Next(L"CROSSFADE starts the next track its length before the first ends on a real output");
+    Check(gapless > 1.7 && gapless - crossfaded > 0.8 && gapless - crossfaded < 1.25,
+          L"CROSSFADE the second track was heard after %.2f s gapless and %.2f s with a 1 s crossfade", gapless, crossfaded);
+}
+
 namespace {
 
 std::string BeBytes(uint64_t v, int n) {

@@ -171,12 +171,13 @@ void DoLayout() {
     L.tabs = {content.x, y, tabsW - radioW, search || tabs ? tabH : 0};
     L.radioTab = {L.tabs.R(), y, radioW, L.tabs.h};
     L.tabRects.clear();
+    L.tabSlots = tabs ? CurrentTabSlots() : std::vector<int>{};
     // The tabs share the strip (ui::FitTabPadding, app_tabstrip.cpp FitTabs): roomy, then tight
     // padding, then equal widths with shortened labels.
     float tx = content.x + S(2);
     std::vector<float> labels;
-    for (size_t i = 0; tabs && i < g.playlists.size(); ++i)
-        labels.push_back(TextWidth(Font::Normal, (int)i == g_renameIndex ? Utf8(g_renameText) : TabName(i)));
+    for (size_t t = 0; t < L.tabSlots.size(); ++t)
+        labels.push_back(TextWidth(Font::Normal, L.tabSlots[t] == g_renameIndex ? Utf8(g_renameText) : TabLabel(t)));
     int count = (int)labels.size(), room = (int)(L.tabs.w - S(4)), total = 0;
     for (float w : labels) total += (int)std::ceil(w);
     int tabPad = ui::FitTabPadding(total, count, room, (int)S(ui::kTabPad), (int)S(ui::kTabPadTight));
@@ -258,6 +259,24 @@ int LineAt(float y) {
 float ColumnWidth(int column) {
     int w = ActiveColumnWidths()[column];
     return S((float)(w > 0 ? w : ColumnAt(column).width));
+}
+
+uint64_t g_autoTabShown = 0;
+
+std::vector<int> CurrentTabSlots() {
+    int shown = -1;
+    for (int i = 0; i < (int)g.playlists.size(); ++i)
+        if (g_autoTabShown && g.playlists[i].identity == g_autoTabShown && g.playlists[i].kind == PlaylistKind::Auto) shown = i;
+    return TabSlots(g.playlists, g.settings.groupAutoTabs, shown);
+}
+
+int TabOfPlaylistIndex(int index) { return TabOfPlaylist(g.playlists, L.tabSlots, index); }
+
+bool IsAutoTab(int tab) { return IsAutoGroupTab(g.playlists, L.tabSlots, tab); }
+
+std::string TabLabel(size_t tab) {
+    if (tab >= L.tabSlots.size()) return {};
+    return TabName(L.tabSlots[tab]) + (IsAutoTab((int)tab) ? " \xE2\x96\xBE" : "");  // ▾: it has a menu
 }
 
 std::string TabName(size_t i) {

@@ -100,8 +100,9 @@ constexpr std::uint32_t kSortComposer = 0x12;
 constexpr std::uint32_t kMhitHeaderSize = 0x248;
 
 [[nodiscard]] std::uint64_t random_u64() {
-    static thread_local std::mt19937_64 generator{std::random_device{}()};
-    return generator();
+    // Not a thread_local engine: its 5,000 bytes would be allocated for every thread in the process.
+    std::random_device device;
+    return (std::uint64_t{device()} << 32) | device();
 }
 
 // Model strings are NUL-terminated in the reference implementation; a string

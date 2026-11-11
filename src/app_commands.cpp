@@ -228,7 +228,6 @@ void OnCommand(int id, int code, HWND ctl) {
         {IDM_PANELS_RESET, ResetPanels},
         {IDM_SMALLER, ViewSmaller},
         {IDM_LARGER, ViewLarger},
-        {IDM_TRAY_SHOW, ShowMainWindow},
         {IDM_START_WITH_WINDOWS, ToggleStartWithWindows},
         {IDM_LYRICS, ToggleLyricsPanel},
         {IDM_FORMAT, ShowFormatWindow},
@@ -249,6 +248,7 @@ void OnCommand(int id, int code, HWND ctl) {
              auto sel = SelectedTracks();
              if (!sel.empty()) ShowTagEditor(AlbumTracksOf(sel));
          }},
+        {IDM_MAKE_ALBUM, [] { ShowAlbumMaker(SelectedTracks()); }},
         {IDM_FETCH_COVERS, FetchMissingCovers},
         {IDM_FETCH_COVERS_CANCEL, CancelCoverFetch},
         {IDM_ARTIST_INFO, ShowArtistInfo},
@@ -261,6 +261,7 @@ void OnCommand(int id, int code, HWND ctl) {
         {IDM_QUEUE_NEXT, [] { QueueTracks(SelectedTracks(), true); }},
         {IDM_QUEUE_ADD, [] { QueueTracks(SelectedTracks(), false); }},
         {IDM_QUEUE_CLEAR, ClearQueue},
+        {IDM_QUEUE_SHOW, ToggleQueue},
         {IDM_NEW_AUTO, [] { ShowAutoPlaylistEditor(-1); }},
         {IDM_ORGANIZE_UNDO, UndoOrganize},
         {IDM_TAG_UNDO, UndoLastTagEdit},
@@ -327,8 +328,8 @@ void OnCommand(int id, int code, HWND ctl) {
     switch (id) {
         case IDM_DUPLICATE_PL: DuplicatePlaylist(); break;
         case IDM_REOPEN_PL: ReopenPlaylist(); break;
-        case IDM_MOVE_PL_LEFT: ReorderPlaylist(g.active, g.active - 1); break;
-        case IDM_MOVE_PL_RIGHT: ReorderPlaylist(g.active, g.active + 1); break;
+        case IDM_MOVE_PL_LEFT: MoveActiveTab(-1); break;
+        case IDM_MOVE_PL_RIGHT: MoveActiveTab(1); break;
         case IDM_PLAYING_PL: RevealPlayingTrack(); break;
         case IDM_CANCEL_IMPORT: {
             std::lock_guard<std::mutex> lock(g.importMx);

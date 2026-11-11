@@ -58,6 +58,7 @@ void CreateLibView(HWND parent);
 void LibViewRebuild();
 // Sets the covers' tile size (96-DPI pixels) for this session and relayouts the view.
 void LibViewSetCoverSize(int pixels);
+void LibViewRelayout();  // Preferences: the cover spacing changed
 void LibViewInvalidate();
 void LibViewSmoothScrollChanged();  // Preferences: Smooth scrolling was turned off
 void LibViewForgetCovers(const std::vector<TrackId>& ids);  // their covers changed on disk
@@ -101,6 +102,10 @@ bool MatchesFilter(TrackId id, const std::vector<std::wstring>& words);
 // Library > Find missing information: the Library tab searched for kMissingFields[field].
 void ShowMissingInformation(size_t field);
 void RebuildView(bool preserveSelection = false);
+// Now Playing lists only the playing track's album (Preferences > Window): the track it is narrowed
+// to, or kNone when the whole list shows; FollowNowPlayingAlbum rebuilds the list once that changes.
+TrackId NowPlayingAlbumTrack();
+void FollowNowPlayingAlbum();
 // Row ↔ view-position mapping. Album grouping inserts two header rows per album, so a list row is
 // a view position plus the groups before it; nothing is stored per track.
 bool GroupingActive();
@@ -136,6 +141,12 @@ void UpdateSearchCue();
 void SortByColumn(int column);
 void RefreshTabs();
 void FitTabs();  // shares the strip among the tabs (app_tabstrip.cpp)
+// Tabs and playlists are not one to one: the auto-playlists can share a tab (TabSlots, g.tabSlots).
+int PlaylistOfTab(int tab);  // -1 for no tab
+int TabOfPlaylistIndex(int index);
+bool IsAutoTab(int tab);  // the shared auto-playlist tab
+// The shared tab's menu, under it: every auto-playlist, then New and Edit rules.
+void ShowAutoTabMenu(int tab);
 void ActivatePlaylist(int index);
 std::wstring UniquePlaylistName(const std::wstring& base);
 void NewPlaylist(const std::wstring& name);
@@ -160,10 +171,16 @@ LRESULT CALLBACK ListSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
 // Playlist persistence bookkeeping: stable identities and remembered cursor positions.
 void EnsurePlaylistIdentities();
 void ClearCellCache();
+void ShrinkCellCache();  // also returns the buffer; Clear keeps it for the next scroll
+size_t CellCacheCount();
+size_t CellCacheBytes();
+bool LookupCachedCell(uint64_t key, std::wstring& out);
+void RememberCachedCell(uint64_t key, std::wstring_view text);
 void FlushSearch();
 void CapturePlaylistPosition();
 void RestorePlaylistPosition();
 void ReorderPlaylist(int from, int to);
+void MoveActiveTab(int direction);  // Move left (-1) / right (1): one tab over
 void DuplicatePlaylist();
 void ReopenPlaylist();
 

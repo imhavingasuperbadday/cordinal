@@ -11,6 +11,16 @@ void PlayList(const std::vector<TrackId>& items, int index, double start = 0, bo
 void QueueTracks(const std::vector<TrackId>& ids, bool next);
 void ClearQueue();
 int QueuePosition(TrackId id);
+// The queue editor's edits (app_panels.cpp). Positions are queue indexes; see app_playback.cpp.
+void InsertIntoQueue(const std::vector<TrackId>& ids, int at);
+void RemoveFromQueue(const std::vector<int>& indices);
+int MoveInQueue(const std::vector<int>& indices, int to, bool keep = false);
+void PlayQueued(int index);
+// Choose by taste's picks at the end of the queue (g.queuePicks).
+bool TastePicking();
+void EnsureTastePicks(unsigned long long token);
+void RepickTaste();
+int DrawLikeThis(const std::vector<TrackId>& items, TrackId from, bool skipQueued);
 int SnapshotToNowPlaying(int pl, int& index);
 void TrackListening();
 void FinishListening(bool manual);
@@ -68,6 +78,9 @@ void WaveformTick();
 bool WaveformStep(UINT_PTR id);
 int WaveformPeak(double from, double to);
 COLORREF WaveformPlayedColor();
+// The played colour with no paused state: the position's own, Preferences', a pack theme's or the accent
+// (the warning's red still applies). WaveformPlayedColor fades this to the paused colour.
+COLORREF WaveformPlayingColor();
 COLORREF WaveformRestColor();
 // Preferences' Waveform colour on the player's background (app_waveform.cpp); kNoRgb for Theme.
 Rgb PreferredWaveColor();
@@ -117,5 +130,8 @@ bool CommandRegion(int id, double pos);
 void DrawRegion(HDC dc, const RECT& rc, const RECT& channel);
 void RemapOccurrences(int playlist, const std::vector<uint32_t>& mapping);
 int TokenIndex(unsigned long long token, int playlist);
+// The slot whose track is the one `token` is playing. TokenIndex follows a queued token's anchor
+// instead, the slot the playlist continues from once the queue is done.
+int PlayingIndex(unsigned long long token, int playlist);
 
 }  // namespace app

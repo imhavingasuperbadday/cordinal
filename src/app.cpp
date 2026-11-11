@@ -130,6 +130,7 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int showCmd) {
         if (EqualizerDialogMessage(&msg)) continue;
         if (WebDialogMessage(&msg)) continue;
         if (TagEditorDialogMessage(&msg)) continue;
+        if (AlbumMakerDialogMessage(&msg)) continue;
         if (AutoEditorDialogMessage(&msg)) continue;
         if (FormatDialogMessage(&msg)) continue;
         if (StartupDefaultsDialogMessage(&msg)) continue;

@@ -16,41 +16,43 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 
-// Encodes to a ".tmp" file then replaces the target, so a half-written cache entry is never read
-// as a valid thumbnail. Quality 0.88 keeps the cache small; these are only ever display thumbnails.
-// Returns the bytes the entry takes on disk, or 0 when it could not be written.
-uint64_t SaveJpeg(const std::wstring& file, const ArtImage& img) {
-    ComPtr<IWICImagingFactory> wic;
-    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic)))) return 0;
+// Writes `img` to `stream` as a JPEG. Quality 0.88 keeps it small; these are only ever display
+// thumbnails.
+bool WriteJpeg(IWICImagingFactory* wic, IStream* stream, const ArtImage& img) {
+    if (img.Empty()) return false;
     ComPtr<IWICBitmap> bitmap;
     if (FAILED(wic->CreateBitmapFromMemory(img.width, img.height, GUID_WICPixelFormat32bppBGR, img.width * 4,
                                            (UINT)(img.pixels.size() * 4),
                                            reinterpret_cast<BYTE*>(const_cast<uint32_t*>(img.pixels.data())), &bitmap)))
-        return 0;
-    std::wstring tmp = file + L".tmp";
-    ComPtr<IWICStream> stream;
+        return false;
     ComPtr<IWICBitmapEncoder> encoder;
     ComPtr<IWICBitmapFrameEncode> frame;
     ComPtr<IPropertyBag2> props;
     WICPixelFormatGUID format = GUID_WICPixelFormat24bppBGR;
+    if (FAILED(wic->CreateEncoder(GUID_ContainerFormatJpeg, nullptr, &encoder)) ||
+        FAILED(encoder->Initialize(stream, WICBitmapEncoderNoCache)) || FAILED(encoder->CreateNewFrame(&frame, &props)))
+        return false;
+    PROPBAG2 option{};
+    option.pstrName = const_cast<LPOLESTR>(L"ImageQuality");
+    VARIANT quality;
+    VariantInit(&quality);
+    quality.vt = VT_R4;
+    quality.fltVal = 0.88f;
+    props->Write(1, &option, &quality);
+    return SUCCEEDED(frame->Initialize(props.Get())) && SUCCEEDED(frame->SetSize(img.width, img.height)) &&
+           SUCCEEDED(frame->SetPixelFormat(&format)) && SUCCEEDED(frame->WriteSource(bitmap.Get(), nullptr)) &&
+           SUCCEEDED(frame->Commit()) && SUCCEEDED(encoder->Commit());
+}
+
+// Encodes to a ".tmp" file then replaces the target, so a half-written cache entry is never read
+// as a valid thumbnail. Returns the bytes the entry takes on disk, or 0 when it could not be written.
+uint64_t SaveJpeg(const std::wstring& file, const ArtImage& img) {
+    ComPtr<IWICImagingFactory> wic;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic)))) return 0;
+    std::wstring tmp = file + L".tmp";
+    ComPtr<IWICStream> stream;
     bool ok = SUCCEEDED(wic->CreateStream(&stream)) && SUCCEEDED(stream->InitializeFromFilename(tmp.c_str(), GENERIC_WRITE)) &&
-              SUCCEEDED(wic->CreateEncoder(GUID_ContainerFormatJpeg, nullptr, &encoder)) &&
-              SUCCEEDED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache)) &&
-              SUCCEEDED(encoder->CreateNewFrame(&frame, &props));
-    if (ok) {
-        PROPBAG2 option{};
-        option.pstrName = const_cast<LPOLESTR>(L"ImageQuality");
-        VARIANT quality;
-        VariantInit(&quality);
-        quality.vt = VT_R4;
-        quality.fltVal = 0.88f;
-        props->Write(1, &option, &quality);
-        ok = SUCCEEDED(frame->Initialize(props.Get())) && SUCCEEDED(frame->SetSize(img.width, img.height)) &&
-             SUCCEEDED(frame->SetPixelFormat(&format)) && SUCCEEDED(frame->WriteSource(bitmap.Get(), nullptr)) &&
-             SUCCEEDED(frame->Commit()) && SUCCEEDED(encoder->Commit());
-    }
-    frame.Reset();
-    encoder.Reset();
+              WriteJpeg(wic.Get(), stream.Get(), img);
     stream.Reset();
     if (!ok || !MoveFileExW(tmp.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING)) {
         DeleteFileW(tmp.c_str());
@@ -104,6 +106,20 @@ uint64_t PruneCache(const std::wstring& dir) {
 
 }  // namespace
 
+std::string JpegBytes(const ArtImage& img) {
+    ComPtr<IWICImagingFactory> wic;
+    ComPtr<IStream> stream;
+    stream.Attach(SHCreateMemStream(nullptr, 0));
+    ULARGE_INTEGER size{};
+    std::string bytes;
+    if (!stream || FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))) ||
+        !WriteJpeg(wic.Get(), stream.Get(), img) || FAILED(IStream_Size(stream.Get(), &size)) || size.QuadPart > (64u << 20))
+        return {};
+    bytes.resize((size_t)size.QuadPart);
+    if (FAILED(IStream_Reset(stream.Get())) || FAILED(IStream_Read(stream.Get(), bytes.data(), (ULONG)bytes.size()))) return {};
+    return bytes;
+}
+
 // FNV-1a over the lowercased path, mixed with the file time so a changed file gets a new key.
 uint64_t ThumbLoader::Key(const std::wstring& path, uint64_t fileTime) {
     uint64_t h = 1469598103934665603ull;  // FNV-1a over the lowercased path, then the time
@@ -142,7 +158,7 @@ void ThumbLoader::Start(HWND notify, UINT msg, std::wstring cacheDir, int thread
     quit_ = false;
     pendingLimit_ = reducedMemory ? 64 : 128;
     readyLimit_ = reducedMemory ? 1 : 2;
-    for (int i = 0; i < threads; ++i) threads_.emplace_back(&ThumbLoader::Run, this);
+    threadCount_ = threads;  // started by the first Request: an empty library never needs them
 }
 
 // Bumps the generation so in-flight jobs are dropped, then joins the workers.
@@ -173,6 +189,8 @@ void ThumbLoader::Request(uint64_t key, const std::wstring& mediaPath, int size)
             active_.erase({jobs_.front().key, jobs_.front().size});
             jobs_.pop_front();
         }
+        // Each new worker waits for mx_ before it looks for a job.
+        while (threads_.size() < (size_t)threadCount_) threads_.emplace_back(&ThumbLoader::Run, this);
     }
     cv_.notify_all();
 }
@@ -195,7 +213,7 @@ std::unique_ptr<ThumbResult> ThumbLoader::TakeResult() {
 
 ThumbLoader::MemoryUsage ThumbLoader::Memory() const {
     std::lock_guard<std::mutex> lock(mx_);
-    MemoryUsage usage{jobs_.size(), results_.size(), 0};
+    MemoryUsage usage{jobs_.size(), results_.size(), 0, threads_.size()};
     for (const auto& result : results_) usage.readyBytes += result->image.pixels.size() * sizeof(uint32_t);
     return usage;
 }

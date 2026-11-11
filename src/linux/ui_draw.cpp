@@ -644,7 +644,7 @@ void DrawBand(const Palette& base) {
     if (L.volume.w > 0) {
         DrawIcon(Icon::Speaker, L.speaker, p.text);
         bool volumeHot = g_popups.empty() && (L.volume.In(g_mouseX, g_mouseY) || g_drag == Drag::Volume);
-        DrawSlider(L.volume, g.settings.volume, true, volumeHot, p);
+        DrawSlider(L.volume, g.settings.volume, g.settings.softwareVolume, volumeHot && g.settings.softwareVolume, p);
     }
     if (L.cover.w <= 0) return;  // the now playing line is hidden
 
@@ -707,16 +707,18 @@ void DrawTabs(const Palette& p) {
     Fill({L.tabs.x, L.tabs.B() - S(1), L.tabs.w, S(1)}, p.border);  // the rule the open tab's underline sits on
     SDL_Rect clip{(int)L.tabs.x, (int)L.tabs.y, (int)L.tabs.w, (int)L.tabs.h};
     SDL_SetRenderClipRect(g.renderer, &clip);
-    for (size_t i = 0; i < L.tabRects.size(); ++i) {
-        Rect r = L.tabRects[i];
+    for (size_t t = 0; t < L.tabRects.size() && t < L.tabSlots.size(); ++t) {
+        Rect r = L.tabRects[t];
         if (r.x >= L.tabs.R()) break;
-        bool sel = !InternetRadio().active && (int)i == g.active, hover = g_popups.empty() && r.In(g_mouseX, g_mouseY);
-        bool closable = g.playlists[i].kind == PlaylistKind::Static || g.playlists[i].kind == PlaylistKind::Auto ||
-                        g.playlists[i].kind == PlaylistKind::NowPlaying;
+        const int i = L.tabSlots[t];  // the playlist this tab shows
+        bool sel = !InternetRadio().active && i == g.active, hover = g_popups.empty() && r.In(g_mouseX, g_mouseY);
+        // The shared auto-playlist tab has no close box: it would close only the one it shows.
+        bool closable = (g.playlists[i].kind == PlaylistKind::Static || g.playlists[i].kind == PlaylistKind::Auto ||
+                         g.playlists[i].kind == PlaylistKind::NowPlaying) && !IsAutoTab((int)t);
         if (sel) Fill({r.x + S(10), r.B() - S(2), r.w - S(20), S(2)}, p.accent);
         // The label keeps its place whether or not the close box shows over its end.
         float left = r.x + S(6), right = r.R() - S(6);
-        if ((int)i == g_renameIndex) {
+        if (i == g_renameIndex) {
             Rect field{left, r.y + S(2), std::max(S(1), right - left), r.h - S(4)};
             Fill(field, g_renameSelected ? p.select : p.bg);
             Frame(field, p.accent);
@@ -727,12 +729,12 @@ void DrawTabs(const Palette& p) {
                 Fill({std::min(caret, field.R() - S(2)), field.y + S(3), std::max(1.f, S(1)), field.h - S(6)}, p.text);
             }
         } else {
-            std::string name = TabName(i);
+            std::string name = TabLabel(t);
             float w = TextWidth(Font::Normal, name), x = std::max(left, std::round((left + right - w) / 2));
-            uint32_t color = (int)i == PlayingTab() ? p.playing : sel || hover ? p.text : p.sub;
+            uint32_t color = i == PlayingTab() ? p.playing : sel || hover ? p.text : p.sub;
             DrawText(Font::Normal, name, x, TextY(r), color, right - x);
         }
-        if (closable && hover && (int)i != g_renameIndex) {  // only under the mouse; Ctrl+W and a middle click close too
+        if (closable && hover && i != g_renameIndex) {  // only under the mouse; Ctrl+W and a middle click close too
             Rect close{r.R() - S(22), r.y + S(3), S(19), r.h - S(6)};
             Fill(close, p.surface);
             DrawText(Font::Normal, "\xC3\x97", close.x, TextY(close), p.text, close.w, 1);
@@ -994,6 +996,7 @@ void DrawList(const Palette& p) {
     int first = (int)(g.scroll / L.rowH), last = std::min((int)g_lines.size(), first + (int)(L.rows.h / L.rowH) + 2);
     int hover = g_popups.empty() ? LineAt(g_mouseY) : -1;
     bool npTab = pl.kind == PlaylistKind::NowPlaying;
+    int heard = npTab ? HeardIndex() : -1;
     const char* mark = g.playing != kNone && IsPaused() ? "\xE2\x9D\x99\xE2\x9D\x99" : nullptr;
     std::string playingMark = Utf8(ThemeInfo(g.settings.theme).playingMark);
     for (int line = std::max(0, first - 1); line < last; ++line) {
@@ -1009,7 +1012,8 @@ void DrawList(const Palette& p) {
         if (sel) Fill(r, p.select);
         else if (line == hover) Fill(r, p.hover);
         else if (line % 2) Fill(r, RowStripe(p));  // every other row a shade off (DrawTrackRow)
-        bool isPlaying = g.playing == id && npTab && ln.row < (int)g.rowItems.size() && g.rowItems[ln.row] == (size_t)g.queuePos;
+        bool isPlaying = heard >= 0 && g.playing == id && npTab && ln.row < (int)g.rowItems.size() &&
+                         g.rowItems[ln.row] == (size_t)heard;
         const Track& t = g_lib[id];
         uint32_t color = sel ? p.selectText : isPlaying ? p.playing : (t.flags & (Track::kMissing | Track::kFailed)) ? p.faint : p.text;
         Font font = isPlaying ? Font::Bold : Font::Normal;
@@ -1108,7 +1112,7 @@ std::wstring StatusMessage() {
             std::to_wstring(output.rate) + L" Hz";
     }
     if (g.stopAfterCurrent) status += L" | stop after current";
-    if (!g.queue.empty()) status += L"  \x2022  " + std::to_wstring(g.queue.size()) + L" queued";
+    if (size_t yours = QueuedByYou()) status += L"  \x2022  " + std::to_wstring(yours) + L" queued";
     // When a long track will be over, on the local clock (app_playback.cpp, EndsAtText).
     double dur = TrackDuration();
     if (dur >= ui::kLongTrackSeconds && !IsPaused() && g.settings.repeat != Repeat::One) {
@@ -1162,26 +1166,6 @@ void DrawStatus(const Palette& p) {
     }
 }
 
-void DrawUpNext(const Palette& p) {
-    if (L.upNext.w <= 0 || L.upNext.h <= 0) return;
-    SDL_Rect clip{(int)L.upNext.x, (int)L.upNext.y, (int)L.upNext.w, (int)L.upNext.h};
-    SDL_SetRenderClipRect(g.renderer, &clip);
-    Fill(L.upNext, p.surface);
-    Frame(L.upNext, p.border);
-    DrawText(Font::Bold, "Up next", L.upNext.x + S(12), L.upNext.y + S(10), p.text, L.upNext.w - S(24));
-    float y = L.upNext.y + S(38);
-    const auto tracks = UpNextTracks();
-    for (TrackId id : tracks) {
-        if (y + S(38) > L.upNext.B()) break;
-        DrawText(Font::Normal, Utf8(TrackTitle(id)), L.upNext.x + S(12), y, p.text, L.upNext.w - S(24));
-        DrawText(Font::Small, Utf8(g_lib.Str(g_lib[id].artist)), L.upNext.x + S(12), y + S(16),
-            p.sub, L.upNext.w - S(24));
-        y += S(42);
-    }
-    if (tracks.empty()) DrawText(Font::Normal, "Nothing queued.", L.upNext.x + S(12), y, p.sub, L.upNext.w - S(24));
-    SDL_SetRenderClipRect(g.renderer, nullptr);
-}
-
 void Draw() {
     ++g_frame;
     // The library changed (a scan, tags arriving): rebuild what's shown, at most twice a second.
@@ -1207,6 +1191,7 @@ void Draw() {
         return;
     }
     LyricsTick();
+    FollowNowPlayingAlbum();  // playback moved to another album, stopped or started
     DoLayout();
     ClampScroll();
     SetColor(p.bg);
@@ -1253,12 +1238,22 @@ void Draw() {
 
 // An album's cover filling `r` (cropped to square), or while it loads the surface color, or for an
 // album without one a tile in a color of its own with the initial of `title` (app_ui.cpp).
+namespace {
+// The track id is part of the key: a group cover override can switch between two files in the
+// same folder and album, where the folder identity alone would keep the old texture.
+uint64_t AlbumCoverKey(TrackId first, StringPool::Handle album, int size) {
+    return (((uint64_t)first << 32) ^ (uint64_t)album ^ g_lib[first].dir) * 0x9E3779B97F4A7C15ull ^ (uint64_t)size;
+}
+}  // namespace
+
+double AlbumCoverHue(TrackId first, StringPool::Handle album, float width) {
+    auto it = g_thumbs.find(AlbumCoverKey(first, album, (int)std::max(width, S(64))));
+    return it != g_thumbs.end() && it->second.texture ? it->second.hue : -1;
+}
+
 void DrawAlbumCover(TrackId first, StringPool::Handle album, const std::wstring& title, const Rect& r, const Palette& p) {
     const int size = (int)std::max(r.w, S(64));
-    // The track id is part of the key: a group cover override can switch between two files in the
-    // same folder and album, where the folder identity alone would keep the old texture.
-    const uint64_t key = (((uint64_t)first << 32) ^ (uint64_t)album ^ g_lib[first].dir) * 0x9E3779B97F4A7C15ull ^
-                         (uint64_t)size;
+    const uint64_t key = AlbumCoverKey(first, album, size);
     auto it = g_thumbs.find(key);
     if (it == g_thumbs.end()) {
         if (g_thumbs.size() >= kThumbsKept) {  // let the least recently drawn half go

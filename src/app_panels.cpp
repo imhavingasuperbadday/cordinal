@@ -2,8 +2,10 @@
 //   Now playing  the title, the artist line and what plays next, large and centered, over a soft
 //                backdrop blended from the cover's colors (the cover itself isn't shown). Click
 //                the title to find the track in the list, or to continue a stopped one.
-//   Up next      the queue, then the rest of the playlist in the order it will play (the shuffle
-//                pass too). Double-click a track to play it; the wheel scrolls.
+//   Up next      the queue editor: what you queued, Choose by taste's picks, then the rest of the
+//                playlist in the order it will play (the shuffle pass too). Queued tracks can be
+//                selected, dragged into a new order, removed and played; tracks dragged from the
+//                list land in the queue. It is also the normal window's side panel.
 // Both are child windows created once; PanelsTick() refreshes them from up here, and the whole
 // module keeps its state in the single file-scope `p`.
 #include "app.h"
@@ -15,9 +17,14 @@ namespace {
 const wchar_t kNowClass[] = L"CordinalNowPlaying";
 const wchar_t kNextClass[] = L"CordinalUpNext";
 
+// Up next's rows: your queued tracks, the taste picks after them, what the playlist plays then, and
+// the labels in between.
+enum RowKind : uint8_t { kYours, kPick, kThen, kLabelPicks, kLabelThen };
+
 struct Row {
     TrackId id;
-    int pl, index;  // where it is in the playlist; -1 for a queued track
+    int pl, index;  // queued rows: the queue position (pl -1); kThen: the playlist and position in it
+    RowKind kind;
 };
 
 struct Panels {
@@ -34,7 +41,16 @@ struct Panels {
     std::wstring shown;  // what the panel showed, to repaint only on a change
     // Up next.
     std::vector<Row> rows;
-    int scroll = 0, hot = -1;
+    std::vector<int> tops;
+    UINT topsDpi = 0;
+    std::deque<TrackId> seen;  // the queue the rows and selection were built for
+    std::vector<char> sel;     // per queue position
+    int scroll = 0, hot = -1, hotLink = 0, focus = -1, anchor = -1;
+    RECT clearLink{}, repickLink{};
+    // A press on a queued row: a drag past the system's threshold moves the selection to dropSlot.
+    bool press = false, dragging = false;
+    POINT pressAt{};
+    int deferSelect = -1, dropSlot = -1;
 } p;
 
 // Integer per-channel blend: bPercent (0..100) of `b` folded into `a`.
@@ -50,41 +66,54 @@ void Line(HDC dc, const std::wstring& s, RECT r, HFONT font, COLORREF color, UIN
     SelectObject(dc, old);
 }
 
-// What plays after the current track: the queue first, then the playlist in playback order. In
-// shuffle the remaining shuffle pass is listed (the queue is drawn as a stack, so it reads backwards
-// here). `limit` bounds the work for the one-line Now playing case.
-std::vector<Row> Upcoming(size_t limit) {
+// What plays after the current track: the queue first (yours, then the taste picks), then the
+// playlist in playback order. In shuffle the remaining shuffle pass is listed (the queue is drawn as
+// a stack, so it reads backwards here); while taste picks, the picks are what follows. `labels` adds
+// the editor's section labels; `limit` bounds the work for the one-line Now playing case.
+std::vector<Row> Upcoming(size_t limit, bool labels) {
     std::vector<Row> rows;
-    for (TrackId id : g.queue) {
-        if (rows.size() >= limit) return rows;
-        rows.push_back({id, -1, -1});
+    auto add = [&](Row row) {
+        if (rows.size() >= limit) return false;
+        rows.push_back(row);
+        return true;
+    };
+    size_t yours = g.queue.size() - std::min(g.queuePicks, g.queue.size());
+    for (size_t i = 0; i < g.queue.size(); ++i) {
+        if (labels && i == yours) add({kNone, -1, -1, kLabelPicks});
+        if (!add({g.queue[i], -1, (int)i, i < yours ? kYours : kPick})) return rows;
     }
+    if (g.queuePicks) return rows;
     auto it = g.tokens.find(g.playingToken);
     if (g.playing == kNone || it == g.tokens.end()) return rows;
     int pl = it->second.pl;
     if (pl < 0 || pl >= (int)g.playlists.size()) return rows;
     const auto& items = g.playlists[pl].items;
     int n = (int)items.size(), cur = TokenIndex(g.playingToken, pl);
-    if (g.radio) {
-        if (rows.size() < limit && it->second.radioNext < items.size()) {
-            int next = (int)it->second.radioNext;
-            rows.push_back({items[next], pl, next});
+    bool labelled = !labels;
+    auto then = [&](int k) {
+        if (!labelled) {
+            labelled = true;
+            add({kNone, pl, -1, kLabelThen});
         }
+        return add({items[k], pl, k, kThen});
+    };
+    if (g.radio) {
+        if (it->second.radioNext < items.size()) then((int)it->second.radioNext);
         return rows;
     }
     if (g.shuffle) {
         if (g.shufflePl != pl) return rows;  // the next pass isn't drawn yet
-        for (auto r = g.shuffleQueue.rbegin(); r != g.shuffleQueue.rend() && rows.size() < limit; ++r)
-            if (*r < items.size() && (int)*r != cur) rows.push_back({items[*r], pl, (int)*r});
+        for (auto r = g.shuffleQueue.rbegin(); r != g.shuffleQueue.rend(); ++r)
+            if (*r < items.size() && (int)*r != cur && !then((int)*r)) break;
         return rows;
     }
-    for (int i = 1; i < n && rows.size() < limit; ++i) {
+    for (int i = 1; i < n; ++i) {
         int k = cur + i;
         if (k >= n) {
             if (g.repeat == Repeat::Off) break;
             k -= n;
         }
-        rows.push_back({items[k], pl, k});
+        if (!then(k)) break;
     }
     return rows;
 }
@@ -198,7 +227,7 @@ void PaintNow(HDC dc, RECT rc) {
     p.title = {pad, y, w - pad, y + S(44)};
     Line(dc, WindowText(g.npTitle), p.title, p.fontBig, TextColor(), DT_CENTER);
     Line(dc, WindowText(g.npSub), {pad, y + S(44), w - pad, y + S(72)}, p.fontMid, SubColor(), DT_CENTER);
-    auto next = Upcoming(1);
+    auto next = Upcoming(1, false);
     if (!next.empty()) {
         std::wstring s = L"Up next  \x00B7  " + FormatTitle(g.fmtTitle, Lookup(next[0].id, false));
         std::wstring artist;
@@ -230,101 +259,530 @@ LRESULT CALLBACK NowProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 // ---------------------------------------------------------------------------
-// Up next
+// Up next: the queue editor
 
-int RowHeight() { return S(46); }
+int HeaderHeight() { return S(40); }
+int RowHeight(const Row& row) { return row.kind >= kLabelPicks ? S(26) : S(44); }
+bool QueueRow(const Row& row) { return row.kind == kYours || row.kind == kPick; }
 
-int RowAt(int y) {
-    int i = (y + p.scroll) / RowHeight();
-    return y >= 0 && i < (int)p.rows.size() ? i : -1;
+// Each row's top in the scrolled list (one more entry for the end), rebuilt when the rows or the
+// DPI change.
+const std::vector<int>& Tops() {
+    if (p.tops.size() != p.rows.size() + 1 || p.topsDpi != g.dpi) {
+        p.tops.assign(1, 0);
+        for (const Row& row : p.rows) p.tops.push_back(p.tops.back() + RowHeight(row));
+        p.topsDpi = g.dpi;
+    }
+    return p.tops;
 }
 
-void ClampScroll() {
+int ListHeight() {
     RECT rc;
     GetClientRect(p.next, &rc);
-    p.scroll = std::clamp(p.scroll, 0, std::max(0, (int)p.rows.size() * RowHeight() - (int)rc.bottom));
+    return std::max(0, (int)rc.bottom - HeaderHeight());
 }
 
-// Paints the Up next list: one row per entry, showing a "Q" for queued tracks and their place in
-// line otherwise, then title, artist / album and duration. Only the visible rows are drawn.
+int RowAt(int y) {
+    if (y < HeaderHeight()) return -1;
+    const auto& tops = Tops();
+    int at = y - HeaderHeight() + p.scroll;
+    auto it = std::upper_bound(tops.begin(), tops.end(), at);
+    int i = (int)(it - tops.begin()) - 1;
+    return i >= 0 && i < (int)p.rows.size() ? i : -1;
+}
+
+// The row showing queue position `index`, or -1.
+int RowOfQueued(int index) {
+    for (int i = 0; i < (int)p.rows.size(); ++i)
+        if (QueueRow(p.rows[i]) && p.rows[i].index == index) return i;
+    return -1;
+}
+
+void ClampScroll() { p.scroll = std::clamp(p.scroll, 0, std::max(0, Tops().back() - ListHeight())); }
+
+void EnsureVisible(int row) {
+    if (row < 0) return;
+    const auto& tops = Tops();
+    if (tops[row] < p.scroll) p.scroll = tops[row];
+    else if (tops[row + 1] > p.scroll + ListHeight()) p.scroll = tops[row + 1] - ListHeight();
+    ClampScroll();
+}
+
+size_t Yours() { return g.queue.size() - std::min(g.queuePicks, g.queue.size()); }
+
+std::vector<int> SelectedQueued() {
+    std::vector<int> out;
+    for (int i = 0; i < (int)p.sel.size() && i < (int)g.queue.size(); ++i)
+        if (p.sel[i]) out.push_back(i);
+    return out;
+}
+
+void SelectOnly(int index) {
+    p.sel.assign(g.queue.size(), 0);
+    if (index >= 0 && index < (int)p.sel.size()) p.sel[index] = 1;
+    p.focus = p.anchor = index;
+}
+
+// Rebuilds the rows from the queue and the playlist, keeping the selection on the same entries:
+// the queue's head leaving (it started playing) shifts it, anything else keeps it by position.
+void Refresh(bool repaint = true) {
+    auto rows = Upcoming(200, true);
+    size_t n = g.queue.size(), seen = p.seen.size();
+    bool queueChanged = g.queue != p.seen;
+    if (n < seen && std::equal(g.queue.begin(), g.queue.end(), p.seen.begin() + (seen - n))) {
+        int k = (int)(seen - n);
+        p.sel.erase(p.sel.begin(), p.sel.begin() + std::min<size_t>(k, p.sel.size()));
+        p.focus = std::max(-1, p.focus - k);
+        p.anchor = std::max(-1, p.anchor - k);
+    }
+    p.sel.resize(n, 0);
+    if (p.focus >= (int)n) p.focus = (int)n - 1;
+    if (p.anchor >= (int)n) p.anchor = p.focus;
+    p.seen = g.queue;
+    bool same = rows.size() == p.rows.size() &&
+                std::equal(rows.begin(), rows.end(), p.rows.begin(), [](const Row& a, const Row& b) {
+                    return a.id == b.id && a.pl == b.pl && a.index == b.index && a.kind == b.kind;
+                });
+    if (!same) {
+        p.rows = std::move(rows);
+        p.tops.clear();
+        ClampScroll();
+    }
+    if (repaint || queueChanged || !same) InvalidateRect(p.next, nullptr, FALSE);
+}
+
+// Where a drag over the list at `y` would put tracks: the queue position they would land before.
+// Your own tracks (and drops from the track list) never land below the picks.
+int SlotAt(int y, bool amongYours) {
+    int slot = (int)g.queue.size();
+    const auto& tops = Tops();
+    int at = y - HeaderHeight() + p.scroll;
+    for (int i = 0; i < (int)p.rows.size(); ++i)
+        if (QueueRow(p.rows[i]) && at < (tops[i] + tops[i + 1]) / 2) {
+            slot = p.rows[i].index;
+            break;
+        }
+    return amongYours ? std::min(slot, (int)Yours()) : slot;
+}
+
+// The insertion line's y for `slot`: under the entry before it, or above the first.
+int SlotY(int slot) {
+    const auto& tops = Tops();
+    int row = slot > 0 ? RowOfQueued(slot - 1) : RowOfQueued(0);
+    int y = row < 0 ? 0 : slot > 0 ? tops[row + 1] : tops[row];
+    return HeaderHeight() + y - p.scroll;
+}
+
+void ScrollNearEdge(int y) {
+    int edge = S(18);
+    if (y < HeaderHeight() + edge) p.scroll -= S(10);
+    else if (y > HeaderHeight() + ListHeight() - edge) p.scroll += S(10);
+    ClampScroll();
+}
+
+// The header's links: Clear (with anything queued) and New picks (while taste is picking).
+void LayoutLinks(HDC dc, RECT rc) {
+    p.clearLink = p.repickLink = {};
+    HGDIOBJ old = SelectObject(dc, g.font);
+    auto width = [&](const wchar_t* s) {
+        SIZE size{};
+        GetTextExtentPoint32W(dc, s, (int)wcslen(s), &size);
+        return (int)size.cx;
+    };
+    int x = rc.right - S(12), h = HeaderHeight();
+    if (!g.queue.empty()) {
+        int w = width(L"Clear");
+        p.clearLink = {x - w, 0, x, h};
+        x -= w + S(14);
+    }
+    if (g.queuePicks && TastePicking()) {
+        int w = width(L"New picks");
+        p.repickLink = {x - w, 0, x, h};
+    }
+    SelectObject(dc, old);
+}
+
+int LinkAt(POINT pt) {
+    if (PtInRect(&p.clearLink, pt)) return 1;
+    if (PtInRect(&p.repickLink, pt)) return 2;
+    return 0;
+}
+
+void FollowLink(int link) {
+    if (link == 1) ClearQueue();
+    else if (link == 2) RepickTaste();
+    else return;
+    p.sel.clear();
+    p.focus = p.anchor = -1;
+    Refresh();
+}
+
+// Paints the header (Up next, the queue's length and the links), then the visible rows: your tracks numbered
+// in the accent, the taste picks under their own label, then what the playlist plays after them.
 void PaintNext(HDC dc, RECT rc) {
     FillSolid(dc, rc, WindowBg());
     SetBkMode(dc, TRANSPARENT);
-    if (p.rows.empty()) {
-        Line(dc, g.playing == kNone ? L"Play something to see what comes next." : L"Nothing comes next.", rc, g.font,
-             Ref(P().faint), DT_CENTER);
-        return;
+    int pad = S(12), hh = HeaderHeight();
+    // Header.
+    LayoutLinks(dc, rc);
+    double total = 0;
+    for (TrackId id : g.queue) total += g_lib[id].Duration();
+    SIZE titleSize{};
+    HGDIOBJ old = SelectObject(dc, g.fontBold);
+    GetTextExtentPoint32W(dc, L"Up next", 7, &titleSize);
+    SelectObject(dc, old);
+    Line(dc, L"Up next", {pad, 0, pad + titleSize.cx, hh}, g.fontBold, TextColor(), DT_LEFT);
+    std::wstring sub = g.queue.empty() ? L"nothing queued"
+                                       : std::to_wstring(g.queue.size()) + L" queued, " + FormatDuration(total);
+    int linksLeft = p.repickLink.left ? p.repickLink.left : p.clearLink.left ? p.clearLink.left : rc.right;
+    Line(dc, sub, {pad + titleSize.cx + S(8), 0, linksLeft - S(8), hh}, g.font, Ref(P().faint), DT_LEFT);
+    for (int link : {1, 2}) {
+        const RECT& r = link == 1 ? p.clearLink : p.repickLink;
+        if (r.right <= r.left) continue;
+        Line(dc, link == 1 ? L"Clear" : L"New picks", r, g.font, p.hotLink == link ? TextColor() : Ref(P().accent), DT_LEFT);
     }
-    int rh = RowHeight(), pad = S(12), numW = S(34), timeW = S(56);
-    int first = p.scroll / rh;
-    for (int i = first; i < (int)p.rows.size(); ++i) {
-        int y = i * rh - p.scroll;
+    FillSolid(dc, {0, hh - 1, rc.right, hh}, Ref(P().border));
+
+    // The paint surface is shared between controls, so the clip goes back afterwards.
+    int saved = SaveDC(dc);
+    IntersectClipRect(dc, 0, hh, rc.right, rc.bottom);
+    if (p.rows.empty()) {
+        const wchar_t* text = g.playing == kNone ? L"Play something, or drag tracks here to queue them."
+                                                 : L"Nothing comes next. Drag tracks here to queue them.";
+        RECT r{pad, hh, rc.right - pad, rc.bottom};
+        Line(dc, text, r, g.font, Ref(P().faint), DT_CENTER);
+    }
+    const auto& tops = Tops();
+    bool focused = GetFocus() == p.next;
+    int numW = S(30), timeW = S(52);
+    for (int i = 0; i < (int)p.rows.size(); ++i) {
+        int y = hh + tops[i] - p.scroll, rh = tops[i + 1] - tops[i];
+        if (y + rh <= hh) continue;
         if (y >= rc.bottom) break;
         const Row& row = p.rows[i];
         RECT r{0, y, rc.right, y + rh};
-        if (i == p.hot) FillSolid(dc, r, Ref(P().hover));
-        FillSolid(dc, {pad, r.bottom - 1, rc.right - pad, r.bottom}, Ref(P().border));
-        // Queued tracks wear an accent "Q"; the rest their place in line.
-        bool queued = row.pl < 0;
-        Line(dc, queued ? L"Q" : std::to_wstring(i + 1), {pad, y, pad + numW, y + rh}, queued ? g.fontBold : g.font,
-             queued ? Ref(P().accent) : Ref(P().faint), DT_LEFT);
+        if (row.kind == kLabelPicks || row.kind == kLabelThen) {
+            std::wstring label = row.kind == kLabelPicks ? L"Picked by taste" : L"Then from " + g.playlists[row.pl].name;
+            Line(dc, label, {pad, y, rc.right - pad, y + rh}, g.font, Ref(P().faint), DT_LEFT);
+            continue;
+        }
+        bool queued = QueueRow(row);
+        bool selected = queued && row.index < (int)p.sel.size() && p.sel[row.index];
+        bool dragged = selected && p.dragging;
+        COLORREF text = TextColor(), sub2 = SubColor();
+        if (selected) {
+            FillSolid(dc, r, Ref(P().select));
+            text = sub2 = Ref(P().selectText);
+        } else if (i == p.hot && !p.dragging) {
+            FillSolid(dc, r, Ref(P().hover));
+        }
+        if (focused && queued && row.index == p.focus && !(SendMessageW(p.next, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS))
+            FillSolid(dc, {0, y, S(3), y + rh}, Ref(P().accent));
+        if (!selected) FillSolid(dc, {pad, r.bottom - 1, rc.right - pad, r.bottom}, Ref(P().border));
+        // Your tracks wear their place in line in the accent; picks and the playlist's are quieter.
+        std::wstring number = queued ? std::to_wstring(row.index + 1) : L"";
+        COLORREF numColor = selected ? text : row.kind == kYours ? Ref(P().accent) : Ref(P().faint);
+        Line(dc, number, {pad, y, pad + numW, y + rh}, row.kind == kYours ? g.fontBold : g.font, numColor, DT_LEFT);
         std::wstring artist, album;
         LookupField(row.id, L"artist", artist);
         LookupField(row.id, L"album", album);
         if (!album.empty()) artist += (artist.empty() ? L"" : L"  \x2022  ") + album;
         int x = pad + numW, right = rc.right - pad - timeW;
-        Line(dc, FormatTitle(g.fmtTitle, Lookup(row.id, false)), {x, y + S(5), right, y + S(25)}, g.fontBold, TextColor(), DT_LEFT);
-        Line(dc, artist, {x, y + S(24), right, y + S(42)}, g.font, SubColor(), DT_LEFT);
-        Line(dc, FormatDuration(g_lib[row.id].Duration()), {right, y, rc.right - pad, y + rh}, g.font, SubColor(), DT_RIGHT);
+        if (dragged) text = sub2 = Ref(P().faint);
+        Line(dc, FormatTitle(g.fmtTitle, Lookup(row.id, false)), {x, y + S(4), right, y + S(23)},
+             row.kind == kThen ? g.font : g.fontBold, row.kind == kThen && !selected ? SubColor() : text, DT_LEFT);
+        Line(dc, artist, {x, y + S(22), right, y + S(40)}, g.font, row.kind == kThen && !selected ? Ref(P().faint) : sub2, DT_LEFT);
+        Line(dc, FormatDuration(g_lib[row.id].Duration()), {right, y, rc.right - pad, y + rh}, g.font, sub2, DT_RIGHT);
     }
+    // Where a drag would land.
+    if (p.dropSlot >= 0) {
+        int y = SlotY(p.dropSlot);
+        FillSolid(dc, {pad, y - S(1), rc.right - pad, y + S(1)}, Ref(P().accent));
+        FillSolid(dc, {pad, y - S(4), pad + S(2), y + S(4)}, Ref(P().accent));
+    }
+    RestoreDC(dc, saved);
 }
 
-// Plays a row: a queued track is moved to the head of the queue and started, a playlist track is
-// played in place (making its playlist current).
+// Moves the selection to land before queue position `to`, keeping it selected.
+void MoveSelection(int to, bool keep = false) {
+    auto picked = SelectedQueued();
+    if (picked.empty()) return;
+    int first = MoveInQueue(picked, to, keep);
+    if (first < 0) return;
+    p.seen = g.queue;
+    p.sel.assign(g.queue.size(), 0);
+    for (int i = first; i < first + (int)picked.size() && i < (int)p.sel.size(); ++i) p.sel[i] = 1;
+    p.focus = p.anchor = first;
+    Refresh();
+    EnsureVisible(RowOfQueued(first));
+}
+
+void RemoveSelection() {
+    auto picked = SelectedQueued();
+    if (picked.empty()) return;
+    RemoveFromQueue(picked);
+    p.seen = g.queue;
+    SelectOnly(g.queue.empty() ? -1 : std::min(picked.front(), (int)g.queue.size() - 1));
+    Refresh();
+    EnsureVisible(RowOfQueued(p.focus));
+}
+
+// Plays a row: a queued track now (it moves to the head of the queue), a playlist track in place.
+void PlayRow(const Row& row) {
+    if (QueueRow(row)) PlayQueued(row.index);
+    else if (row.kind == kThen) PlayTrack(row.pl, row.index, true);
+    p.sel.clear();
+    p.focus = p.anchor = -1;
+    Refresh();
+}
+
 void PlayRowAt(int i) {
-    if (i < 0 || i >= (int)p.rows.size()) return;
-    Row row = p.rows[i];
-    if (row.pl < 0) {
-        // A queued track: to the head of the queue, then on to it.
-        if (i < (int)g.queue.size()) g.queue.erase(g.queue.begin() + i);
-        g.queue.push_front(row.id);
-        Next();
-    } else {
-        PlayTrack(row.pl, row.index, true);
+    if (i >= 0 && i < (int)p.rows.size()) PlayRow(p.rows[i]);
+}
+
+// The right-click menu: for queued tracks the moves, Keep for picks, Remove; for the playlist's
+// tracks Play, Play next and Add to queue; and the whole queue's Clear and New picks.
+void ShowNextMenu(POINT screen, int row) {
+    enum { kPlay = 1, kTop, kBottom, kKeep, kRemove, kPlayNext, kAddToQueue, kRepick, kClear };
+    HMENU m = CreatePopupMenu();
+    // The menu pumps messages, and a tick may rebuild the rows meanwhile: work from a copy. Queued
+    // tracks are acted on through the selection, which follows the queue.
+    Row target = row >= 0 && row < (int)p.rows.size() ? p.rows[row] : Row{kNone, -1, -1, kLabelThen};
+    bool queued = QueueRow(target), then = target.kind == kThen;
+    if (queued) {
+        if (!p.sel[target.index]) SelectOnly(target.index);
+        p.focus = target.index;
+        InvalidateRect(p.next, nullptr, FALSE);
+        auto picked = SelectedQueued();
+        bool anyPick = std::any_of(picked.begin(), picked.end(), [](int i) { return (size_t)i >= Yours(); });
+        UINT single = picked.size() == 1 ? 0 : MF_GRAYED;
+        AppendMenuW(m, MF_STRING | single, kPlay, L"&Play now\tEnter");
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(m, MF_STRING, kTop, L"Move to the &top");
+        AppendMenuW(m, MF_STRING, kBottom, L"Move to the &bottom");
+        if (anyPick) AppendMenuW(m, MF_STRING, kKeep, L"&Keep (play before the picks)");
+        AppendMenuW(m, MF_STRING, kRemove, L"&Remove from the queue\tDel");
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    } else if (then) {
+        AppendMenuW(m, MF_STRING, kPlay, L"&Play");
+        AppendMenuW(m, MF_STRING, kPlayNext, L"Play ne&xt");
+        AppendMenuW(m, MF_STRING, kAddToQueue, L"Add to &queue");
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    }
+    if (g.queuePicks && TastePicking()) AppendMenuW(m, MF_STRING, kRepick, L"&New picks");
+    AppendMenuW(m, MF_STRING | (g.queue.empty() ? MF_GRAYED : 0), kClear, L"&Clear the queue");
+    int cmd = (int)TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, 0, p.next, nullptr);
+    DestroyMenu(m);
+    switch (cmd) {
+        case kPlay:
+            if (then) PlayRow(target);
+            else if (auto picked = SelectedQueued(); picked.size() == 1) PlayRowAt(RowOfQueued(picked.front()));
+            break;
+        case kTop: MoveSelection(0); break;
+        case kBottom: MoveSelection((int)g.queue.size()); break;
+        case kKeep: MoveSelection((int)Yours(), true); break;
+        case kRemove: RemoveSelection(); break;
+        case kPlayNext: QueueTracks({target.id}, true); Refresh(); break;
+        case kAddToQueue: QueueTracks({target.id}, false); Refresh(); break;
+        case kRepick: FollowLink(2); break;
+        case kClear: FollowLink(1); break;
     }
 }
 
-// The Up next window: paints the list and handles the wheel, hover highlighting and double-click to
-// play. Rows are recomputed by PanelsTick(); this proc only scrolls and picks.
+// Arrow keys move the focus (Shift extends the selection), Alt or Ctrl with them moves the selected
+// tracks, Home and End jump, Delete removes, Enter plays, Ctrl+A selects the whole queue.
+bool NextKey(WPARAM key) {
+    bool ctrl = GetKeyState(VK_CONTROL) < 0, shift = GetKeyState(VK_SHIFT) < 0, alt = GetKeyState(VK_MENU) < 0;
+    int n = (int)g.queue.size();
+    if (n == 0) return false;
+    p.sel.resize(n, 0);
+    if ((key == VK_UP || key == VK_DOWN) && (alt || ctrl)) {
+        auto picked = SelectedQueued();
+        if (picked.empty()) return true;
+        if (key == VK_UP && picked.front() > 0) MoveSelection(picked.front() - 1);
+        else if (key == VK_DOWN && picked.back() < n - 1) MoveSelection(picked.front() + 2);
+        return true;
+    }
+    int to = -1;
+    if (key == VK_UP) to = std::max(0, p.focus - 1);
+    else if (key == VK_DOWN) to = std::min(n - 1, p.focus + 1);
+    else if (key == VK_HOME) to = 0;
+    else if (key == VK_END) to = n - 1;
+    if (to >= 0) {
+        if (shift && p.anchor >= 0) {
+            p.sel.assign(n, 0);
+            for (int i = std::min(p.anchor, to); i <= std::max(p.anchor, to); ++i) p.sel[i] = 1;
+            p.focus = to;
+        } else {
+            SelectOnly(to);
+        }
+        EnsureVisible(RowOfQueued(to));
+        InvalidateRect(p.next, nullptr, FALSE);
+        return true;
+    }
+    if (key == VK_DELETE || key == VK_BACK) {
+        RemoveSelection();
+        return true;
+    }
+    if (key == VK_RETURN && p.focus >= 0) {
+        PlayRowAt(RowOfQueued(p.focus));
+        return true;
+    }
+    if (key == 'A' && ctrl) {
+        p.sel.assign(n, 1);
+        InvalidateRect(p.next, nullptr, FALSE);
+        return true;
+    }
+    return false;
+}
+
+void EndPress() {
+    p.press = p.dragging = false;
+    p.dropSlot = -1;
+    p.deferSelect = -1;
+    InvalidateRect(p.next, nullptr, FALSE);
+}
+
+// The Up next window: the editor's mouse and keys. A press selects (Ctrl toggles, Shift extends),
+// a drag moves the selected tracks, a double-click plays, the wheel scrolls.
 LRESULT CALLBACK NextProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+    // Input acts on the queue as it is now, not as the last timer tick saw it.
+    if (!p.press && (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK || msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN ||
+                     msg == WM_CONTEXTMENU))
+        Refresh(false);
     switch (msg) {
         case WM_PAINT: DoubleBufferedPaint(h, PaintNext); return 0;
         case WM_ERASEBKGND: return 1;
         case WM_SIZE:
             ClampScroll();
             return 0;
+        case WM_SETFOCUS:
+        case WM_KILLFOCUS:
+            InvalidateRect(h, nullptr, FALSE);
+            return 0;
         case WM_MOUSEWHEEL:
-            p.scroll -= GET_WHEEL_DELTA_WPARAM(wp) * RowHeight() * 3 / WHEEL_DELTA;
+            p.scroll -= GET_WHEEL_DELTA_WPARAM(wp) * S(44) * 3 / WHEEL_DELTA;
             ClampScroll();
             InvalidateRect(h, nullptr, FALSE);
             return 0;
+        case WM_LBUTTONDOWN: {
+            SetFocus(h);
+            if (int link = LinkAt(pt)) {
+                FollowLink(link);
+                return 0;
+            }
+            p.sel.resize(g.queue.size(), 0);
+            int r = RowAt(pt.y);
+            bool ctrl = (wp & MK_CONTROL) != 0, shift = (wp & MK_SHIFT) != 0;
+            if (r < 0 || !QueueRow(p.rows[r])) {
+                if (!ctrl) SelectOnly(-1);
+                p.hot = r;
+                InvalidateRect(h, nullptr, FALSE);
+                return 0;
+            }
+            int index = p.rows[r].index;
+            p.deferSelect = -1;
+            if (shift && p.anchor >= 0) {
+                if (!ctrl) p.sel.assign(g.queue.size(), 0);
+                for (int i = std::min(p.anchor, index); i <= std::max(p.anchor, index); ++i) p.sel[i] = 1;
+            } else if (ctrl) {
+                p.sel[index] = !p.sel[index];
+                p.anchor = index;
+            } else if (p.sel[index]) {
+                p.deferSelect = index;  // a drag takes the whole selection; a click only this one
+                p.anchor = index;
+            } else {
+                SelectOnly(index);
+            }
+            p.focus = index;
+            p.press = true;
+            p.pressAt = pt;
+            SetCapture(h);
+            InvalidateRect(h, nullptr, FALSE);
+            return 0;
+        }
         case WM_MOUSEMOVE: {
-            int hot = RowAt(GET_Y_LPARAM(lp));
-            if (hot != p.hot) {
+            if (p.press) {
+                if (!p.dragging && (std::abs(pt.x - p.pressAt.x) >= GetSystemMetrics(SM_CXDRAG) ||
+                                    std::abs(pt.y - p.pressAt.y) >= GetSystemMetrics(SM_CYDRAG)))
+                    p.dragging = !SelectedQueued().empty();
+                if (p.dragging) {
+                    ScrollNearEdge(pt.y);
+                    auto picked = SelectedQueued();
+                    bool allPicks = !picked.empty() && (size_t)picked.front() >= Yours();
+                    p.dropSlot = SlotAt(pt.y, !allPicks);
+                    InvalidateRect(h, nullptr, FALSE);
+                }
+                return 0;
+            }
+            int hot = RowAt(pt.y), link = LinkAt(pt);
+            if (hot != p.hot || link != p.hotLink) {
                 p.hot = hot;
+                p.hotLink = link;
                 TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, h, 0};
                 TrackMouseEvent(&tme);
                 InvalidateRect(h, nullptr, FALSE);
             }
             return 0;
         }
-        case WM_MOUSELEAVE:
-            p.hot = -1;
+        case WM_LBUTTONUP: {
+            if (!p.press) return 0;
+            bool dragging = p.dragging;
+            int slot = p.dropSlot, defer = p.deferSelect;
+            p.press = false;  // ReleaseCapture's WM_CAPTURECHANGED must not undo the drop
+            ReleaseCapture();
+            EndPress();
+            if (dragging && slot >= 0) MoveSelection(slot);
+            else if (!dragging && defer >= 0) SelectOnly(defer);
             InvalidateRect(h, nullptr, FALSE);
             return 0;
-        case WM_LBUTTONDBLCLK:
-            PlayRowAt(RowAt(GET_Y_LPARAM(lp)));
+        }
+        case WM_CAPTURECHANGED:
+            if (p.press) EndPress();
             return 0;
+        case WM_MOUSELEAVE:
+            p.hot = -1;
+            p.hotLink = 0;
+            InvalidateRect(h, nullptr, FALSE);
+            return 0;
+        case WM_SETCURSOR:
+            if (LOWORD(lp) == HTCLIENT) {
+                POINT at;
+                GetCursorPos(&at);
+                ScreenToClient(h, &at);
+                SetCursor(LoadCursorW(nullptr, p.dragging ? IDC_SIZENS : LinkAt(at) ? IDC_HAND : IDC_ARROW));
+                return TRUE;
+            }
+            break;
+        case WM_LBUTTONDBLCLK:
+            PlayRowAt(RowAt(pt.y));
+            return 0;
+        case WM_CONTEXTMENU: {
+            int row = -1;
+            if (pt.x == -1 && pt.y == -1) {
+                row = RowOfQueued(p.focus);
+                RECT rc;
+                GetClientRect(h, &rc);
+                POINT at{S(24), row >= 0 ? HeaderHeight() + Tops()[row + 1] - p.scroll : HeaderHeight()};
+                ClientToScreen(h, &at);
+                pt = at;
+            } else {
+                POINT at = pt;
+                ScreenToClient(h, &at);
+                row = RowAt(at.y);
+            }
+            ShowNextMenu(pt, row);
+            return 0;
+        }
+        case WM_KEYDOWN:
+        case WM_SYSKEYDOWN:
+            if (wp == VK_ESCAPE && p.press) {
+                ReleaseCapture();
+                return 0;
+            }
+            if ((msg == WM_KEYDOWN || wp == VK_UP || wp == VK_DOWN) && NextKey(wp)) return 0;
+            break;
     }
     return DefWindowProcW(h, msg, wp, lp);
 }
@@ -345,7 +803,7 @@ HWND UpNextPanel() { return p.next; }
 // string / row list actually differs, so an idle player stays cheap.
 void PanelsTick() {
     if (IsWindowVisible(p.now)) {
-        auto next = Upcoming(1);
+        auto next = Upcoming(1, false);
         std::wstring shown = WindowText(g.npTitle) + L'\n' + WindowText(g.npSub) + L'\n' +
                              std::to_wstring(next.empty() ? kNone : next[0].id) + L'\n' +
                              std::to_wstring(g.playing != kNone ? g.playing : g.resumeTrack) + (g.dark ? L"d" : L"l");
@@ -354,18 +812,67 @@ void PanelsTick() {
             InvalidateRect(p.now, nullptr, FALSE);
         }
     }
-    if (IsWindowVisible(p.next)) {
-        auto rows = Upcoming(200);
-        bool same = rows.size() == p.rows.size() &&
-                    std::equal(rows.begin(), rows.end(), p.rows.begin(), [](const Row& a, const Row& b) {
-                        return a.id == b.id && a.pl == b.pl && a.index == b.index;
-                    });
-        if (!same) {
-            p.rows = std::move(rows);
-            ClampScroll();
-            InvalidateRect(p.next, nullptr, FALSE);
+    if (IsWindowVisible(p.next) && !p.press) Refresh(false);
+}
+
+// A track drag from the list (app_playlists.cpp) over the queue: shows where the tracks would land
+// and says whether `screen` is over it. Off it (or with `screen` null) the mark goes.
+bool QueueDragOver(const POINT* screen) {
+    int slot = -1;
+    if (screen && IsWindowVisible(p.next)) {
+        RECT rc;
+        GetWindowRect(p.next, &rc);
+        if (PtInRect(&rc, *screen)) {
+            POINT at = *screen;
+            ScreenToClient(p.next, &at);
+            ScrollNearEdge(at.y);
+            slot = SlotAt(at.y, true);
         }
     }
+    if (slot != p.dropSlot) {
+        p.dropSlot = slot;
+        InvalidateRect(p.next, nullptr, FALSE);
+    }
+    return slot >= 0;
+}
+
+// Drops `ids` into the queue where QueueDragOver last showed; false when the drag ended elsewhere.
+bool QueueDrop(const std::vector<TrackId>& ids) {
+    int slot = p.dropSlot;
+    QueueDragOver(nullptr);
+    if (slot < 0) return false;
+    InsertIntoQueue(ids, slot);
+    Refresh();
+    return true;
+}
+
+bool QueueShown() { return p.next && IsWindowVisible(p.next); }
+
+// View > Up next: the normal window's side panel, or Big mode's Up next panel. Opening it puts the
+// keyboard there, so Ctrl+Shift+Q then the arrow keys and Delete edit the queue straight away.
+void ToggleQueue() {
+    if (g.size == ViewSize::Spotlight) {  // the spotlight always shows it
+        FocusQueue();
+        return;
+    }
+    bool show = !QueueShown();
+    if (g.size == ViewSize::Big) {
+        TogglePanel(kPanelUpNext);
+    } else {
+        if (g.size == ViewSize::Compact) SetViewSize(ViewSize::Normal);
+        g.layout.upNext = show;
+        ApplyMainLayout();
+    }
+    if (show) FocusQueue();
+    else if (GetFocus() == p.next || !GetFocus()) SetFocus(g.list);
+}
+
+// Moves the keyboard focus to the queue editor, wherever it is shown.
+void FocusQueue() {
+    if (!IsWindowVisible(p.next)) return;
+    Refresh();
+    if (p.focus < 0 && !g.queue.empty()) SelectOnly(0);
+    SetFocus(p.next);
 }
 
 }  // namespace app

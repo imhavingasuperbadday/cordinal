@@ -35,6 +35,10 @@ bool SystemUsesDarkTheme();
 double Contrast(Rgb a, Rgb b);
 // Black or white, whichever reads better on `fill` (text and glyphs drawn on the accent).
 Rgb TextOn(Rgb fill);
+// The colour a waveform turns to while paused: the palette's amber, or, when the waveform is itself
+// amber or yellow (a chosen colour, a pack theme) and the two would look alike, the text colour, so
+// pausing always shows.
+Rgb PausedWaveColor(const Palette& p, Rgb playing);
 // `h` 0..360, `s` and `v` 0..1.
 Rgb HsvColor(double h, double s, double v);
 // The hue (0..360) a cover reads as: the one its vivid pixels gather around most, or -1 for a gray,
@@ -44,6 +48,9 @@ double CoverHue(const uint8_t* pixels, size_t count, bool bgr);
 // The docked player's background: in Light and Dark, the surface faintly washed with `hue` (-1:
 // none) and, in Dark, a step lighter than the chrome around it; any other palette's own surface.
 Rgb PlayerSurface(const Palette& p, double hue);
+// An open album's panel in the album grid: in Light and Dark, the surface washed with its cover's
+// `hue` (-1: a neutral surface); any other palette's surface2 with a touch of its accent.
+Rgb AlbumPanelSurface(const Palette& p, double hue);
 // Every other playlist row is drawn this much off the list's background, Light and Dark only.
 Rgb RowStripe(const Palette& p);
 // The first legibility rule `p` breaks (PRINCIPLES.md, "Legible in every theme"), in words such as

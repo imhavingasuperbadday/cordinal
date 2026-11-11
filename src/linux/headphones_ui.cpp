@@ -12,7 +12,8 @@ namespace {
 HeadsetController g_controller;
 HeadsetInfo g_headset;
 OutputProfiles g_profiles;
-bool g_started = false;
+bool g_loaded = false;   // profiles read; Global() is valid
+bool g_started = false;  // the output poller is running
 struct HeadphonesPanel {
     Rect panel, viewport;
     float scroll = 0, maxScroll = 0;
@@ -102,12 +103,26 @@ void Activate(int index) {
 }
 }
 
-void StartHeadphones() {
-    if (g_started) return;
+void EnsureProfilesLoaded() {
+    if (g_loaded) return;
     g_profiles.Load(std::filesystem::path(ToUtf8(g.dataDir)) / "output-profiles.ini", g.settings.eq);
+    g_loaded = true;
+}
+
+// SelectOutput before Start: the first loop reads the selected node, so the lost wake does
+// not matter. A second call does nothing once the poller is running.
+void EnsureHeadsetPolling() {
+    if (g_started) return;
     g_controller.SelectOutput(g.settings.outputDevice);
     g_started = true;
     g_controller.Start();
+}
+
+void StartHeadphones() {
+    EnsureProfilesLoaded();
+    // No saved profile means nothing to apply when the output changes, so the poller stays down
+    // until the headphones page opens.
+    if (g_profiles.Any()) EnsureHeadsetPolling();
 }
 void StopHeadphones() { g_controller.Stop(); }
 void HeadphonesTick() {
@@ -130,9 +145,11 @@ void SaveHeadphoneProfiles() {
 const EqSettings& HeadphonesGlobalEq() { return g_started ? g_profiles.Global() : g.settings.eq; }
 float HeadphonesHeadroom() { return g_started ? g_profiles.Headroom() : 0; }
 void PrepareHeadphonesPanel() {
+    EnsureProfilesLoaded();
+    EnsureHeadsetPolling();
     H = HeadphonesPanel{};
     SyncPanel();
-    if (g_started) g_controller.Refresh();
+    g_controller.Refresh();
 }
 void DrawHeadphones(const Palette& p) {
     SyncPanel();

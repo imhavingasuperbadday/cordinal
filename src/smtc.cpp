@@ -184,6 +184,11 @@ void SetMetadata(const std::wstring& title, const std::wstring& artist, const st
         ComPtr<Media::IMusicDisplayProperties2> music2;
         if (SUCCEEDED(music.As(&music2))) music2->put_AlbumTitle(text.Get());
     }
+    SetCover(image);  // commits the metadata too
+}
+
+void SetCover(const std::string& image) {
+    if (!g_updater) return;
     if (image.empty() || !SetThumbnail(g_updater.Get(), image)) g_updater->put_Thumbnail(nullptr);
     g_updater->Update();
 }

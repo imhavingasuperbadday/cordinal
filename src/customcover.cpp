@@ -26,6 +26,7 @@ struct Entry {
 
 std::mutex g_mx;
 std::wstring g_dir;
+bool g_loaded = false;
 std::map<std::wstring, Entry> g_entries;        // by Key(path)
 std::map<std::wstring, std::string> g_sources;  // image file -> the https address it came from
 
@@ -100,13 +101,13 @@ std::wstring ImageName(const std::string& image, online::ImageType type) {
     return name;
 }
 
-}  // namespace
-
-void Start(const std::wstring& dataDir) {
-    std::lock_guard lock(g_mx);
+// Caller holds g_mx. An empty map is also what a profile with no covers looks like, so the
+// loaded flag is what decides whether covers.txt still has to be read.
+void EnsureLoadedLocked() {
+    if (g_loaded) return;
+    g_loaded = true;
     g_entries.clear();
     g_sources.clear();
-    g_dir = dataDir.empty() ? std::wstring() : dataDir + kPathSep + L"covers";
     if (g_dir.empty()) return;
     std::string bytes;
     if (!backup::ReadBytes(g_dir + kPathSep + L"covers.txt", bytes, 64u << 20) || !bytes.starts_with("1\n"))
@@ -144,8 +145,19 @@ void Start(const std::wstring& dataDir) {
     }
 }
 
+}  // namespace
+
+void Start(const std::wstring& dataDir) {
+    std::lock_guard lock(g_mx);
+    g_entries.clear();
+    g_sources.clear();
+    g_loaded = false;
+    g_dir = dataDir.empty() ? std::wstring() : dataDir + kPathSep + L"covers";
+}
+
 std::wstring ImageFor(const std::wstring& trackPath) {
     std::lock_guard lock(g_mx);
+    EnsureLoadedLocked();
     if (g_entries.empty()) return {};
     auto it = g_entries.find(Key(trackPath));
     return it == g_entries.end() ? std::wstring() : g_dir + kPathSep + it->second.file;
@@ -153,6 +165,7 @@ std::wstring ImageFor(const std::wstring& trackPath) {
 
 std::wstring SourceUrlFor(const std::wstring& trackPath) {
     std::lock_guard lock(g_mx);
+    EnsureLoadedLocked();
     if (g_entries.empty() || g_sources.empty()) return {};
     auto it = g_entries.find(Key(trackPath));
     if (it == g_entries.end()) return {};
@@ -166,6 +179,7 @@ void RememberImageUrl(const std::wstring& imagePath, const std::string& url) {
     const std::wstring file = cut == std::wstring::npos ? imagePath : imagePath.substr(cut + 1);
     if (file.empty() || file.find_first_of(L":") != std::wstring::npos) return;
     std::lock_guard lock(g_mx);
+    EnsureLoadedLocked();
     if (g_dir.empty()) return;
     bool used = false;
     for (const auto& [key, entry] : g_entries) used = used || entry.file == file;
@@ -183,6 +197,7 @@ bool Set(const std::vector<std::wstring>& trackPaths, const std::string& image, 
         return false;
     }
     std::lock_guard lock(g_mx);
+    EnsureLoadedLocked();
     if (g_dir.empty()) {
         error = L"cordinal has no data folder to keep covers in";
         return false;
@@ -219,6 +234,7 @@ bool Set(const std::vector<std::wstring>& trackPaths, const std::string& image, 
 
 size_t Clear(const std::vector<std::wstring>& trackPaths) {
     std::lock_guard lock(g_mx);
+    EnsureLoadedLocked();
     auto previous = g_entries;
     std::set<std::wstring> removed;
     for (const std::wstring& path : trackPaths) {
@@ -239,6 +255,7 @@ size_t Clear(const std::vector<std::wstring>& trackPaths) {
 
 size_t Count(const std::vector<std::wstring>& trackPaths) {
     std::lock_guard lock(g_mx);
+    EnsureLoadedLocked();
     size_t n = 0;
     if (!g_entries.empty())
         for (const std::wstring& path : trackPaths) n += g_entries.count(Key(path));

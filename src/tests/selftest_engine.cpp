@@ -133,13 +133,15 @@ void TestSampleConversion() {
         exactClip&=memcmp(expected.data(),actual.data(),actual.size()*sizeof(float))==0;
     }
     Check(exactClip,L"OUTPUT clipping preserves all float bits against std::clamp, including NaNs, zeros, infinities, tails and unaligned spans");
-    batch.Next(L"OUTPUT integer formats, 24-bit packing and TPDF dither preserve exact samples and step "
-               L"averages");
+    batch.Next(L"OUTPUT 32-bit integer rounding, 24-bit packing and TPDF dither preserve exact samples and "
+               L"step averages");
+    // 24-bit now dithers blocks that are not already on a step, so this sweep stays on 32-bit,
+    // which is rounded. Exact 24-bit values are checked below, and dithered 24-bit after that.
     bool exactInteger = true;
     const int rounding = std::fegetround();
     for (int mode : {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
         std::fesetround(mode);
-        for (auto format : {SampleFormat::Int24, SampleFormat::Int24In32, SampleFormat::Int32})
+        for (auto format : {SampleFormat::Int32})
         for (size_t count : {size_t(0), size_t(1), size_t(3), size_t(4), size_t(7), clipInput.size() - 1}) {
             const unsigned width = SampleBytes(format);
             std::vector<uint8_t> expected(count * width + 2, 0xA5), actual = expected;
@@ -156,7 +158,7 @@ void TestSampleConversion() {
         }
     }
     std::fesetround(rounding);
-    Check(exactInteger, L"OUTPUT integer blocks match scalar rounding in every mode, including non-finite values, saturation, tails and guards");
+    Check(exactInteger, L"OUTPUT 32-bit integer blocks match scalar rounding in every mode, including non-finite values, saturation, tails and guards");
     bool ok24 = true;
     std::vector<int32_t> values;
     for (int v = -8388608; v <= 8388607; v += 977) values.push_back(v);
@@ -186,6 +188,76 @@ void TestSampleConversion() {
     mean /= dithered.size();
     Check(bounded && std::fabs(mean - 0.25) < 0.02,
           L"OUTPUT 16-bit conversion of processed audio is TPDF-dithered: mean %.3f steps (0.25)", mean);
+
+    // 24-bit dither shares the generator but runs on fresh threads, so it neither depends on the
+    // 16-bit draw above nor moves that thread's sequence. Packed and 24-in-32 each start from the
+    // seed, so the same input must come out as the same steps.
+    batch.Next(L"OUTPUT 24-bit TPDF dither matches across packed and 24-in-32, and an exact block draws no noise");
+    constexpr size_t kDitherFrames = 48000;
+    std::vector<int32_t> wide(kDitherFrames);
+    std::vector<uint8_t> packed(kDitherFrames * 3);
+    std::thread ditherWide([&] {
+        std::vector<float> quarter(kDitherFrames, 0.25f / 8388608.0f);
+        ConvertSamples(quarter.data(), quarter.size(), SampleFormat::Int24In32, wide.data());
+    });
+    std::thread ditherPacked([&] {
+        std::vector<float> quarter(kDitherFrames, 0.25f / 8388608.0f);
+        ConvertSamples(quarter.data(), quarter.size(), SampleFormat::Int24, packed.data());
+    });
+    std::vector<int32_t> afterExact, alone;
+    std::thread withExact([&] {
+        std::vector<float> exact(8);
+        for (int i = 0; i < 8; ++i) exact[i] = (float)((i - 4) * 1000) / 8388608.0f;
+        std::vector<int32_t> sink(exact.size());
+        ConvertSamples(exact.data(), exact.size(), SampleFormat::Int24In32, sink.data());
+        std::vector<float> quarter(64, 0.25f / 8388608.0f);
+        afterExact.resize(quarter.size());
+        ConvertSamples(quarter.data(), quarter.size(), SampleFormat::Int24In32, afterExact.data());
+    });
+    std::thread withoutExact([&] {
+        std::vector<float> quarter(64, 0.25f / 8388608.0f);
+        alone.resize(quarter.size());
+        ConvertSamples(quarter.data(), quarter.size(), SampleFormat::Int24In32, alone.data());
+    });
+    ditherWide.join();
+    ditherPacked.join();
+    withExact.join();
+    withoutExact.join();
+    double mean24 = 0;
+    bool bounded24 = true, packedMatches = true;
+    for (size_t i = 0; i < kDitherFrames; ++i) {
+        const int32_t step = wide[i] >> 8;
+        mean24 += step;
+        bounded24 &= step >= -1 && step <= 1;
+        const int32_t bytes = (int32_t)((uint32_t)packed[i * 3] | (uint32_t)packed[i * 3 + 1] << 8 |
+                                        (uint32_t)packed[i * 3 + 2] << 16) << 8 >> 8;
+        packedMatches &= bytes == step;
+    }
+    mean24 /= kDitherFrames;
+    Check(bounded24 && std::fabs(mean24 - 0.25) < 0.02,
+          L"OUTPUT 24-bit conversion of processed audio is TPDF-dithered: mean %.3f steps (0.25)", mean24);
+    Check(packedMatches, L"OUTPUT packed 24-bit dither matches 24-in-32 step for step");
+    Check(afterExact == alone, L"OUTPUT an exact 24-bit block does not draw dither ahead of the next block");
+
+    batch.Next(L"OUTPUT shared mode accepts a stereo mix format and exclusive mode prefers wide integer");
+    auto accepts = [](MixLayout layout, SampleFormat format) {
+        const std::optional<SampleFormat> got = NativeMixFormat(layout);
+        return got && *got == format;
+    };
+    const MixLayout stereoFloat{2, 32, 32, 8, false};
+    const MixLayout stereo16{2, 16, 16, 4, true};
+    const MixLayout packed24{2, 24, 24, 6, true};
+    const MixLayout in32{2, 32, 24, 8, true};
+    const MixLayout stereo32{2, 32, 32, 8, true};
+    const MixLayout surround{6, 32, 32, 24, false};
+    Check(accepts(stereoFloat, SampleFormat::Float32) && accepts(stereo16, SampleFormat::Int16) &&
+              accepts(packed24, SampleFormat::Int24) && accepts(in32, SampleFormat::Int24In32) &&
+              accepts(stereo32, SampleFormat::Int32) && !NativeMixFormat(surround),
+          L"OUTPUT mix format: stereo float, 16, packed 24, 24-in-32 and 32-bit PCM are native; 6-channel float is not");
+    Check(std::size(kExclusiveFormats) == 5 && kExclusiveFormats[0] == SampleFormat::Int32 &&
+              kExclusiveFormats[1] == SampleFormat::Int24In32 && kExclusiveFormats[2] == SampleFormat::Int24 &&
+              kExclusiveFormats[3] == SampleFormat::Float32 && kExclusiveFormats[4] == SampleFormat::Int16,
+          L"OUTPUT exclusive format order is 32-bit, 24-in-32, packed 24, float, then 16-bit");
 }
 
 // Exclusive output opens the device at each track's own rate. It takes the audio device away
@@ -1037,12 +1109,12 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
         g_events = &ev;
         const bool initialized = deferred.Init(hwnd, error, true);
         deferred.SetVolume(0);
-        const bool stayedIdle = initialized && !deferred.Output().ready;
+        const bool stayedIdle = initialized && !deferred.Output().ready && !deferred.DecodeThreadStarted();
         deferred.Play(PlayItem{901, gapDir + L"\\a.flac"});
         Pump(2000, [&] { return deferred.Position() > 0.1; });
-        batch.Next(L"ENGINE a deferred device stays idle until the first Play, then opens and produces "
-                   L"audible progress");
-        Check(stayedIdle && deferred.Output().ready && deferred.Position() > 0.1,
+        batch.Next(L"ENGINE a deferred device and its decode thread stay idle until the first Play, "
+                   L"then open and produce audible progress");
+        Check(stayedIdle && deferred.Output().ready && deferred.DecodeThreadStarted() && deferred.Position() > 0.1,
               L"ENGINE deferred device opens on first Play and produces audible-position progress");
         deferred.Stop(); Pump(350); deferred.Shutdown(); g_events = nullptr;
     }

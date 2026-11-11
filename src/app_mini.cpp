@@ -345,7 +345,8 @@ LRESULT CALLBACK MiniProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             m.seeking = false;
             return 0;
         case WM_MOUSEWHEEL:
-            SetVolumePercent(g.volumePercent + (GET_WHEEL_DELTA_WPARAM(wp) > 0 ? 5 : -5));
+            // With cordinal's own volume control off, the system sets the level and the wheel leaves it.
+            if (g.softwareVolume) SetVolumePercent(g.volumePercent + (GET_WHEEL_DELTA_WPARAM(wp) > 0 ? 5 : -5));
             return 0;
         case WM_KEYDOWN: {
             bool ctrl = GetKeyState(VK_CONTROL) < 0;

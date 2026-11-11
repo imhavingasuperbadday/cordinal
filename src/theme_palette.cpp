@@ -132,6 +132,22 @@ double Contrast(Rgb a, Rgb b) {
 
 Rgb TextOn(Rgb fill) { return Contrast(fill, 0xFFFFFF) >= Contrast(fill, 0x000000) ? 0xFFFFFF : 0x000000; }
 
+Rgb PausedWaveColor(const Palette& p, Rgb playing) {
+    auto apart = [playing](Rgb c) {
+        int dr = (int)((playing >> 16) & 255) - (int)((c >> 16) & 255);
+        int dg = (int)((playing >> 8) & 255) - (int)((c >> 8) & 255);
+        int db = (int)(playing & 255) - (int)(c & 255);
+        // 70 of 441: the light theme's red accent sits 99 from its dark amber and must keep that amber.
+        return dr * dr + dg * dg + db * db >= 70 * 70;
+    };
+    if (apart(p.amber)) return p.amber;
+    if (apart(p.text)) return p.text;
+    // Both neighbours are taken (an amber waveform on an amber-ish theme): dim it halfway into the background.
+    auto half = [](int a, int b) { return (a + b) / 2; };
+    return half((playing >> 16) & 255, (p.bg >> 16) & 255) << 16 | half((playing >> 8) & 255, (p.bg >> 8) & 255) << 8 |
+           half(playing & 255, p.bg & 255);
+}
+
 Rgb HsvColor(double h, double s, double v) {
     h = std::fmod(std::fmod(h, 360) + 360, 360);
     double c = v * s, x = c * (1 - std::fabs(std::fmod(h / 60, 2) - 1)), m = v - c;
@@ -191,6 +207,14 @@ Rgb PlayerSurface(const Palette& p, double hue) {
     Rgb base = p.dark ? Blend(p.surface, p.text, 0.025) : p.surface;
     if (hue < 0) return base;
     return p.dark ? Blend(base, HsvColor(hue, 0.5, 0.45), 0.09) : Blend(base, HsvColor(hue, 0.4, 0.9), 0.12);
+}
+
+// Stronger than the player's wash, since the panel is the open album's own ground, but kept low enough
+// that body text, secondary text and the accent stay legible on every hue (a self-test checks).
+Rgb AlbumPanelSurface(const Palette& p, double hue) {
+    if (!Tinted(p)) return Blend(p.surface2, p.accent, p.dark ? 0.16 : 0.10);
+    if (hue < 0) return p.dark ? p.surface2 : p.surface;
+    return p.dark ? Blend(p.surface2, HsvColor(hue, 0.6, 0.5), 0.16) : Blend(p.surface, HsvColor(hue, 0.4, 0.92), 0.22);
 }
 
 Rgb RowStripe(const Palette& p) { return Tinted(p) ? Blend(p.bg, p.text, p.dark ? 0.022 : 0.02) : p.bg; }

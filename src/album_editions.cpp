@@ -14,7 +14,24 @@
 #include <unordered_set>
 
 std::vector<AlbumGroup> g_albumGroups;
-std::map<TrackId, TrackMusicBrainz> g_trackMusicBrainz;
+TrackMusicBrainzTable g_trackMusicBrainz;
+
+void TrackMusicBrainzTable::Set(TrackId id, std::string_view releaseGroup, std::string_view release) {
+    if (releaseGroup.empty() && release.empty()) {
+        ids_.erase(id);
+        return;
+    }
+    ids_[id] = {pool_.Intern(releaseGroup), pool_.Intern(release)};
+}
+
+TrackMusicBrainzTable::Ids TrackMusicBrainzTable::Get(TrackId id) const {
+    const Handles* handles = ids_.find(id);
+    return handles ? Ids{pool_.Get(handles->releaseGroup), pool_.Get(handles->release)} : Ids{};
+}
+
+size_t TrackMusicBrainzTable::MemoryBytes() const {
+    return ids_.size() * sizeof(TrackIdMap<Handles>::Entry) + pool_.Bytes();
+}
 
 namespace {
 
@@ -397,15 +414,9 @@ std::string NormalizedTitle(TrackId id) {
     return NormalizeAlbumText(ToUtf8(StemOf(g_lib.Path(id))));
 }
 
-std::string ReleaseIdForTrack(TrackId id) {
-    auto it = g_trackMusicBrainz.find(id);
-    return it == g_trackMusicBrainz.end() ? std::string{} : it->second.release;
-}
+std::string ReleaseIdForTrack(TrackId id) { return std::string(g_trackMusicBrainz.Get(id).release); }
 
-std::string ReleaseGroupForTrack(TrackId id) {
-    auto it = g_trackMusicBrainz.find(id);
-    return it == g_trackMusicBrainz.end() ? std::string{} : it->second.releaseGroup;
-}
+std::string ReleaseGroupForTrack(TrackId id) { return std::string(g_trackMusicBrainz.Get(id).releaseGroup); }
 
 struct Candidate {
     std::string artist, album, date;
@@ -728,7 +739,7 @@ void AlbumGroupsChanged() {
 
 void ResetAlbumGroups() {
     std::vector<AlbumGroup>().swap(g_albumGroups);
-    std::map<TrackId, TrackMusicBrainz>().swap(g_trackMusicBrainz);
+    g_trackMusicBrainz = {};
     s_index = AlbumTrackIndex{};
     s_nextGroup = s_nextEdition = 1;
     s_idsDirty = true;
@@ -782,8 +793,7 @@ uint32_t PreferredEditionId(const AlbumGroup& group) {
 }
 
 void SetTrackMusicBrainz(TrackId id, std::string_view releaseGroup, std::string_view release) {
-    if (releaseGroup.empty() && release.empty()) g_trackMusicBrainz.erase(id);
-    else g_trackMusicBrainz[id] = {std::string(releaseGroup), std::string(release)};
+    g_trackMusicBrainz.Set(id, releaseGroup, release);
 }
 
 bool AutoGroupAlbums() {
@@ -914,9 +924,11 @@ void RemapAlbumGroups(const std::vector<TrackId>& mapping) {
         FixArt(group);
     }
     DropEmpty(g_albumGroups);
-    std::map<TrackId, TrackMusicBrainz> musicBrainz;
-    for (auto& [id, value] : g_trackMusicBrainz)
-        if (id < mapping.size() && mapping[id] != kInvalidTrack) musicBrainz[mapping[id]] = std::move(value);
+    // Rebuilt rather than renumbered in place: the new table pools only the ids still in use.
+    TrackMusicBrainzTable musicBrainz;
+    g_trackMusicBrainz.ForEach([&](TrackId id, TrackMusicBrainzTable::Ids ids) {
+        if (id < mapping.size() && mapping[id] != kInvalidTrack) musicBrainz.Set(mapping[id], ids.releaseGroup, ids.release);
+    });
     g_trackMusicBrainz = std::move(musicBrainz);
     AlbumGroupsChanged();
 }
@@ -1447,8 +1459,8 @@ bool ApplyMusicBrainzReleaseGroup(std::string_view artist, std::string_view titl
 
 namespace {
 
-void PutString(ByteWriter& w, const std::string& text) {
-    std::string clean = text;
+void PutString(ByteWriter& w, std::string_view text) {
+    std::string clean(text);
     std::replace(clean.begin(), clean.end(), '\0', ' ');
     std::string_view view = clean;
     if (view.size() > kMaxField) {
@@ -1536,7 +1548,7 @@ bool DecodeAlbumArt(std::string_view data, uint64_t trackCount, const std::vecto
 }
 
 std::string EncodeAlbumDatabase(const std::vector<AlbumGroup>& groups,
-                                const std::map<TrackId, TrackMusicBrainz>& musicBrainz,
+                                const TrackMusicBrainzTable& musicBrainz,
                                 const std::vector<uint32_t>& newId) {
     std::string out;
     ByteWriter w(out);
@@ -1637,24 +1649,24 @@ std::string EncodeAlbumDatabase(const std::vector<AlbumGroup>& groups,
             w.U(item.track);
         }
     }
-    std::vector<std::pair<uint32_t, const TrackMusicBrainz*>> mb;
-    for (const auto& [id, value] : musicBrainz)
-        if (id < newId.size() && newId[id] != UINT32_MAX && (!value.releaseGroup.empty() || !value.release.empty()))
-            mb.emplace_back(newId[id], &value);
+    std::vector<std::pair<uint32_t, TrackMusicBrainzTable::Ids>> mb;
+    musicBrainz.ForEach([&](TrackId id, TrackMusicBrainzTable::Ids ids) {
+        if (id < newId.size() && newId[id] != UINT32_MAX) mb.emplace_back(newId[id], ids);
+    });
     std::sort(mb.begin(), mb.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
     w.U(mb.size());
     uint32_t previous = 0;
-    for (const auto& [index, value] : mb) {
+    for (const auto& [index, ids] : mb) {
         w.U(index - previous);
         previous = index;
-        PutString(w, value->releaseGroup);
-        PutString(w, value->release);
+        PutString(w, ids.releaseGroup);
+        PutString(w, ids.release);
     }
     return out;
 }
 
 bool DecodeAlbumDatabase(std::string_view data, uint64_t trackCount, const std::vector<TrackId>* savedToId,
-                         std::vector<AlbumGroup>* groups, std::map<TrackId, TrackMusicBrainz>* musicBrainz) {
+                         std::vector<AlbumGroup>* groups, TrackMusicBrainzTable* musicBrainz) {
     ByteReader r(data);
     if (r.U(1) != 1) return false;
     uint64_t groupCount = r.U(std::min<uint64_t>(1u << 20, data.size() + 1));
@@ -1729,16 +1741,16 @@ bool DecodeAlbumDatabase(std::string_view data, uint64_t trackCount, const std::
         SortEditions(group);
         loaded.push_back(std::move(group));
     }
-    std::map<TrackId, TrackMusicBrainz> loadedMb;
+    TrackMusicBrainzTable loadedMb;
     uint64_t mbCount = r.U(trackCount);
     uint64_t index = 0;
+    std::string releaseGroup, release;
     for (uint64_t i = 0; i < mbCount && r.ok; ++i) {
         if (!ReadTrackIndex(r, trackCount, index)) return false;
-        TrackMusicBrainz value;
-        if (!ReadString(r, value.releaseGroup) || !ReadString(r, value.release)) return false;
+        if (!ReadString(r, releaseGroup) || !ReadString(r, release)) return false;
         TrackId id = LiveId(index, savedToId);
         if (id == kInvalidTrack) return false;
-        loadedMb[id] = std::move(value);
+        loadedMb.Set(id, releaseGroup, release);
     }
     if (!r.ok || !r.Done()) return false;
     std::sort(loaded.begin(), loaded.end(), [](const AlbumGroup& a, const AlbumGroup& b) { return a.id < b.id; });

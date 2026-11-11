@@ -9,7 +9,7 @@ One 1.8 MB program. No installer, no runtime, no codecs to add.
 
 <div align="center">
 
-Current release: **0.1.9** · `cordinal.exe`, 1,792,512 bytes<br>
+Current release: **0.1.10**<br>
 **[Download](https://github.com/imhavingasuperbadday/cordinal/releases/latest)** ·
 [Getting started](#getting-started) · [Guide](#guide) · [Building](#building) ·
 [Issues](https://github.com/imhavingasuperbadday/cordinal/issues)
@@ -33,7 +33,7 @@ library, and treats your files carefully: every tag write is atomic and can be u
 
 ### Playback and sound
 
-- Gapless playback, exclusive bit-perfect output, speed and tempo control
+- Gapless playback or a crossfade between tracks, exclusive bit-perfect output, speed and tempo control
 - Sample-rate conversion that preserves treble and suppresses aliasing
 - ReplayGain with a built-in loudness scanner
 - Ten-band equalizer with headphone (AutoEq) profiles, crossfeed and per-output settings
@@ -53,7 +53,7 @@ Game Boy, Genesis, Commodore 64) and cordinal's own lossless `.cord`.
 - Track list grouped by album, cover grid, albums with tracks, artists, and a column browser
 - An optional Inbox to review new music before it joins the library
 - Album editions (remaster, deluxe, regional...) sharing one tile, with an edition selector
-- Static playlists, rules-based auto-playlists, a play queue and Play next
+- Static playlists, rules-based auto-playlists, Play next and a queue you can reorder by dragging
 - M3U/M3U8 and PLS import and export; undo and redo for playlist changes
 - Steam soundtrack import, Copy to folder or device, and classic iPod sync
 
@@ -103,6 +103,7 @@ cordinal runs on Windows 10 and 11. For Linux, see [Linux](#linux-preview).
 | Left / Right | Seek 5 seconds |
 | Ctrl+Left / Ctrl+Right | Previous / next |
 | Ctrl+Enter / Ctrl+Q | Play next / add to queue |
+| Ctrl+Shift+Q | Up next (the queue) |
 | Ctrl+F | Search |
 | Alt+Enter | Edit tags |
 | Ctrl+Z / Ctrl+Y | Undo the last playlist change or tag edit / redo a playlist change |
@@ -163,8 +164,24 @@ played this month" or "added since 2026-01-01 and never played". Rules cover tag
 ratings, play and skip counts, recent plays, dates added and played, length, bitrate, sample rate,
 channels, BPM, file size and measured track gain, in nested ALL/ANY groups with an optional limit.
 
+Auto-playlists share one tab, where the first of them sits, named after the one you opened last
+(⚡ Top rated ▾). Click it again for a menu of all of them, **New auto-playlist...** and **Edit
+rules...** (on Windows, Down opens it from the keyboard; Ctrl+Tab steps through every auto-playlist
+too). **Preferences ▸ View ▸ One tab for auto-playlists** gives each its own tab instead.
+
+While a song from an album plays, the **Now Playing** tab lists only that album, and moves on with
+playback to the next album. Type in its search box to look through the whole list; songs without an
+album always show all of it. **Preferences ▸ View ▸ Now Playing shows the playing album** turns this
+off.
+
 Ctrl+Z undoes changes to a playlist (adding, removing, moving, sorting, clearing) and Ctrl+Y redoes
 them, for the session; Ctrl+Z takes back a tag edit instead when that came last.
+
+**View ▸ Up next** (Ctrl+Shift+Q) opens the queue beside the list, or as Big mode's Up next panel.
+It lists what you queued, numbered in play order, then what the playlist plays after it.
+Drag queued tracks to reorder them, or drag tracks from the list onto it to queue them at that
+spot. Delete removes the selected tracks, Alt+Up and Alt+Down move them, Enter or a double-click
+plays one now, and right-click has Move to the top or bottom, Remove and Clear the queue.
 
 **Playback ▸ Choose by taste** (also **Preferences ▸ Playback**) is off until you turn it on. Track
 shuffle and **Keep playing like this** then follow songs you come back to, finish, rate and rewind
@@ -176,6 +193,11 @@ you finish them, not by how many of their songs you have, and about one track-sh
 stays plain shuffle, so songs it passed over still come up. Mood comes from a waveform or a
 ReplayGain scan, so it starts once those exist. Album shuffle still plays each album in order.
 
+While taste is choosing (track shuffle or Keep playing like this, not Repeat track), its next five
+picks wait in the queue under **Picked by taste**, after anything you queued yourself, and a new
+one joins as each plays. Remove a pick to skip it, drag it up among yours or choose **Keep** to make
+sure it plays, or click **New picks** for others. Turning taste off takes the picks out again.
+
 ### Sound and ReplayGain
 
 The bitcrusher is in **Playback ▸ Bitcrush**; its depth, sample rate and mix are in
@@ -184,6 +206,13 @@ headroom for each output; remembering an output's EQ is opt-in. Supported headse
 offers battery, sidetone, automatic power-off, Bluetooth do-not-disturb and onboard EQ controls,
 and Apply writes only the choices you select. On Linux, hardware access needs normal read/write
 access to the headset's hidraw interface.
+
+**Preferences ▸ Playback ▸ Crossfade between tracks** fades the end of one track into the next when
+playback moves on by itself (1 to 8 seconds; off by default). Tracks of the same album stay gapless
+unless you turn on **Crossfade within an album**, and a track you start yourself, a radio stream or a
+section loop still changes at once. **Preferences ▸ Output** sets the volume curve (how the slider's
+travel turns into loudness) and can turn off cordinal's own volume control, sending the music at full
+level so only Windows, PipeWire or your amplifier sets it; mute still works.
 
 **Preferences ▸ ReplayGain** has **Scan selection**, **Scan playlist** and **Scan library**. Scan
 library remeasures every available library track, including earlier scans and failed attempts,
@@ -206,6 +235,16 @@ title, artist, album, album artist, year, genre, track number or composer, or an
 it is a search, so you can also type `missing:year`, `missing:genre`, `missing:any` and so on in the
 search box, and combine it with other words. Select the tracks it finds and press Alt+Enter to fill
 the gap; each track leaves the list once it has the tag.
+
+**Make album...** (the Edit menu or a track's right-click menu) turns the selected tracks into one
+album, or tidies an album you already have. It starts from what the tracks share and gives the
+album a title, album artist, year, genre, disc number and cover (a file, or **Find cover online**);
+tracks by different artists start as a compilation by Various Artists. Put the tracks in order with
+**Move up** and **Move down** (Alt+Up and Alt+Down), **Order** (by track number, title or file name,
+or reversed) and **Remove**; **Number the tracks in this order** writes the track numbers to match.
+**Set every track's artist to the album artist** is there for albums whose songs credit guests. On
+Windows the window stays open beside the list, so **Add selected** brings in more tracks. Saving
+writes only the tags that change, as one edit that **Undo last tag edit** takes back.
 
 When a track has no title, artist or track number in its tags (the list then shows its file name),
 the editor offers them from the file name, such as `03 - Artist - Title`, as gray hints in the empty
@@ -314,6 +353,9 @@ protected purchases in their authorized app.
 - **Seek bar shows** the **Whole song**, or **Live audio**, a moving picture of what is being heard
   (optionally **with progress**). Radio always shows live audio, and seeking works either way.
 - **Seek bar glow** draws a soft halo that pulses with the beat, brighter where the song is loud.
+- **Fade the waveform when pausing** (on by default) fades the waveform between its playing colour
+  and amber instead of switching at once. If your waveform colour is itself amber or yellow, paused
+  turns the text colour instead, so you can still tell the two apart.
 - **Moodbar colours**: Theme, Vivid (the whole colour wheel), Spectrum (red bass, green mids, blue
   treble), Warm, Cool, Colour-blind friendly (blue to orange) or Single colour. **Mood waveform
   colours** can give the Mood waveform a scheme of its own.
@@ -327,7 +369,7 @@ protected purchases in their authorized app.
   it instead of jumping. Scrollbar drags and keyboard focus still move at once. It is off by default.
 
 Over the whole song, both moodbar looks draw a playhead line in the playback state's colour: amber
-while paused, red when playback will stop or the track failed. The track list's **Mood** column
+while paused (the text colour if the waveform is amber or yellow), red when playback will stop or the track failed. The track list's **Mood** column
 shows each track's moodbar; tracks not seen before fill in while nothing else is being prepared, and
 a ReplayGain scan prepares them all.
 
@@ -356,6 +398,13 @@ helper visualizers in their own windows. Each gets a read-only audio feed and st
 is turned off or cordinal closes.
 
 **Preferences ▸ View ▸ Draw with the graphics card** switches drawing immediately.
+**Preferences ▸ Library ▸ Album cover spacing** sets the least space between covers in the Albums and
+Artists views.
+
+**Preferences** (Ctrl+,) groups its pages under Sound, Look, Collection and General. Each page is
+divided by headings, every setting has its control beside its explanation, and a **Reset** appears
+once it differs from the default. **All settings** shows every page in turn, and the search covers
+them all.
 
 ### Your data
 
@@ -403,18 +452,22 @@ carries those.
 
 A native Linux build shares the library, decoders, tags and engine with Windows. Its window is drawn
 through SDL3, sound goes through PipeWire, and media keys and the tray use D-Bus. It has the same
-features as Windows but is less tested than the Windows build.
+features as Windows but is less tested than the Windows build. The published program is built on
+Debian 13 for 64-bit x86, and it uses that system's libraries: SDL3, SDL3_ttf, PipeWire, libsystemd,
+fontconfig and OpenSSL 3.
 
-On Arch Linux, one command installs it and the libraries it needs:
+On Debian 13 and newer, Ubuntu 25.10 and newer, Fedora 42 and newer, openSUSE Tumbleweed, and Arch
+and its derivatives, one command installs it. Libraries come from the repositories already configured
+on the machine. The download is checked against the release checksum before it is unpacked.
 
 ```sh
 curl -fsSL https://github.com/imhavingasuperbadday/cordinal/releases/latest/download/install.sh | sh
 ```
 
 Run it again to update. Replace the final `sh` with `sh -s -- --uninstall` to remove it; your
-library and settings stay. On other distributions, use `cordinal-linux-x64.tar.gz` from
-[Releases](https://github.com/imhavingasuperbadday/cordinal/releases/latest) with the libraries
-listed below, or build from source.
+library and settings stay. `sh -s -- --dry-run` prints the package names and stops. Ubuntu 24.04 and
+Debian 12 do not publish SDL3, and Alpine's musl C library cannot run this build. To install a
+release you already unpacked, run `sh install.sh` in that directory.
 
 ## Building
 
@@ -429,8 +482,8 @@ pinned UPX packer and checking its hash. Releases use cordinal's own packer: `bu
 additionally needs [LLVM-MinGW](https://github.com/mstorsjo/llvm-mingw)'s `clang++` on `PATH` and
 Python 3.14 (see [cdpack/README.md](cdpack/README.md)). Every mode writes `build\cordinal.exe`.
 
-**Linux** needs CMake, a C++20 compiler, SDL3, SDL3_ttf, PipeWire, systemd-libs, fontconfig and
-OpenSSL:
+**Linux** needs CMake, a C++20 compiler, SDL3, SDL3_ttf, PipeWire, libsystemd, fontconfig and
+OpenSSL 3:
 
 ```sh
 cmake -S . -B build-linux && cmake --build build-linux

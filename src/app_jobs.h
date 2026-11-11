@@ -9,6 +9,9 @@ namespace app {
 bool ScanInProgress();
 
 void QueueTags(const std::vector<TrackId>& ids);
+// After LoadState. The tag thread starts only when a batch is already waiting or a later
+// batch is dispatched. QueueTags does not start it, so a test can drain the queue itself.
+void ArmTagWorker(HWND hwnd);
 void AcceptTagBatch(std::vector<TagResult>* results);
 void TagWorker(HWND hwnd);
 float RgGainFor(TrackId id);

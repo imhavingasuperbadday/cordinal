@@ -11,7 +11,9 @@
 
 namespace customcover {
 
-// Loads `dataDir`/covers/covers.txt; call once before the art workers start.
+// Records `dataDir`/covers and drops any index already in memory. The files are read on the
+// first lookup or change, still before a cover is decoded: art workers call ImageFor first.
+// Call once before those workers start. A later Start reads the files again on the next use.
 void Start(const std::wstring& dataDir);
 // The image file chosen for the track at `trackPath` (as the library names it), or "" for none.
 std::wstring ImageFor(const std::wstring& trackPath);

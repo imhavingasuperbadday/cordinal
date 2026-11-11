@@ -2,6 +2,7 @@
 // correspondence, persistence, migration and search. The suite owns g_lib and resets the album
 // database before and after itself so it can run alone or after another suite.
 #include "album_editions.h"
+#include "album_maker.h"
 #include "library_archive.h"
 #include "musicbrainz.h"
 #include "selftest_common.h"
@@ -495,5 +496,90 @@ void TestAlbumEditions(const std::wstring& scratch) {
     Check(noCrash && ambiguousCopies,
           L"EDITIONS empty metadata and two copies of one full title create no speculative group");
 
+    ResetLibrary();
+}
+
+// Edit > Make album's model (album_maker.h), shared by both platforms: the values a draft starts with,
+// ordering and moving tracks, and the edits that turn them into one album and nothing more.
+void TestAlbumMaker(const std::wstring& scratch) {
+    testlog::Batch batch;
+    ResetLibrary();
+    // Loose singles by two artists, unnumbered except one, in no album.
+    TrackId a = AddTrack(scratch + L"\\maker\\b-song.flac", "Rook", "", "Bravo", "2020", 0);
+    TrackId b = AddTrack(scratch + L"\\maker\\a-song.flac", "Rook", "", "Alpha", "2020", 0);
+    TrackId c = AddTrack(scratch + L"\\maker\\c-song.flac", "Pawn", "", "Charlie", "2021", 7);
+    g_lib[a].albumArtist = g_lib[b].albumArtist = g_lib[c].albumArtist = 0;
+    AlbumDraft d = DraftAlbum(g_lib, {a, b, a, c, 999999});
+    batch.Next(L"a new album starts from what the tracks share");
+    Check(d.tracks == std::vector<TrackId>{a, b, c} && d.title.empty() && d.artist == L"Various Artists" &&
+              d.compilation && d.date == L"2020" && d.numberTracks,
+          L"loose tracks by different artists start as a numbered compilation in the order given, each once");
+    Check(AlbumDraftProblem(d) == L"Give the album a title." && AlbumEdits(g_lib, d).empty(),
+          L"an album without a title can't be saved and writes nothing");
+    d.title = L"  Mixtape  ";
+    d.compilation = false;
+    d.artist = L"Rook";
+    d.date.clear();
+    auto edits = AlbumEdits(g_lib, d);
+    bool written = edits.size() == 3;
+    for (size_t i = 0; written && i < edits.size(); ++i) {
+        const TagEdit& e = edits[i].second;
+        written = edits[i].first == d.tracks[i] && e.album == std::optional<std::string>("Mixtape") &&
+                  e.albumArtist == std::optional<std::string>("Rook") && e.track == (uint32_t)i + 1 &&
+                  e.trackTotal == 3u && !e.date && !e.genre && !e.artist && !e.cover;
+    }
+    Check(written && edits[2].second.compilation == std::nullopt,
+          L"saving sets album, album artist and numbers in order, and leaves empty fields and covers alone");
+    // An album already tagged that way needs no write at all.
+    for (size_t i = 0; i < d.tracks.size(); ++i) {
+        TagData tags;
+        tags.artist = i == 2 ? "Pawn" : "Rook";
+        tags.albumArtist = "Rook";
+        tags.album = "Mixtape";
+        tags.title = i == 0 ? "Bravo" : i == 1 ? "Alpha" : "Charlie";
+        tags.track = (uint32_t)i + 1;
+        tags.trackTotal = 3;
+        g_lib.ApplyTags(d.tracks[i], tags);
+    }
+    Check(AlbumEdits(g_lib, d).empty(), L"an album that is already as drafted rewrites no file");
+    d.artistToTracks = true;
+    edits = AlbumEdits(g_lib, d);
+    Check(edits.size() == 1 && edits[0].first == c && edits[0].second.artist == std::optional<std::string>("Rook"),
+          L"Set every track's artist writes only the tracks whose artist differs");
+    d.artistToTracks = false;
+    // A numbered album keeps its numbers and order.
+    AlbumDraft numbered = DraftAlbum(g_lib, {c, a, b});
+    Check(numbered.tracks == std::vector<TrackId>{a, b, c} && !numbered.numberTracks && numbered.title == L"Mixtape" &&
+              numbered.artist == L"Rook" && !numbered.compilation,
+          L"tracks that are already numbered keep that order and their numbers");
+    // Ordering and moving.
+    OrderAlbum(g_lib, d, AlbumOrder::Title);
+    bool byTitle = d.tracks == std::vector<TrackId>{b, a, c};
+    OrderAlbum(g_lib, d, AlbumOrder::FileName);
+    bool byFile = d.tracks == std::vector<TrackId>{b, a, c};
+    OrderAlbum(g_lib, d, AlbumOrder::Reverse);
+    bool reversed = d.tracks == std::vector<TrackId>{c, a, b};
+    Check(byTitle && byFile && reversed, L"the album orders by title, by file name and in reverse");
+    auto moved = MoveAlbumTracks(d, {1, 2}, -1);
+    bool up = d.tracks == std::vector<TrackId>{a, b, c} && moved == std::vector<size_t>{0, 1};
+    moved = MoveAlbumTracks(d, {0, 1}, -1);
+    bool stuck = d.tracks == std::vector<TrackId>{a, b, c} && moved == std::vector<size_t>{0, 1};
+    moved = MoveAlbumTracks(d, {0, 2}, 1);
+    bool scattered = d.tracks == std::vector<TrackId>{a, b, c} && moved == std::vector<size_t>{0, 2};
+    moved = MoveAlbumTracks(d, {0}, 1);
+    bool down = d.tracks == std::vector<TrackId>{b, a, c} && moved == std::vector<size_t>{1};
+    Check(up && stuck && scattered && down, L"selected tracks move up and down together and stop at the ends");
+    TrackId extra = AddTrack(scratch + L"\\maker\\d-song.flac", "Rook", "", "Delta", "2020", 0);
+    size_t added = AddAlbumTracks(g_lib, d, {a, extra, extra});
+    Check(added == 1 && d.tracks.back() == extra && d.tracks.size() == 4, L"Add selected adds only the tracks not in the album yet");
+    d.cover = std::string("\xFF\xD8\xFF\xE0", 4);
+    d.disc = 3;
+    d.discTotal = 2;
+    Check(!AlbumDraftProblem(d).empty(), L"a disc number past the number of discs is refused");
+    d.discTotal = 3;
+    edits = AlbumEdits(g_lib, d);
+    bool covered = edits.size() == 4;
+    for (const auto& [id, e] : edits) covered = covered && e.cover && e.cover->size() == 4 && e.disc == 3u && e.discTotal == 3u;
+    Check(covered, L"a chosen cover and disc go to every track of the album");
     ResetLibrary();
 }

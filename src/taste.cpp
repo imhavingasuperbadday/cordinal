@@ -13,6 +13,7 @@
 #include "peaks.h"
 #include "playlog.h"
 #include "sections.h"
+#include "track_set.h"
 
 #include <algorithm>
 #include <array>
@@ -79,8 +80,10 @@ struct Model {
     bool ready = false;
 };
 
-std::unordered_map<TrackId, std::array<uint16_t, kBins>> g_parts;
-std::unordered_map<TrackId, MoodSketch> g_moods;
+// Per-track records in id order (track_set.h). A mood is 6 bytes and every song whose waveform was
+// drawn has one, so a hash node per song cost several times the sketch itself.
+TrackIdMap<std::array<uint16_t, kBins>> g_parts;
+TrackIdMap<MoodSketch> g_moods;
 std::vector<TrackId> g_session;
 Model g_model;
 bool g_modelDirty = true;
@@ -120,12 +123,12 @@ void CreditSpan(uint16_t* bins, double start, double end, double duration, int a
 
 // Bins hold only rewinds and jumps, so a song gathered around one passage is one someone goes back to.
 double PartMultiplier(TrackId id) {
-    auto it = g_parts.find(id);
-    if (it == g_parts.end()) return 1;
+    const auto* bins = g_parts.find(id);
+    if (!bins) return 1;
     double sum = 0, peak = 0;
     for (int i = 0; i < kBins; ++i) {
-        sum += it->second[i];
-        peak = std::max(peak, (double)it->second[i]);
+        sum += (*bins)[i];
+        peak = std::max(peak, (double)(*bins)[i]);
     }
     if (sum < 24 || peak <= 0) return 1;
     double focus = peak / (sum / kBins);
@@ -196,8 +199,8 @@ bool Fresh(const Library& library) {
 }
 
 const MoodSketch* SketchOf(TrackId id) {
-    auto it = g_moods.find(id);
-    return it == g_moods.end() || !it->second.Known() ? nullptr : &it->second;
+    const MoodSketch* sketch = g_moods.find(id);
+    return sketch && sketch->Known() ? sketch : nullptr;
 }
 
 // How alike two songs are on what the library knows: artist, album, genre, era, tempo, ReplayGain
@@ -519,9 +522,9 @@ void ObservePlayback(TrackId id, double previous, double position, double durati
         CreditSpan(g_parts[id].data(), position, previous, duration, 240);
         g_save = true;
     } else if (delta >= 4.0) {
-        auto it = g_parts.find(id);
-        if (it == g_parts.end()) return;
-        CreditSpan(it->second.data(), previous, position, duration, -36);
+        auto* bins = g_parts.find(id);
+        if (!bins) return;
+        CreditSpan(bins->data(), previous, position, duration, -36);
         g_save = true;
     }
 }
@@ -543,10 +546,9 @@ void NoteMood(TrackId id, const Peaks& peaks) {
     if (id == kInvalidTrack) return;
     MoodSketch sketch = SketchPeaks(peaks);
     if (!sketch.Known()) return;
-    auto it = g_moods.find(id);
-    if (it != g_moods.end() && it->second.bass == sketch.bass && it->second.mid == sketch.mid &&
-        it->second.treble == sketch.treble && it->second.energy == sketch.energy && it->second.arc == sketch.arc &&
-        it->second.contrast == sketch.contrast)
+    const MoodSketch* known = g_moods.find(id);
+    if (known && known->bass == sketch.bass && known->mid == sketch.mid && known->treble == sketch.treble &&
+        known->energy == sketch.energy && known->arc == sketch.arc && known->contrast == sketch.contrast)
         return;
     g_moods[id] = sketch;
     TouchModel();
@@ -556,7 +558,7 @@ void NoteMood(TrackId id, const Peaks& peaks) {
 TasteState CurrentTaste() {
     TasteState state;
     state.parts.reserve(g_parts.size());
-    for (const auto& [id, bins] : g_parts) {
+    for (const auto& [id, bins] : g_parts) {  // in id order, as the section is saved
         bool any = false;
         for (int i = 0; i < kBins; ++i) any = any || bins[i];
         if (!any) continue;
@@ -565,11 +567,9 @@ TasteState CurrentTaste() {
         std::copy(bins.begin(), bins.end(), row.bin);
         state.parts.push_back(row);
     }
-    std::sort(state.parts.begin(), state.parts.end(), [](const TasteParts& a, const TasteParts& b) { return a.id < b.id; });
     state.moods.reserve(g_moods.size());
     for (const auto& [id, mood] : g_moods)
         if (mood.Known()) state.moods.push_back({id, mood});
-    std::sort(state.moods.begin(), state.moods.end(), [](const TasteMood& a, const TasteMood& b) { return a.id < b.id; });
     return state;
 }
 

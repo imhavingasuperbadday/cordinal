@@ -397,6 +397,7 @@ bool TranslateMainKey(MSG* msg) {
                 for (HWND b : g.viewButtons) stops.push_back(b);
                 for (const auto& pane : g.panes) stops.push_back(pane.list);
                 stops.push_back(CanvasActive() ? g.libView : g.list);
+                stops.push_back(UpNextPanel());
             }
             std::erase_if(stops, [](HWND h) { return !h || !IsWindowVisible(h) || !IsWindowEnabled(h); });
             if (stops.empty()) return false;

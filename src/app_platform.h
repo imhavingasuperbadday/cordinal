@@ -15,6 +15,7 @@ void InitPlatform(HWND hwnd);
 void ShutdownPlatform();
 bool OnPlatformMessage(UINT msg, WPARAM wp, LPARAM lp);
 void PlatformTrackChanged();
+void PlatformArtChanged();  // g.art arrived or changed: the flyout's cover follows
 void PlatformTick();
 void PlatformCountedPlay(TrackId id, uint32_t when, double seconds, bool local);
 std::optional<int> ForwardTransportCommand(const std::vector<std::wstring>& args);

@@ -220,6 +220,7 @@ void LoadSettings() {
     s.waveReflection = ToInt(v, "wave_reflection", 1) != 0;
     s.waveFullHeight = ToInt(v, "wave_full_height", 1) != 0;
     s.seekGlow = ToInt(v, "seek_glow", 1) != 0;
+    s.pauseFade = ToInt(v, "pause_fade", 1) != 0;
     s.alwaysOnTop = ToInt(v, "always_on_top", 0) != 0;
     s.gpuDrawing = ToInt(v, "gpu_drawing", 0) != 0;
     for (auto [key, target] : {std::pair{"format_title", &s.fmtTitle}, std::pair{"format_subtitle", &s.fmtSub},
@@ -249,6 +250,11 @@ void LoadSettings() {
     s.inboxEnabled = ToInt(v, "inbox_enabled", 0) != 0;
     s.steamOffered = ToInt(v, "steam_offered", 0) != 0;
     s.volume = std::clamp(ToInt(v, "volume", 100), 0, 100) / 100.0f;
+    s.volumeCurve = std::clamp(ToInt(v, "volume_curve", 0), 0, kVolumeCurves - 1);
+    s.softwareVolume = ToInt(v, "software_volume", 1) != 0;
+    s.crossfade = std::clamp(ToInt(v, "crossfade", 0), 0, (int)std::size(kCrossfadeSeconds) - 1);
+    s.crossfadeAlbums = ToInt(v, "crossfade_albums", 0) != 0;
+    s.coverGap = std::clamp(ToInt(v, "cover_gap", 16), 4, 48);
     s.shuffle = std::clamp(ToInt(v, "shuffle", 0), 0, kShuffleCount - 1);
     s.skipAwareShuffle = ToInt(v, "skip_aware_shuffle", 0) != 0;
     s.radio = ToInt(v, "radio", 0) != 0;
@@ -282,6 +288,8 @@ void LoadSettings() {
     s.theme = AvailableTheme(v.count("ui_theme") ? (ThemeMode)std::clamp(ToInt(v, "ui_theme", 0), 0, (int)ThemeMode::Count - 1)
                                                  : kOldThemes[std::clamp(ToInt(v, "theme", 0), 0, 3)]);
     s.groupAlbums = ToInt(v, "group_albums", 1) != 0;
+    s.npAlbumOnly = ToInt(v, "now_playing_album", 1) != 0;
+    s.groupAutoTabs = ToInt(v, "group_auto_tabs", 1) != 0;
     s.musicBrainzLookup = ToInt(v, "musicbrainz_lookup", 0) != 0;
     // Online sources keep the Windows names (Preferences > Online); every one is off by default.
     online::Settings& net = online::Config();
@@ -406,6 +414,8 @@ void SaveSettings() {
     text += "preference_saving=" + std::to_string((int)s.preferenceSaving) + "\npreference_saving_chosen=" + std::to_string(s.preferenceSavingChosen) +
             "\nsuggestion_last_review=" + std::to_string(s.suggestionLastReview) + "\n";
     text += "group_albums=" + std::to_string(s.groupAlbums) + "\n";
+    text += "now_playing_album=" + std::to_string(s.npAlbumOnly) + "\n";
+    text += "group_auto_tabs=" + std::to_string(s.groupAutoTabs) + "\n";
     text += "musicbrainz_lookup=" + std::to_string(s.musicBrainzLookup) + "\n";
     const online::Settings& net = online::Config();
     text += "online_covers_deezer=" + std::to_string(net.covers[0]) + "\nonline_covers_itunes=" +
@@ -449,7 +459,8 @@ void SaveSettings() {
     text += "seek_style=" + std::to_string(s.seekStyle) + "\nmood_colors=" + std::to_string(s.moodColors) +
             "\nsmooth_seek=" + std::to_string(s.smoothSeek) + "\nwave_reflection=" +
             std::to_string(s.waveReflection) + "\nwave_full_height=" + std::to_string(s.waveFullHeight) +
-            "\nseek_glow=" + std::to_string(s.seekGlow) + "\nsmooth_scroll=" + std::to_string(s.smoothScroll) + "\n";
+            "\nseek_glow=" + std::to_string(s.seekGlow) + "\npause_fade=" + std::to_string(s.pauseFade) +
+            "\nsmooth_scroll=" + std::to_string(s.smoothScroll) + "\n";
     text += "format_title=" + ToUtf8(s.fmtTitle) + "\nformat_subtitle=" + ToUtf8(s.fmtSub) + "\nformat_status=" + ToUtf8(s.fmtStatus) +
             "\nformat_window=" + ToUtf8(s.fmtWindow) + "\n";
     text += "sound_effects=" + std::to_string(s.soundEffects) + "\nrobotic_sounds=" + std::to_string(s.roboticSounds) + "\n";
@@ -476,6 +487,9 @@ void SaveSettings() {
     text += "reverb=" + std::to_string((int)s.reverb.preset) + "\nreverb_amount=" + FloatText(s.reverb.mix) +
             "\nloudness_compensation=" + std::to_string(s.loudnessComp) + "\nnight_mode=" + std::to_string(s.nightMode) +
             "\nloops=" + std::to_string(s.loops) + "\n";
+    text += "volume_curve=" + std::to_string(s.volumeCurve) + "\nsoftware_volume=" + std::to_string(s.softwareVolume) +
+            "\ncrossfade=" + std::to_string(s.crossfade) + "\ncrossfade_albums=" + std::to_string(s.crossfadeAlbums) +
+            "\ncover_gap=" + std::to_string(s.coverGap) + "\n";
     text += "bitcrush=" + std::to_string(s.bitcrush.enabled) + "\nbitcrush_bits=" + std::to_string(s.bitcrush.bits) +
             "\nbitcrush_rate=" + std::to_string(BitcrushRateIndex(s.bitcrush.rate)) +
             "\nbitcrush_mix=" + FloatText(s.bitcrush.mix) + "\n";

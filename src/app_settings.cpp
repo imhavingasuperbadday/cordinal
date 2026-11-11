@@ -202,6 +202,22 @@ void SaveEq() {
     }
 }
 
+bool SavedOutputProfiles() {
+    if (g.iniPath.empty()) return false;
+    std::wstring names(65536, L'\0');
+    for (;;) {
+        DWORD n = GetPrivateProfileSectionNamesW(names.data(), (DWORD)names.size(), g.iniPath.c_str());
+        if (!n) return false;
+        // nSize - 2 means the buffer was short and the list was cut off.
+        if (n < names.size() - 2) break;
+        if (names.size() >= (1u << 20)) return false;
+        names.assign(names.size() * 2, L'\0');
+    }
+    for (const wchar_t* at = names.c_str(); *at; at += wcslen(at) + 1)
+        if (wcsncmp(at, L"OutputEQ-", 9) == 0) return true;
+    return false;
+}
+
 void SyncOutputEq(const std::wstring& id) {
     if (id == g.eqOutputId) return;
     g.eqOutputId = id;

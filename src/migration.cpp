@@ -269,6 +269,7 @@ bool RemapLibrary(LibraryArchive& data, const std::vector<PathMap>& maps, std::w
         auto copy = data.library[id];
         copy.dir = replacement[id].dir;
         copy.file = replacement[id].file;
+        copy.pathHash = replacement[id].pathHash;
         for (auto field : {&Track::title, &Track::artist, &Track::album, &Track::albumArtist, &Track::genre,
                            &Track::date, &Track::composer, &Track::comment, &Track::grouping, &Track::label})
             copy.*field = replacement.Intern(data.library.View(copy.*field));

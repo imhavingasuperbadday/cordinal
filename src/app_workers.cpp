@@ -15,23 +15,47 @@
 namespace app {
 
 namespace {
+// Stays false until CreateMainWindow arms it. Tests that queue tags and start their own
+// TagWorker rely on QueueTags leaving g.tagWorker alone.
+bool g_tagArmed = false;
+
 // Called only by the UI thread. Workers never read a mutating Library/StringPool, and
 // cannot outpace the UI by posting a library's worth of metadata into the message queue.
+// The thread is started after tagMx is released: TagWorker locks it immediately.
 void DispatchTagBatch() {
-    std::lock_guard<std::mutex> lock(g.tagMx);
-    if (g.tagQuit || g.tagBatchInFlight || g.tagQueue.empty()) return;
-    g.tagBatch.reserve(64);
-    while (!g.tagQueue.empty() && g.tagBatch.size() < 64) {
-        TrackId id = g.tagQueue.front();
-        g.tagQueue.pop_front();
-        if (id < g_lib.Count()) g.tagBatch.push_back(g_lib.SnapshotPath(id));
+    bool start = false;
+    {
+        std::lock_guard<std::mutex> lock(g.tagMx);
+        if (g.tagQuit || g.tagBatchInFlight || g.tagQueue.empty()) return;
+        g.tagBatch.reserve(64);
+        while (!g.tagQueue.empty() && g.tagBatch.size() < 64) {
+            TrackId id = g.tagQueue.front();
+            g.tagQueue.pop_front();
+            if (id < g_lib.Count()) g.tagBatch.push_back(g_lib.SnapshotPath(id));
+        }
+        if (g.tagQueue.empty()) std::deque<TrackId>().swap(g.tagQueue);
+        g.tagBatchInFlight = !g.tagBatch.empty();
+        for (const auto& item : g.tagBatch) g.tagReading.insert(item.id);
+        start = g_tagArmed && g.tagBatchInFlight && !g.tagWorker.joinable();
     }
-    if (g.tagQueue.empty()) std::deque<TrackId>().swap(g.tagQueue);
-    g.tagBatchInFlight = !g.tagBatch.empty();
-    for (const auto& item : g.tagBatch) g.tagReading.insert(item.id);
+    if (start) g.tagWorker = std::thread(TagWorker, g.hwnd);
     g.tagCv.notify_one();
 }
 }  // namespace
+
+void ArmTagWorker(HWND hwnd) {
+    g_tagArmed = true;
+    DispatchTagBatch();  // a batch LoadState already filled is in flight, so this returns
+    bool start = false;
+    {
+        std::lock_guard<std::mutex> lock(g.tagMx);
+        start = !g.tagQuit && !g.tagWorker.joinable() && (g.tagBatchInFlight || !g.tagQueue.empty());
+    }
+    if (start) {
+        g.tagWorker = std::thread(TagWorker, hwnd);
+        g.tagCv.notify_one();
+    }
+}
 
 // UI thread. Queued reads coalesce; a file changed during its current read gets one fresh read
 // after that batch returns, so an older snapshot cannot win over a completed tag edit.
@@ -43,7 +67,7 @@ void QueueTags(const std::vector<TrackId>& ids) {
             if (!g_lib.Contains(id)) continue;
             if (g.tagReading.contains(id)) {
                 if (std::find(g.tagAgain.begin(), g.tagAgain.end(), id) == g.tagAgain.end()) g.tagAgain.push_back(id);
-            } else if (g.tagPending.insert(id).second) g.tagQueue.push_back(id);
+            } else if (g.tagPending.insert(id)) g.tagQueue.push_back(id);
         }
     }
     DispatchTagBatch();
@@ -77,7 +101,7 @@ void AcceptTagBatch(std::vector<TagResult>* results) {
         std::lock_guard<std::mutex> lock(g.tagMx);
         g.tagBatchInFlight = false;
     }
-    std::unordered_set<TrackId>().swap(g.tagReading);
+    g.tagReading.clear();
     auto again = std::move(g.tagAgain);
     owned.reset();  // release this batch before the next one can start decoding
     QueueTags(again);
@@ -189,7 +213,7 @@ void StopRgWorker() {
     if (g.rgWorker.joinable()) g.rgWorker.join();
     g.rgRunning = false;
     g.rgCancel = false;
-    std::unordered_set<TrackId>().swap(g.rgRunIds);
+    g.rgRunIds.clear();
     MSG posted;
     while (PeekMessageW(&posted, g.hwnd, WM_APP_RG, WM_APP_RG, PM_REMOVE)) FinishReplayGain(posted.wParam, posted.lParam);
 }
@@ -200,9 +224,9 @@ void StartRgScan(const std::vector<TrackId>& ids, bool background) {
     if (g.rgWorker.joinable()) g.rgWorker.join();
     std::vector<TrackPath> items;
     std::vector<std::pair<uint64_t, uint64_t>> sizeAndTime;
-    std::unordered_set<TrackId> seen;
+    TrackIdSet seen;
     for (TrackId id : ids) {
-        if (id >= g_lib.Count() || !seen.insert(id).second) continue;
+        if (id >= g_lib.Count() || !seen.insert(id)) continue;
         if (!background && (g_lib[id].flags & Track::kRgScanFailed)) {
             g_lib[id].flags &= (uint16_t)~Track::kRgScanFailed;
             g.dirty = true;
@@ -342,10 +366,10 @@ void WriteReplayGainTags(const std::vector<TrackId>& ids) {
         ShowMessage(L"Wait for the ReplayGain scan to finish.");
         return;
     }
-    std::unordered_set<TrackId> seen;
+    TrackIdSet seen;
     std::vector<std::pair<TrackId, TagEdit>> items;
     for (TrackId id : ids)
-        if (id < g_lib.Count() && seen.insert(id).second) items.push_back({id, replaygain::TagsFor(g_lib[id])});
+        if (id < g_lib.Count() && seen.insert(id)) items.push_back({id, replaygain::TagsFor(g_lib[id])});
     if (items.empty()) {
         ShowMessage(L"Nothing to write.");
         return;
@@ -354,10 +378,10 @@ void WriteReplayGainTags(const std::vector<TrackId>& ids) {
 }
 
 void WriteStatisticsTags(const std::vector<TrackId>& ids) {
-    std::unordered_set<TrackId> seen;
+    TrackIdSet seen;
     std::vector<std::pair<TrackId, TagEdit>> items;
     for (TrackId id : ids)
-        if (id < g_lib.Count() && seen.insert(id).second && CanWriteTags(g_lib.Path(id)))
+        if (id < g_lib.Count() && seen.insert(id) && CanWriteTags(g_lib.Path(id)))
             if (TagEdit e = migration::StatisticsTags(g_lib[id]); !e.Empty()) items.push_back({id, std::move(e)});
     if (items.empty()) {
         ShowMessage(ids.empty() ? L"Select the tracks to write ratings and play counts for."
@@ -394,7 +418,7 @@ void FinishReplayGain(WPARAM wp, LPARAM lp) {
     g.rgRunning = false;
     if (g.rgWorker.joinable()) g.rgWorker.join();
     g.rgCancel = false;
-    std::unordered_set<TrackId>().swap(g.rgRunIds);
+    g.rgRunIds.clear();
     g.rgNextAuto = GetTickCount64() + 1000;  // more may be waiting: continue the sweep shortly
     UpdateStatus();
     if (batch->background) return;

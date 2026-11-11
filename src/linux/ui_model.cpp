@@ -108,13 +108,6 @@ bool SortKeepsAlbums(int column) {  // #, Artist, Album, Year, Album artist, Dis
     return column <= 0 || column == 1 || column == 3 || column == 4 || column == 5 || column == 10 || column == 13;
 }
 
-bool SameAlbum(const Track& a, const Track& b) {
-    if (a.album != b.album) return false;
-    // With album artists, they decide; without, the folder does (compilations keep together).
-    if (a.albumArtist || b.albumArtist) return a.albumArtist == b.albumArtist;
-    return a.dir == b.dir;
-}
-
 // The album groups and display lines for g.rows.
 void BuildLines() {
     g_groups.clear();
@@ -399,8 +392,10 @@ void RevealPlaying() {
     int np = NowPlayingIndex();
     if (g.playing == kNone || np < 0) return;
     if (g.active != np) SetActiveTab(np);
+    int heard = HeardIndex();
+    if (heard < 0) return;
     for (size_t i = 0; i < g.rowItems.size(); ++i)
-        if (g.queuePos >= 0 && g.rowItems[i] == (size_t)g.queuePos) { MoveFocus((int)i, false); break; }
+        if (g.rowItems[i] == (size_t)heard) { MoveFocus((int)i, false); break; }
 }
 
 void UpdateInboxTab() {
@@ -435,6 +430,27 @@ void InvalidateCellCache() {
     g_cellsRevision = g_lib.Revision();
 }
 
+// The playing track, when Now Playing lists only its album (as app_playlists.cpp on Windows): Now
+// Playing is open, the track has an album tag, no search is typed and Preferences leaves it on.
+// kNone otherwise, and the whole list shows. Linux always plays from Now Playing.
+TrackId NowPlayingAlbumTrack() {
+    if (!g.settings.npAlbumOnly || AlternateMode() || InternetRadio().active || g.playing == kNone ||
+        g.playing >= g_lib.Count() || g.playlists.empty())
+        return kNone;
+    if (Active().kind != PlaylistKind::NowPlaying || !g.search.empty()) return kNone;
+    return g_lib[g.playing].album ? g.playing : kNone;
+}
+
+TrackId g_npAlbumTrack = kNone;  // the track whose album the rows were narrowed to
+
+void FollowNowPlayingAlbum() {
+    TrackId want = NowPlayingAlbumTrack(), shown = g_npAlbumTrack;
+    bool same = want == shown ||
+        (want != kNone && shown != kNone && shown < g_lib.Count() && SameAlbum(g_lib[want], g_lib[shown]));
+    if (!same) RebuildRows();
+    else g_npAlbumTrack = want;
+}
+
 void RebuildRows() {
     if (g.playlists.empty()) return;
     g.active = std::clamp(g.active, 0, (int)g.playlists.size() - 1);
@@ -448,8 +464,11 @@ void RebuildRows() {
     TrackMatcher matcher(g_lib, words);
     std::vector<size_t> occurrences;
     occurrences.reserve(source.size());
+    g_npAlbumTrack = NowPlayingAlbumTrack();
+    const Track* album = g_npAlbumTrack != kNone ? &g_lib[g_npAlbumTrack] : nullptr;
     for (size_t i = 0; i < source.size(); ++i)
-        if (source[i] < g_lib.Count() && matcher.Matches(source[i])) occurrences.push_back(i);
+        if (source[i] < g_lib.Count() && (!album || SameAlbum(g_lib[source[i]], *album)) && matcher.Matches(source[i]))
+            occurrences.push_back(i);
     // A column's sort: its sort format compared naturally (ui_spec.h, as on Windows).
     if (pl.sortColumn > 0 && pl.sortColumn < ColumnTotal()) {
         const wchar_t* format = ColumnAt(pl.sortColumn).sort;
@@ -499,6 +518,10 @@ void SetActiveTab(int tab) {
     g_trackDrag = {};
     EndRename(true);
     g.active = tab;
+    if (Active().kind == PlaylistKind::Auto) {  // the shared auto-playlist tab now shows this one
+        if (!Active().identity) Active().identity = g_nextPlaylistIdentity++;
+        g_autoTabShown = Active().identity;
+    }
     if (leavingInbox) UpdateInboxTab();
     g.search.clear();
     g.selected.clear();
@@ -507,9 +530,12 @@ void SetActiveTab(int tab) {
     g.focus = g.anchor = -1;
     g.scroll = 0;
     RebuildRows();
-    if (Active().kind == PlaylistKind::NowPlaying && g.queuePos >= 0)
-        for (size_t i = 0; i < g.rowItems.size(); ++i)
-            if (g.rowItems[i] == (size_t)g.queuePos) { EnsureVisible((int)i); break; }
+    if (Active().kind == PlaylistKind::NowPlaying) {
+        int at = g.playing != kNone ? HeardIndex() : g.queuePos;
+        if (at >= 0)
+            for (size_t i = 0; i < g.rowItems.size(); ++i)
+                if (g.rowItems[i] == (size_t)at) { EnsureVisible((int)i); break; }
+    }
 }
 
 }  // namespace lx

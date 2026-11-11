@@ -250,6 +250,11 @@ int PanelColumns(const Album& a, float width) {
     return a.tracks.size() > 10 && listW > F(760) ? 2 : 1;
 }
 
+// The open album panel's colour: its cover's hue (once the large cover has arrived) over the theme's surface.
+uint32_t PanelSurface(const Album& a, float width, const Palette& p) {
+    return AlbumPanelSurface(p, a.tracks.empty() ? -1 : AlbumCoverHue(ArtTrackOf(a), a.album, PanelCover(width)));
+}
+
 float PanelHeight(const Album& a, float width) {
     int cols = PanelColumns(a, width);
     int rows = (int)(a.tracks.size() + cols - 1) / cols;
@@ -386,9 +391,11 @@ void BuildGroups() {
 // Grid layout shared by album and artist tiles: columns that fill the width evenly.
 void GridMetrics(float width, float itemW, int& cols, float& gap) {
     float avail = width - Margin() * 2;
-    gap = F(16);
+    // Cover spacing (Preferences > Library) is the least space; the spread stops at twice that.
+    const float least = F((float)std::clamp(g.settings.coverGap, 4, 48));
+    gap = least;
     cols = std::max(1, (int)((avail + gap) / (itemW + gap)));
-    gap = cols > 1 ? std::min((avail - cols * itemW) / (cols - 1), F(32)) : 0;
+    gap = cols > 1 ? std::min((avail - cols * itemW) / (cols - 1), least * 2) : 0;
 }
 
 void LayoutItems(float W) {
@@ -727,10 +734,11 @@ void DrawItem(const Item& item, int index, float ox, float oy, const Palette& p)
         case ItemKind::Tile: {
             const Album& a = v.albums[it.index];
             bool sel = v.selAlbum[it.index], open = it.index == v.expanded;
+            // The open album stands on its panel's colour, so the tile and the panel read as one piece.
             Rect bg{rc.x - F(6), rc.y - F(6), rc.w + F(12), rc.h + F(8)};
-            if (sel || open) Fill(bg, sel ? p.select : p.hover);
+            if (sel) Fill(bg, p.select);
+            else if (open) Fill(bg, PanelSurface(a, v.laidWidth, p));
             else if (hover) Fill(bg, p.hover);
-            if (open) Fill({bg.x, bg.B() - F(2), bg.w, F(2)}, p.border);
             Rect art{rc.x, rc.y, rc.w, TileArt()};
             std::wstring title = AlbumTitle(a);
             DrawAlbumCover(ArtTrackOf(a), a.album, title, art, p);
@@ -752,8 +760,12 @@ void DrawItem(const Item& item, int index, float ox, float oy, const Palette& p)
         }
         case ItemKind::Panel: {
             const Album& a = v.albums[it.index];
-            uint32_t tint = Mix(p.surface2, p.accent, p.dark ? 16 : 10);
-            Fill(rc, tint);
+            // The cover's colour at the top, settling halfway into the page by the bottom.
+            uint32_t tint = PanelSurface(a, rc.w, p), foot = Mix(tint, p.bg, 50);
+            SDL_Vertex fade[4] = {{{rc.x, rc.y}, FColor(tint), {0, 0}}, {{rc.R(), rc.y}, FColor(tint), {0, 0}},
+                                  {{rc.R(), rc.B()}, FColor(foot), {0, 0}}, {{rc.x, rc.B()}, FColor(foot), {0, 0}}};
+            const int quad[6] = {0, 1, 2, 0, 2, 3};
+            SDL_RenderGeometry(g.renderer, nullptr, fade, 4, quad, 6);
             int tileItem = v.albumItem[it.index];
             if (tileItem >= 0) {  // a notch pointing at the open tile
                 float cx = v.items[tileItem].rc.x + ox + v.items[tileItem].rc.w / 2;
@@ -1307,6 +1319,11 @@ void CanvasMouseDown(const Rect& area, float x, float y, int button, int clicks,
         }
     }
     SyncSelection();
+}
+
+void CanvasRelayout() {
+    v.layoutDirty = true;
+    g.redraw = true;
 }
 
 void CanvasWheel(const Rect& area, float dy, bool ctrl) {

@@ -7,6 +7,7 @@
 // track correspondences, so rescans never need to guess again.
 #pragma once
 #include "library.h"
+#include "track_set.h"
 
 #include <cstdint>
 #include <map>
@@ -28,9 +29,35 @@ enum class EditionSource : uint8_t { MusicBrainz, Heuristic, Manual, Count };
 enum class TrackRelation : uint8_t { SameRecording, DifferentMaster, AlternateMix, DifferentPerformance, Unknown, Count };
 enum class MatchStatus : uint8_t { Suggested, Confirmed, Rejected, Count };
 
-struct TrackMusicBrainz {
-    std::string releaseGroup;  // MUSICBRAINZ_RELEASEGROUPID
-    std::string release;       // MUSICBRAINZ_ALBUMID / RELEASEID
+// Each track's MusicBrainz ids, read from its tags. Every track of an album repeats the same two
+// 36-character ids, too long for std::string's inline buffer, so a std::map of string pairs cost
+// about 250 bytes a track. Here each distinct id is pooled once and a track keeps two handles,
+// 12 bytes with its key. An id no track uses any more stays pooled until the table is rebuilt
+// (on load and on compaction), as the library's own strings do.
+class TrackMusicBrainzTable {
+public:
+    struct Ids {
+        std::string_view releaseGroup;  // MUSICBRAINZ_RELEASEGROUPID
+        std::string_view release;       // MUSICBRAINZ_ALBUMID / RELEASEID
+    };
+    // Both empty removes the track's entry.
+    void Set(TrackId id, std::string_view releaseGroup, std::string_view release);
+    Ids Get(TrackId id) const;
+    bool empty() const { return ids_.empty(); }
+    size_t size() const { return ids_.size(); }
+    // f(TrackId, Ids) for every track with an id, in track id order.
+    template <class F>
+    void ForEach(F&& f) const {
+        for (const auto& entry : ids_) f(entry.id, Ids{pool_.Get(entry.value.releaseGroup), pool_.Get(entry.value.release)});
+    }
+    size_t MemoryBytes() const;
+
+private:
+    struct Handles {
+        StringPool::Handle releaseGroup = 0, release = 0;
+    };
+    TrackIdMap<Handles> ids_;
+    StringPool pool_;
 };
 
 struct TrackMatch {
@@ -73,7 +100,7 @@ struct AlbumGroup {
 
 // The one album database. UI-thread owned like g_lib; workers get snapshots through LibraryArchive.
 extern std::vector<AlbumGroup> g_albumGroups;
-extern std::map<TrackId, TrackMusicBrainz> g_trackMusicBrainz;
+extern TrackMusicBrainzTable g_trackMusicBrainz;
 
 // A track's group/edition, or 0. Rebuilt lazily; a handful of editions costs less than a map.
 struct AlbumTrackIndex {
@@ -160,10 +187,10 @@ std::string AlbumBaseTitle(std::string_view album, EditionKind* kind = nullptr);
 // The extension section codec (librarydb.cpp). savedToId maps a saved track index to a live id;
 // newId maps a live id to its saved index (UINT32_MAX when it is not written).
 std::string EncodeAlbumDatabase(const std::vector<AlbumGroup>& groups,
-                                const std::map<TrackId, TrackMusicBrainz>& musicBrainz,
+                                const TrackMusicBrainzTable& musicBrainz,
                                 const std::vector<uint32_t>& newId);
 bool DecodeAlbumDatabase(std::string_view data, uint64_t trackCount, const std::vector<TrackId>* savedToId,
-                         std::vector<AlbumGroup>* groups, std::map<TrackId, TrackMusicBrainz>* musicBrainz);
+                         std::vector<AlbumGroup>* groups, TrackMusicBrainzTable* musicBrainz);
 std::string EncodeAlbumArt(const std::vector<AlbumGroup>& groups, const std::vector<uint32_t>& newId);
 bool DecodeAlbumArt(std::string_view data, uint64_t trackCount, const std::vector<TrackId>* savedToId,
                     std::vector<AlbumGroup>* groups);

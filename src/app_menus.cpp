@@ -89,6 +89,7 @@ HMENU BuildMenu() {
     AppendMenuW(edit, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(edit, MF_STRING, IDM_PROPERTIES, L"Edit &tags...\tAlt+Enter");
     AppendMenuW(edit, MF_STRING, IDM_EDIT_ALBUM_TAGS, L"Edit al&bum tags...");
+    AppendMenuW(edit, MF_STRING, IDM_MAKE_ALBUM, L"&Make album...");
     AppendMenuW(edit, MF_STRING, IDM_TAG_UNDO, L"Undo last ta&g edit");
     AppendHelperTools(edit, true);  // the tools of the helpers that are on, when there are any
 
@@ -210,6 +211,7 @@ HMENU BuildMenu() {
     AppendMenuW(view, MF_STRING, IDM_OPEN_RADIO, L"&Radio\tCtrl+Shift+R");
     AppendMenuW(view, MF_STRING, IDM_GROUP_ALBUMS, L"&Group tracks by album");
     AppendMenuW(view, MF_STRING, IDM_LYRICS, L"L&yrics panel\tCtrl+L");
+    AppendMenuW(view, MF_STRING, IDM_QUEUE_SHOW, L"&Up next\tCtrl+Shift+Q");
     AppendMenuW(view, MF_STRING, IDM_ARTIST_INFO, L"Artist &info...");
     AppendMenuW(view, MF_POPUP, (UINT_PTR)LayoutMenu(), L"Customize la&yout");
     HMENU sizes = CreatePopupMenu();
@@ -273,6 +275,7 @@ HACCEL BuildAccelerators() {
         {FCONTROL | FVIRTKEY, 'Y', IDM_REDO},
         {FCONTROL | FVIRTKEY, VK_RETURN, IDM_QUEUE_NEXT},
         {FCONTROL | FVIRTKEY, 'Q', IDM_QUEUE_ADD},
+        {FCONTROL | FSHIFT | FVIRTKEY, 'Q', IDM_QUEUE_SHOW},
         {FCONTROL | FSHIFT | FVIRTKEY, 'O', IDM_ADD_FOLDER},
         {FCONTROL | FVIRTKEY, 'S', IDM_EXPORT_M3U},
         {FCONTROL | FVIRTKEY, 'F', IDM_FIND},
@@ -314,6 +317,7 @@ void UpdateMainMenu(HMENU m) {
         {IDM_RG_ENABLE, g.rgOn}, {IDM_STOP_AFTER, g.stopAfterCurrent}, {IDM_NIGHT_MODE, g.nightMode}, {IDM_BITCRUSH, g.bitcrush.enabled},
         {IDM_EQUALIZER, g.eq.enabled || g.eq.crossfeed}, {IDM_ALWAYS_ON_TOP, g.alwaysOnTop},
         {IDM_GROUP_ALBUMS, g.groupAlbums}, {IDM_LYRICS, LyricsPanelShown()},
+        {IDM_QUEUE_SHOW, QueueShown()},
     };
     for (const auto& item : checks) CheckMenuItem(m, item.id, MF_BYCOMMAND | (item.checked ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuRadioItem(m, IDM_REVERB_BASE, IDM_REVERB_BASE + (int)ReverbPreset::Count - 1,
@@ -347,7 +351,7 @@ void UpdateMainMenu(HMENU m) {
         {IDM_RENAME_PL, removable}, {IDM_REMOVE_PL, RadioActive() || removable},
         {IDM_REMOVE, selected && (editable || LibraryActive())}, {IDM_CROP, selected && editable},
         {IDM_CLEAR, populated}, {IDM_REMOVE_DUPES, populated}, {IDM_REMOVE_DEAD, populated},
-        {IDM_PROPERTIES, selected}, {IDM_EDIT_ALBUM_TAGS, selected}, {IDM_TAG_UNDO, CanUndoTagEdit(undoDescription)},
+        {IDM_PROPERTIES, selected}, {IDM_EDIT_ALBUM_TAGS, selected}, {IDM_MAKE_ALBUM, selected}, {IDM_TAG_UNDO, CanUndoTagEdit(undoDescription)},
         {IDM_RG_SCAN_PL, !manualScan}, {IDM_RG_SCAN_SEL, selected && !manualScan},
         {IDM_RG_SCAN_ALL, replaygain::HasLibraryTracks() && !manualScan},
         {IDM_RG_CLEAR, selected && !manualScan},

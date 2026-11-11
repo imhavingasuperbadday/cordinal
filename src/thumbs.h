@@ -18,6 +18,9 @@
 #include <thread>
 #include <vector>
 
+// `img` as JPEG bytes, or empty when it is empty or could not be encoded. Requires COM.
+std::string JpegBytes(const ArtImage& img);
+
 struct ThumbResult {
     uint64_t key = 0;
     int size = 0;
@@ -30,11 +33,12 @@ public:
     // A payload-free message wakes the UI, which drains TakeResult(). At most two completed
     // images wait here (one in reduced memory mode); decoded images cannot accumulate in the
     // Windows message queue. Reduced mode also halves the pending request limit.
+    // The `threads` workers start with the first Request, not here.
     void Start(HWND notify, UINT msg, std::wstring cacheDir, int threads = 2, bool reducedMemory = false);
     void Stop();
     void Request(uint64_t key, const std::wstring& mediaPath, int size);
     std::unique_ptr<ThumbResult> TakeResult();
-    struct MemoryUsage { size_t pending, ready, readyBytes; };
+    struct MemoryUsage { size_t pending, ready, readyBytes, workers; };
     MemoryUsage Memory() const;
     void DropPending();  // e.g. after the view jumped somewhere else
     // Deletes the cached thumbnails of `key` at every size: its cover changed without its file
@@ -65,5 +69,6 @@ private:
     uint64_t generation_ = 0;                          // bumped to invalidate in-flight work
     bool quit_ = false;
     size_t pendingLimit_ = 128, readyLimit_ = 2;
+    int threadCount_ = 0;  // workers to start with the first request
     uint64_t cacheBytes_ = 0;  // what the cache folder should hold, from the last listing
 };

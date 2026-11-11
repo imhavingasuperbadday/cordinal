@@ -35,6 +35,7 @@
 #include "cue.h"
 #include "decoder.h"
 #include "peaks.h"
+#include "track_set.h"
 
 #include <algorithm>
 #include <cmath>
@@ -432,10 +433,10 @@ void Apply(const RgResult& r) {
 }
 
 size_t Clear(const std::vector<TrackId>& ids) {
-    std::unordered_set<TrackId> seen;
+    TrackIdSet seen;  // ids can be the whole library
     size_t n = 0;
     for (TrackId id : ids) {
-        if (id >= g_lib.Count() || !seen.insert(id).second) continue;
+        if (id >= g_lib.Count() || !seen.insert(id)) continue;
         Track& t = g_lib[id];
         const bool flagged = (t.flags & (Track::kRgScanned | Track::kRgTruePeak | Track::kRgScanFailed | Track::kRgAlbumMeasured)) != 0;
         if (t.rgTrackGain == kNoGain && t.rgAlbumGain == kNoGain && !t.rgTrackPeak && !t.rgAlbumPeak && !t.rgHigh && !flagged)

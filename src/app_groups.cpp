@@ -46,13 +46,6 @@ bool SortKeepsAlbums(int column) {
     return column <= 0 || column == 1 || column == 3 || column == 4 || column == 5 || column == 10 || column == 13;
 }
 
-bool SameAlbum(const Track& a, const Track& b) {
-    if (a.album != b.album) return false;
-    // With album artists, they decide; without, the folder does (compilations keep together).
-    if (a.albumArtist || b.albumArtist) return a.albumArtist == b.albumArtist;
-    return a.dir == b.dir;
-}
-
 // Index of the last group whose header starts at or before `row`, or -1.
 int GroupAtRow(int row) {
     auto it = std::upper_bound(g.groups.begin(), g.groups.end(), (uint32_t)row,
@@ -82,6 +75,24 @@ const ArtImage* Cover(const TrackGroup& gr, int size) {
     }
     c.loader.Request(base, g_lib.Path(id), size);
     return nullptr;
+}
+
+// Reuses `out`. A header used to build a fresh string for the album, artist and year on every paint.
+void AssignPool(std::wstring& out, StringPool::Handle h) {
+    if (!h) {
+        out.clear();
+        return;
+    }
+    const std::string_view utf8 = g_lib.View(h);
+    if (utf8.empty()) {
+        out.clear();
+        return;
+    }
+    if (out.capacity() < utf8.size()) out.reserve(utf8.size());
+    out.resize(utf8.size());
+    const int n = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), (int)utf8.size(), out.data(), (int)out.size());
+    if (n <= 0) out.clear();
+    else out.resize((size_t)n);
 }
 
 void DrawText1(HDC dc, const std::wstring& s, RECT r, HFONT font, COLORREF color, UINT flags) {
@@ -282,7 +293,8 @@ void DrawGroupRow(HDC dc, int row, RECT rc) {
     int size = 2 * h - S(8);
     const PackGroups* look = PackGroupLook();
     RECT cover{all.left + S(8), all.top + S(5), all.left + S(8) + size, all.top + S(5) + size};
-    std::wstring album = g_lib.Str(gr.album);
+    static std::wstring album, artist, year, stats, line2text, edition;
+    AssignPool(album, gr.album);
     // The cover fills its square; an album without art gets its own tile, and one still decoding a
     // plain one, so the tile's color doesn't flash before the art.
     if (!look || look->cover) {
@@ -296,18 +308,38 @@ void DrawGroupRow(HDC dc, int row, RECT rc) {
     }
     SetBkMode(dc, TRANSPARENT);
     // Line 1: the album, and the track count and length on the right.
-    // Line 2: the artist and year.
+    // Line 2: the artist and year. The buffers stay, so scrolling a grouped list does not allocate them.
     int x = cover.right + S(10), right = all.right - S(10);
-    std::wstring artist = gr.artist ? g_lib.Str(gr.artist) : L"Various artists";
-    std::wstring year = g_lib.Str(gr.date).substr(0, 4);
-    std::wstring stats = std::to_wstring(gr.count) + L" tracks  \x00B7  " + FormatDuration(gr.seconds);
-    std::wstring line2text = year.empty() ? artist : artist + L"  \x00B7  " + year;
-    std::wstring edition = TrackEditionLabel(Active().items[g.view[gr.firstView]]);
-    if (!edition.empty()) line2text += L"  \x00B7  " + edition;
+    if (gr.artist) AssignPool(artist, gr.artist);
+    else artist.assign(L"Various artists", 15);
+    AssignPool(year, gr.date);
+    if (year.size() > 4) year.resize(4);
+    stats = std::to_wstring(gr.count);
+    stats += L" tracks  \x00B7  ";
+    stats += FormatDuration(gr.seconds);
+    line2text = artist;
+    if (!year.empty()) {
+        line2text += L"  \x00B7  ";
+        line2text += year;
+    }
+    edition = TrackEditionLabel(Active().items[g.view[gr.firstView]]);
+    if (!edition.empty()) {
+        line2text += L"  \x00B7  ";
+        line2text += edition;
+    }
     if (look) {
-        if (!look->title.empty()) album = PackHeaderText(look->title, gr);
-        if (!look->subtitle.empty()) line2text = PackHeaderText(look->subtitle, gr);
-        if (!look->right.empty()) stats = PackHeaderText(look->right, gr);
+        if (!look->title.empty()) {
+            edition = PackHeaderText(look->title, gr);
+            album.assign(edition.data(), edition.size());
+        }
+        if (!look->subtitle.empty()) {
+            edition = PackHeaderText(look->subtitle, gr);
+            line2text.assign(edition.data(), edition.size());
+        }
+        if (!look->right.empty()) {
+            edition = PackHeaderText(look->right, gr);
+            stats.assign(edition.data(), edition.size());
+        }
     }
     RECT line1{x, all.top + S(3), right, all.top + h + S(1)}, line2{x, all.top + h - S(1), right, all.bottom - S(3)};
     RECT statsRect = line1;

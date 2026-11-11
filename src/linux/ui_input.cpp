@@ -120,7 +120,7 @@ void ClickGroup(int group, bool add) {
 
 void PrepareTrackDrag(float x, float y, int clicked, bool collapseOnClick) {
     g_trackDrag = {};
-    if (!Active().Editable()) return;
+    // Any list's tracks can be dragged into the queue editor; only an editable one reorders.
     for (size_t i = 0; i < g.selected.size() && i < g.rowItems.size(); ++i)
         if (g.selected[i]) g_trackDrag.sources.push_back(g.rowItems[i]);
     if (g_trackDrag.sources.empty()) return;
@@ -220,7 +220,8 @@ void MouseDown(const SDL_MouseButtonEvent& e) {
         return;
     }
     if (g_renameIndex >= 0) {
-        if (g_renameIndex < (int)L.tabRects.size() && L.tabRects[g_renameIndex].In(x, y)) return;
+        int tab = TabOfPlaylistIndex(g_renameIndex);
+        if (tab >= 0 && tab < (int)L.tabRects.size() && L.tabRects[tab].In(x, y)) return;
         EndRename(true);
     }
     if (PanelOpen()) {
@@ -276,13 +277,7 @@ void MouseDown(const SDL_MouseButtonEvent& e) {
         OpenLyricsMenu(x, y);
         return;
     }
-    if (L.upNext.In(x, y)) {
-        const auto tracks = UpNextTracks();
-        int row = (int)((y - L.upNext.y - S(38)) / S(42));
-        if (e.button == SDL_BUTTON_LEFT && e.clicks >= 2 && y >= L.upNext.y + S(38) &&
-            row >= 0 && row < (int)tracks.size()) PlayTracks({tracks[row]}, 0);
-        return;
-    }
+    if (QueueMouseDown(x, y, e.button, e.clicks, SDL_GetModState())) return;
     if (!L.browser.In(x, y)) BrowserBlur();
     if (e.button == SDL_BUTTON_RIGHT) {
         if (InternetRadio().active && L.list.In(x, y)) return;
@@ -320,7 +315,7 @@ void MouseDown(const SDL_MouseButtonEvent& e) {
         if (!Resume()) RevealPlaying();
     }
     else if (Rect{L.speaker.x, L.volume.y, L.speaker.w, L.volume.h}.In(x, y)) ToggleMute();
-    else if (L.volume.In(x, y)) {
+    else if (L.volume.In(x, y) && g.settings.softwareVolume) {  // off: the system sets the level
         g_drag = Drag::Volume;
         g_muteVolume = 0;
         SetVolume(VolumeAt(x));
@@ -378,12 +373,15 @@ void MouseDown(const SDL_MouseButtonEvent& e) {
         int col = ColumnAt(x);
         if (col >= 0) SortBy(ActiveColumnTypes()[col]);
     } else if (L.tabs.In(x, y)) {
-        for (size_t i = 0; i < L.tabRects.size(); ++i)
-            if (L.tabRects[i].In(x, y)) {
-                Rect close{L.tabRects[i].R() - S(22), L.tabRects[i].y + S(3), S(19), L.tabRects[i].h - S(6)};
-                if (close.In(x, y) && (g.playlists[i].kind == PlaylistKind::Static || g.playlists[i].kind == PlaylistKind::Auto))
-                    ClosePlaylist((int)i);
-                else SetActiveTab((int)i);
+        for (size_t t = 0; t < L.tabRects.size() && t < L.tabSlots.size(); ++t)
+            if (L.tabRects[t].In(x, y)) {
+                const int i = L.tabSlots[t];
+                Rect close{L.tabRects[t].R() - S(22), L.tabRects[t].y + S(3), S(19), L.tabRects[t].h - S(6)};
+                if (IsAutoTab((int)t) && i == g.active && !InternetRadio().active) OpenAutoTabMenu((int)t);
+                else if (close.In(x, y) && !IsAutoTab((int)t) &&
+                         (g.playlists[i].kind == PlaylistKind::Static || g.playlists[i].kind == PlaylistKind::Auto))
+                    ClosePlaylist(i);
+                else SetActiveTab(i);
                 break;
             }
     } else if (L.rows.In(x, y)) {
@@ -452,9 +450,11 @@ void MouseMove(const SDL_MouseMotionEvent& e) {
         SDL_CaptureMouse(true);
     }
     if (g_drag == Drag::Tracks) {
-        g_trackDrag.target = TrackDropTarget(y);
+        // Over the queue editor the tracks would be queued; a list that can't be reordered only queues.
+        g_trackDrag.target = QueueDropSlot(x, y) < 0 && Active().Editable() ? TrackDropTarget(y) : -1;
         return;
     }
+    if (QueueMouseMove(x, y)) return;
     if (PanelOpen()) {
         PanelMouseMove(x, y);
         static SDL_Cursor* arrow = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_DEFAULT);
@@ -513,9 +513,18 @@ void MouseUp(const SDL_MouseButtonEvent& e) {
         return;
     }
     if (PresentationMouseUp(e.x * Density(), e.y * Density())) return;
+    if (e.button == SDL_BUTTON_LEFT && QueueMouseUp()) return;
     if (e.button == SDL_BUTTON_LEFT && g_drag == Drag::Tracks) {
-        g_trackDrag.target = TrackDropTarget(e.y * Density());
-        MoveDraggedTracks();
+        if (int slot = QueueDropSlot(e.x * Density(), e.y * Density()); slot >= 0) {
+            std::vector<TrackId> ids;
+            for (size_t source : g_trackDrag.sources)
+                if (source < Active().items.size()) ids.push_back(Active().items[source]);
+            InsertIntoQueue(ids, slot);
+        } else {
+            g_trackDrag.target = TrackDropTarget(e.y * Density());
+            MoveDraggedTracks();
+        }
+        QueueDropEnd();
         SDL_CaptureMouse(false);
         g_trackDrag = {};
     } else if (e.button == SDL_BUTTON_LEFT && g_trackDrag.pending) {
@@ -553,8 +562,9 @@ void Wheel(const SDL_MouseWheelEvent& e) {
     }
     if (g_web.open) { g_web.scroll = std::max(0, g_web.scroll - (int)e.y); g.redraw = true; return; }
     float x = e.mouse_x * Density(), y = e.mouse_y * Density();
+    if (QueueWheel(x, y, e.y)) return;
     if (Rect{L.speaker.x, L.volume.y, L.volume.R() - L.speaker.x, L.volume.h}.In(x, y)) {
-        SetVolume(g.settings.volume + e.y * 0.05f);
+        if (g.settings.softwareVolume) SetVolume(g.settings.volume + e.y * 0.05f);
         SaveSettings();
         return;
     }
@@ -710,6 +720,7 @@ void Key(const SDL_KeyboardEvent& e) {
             return;
         default: break;
     }
+    if (QueueKey(e)) return;
     if (ctrl) {  // the menus' shortcuts
         switch (e.key) {
             case SDLK_F:
@@ -717,7 +728,10 @@ void Key(const SDL_KeyboardEvent& e) {
                 g.searchFocused = true;
                 SDL_StartTextInput(g.window);
                 return;
-            case SDLK_Q: g.quit = true; return;
+            case SDLK_Q:
+                if (shift) ToggleQueue();
+                else g.quit = true;
+                return;
             case SDLK_O:
                 if (shift) ChooseImportFolder();
                 else ChooseFiles();

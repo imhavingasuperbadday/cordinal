@@ -49,6 +49,7 @@ struct Layout {
     Rect tabs, radioTab, search, viewRow, browser, splitter, list, header, rows, scrollbar, status, visuals[2];
     Rect radioSaved, radioDiscover, radioGenre, radioCountry, radioState, radioSearch, radioGrid;
     std::vector<Rect> tabRects, barItems;
+    std::vector<int> tabSlots;  // the playlist each of tabRects shows (TabSlots): auto-playlists can share one
     Rect views[kViewButtons];
     float rowH = 0;
 };
@@ -101,6 +102,7 @@ struct Thumb {
     SDL_Texture* texture = nullptr;
     bool done = false;
     uint64_t used = 0;  // the frame it was last drawn in
+    double hue = -1;    // the cover's hue (CoverHue), which an open album's panel is washed with
 };
 inline constexpr size_t kThumbsKept = 600;
 extern uint64_t g_frame;
@@ -128,7 +130,7 @@ enum Action {
     kNewAuto, kEditAuto, kChoice, kGroupEditions, kPreferredEdition, kRemoveEdition, kSplitEditions,
     kAlbumEditions, kEditionVersions, kRgScanAll, kFindCover, kFetchCovers, kCancelFetchCovers, kRecentAdditions,
     kSaveLyricsTags, kSaveLyricsLrc, kArtistInfo, kRestoreCover,
-    kCoverFile, kCoverPaste, kEditAlbumTags, kMissingInfo,
+    kCoverFile, kCoverPaste, kEditAlbumTags, kMissingInfo, kQueuePanel, kQueueEdit, kMakeAlbum,
 };
 extern std::function<void(int)> g_choicePick;  // the choice a panel's OpenChoice menu is for
 struct MenuItem {
@@ -274,6 +276,9 @@ std::string Plain(const wchar_t* label);
 void DrawIcon(Icon icon, const Rect& r, uint32_t rgb);
 Playlist& Active();
 int NowPlayingIndex();
+// Now Playing index of the track that is playing. A queued track's queuePos stays on the slot
+// playback continues from, so this finds the track itself when that slot is a different song.
+int HeardIndex();
 FieldLookup Lookup(TrackId id, bool withPlayback);
 const std::string& Cell(TrackId id, int column);
 int CompareNatural(const std::wstring& a, const std::wstring& b);
@@ -282,12 +287,23 @@ bool LibraryLess(TrackId x, TrackId y);
 std::vector<TrackId> PlaylistTracks(const Playlist& pl);
 void SortPlaylistTracks(std::vector<TrackId>& tracks, const Playlist& pl);
 bool SortKeepsAlbums(int column);
-bool SameAlbum(const Track& a, const Track& b);
 void BuildLines();
 bool GroupHidesCell(const Line& line, int column);
 float ColumnWidth(int column);
 float CellTextWidth(const Line& line, size_t index, float width);
 std::string TabName(size_t i);
+// Now Playing lists only the playing song's album (Preferences > View): the track it is narrowed to,
+// or kNone; FollowNowPlayingAlbum, run before each frame, rebuilds the rows once that changes.
+TrackId NowPlayingAlbumTrack();
+void FollowNowPlayingAlbum();
+// The tabs as playlists (TabSlots, as on Windows): the auto-playlists share one tab that shows the
+// one last opened, and clicking it again opens a menu of all of them.
+extern uint64_t g_autoTabShown;
+std::vector<int> CurrentTabSlots();
+int TabOfPlaylistIndex(int index);  // in L.tabSlots; -1 for none
+bool IsAutoTab(int tab);
+std::string TabLabel(size_t tab);  // the playlist's TabName, with a ▾ on the shared auto-playlist tab
+void OpenAutoTabMenu(int tab);
 void DoLayout();
 float ContentHeight();
 float MaxScroll();
@@ -310,6 +326,20 @@ Rect PopupItemRect(const Popup& p, size_t i);
 void CloseMenus();
 void OpenBarMenu(int index);
 void OpenRowMenu(float x, float y);
+// The queue editor, the Up next panel (queue_ui.cpp).
+void DrawUpNext(const Palette& p);
+bool QueueFocused();
+bool QueueMouseDown(float x, float y, int button, int clicks, SDL_Keymod mod);
+bool QueueMouseMove(float x, float y);
+bool QueueMouseUp();
+bool QueueWheel(float x, float y, float dy);
+int QueueDropSlot(float x, float y);
+void QueueDropEnd();
+bool QueueKey(const SDL_KeyboardEvent& e);
+void OpenQueueMenu(float x, float y, TrackId then);
+void QueueEdit(int arg);
+bool QueueShown();
+void ToggleQueue();
 void OpenHeaderMenu(float x, float y);
 void ShowFolder(TrackId id);
 void InsertIntoNowPlaying(const std::vector<TrackId>& ids, bool next);
@@ -453,6 +483,7 @@ void PrefetchWaveform(TrackId id);
 void OnPeaksReady(uint32_t request);
 int CaptureUi(const std::string& dir);
 void DrawAlbumCover(TrackId first, StringPool::Handle album, const std::wstring& title, const Rect& r, const Palette& p);
+double AlbumCoverHue(TrackId first, StringPool::Handle album, float width);
 void OpenTrackMenu(float x, float y);
 void RateTracks(const std::vector<TrackId>& ids, uint8_t rating);
 

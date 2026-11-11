@@ -154,6 +154,7 @@ struct Settings {
     bool smoothScroll = false;   // the library canvas eases toward wheel and paging moves (off by default)
     bool waveReflection = true;  // mirror the waveform below its center line, for the waveform and moodbar styles
     bool waveFullHeight = true;  // unmirrored, the waveforms still fill both halves, the lower as bright
+    bool pauseFade = true;       // the waveform fades to its paused colour and back instead of switching at once
     bool seekGlow = true;        // the seek bar's colours glow softly past its edges, every style and source alike
     bool alwaysOnTop = false;
     bool gpuDrawing = false;     // draw through the graphics card; off keeps its driver out
@@ -197,6 +198,8 @@ struct Settings {
     Repeat repeat = Repeat::Off;
     ThemeMode theme = ThemeMode::System;
     bool groupAlbums = true;  // album headers over each album's tracks, as View > Group tracks by album
+    bool npAlbumOnly = true;    // Now Playing lists only the playing song's album, as on Windows
+    bool groupAutoTabs = true;  // the auto-playlists share one tab (TabSlots), as on Windows
     bool musicBrainzLookup = false;  // optional online album-edition lookup, cached and rate-limited
     // Conversion to .cord: originals go to the Recycle Bin or stay (shown in the library or not), and
     // a conversion can be undone for kConvertMemoryDays[convertMemory].
@@ -233,6 +236,11 @@ struct Settings {
     BitcrushSettings bitcrush;
     bool loudnessComp = false, nightMode = false;
     int loops = 2;  // passes of a loop before the fade; 0 ignores loop points
+    // As on Windows: the slider's curve (VolumeCurveGain), whether cordinal scales the samples at all,
+    // the crossfade between tracks that follow on their own (kCrossfadeSeconds index), and whether an
+    // album's own tracks crossfade too. Cover spacing is the album grid's least gap, at scale 1.
+    int volumeCurve = 0, crossfade = 0, coverGap = 16;
+    bool softwareVolume = true, crossfadeAlbums = false;
 };
 
 // A ReplayGain worker's message: some tracks' results; the run's last one is marked final.
@@ -255,6 +263,13 @@ struct App {
     std::vector<Playlist> playlists;
     int active = 0;
     std::deque<TrackId> queue;  // Play next / Add to queue: played before Now Playing continues (playback.cpp)
+    // Choose by taste's picks are the queue's last `queuePicks` entries, after what you queued;
+    // pickIndex holds each one's Now Playing position, and picksMode the order that drew them
+    // (1 track shuffle, 2 Keep playing like this); pickFrom is the position the next shuffle pick
+    // follows (-1: the playing one), so a removed pick doesn't come straight back.
+    size_t queuePicks = 0;
+    std::deque<int> pickIndex;
+    int picksMode = 0, pickFrom = -1;
     std::vector<TrackId> rows;  // the active tab after the search filter and sort
     std::vector<size_t> rowItems; // each row's occurrence in its source playlist
     std::vector<char> selected; // per row
@@ -622,6 +637,15 @@ void ClearQueue();
 std::vector<TrackId> UpNextTracks();
 void RefreshNext();
 int QueuePosition(TrackId id);  // 1-based place in the queue, 0 when not queued
+// The queue editor's edits (queue_ui.cpp), by queue position, as on Windows (app_playback.cpp).
+void InsertIntoQueue(const std::vector<TrackId>& ids, int at);
+void RemoveFromQueue(const std::vector<int>& indices);
+int MoveInQueue(const std::vector<int>& indices, int to, bool keep = false);
+void PlayQueuedAt(int index);
+bool TastePicking();
+void EnsureTastePicks();
+void RepickTaste();
+size_t QueuedByYou();
 void InitWeb();
 void StartWeb();
 void StopWeb();

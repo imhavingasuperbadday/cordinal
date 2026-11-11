@@ -18,11 +18,14 @@ void RunMenuCommand(size_t index);           // ui.cpp: runs the index-th item o
 enum FilePurpose : int {
     kFileCover = 1, kFileAutoEq = 2, kFileOrganizeRoot = 3, kFileCopyDest = 4, kFilePack = 5, kFileHelper = 6,
     kFileCoverPick = 7,  // the cover picker's From file...
-    kFileCoverDirect = 8  // the track menu's Cover > Choose image file...
+    kFileCoverDirect = 8,  // the track menu's Cover > Choose image file...
+    kFileAlbumCover = 9    // the album maker's Choose cover...
 };
 
 void OpenEqualizer();
 void OpenTagEditor(const std::vector<TrackId>& ids);
+// Edit > Make album (panels.cpp, as app_albummaker.cpp): the tracks given become one album.
+void OpenAlbumMaker(const std::vector<TrackId>& ids);
 void OpenPreferences();
 int CheckPreferences();  // headless control geometry, state and keyboard checks; saves no images
 int CheckTagSuggestions();  // headless tag-editor completion check; saves no images

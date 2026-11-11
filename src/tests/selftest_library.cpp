@@ -1204,6 +1204,29 @@ void TestPoints() {
 // Auto-playlist rules over a small synthetic library.
 void TestAutoPlaylists() {
     testlog::Batch batch;
+    {
+        // The tab strip's slots (TabSlots, both platforms): auto-playlists share the first one's tab,
+        // showing the one asked for; one auto-playlist, or grouping off, keeps a tab each.
+        auto list = [](std::initializer_list<PlaylistKind> kinds) {
+            std::vector<Playlist> pls;
+            for (PlaylistKind kind : kinds) pls.push_back(Playlist{L"p" + std::to_wstring(pls.size()), {}, kind});
+            return pls;
+        };
+        using K = PlaylistKind;
+        auto pls = list({K::Library, K::NowPlaying, K::Static, K::Auto, K::Static, K::Auto, K::Auto});
+        auto slots = TabSlots(pls, true, 5);
+        auto first = TabSlots(pls, true, 2);  // not an auto-playlist: the first one shows
+        auto single = list({K::Library, K::Auto, K::Static});
+        batch.Next(L"auto-playlists share one tab");
+        Check(slots == std::vector<int>{0, 1, 2, 5, 4} && IsAutoGroupTab(pls, slots, 3) && !IsAutoGroupTab(pls, slots, 2) &&
+                  TabOfPlaylist(pls, slots, 6) == 3 && TabOfPlaylist(pls, slots, 3) == 3 && TabOfPlaylist(pls, slots, 4) == 4 &&
+                  first == std::vector<int>{0, 1, 2, 3, 4},
+              L"auto-playlists share the first one's tab, which shows the one last opened");
+        Check(TabSlots(pls, false, 5) == std::vector<int>{0, 1, 2, 3, 4, 5, 6} &&
+                  !IsAutoGroupTab(pls, TabSlots(pls, false, 5), 3) && TabSlots(single, true, 1) == std::vector<int>{0, 1, 2} &&
+                  !IsAutoGroupTab(single, TabSlots(single, true, 1), 1),
+              L"grouping off, or a single auto-playlist, keeps a tab for each");
+    }
     g_lib = Library();
     struct Spec {
         const char *title, *artist, *genre, *date;

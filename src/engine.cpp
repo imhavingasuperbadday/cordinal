@@ -92,7 +92,119 @@ std::unique_ptr<Decoder> OpenItem(const PlayItem& item, unsigned rate, int loops
     return OpenLooped(std::move(d), loopStart, loopEnd, loops, fade);
 }
 
+// The decode-side crossfade (Engine::SetCrossfade). While the decoding track is in its last seconds,
+// its output collects here instead of in the ring (Holding); once it has ended (Held), the next
+// track's first output is mixed with it as it is written (Mixing), or, with no crossfade to make, it
+// is written out as it was (Draining). Decode thread only.
+struct CrossfadeTail {
+    enum State { None, Holding, Held, Mixing, Draining } state = None;
+    std::vector<float> tail;  // interleaved stereo at the output rate
+    size_t at = 0;            // frames of the tail already written
+    size_t limit = 0;         // the most frames held: the fade's length
+    float ratio = 1;          // outgoing gain over incoming gain (the renderer applies the incoming one)
+    bool fadeOut = false;     // Draining: the incoming track ended inside the fade, so keep fading
+    unsigned long long markerPos = ~0ull;  // the incoming track's marker, where the mix starts
+
+    size_t Frames() const { return tail.size() / 2; }
+    void Reset() {
+        state = None;
+        std::vector<float>().swap(tail);
+        at = 0;
+        ratio = 1;
+        fadeOut = false;
+        markerPos = ~0ull;
+    }
+    // Equal power: the sum stays as loud as either track through the fade.
+    static void Weights(size_t i, size_t n, float& out, float& in) {
+        const double t = ((double)i + 0.5) / (double)std::max<size_t>(n, 1) * 1.5707963267948966;
+        out = (float)std::cos(t);
+        in = (float)std::sin(t);
+    }
+    // Appends to the tail; past the limit (a length that was off), the oldest frames go to `spill`
+    // a block at a time. Returns the frames spilled.
+    size_t Hold(const float* data, size_t frames, std::vector<float>& spill) {
+        tail.insert(tail.end(), data, data + frames * 2);
+        if (Frames() <= limit + 16384) return 0;
+        const size_t excess = Frames() - limit;
+        spill.assign(tail.begin(), tail.begin() + excess * 2);
+        tail.erase(tail.begin(), tail.begin() + excess * 2);
+        return excess;
+    }
+    // Mixes the incoming `data` with the tail from `at`, in place; returns the frames mixed.
+    size_t Mix(float* data, size_t frames) {
+        const size_t total = Frames(), n = std::min(frames, total - at);
+        for (size_t i = 0; i < n; ++i) {
+            float out, in;
+            Weights(at + i, total, out, in);
+            const float* a = tail.data() + (at + i) * 2;
+            data[i * 2] = data[i * 2] * in + a[0] * out * ratio;
+            data[i * 2 + 1] = data[i * 2 + 1] * in + a[1] * out * ratio;
+        }
+        at += n;
+        return n;
+    }
+    // The rest of the tail into `out` (up to `frames`), faded when fadeOut says so.
+    size_t Drain(std::vector<float>& out, size_t frames) {
+        const size_t total = Frames(), n = std::min(frames, total - at);
+        out.assign(tail.begin() + at * 2, tail.begin() + (at + n) * 2);
+        if (fadeOut)
+            for (size_t i = 0; i < n; ++i) {
+                float w, unused;
+                Weights(at + i, total, w, unused);
+                out[i * 2] *= w * ratio;
+                out[i * 2 + 1] *= w * ratio;
+            }
+        at += n;
+        return n;
+    }
+};
+
 }  // namespace
+
+std::vector<float> CrossfadePcm(const std::vector<float>& a, const std::vector<float>& b, unsigned rate, double seconds,
+                                float gainA, float gainB) {
+    std::vector<float> out, spill, chunk;
+    CrossfadeTail xf;
+    xf.limit = (size_t)std::llround(seconds * rate);
+    const size_t framesA = a.size() / 2, framesB = b.size() / 2, block = 2048;
+    const size_t holdFrom = framesA > xf.limit ? framesA - xf.limit : 0;
+    for (size_t i = 0; i < framesA;) {  // a as the decode thread writes it, held from exactly the fade's start
+        size_t n = std::min(block, framesA - i);
+        if (xf.state == CrossfadeTail::None && i + n > holdFrom) {
+            if (i < holdFrom) n = holdFrom - i;
+            else xf.state = CrossfadeTail::Holding;
+        }
+        if (xf.state == CrossfadeTail::Holding) {
+            const size_t spilled = xf.Hold(a.data() + i * 2, n, spill);
+            out.insert(out.end(), spill.begin(), spill.begin() + spilled * 2);
+        } else out.insert(out.end(), a.begin() + i * 2, a.begin() + (i + n) * 2);
+        i += n;
+    }
+    xf.state = CrossfadeTail::Mixing;
+    xf.ratio = gainB > 1e-6f ? gainA / gainB : 1.0f;
+    for (size_t i = 0; i < framesB; i += block) {
+        const size_t n = std::min(block, framesB - i);
+        chunk.assign(b.begin() + i * 2, b.begin() + (i + n) * 2);
+        if (xf.state == CrossfadeTail::Mixing) xf.Mix(chunk.data(), n);
+        out.insert(out.end(), chunk.begin(), chunk.end());
+    }
+    if (xf.at < xf.Frames()) {  // b ended inside the fade
+        xf.fadeOut = true;
+        xf.Drain(chunk, xf.Frames());
+        out.insert(out.end(), chunk.begin(), chunk.end());
+    }
+    return out;
+}
+
+float VolumeCurveGain(float slider, int curve) {
+    const float s = std::clamp(slider, 0.0f, 1.0f);
+    switch (curve) {
+        case 1: return s;
+        case 2: return s * s * s;
+        case 3: return s <= 0.0f ? 0.0f : std::pow(10.0f, (s - 1.0f) * 3.0f);  // 60 dB from the top to just above 0
+        default: return s * s;
+    }
+}
 
 void ClipPcm(float* samples,size_t count) {
     size_t i=0;
@@ -187,6 +299,10 @@ struct Engine::Impl {
     std::atomic<bool> quit{false};
     std::atomic<int> loopCount{2};       // loop points: passes through the loop (0 = off), see SetLoops
     std::atomic<double> loopFade{8.0};   // seconds of fade-out after the last pass
+    std::atomic<double> crossfadeSeconds{0};  // see SetCrossfade
+    CrossfadeTail xf;
+    std::vector<float> xfBuf;  // the mix or spill being written
+    double curDuration = 0;    // the decoding track's length in its own seconds, 0 if unknown
     std::unique_ptr<Decoder> dec;
     std::unique_ptr<Decoder> waiting;  // exclusive output: the next track, held until the device can switch rate
     PlayItem waitingItem;
@@ -260,7 +376,20 @@ struct Engine::Impl {
             }
             cmds.push_back(std::move(c));
         }
+        // After the queue lock. The command is already visible to DecodeLoop's first swap,
+        // so a wakeup that lands before the thread waits is not lost.
+        EnsureDecodeThread();
         cv.notify_one();
+    }
+
+    // The decode thread locks cmdMx as soon as it runs, but it only waits on that mutex: the
+    // constructor returns while the new thread blocks, so holding cmdMx across the start cannot
+    // deadlock. The same lock stops Shutdown from observing a not-yet-joinable thread and
+    // returning while a start is still in progress.
+    void EnsureDecodeThread() {
+        std::lock_guard<std::mutex> lock(cmdMx);
+        if (quit.load() || thread.joinable()) return;
+        thread = std::thread([this] { DecodeLoop(); });
     }
 
     void AllocateRing() {
@@ -441,6 +570,38 @@ struct Engine::Impl {
         writePos += frames;
     }
 
+    // Decoded output on its way to the ring, through the crossfade: held back near a track's end,
+    // or mixed with the held tail at the start of the next one.
+    void Emit(const float* data, size_t frames) {
+        if (!frames) return;
+        if (xf.state == CrossfadeTail::Mixing) {
+            xfBuf.assign(data, data + frames * 2);
+            xf.Mix(xfBuf.data(), frames);
+            WriteRing(xfBuf.data(), frames);
+            if (xf.at >= xf.Frames()) xf.Reset();
+            return;
+        }
+        if (xf.state == CrossfadeTail::Holding) {
+            if (size_t spilled = xf.Hold(data, frames, xfBuf)) WriteRing(xfBuf.data(), spilled);
+            return;
+        }
+        WriteRing(data, frames);
+    }
+
+    // Starts holding the decoding track's output once it is within the fade of its end, when what
+    // follows can fade in. A section loop, a radio stream or an unknown length never ends on cue.
+    void MaybeHold() {
+        const double fade = crossfadeSeconds.load();
+        if (xf.state != CrossfadeTail::None || fade <= 0 || curItem.live || curDuration <= 0 ||
+            curItem.loopEnd > curItem.loopStart || nextState == Next::None ||
+            (nextState == Next::Known && (!nextItem.crossfade || nextItem.live)))
+            return;
+        if (curDuration - decodedTo > fade * Stretch()) return;
+        xf.state = CrossfadeTail::Holding;
+        xf.limit = (size_t)std::llround(fade * rate);
+        xf.tail.reserve((xf.limit + 4096) * 2);
+    }
+
     size_t QueueDecoded(const float* data,size_t frames) {
         if (stretch.Active()) {
             stretch.Process(data,frames,tsOut);
@@ -449,9 +610,9 @@ struct Engine::Impl {
         return QueueResampled(data,frames);
     }
     size_t QueueResampled(const float* data,size_t frames) {
-        if (rs.Passthrough()) { WriteRing(data,frames);return frames; }
+        if (rs.Passthrough()) { Emit(data,frames);return frames; }
         rs.Process(data,frames,rsOut);
-        size_t produced=rsOut.size()/2;WriteRing(rsOut.data(),produced);return produced;
+        size_t produced=rsOut.size()/2;Emit(rsOut.data(),produced);return produced;
     }
 
     // The end of the stream, or of one input rate: what the tempo stage and resampler still hold.
@@ -463,7 +624,7 @@ struct Engine::Impl {
         }
         rsOut.clear();
         rs.Flush(rsOut);
-        WriteRing(rsOut.data(), rsOut.size() / 2);
+        Emit(rsOut.data(), rsOut.size() / 2);
     }
 
     unsigned Effective(unsigned inRate) const {
@@ -538,6 +699,7 @@ struct Engine::Impl {
         reverbClear = true;  // a new place in the music: the old tail ducks out
         audible = 0;
         waiting.reset();  // don't keep a held-back next track's file open
+        xf.Reset();
     }
 
     // The decode thread changes what plays (seek, stop, a track started by hand) inside a Hold:
@@ -600,7 +762,24 @@ struct Engine::Impl {
         }
     }
 
-    void OpenTrack(const PlayItem& item, double start, bool flush, std::unique_ptr<Decoder> opened = nullptr) {
+    // `crossfade`: the held tail of the track before fades out under this one (CrossfadeTail).
+    // Exclusive output: the next track opened ahead (`waiting`), so its rate can be compared before
+    // it joins. False when it couldn't be opened; the application has been told.
+    bool OpenWaiting() {
+        if (waiting && waitingItem.token == nextItem.token) return true;
+        std::wstring error;
+        waitingItem = nextItem;
+        waiting = OpenItem(waitingItem, rate, loopCount, loopFade, error);
+        if (waiting) return true;
+        PlayItem failed = waitingItem;
+        nextState = Next::Unknown;
+        decodingToken = failed.token;
+        Fail(failed, error);
+        return false;
+    }
+
+    void OpenTrack(const PlayItem& item, double start, bool flush, std::unique_ptr<Decoder> opened = nullptr,
+                   bool crossfade = false) {
         if (flush) {
             if (!cap) AllocateRing();
             if (readBuf.empty()) readBuf.resize(2048 * 2);
@@ -625,6 +804,11 @@ struct Engine::Impl {
         }
         decodedTo = std::max(0.0, start);
         unsigned inRate = dec->Rate();
+        // The mix starts before the old resampler's last samples come out, so they fade with the tail.
+        if (crossfade) {
+            xf.state = CrossfadeTail::Mixing;
+            xf.at = 0;
+        }
         if (flush && Exclusive() && inRate != rate) SwitchRate(inRate);
         if (flush || Effective(inRate) != rs.InRate() || tempoReq.load() != stretch.Tempo()) {
             if (!flush) WriteTail();  // finish the previous track's tail at its own rate
@@ -639,11 +823,20 @@ struct Engine::Impl {
             estimateRate = inRate;
         }
         double duration = dec->Duration() > 0 ? dec->Duration() : item.duration;
+        curDuration = item.live ? 0 : duration;
         {
             std::lock_guard<std::mutex> lock(ringMx);
             auto g = gains.find(item.token);
-            markers.push_back({writePos + (unsigned long long)std::llround(PendingOutput()), item.token, start,
-                               g != gains.end() ? g->second : item.gain, duration, item});
+            const float gain = g != gains.end() ? g->second : item.gain;
+            // A crossfade's marker is where the mix starts: the renderer plays the whole overlap at the
+            // incoming track's gain, so the tail is scaled from the outgoing one's.
+            unsigned long long pos = crossfade ? writePos : writePos + (unsigned long long)std::llround(PendingOutput());
+            if (crossfade) {
+                const float before = markers.empty() ? gain : markers.back().gain;
+                xf.ratio = gain > 1e-6f ? before / gain : 1.0f;
+                xf.markerPos = pos;
+            }
+            markers.push_back({pos, item.token, start, gain, duration, item});
             markers.back().stretch = Stretch();
         }
         curItem = item;
@@ -714,6 +907,12 @@ struct Engine::Impl {
                     return;
                 }
                 writePos = current->pos;
+                // Mixing into the replaced track: the tail is untouched, so it can fade under the
+                // new one instead. Any other held tail was the replaced track's own.
+                if (xf.state == CrossfadeTail::Mixing && xf.markerPos == current->pos) {
+                    xf.state = CrossfadeTail::Held;
+                    xf.at = 0;
+                } else if (xf.state != CrossfadeTail::None) xf.Reset();
                 markers.erase(current, markers.end());
             }
             dec.reset();
@@ -884,6 +1083,7 @@ struct Engine::Impl {
                 if (RingSpace() >= refillNeed) {
                     size_t n = dec->Read(readBuf.data(), chunk);
                     if (n) {
+                        MaybeHold();
                         Estimate(readBuf.data(), n, false);
                         QueueDecoded(readBuf.data(),n);
                         decodedTo += (double)n / dec->Rate();
@@ -896,21 +1096,41 @@ struct Engine::Impl {
                 }
             }
             if (!dec && !idle && !drained) {
+                // The crossfade first: a held tail waits for what follows, then fades under it or is
+                // written out as it was; one the incoming track outlasted ends faded.
+                if (xf.state == CrossfadeTail::Holding) xf.state = CrossfadeTail::Held;
+                if (xf.state == CrossfadeTail::Mixing) {
+                    xf.state = CrossfadeTail::Draining;
+                    xf.fadeOut = true;
+                }
+                if (xf.state == CrossfadeTail::Held && nextState != Next::Unknown) {
+                    const bool fade = nextState == Next::Known && nextItem.crossfade && !nextItem.live &&
+                                      crossfadeSeconds.load() > 0;
+                    if (fade && !Exclusive()) {
+                        PlayItem next = nextItem;
+                        OpenTrack(next, 0, false, nullptr, true);
+                        busy = true;
+                    } else if (fade && OpenWaiting()) {
+                        if (waiting->Rate() == rate || rs.InRate() == Effective(waiting->Rate())) {
+                            PlayItem next = waitingItem;
+                            OpenTrack(next, 0, false, std::move(waiting), true);
+                            busy = true;
+                        } else xf.state = CrossfadeTail::Draining;  // a rate switch can't overlap
+                    } else if (!fade) xf.state = CrossfadeTail::Draining;
+                }
+                if (xf.state == CrossfadeTail::Draining) {
+                    if (size_t n = xf.Drain(xfBuf, std::min(RingSpace(), xf.Frames() - xf.at))) {
+                        WriteRing(xfBuf.data(), n);
+                        busy = true;
+                    }
+                    if (xf.at >= xf.Frames()) xf.Reset();
+                }
+            }
+            if (!dec && !idle && !drained && xf.state == CrossfadeTail::None) {
                 if (nextState == Next::Known && Exclusive()) {
                     // A gapless join needs one rate. When the next track's differs, let this one
                     // play out, then switch the device and start the next track fresh.
-                    if (!waiting || waitingItem.token != nextItem.token) {
-                        std::wstring error;
-                        waitingItem = nextItem;
-                        waiting = OpenItem(waitingItem, rate, loopCount, loopFade, error);
-                        if (!waiting) {
-                            PlayItem failed = waitingItem;
-                            nextState = Next::Unknown;
-                            decodingToken = failed.token;
-                            Fail(failed, error);
-                            continue;
-                        }
-                    }
+                    if (!OpenWaiting()) continue;
                     if (waiting->Rate() == rate || rs.InRate() == Effective(waiting->Rate())) {
                         PlayItem next = waitingItem;
                         OpenTrack(next, 0, false, std::move(waiting));
@@ -1078,27 +1298,36 @@ Engine::~Engine() { Shutdown(); }
 bool Engine::Init(HWND notify, std::wstring& error, bool deferOutput) {
     Impl& d = *impl_;
     d.notify = notify;
-    // OpenTrack allocates audio buffers on the first Play command.
+    d.quit = false;  // a later Init, after Shutdown, may start the decode thread again
+    // OpenTrack allocates audio buffers on the first Play command. The decode thread starts
+    // with that command too, so an idle window does not keep it.
     d.out.SetPaused(true);  // no silent render stream before the first track
     bool ok = deferOutput || d.StartOutput(error);
     d.eqDirty = true;
-    d.thread = std::thread([&d] { d.DecodeLoop(); });
     return ok;
+}
+
+bool Engine::DecodeThreadStarted() {
+    std::lock_guard<std::mutex> lock(impl_->cmdMx);
+    return impl_->thread.joinable();
 }
 
 void Engine::Shutdown() {
     Impl& d = *impl_;
-    if (d.thread.joinable()) {
-        {
-            std::lock_guard<std::mutex> lock(d.liveMx);
-            if (d.requestedLive) d.requestedLive->Abort();
-            d.requestedLive.reset();
-        }
-        d.quit = true;
-        // The decode thread owns its decoder until it has joined.
-        d.cv.notify_all();
-        d.thread.join();
+    {
+        std::lock_guard<std::mutex> lock(d.liveMx);
+        if (d.requestedLive) d.requestedLive->Abort();
+        d.requestedLive.reset();
     }
+    {
+        // Even when the thread was never started: a start that has passed its quit check
+        // still assigns the thread under this lock, and then the join below waits for it.
+        std::lock_guard<std::mutex> lock(d.cmdMx);
+        d.quit = true;
+    }
+    // The decode thread owns its decoder until it has joined.
+    d.cv.notify_all();
+    if (d.thread.joinable()) d.thread.join();
     d.out.Stop();
     d.outputStarted = false;
     d.dec.reset();
@@ -1146,6 +1375,9 @@ void Engine::Stop() { impl_->Enqueue({Command::Stop}); }
 // Pausing is a fade in Render, so the device never stops mid-wave; once the fade has played out,
 // Housekeeping stops the device.
 void Engine::SetPaused(bool paused) {
+    // Resume does not enqueue a command. Start the thread before the pause flags change so
+    // its wait cannot miss the wakeup, and do not start one merely to record a pause.
+    if (!paused) impl_->EnsureDecodeThread();
     {
         std::lock_guard<std::mutex> outputLock(impl_->outputMx);
         // Pair with DecodeLoop's wait so resuming an idle endpoint cannot lose its wakeup.
@@ -1169,6 +1401,10 @@ void Engine::SetVolume(float linear) { impl_->volume = std::clamp(linear, 0.0f, 
 void Engine::SetLoops(int count, double fadeSeconds) {
     impl_->loopCount = std::clamp(count, 0, 100);
     impl_->loopFade = std::max(0.0, fadeSeconds);
+}
+
+void Engine::SetCrossfade(double seconds) {
+    impl_->crossfadeSeconds = std::isfinite(seconds) ? std::clamp(seconds, 0.0, 12.0) : 0.0;
 }
 
 void Engine::SetExclusive(bool exclusive) {

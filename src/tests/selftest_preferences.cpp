@@ -381,6 +381,8 @@ void TestWaveform(const std::wstring& scratch) {
         if (dc) DeleteDC(dc);
     }
     testlog::Cases sizes;
+    const bool savedPauseFade = g.pauseFade;
+    g.pauseFade = false;  // the state colours themselves; the fade has its own checks below
     for (ViewSize size : {ViewSize::Compact, ViewSize::Normal, ViewSize::Spotlight, ViewSize::Big}) {
         g.size = size;
         bool states = true;
@@ -405,6 +407,36 @@ void TestWaveform(const std::wstring& scratch) {
     batch.Next(L"waveform theme switches preserve progress, pause and warning colors in every view size");
     Check(sizes.Passed(), L"waveform theme switches preserve progress, pause and warning colors in every view size%ls",
           sizes.failed.c_str());
+    {
+        // Paused must differ from playing even when the waveform colour is amber or yellow, and the fade
+        // must pass through a mix of the two before settling.
+        const Palette& pal = P();
+        const Rgb yellow = pal.amber, red = 0xE03030;
+        batch.Next(L"a paused waveform never looks like a playing amber or yellow one");
+        Check(PausedWaveColor(pal, red) == pal.amber && PausedWaveColor(pal, yellow) != yellow &&
+                  PausedWaveColor(pal, yellow) == pal.text && PausedWaveColor(pal, 0xFFD000) != 0xFFD000,
+              L"paused waveform colour differs from a yellow playing colour");
+        g.pauseFade = true;
+        g.stopAfterCurrent = false;
+        g.engine.SetPaused(false);
+        for (int i = 0; i < 12; ++i) { WaveformTick(); Sleep(5); }
+        const COLORREF playing = WaveformPlayedColor();
+        g.engine.SetPaused(true);
+        WaveformTick();
+        Sleep(40);
+        WaveformTick();
+        const COLORREF mid = WaveformPlayedColor();
+        for (int i = 0; i < 40; ++i) { Sleep(10); WaveformTick(); }
+        const COLORREF settled = WaveformPlayedColor();
+        g.pauseFade = false;
+        const COLORREF direct = WaveformPlayedColor();
+        batch.Next(L"the waveform fades between its playing and paused colours");
+        Check(mid != playing && mid != settled && settled == direct && direct != playing,
+              L"pause fade passes through a middle colour and settles on the paused one");
+        g.engine.SetPaused(false);
+        for (int i = 0; i < 40; ++i) { Sleep(10); WaveformTick(); }
+    }
+    g.pauseFade = savedPauseFade;
     // A play request starts the actual song's waveform before the engine announces playback.
     const std::wstring early = scratch + L"\\waveform-early.wav", earlyCache = scratch + L"\\waveform-early-cache";
     if (Ready(WriteTestBytes(early, MakeSineWav(2, 2)), L"early waveform fixture is prepared")) {
@@ -733,7 +765,8 @@ void TestTweaks(const std::wstring& scratch) {
     testlog::Cases liveSettings;
     const struct { const char* key; const wchar_t* ini; bool* value; } liveRows[] = {
         {"view.live_fountain", L"LiveFountain", &g.liveFountain},
-        {"view.seek_glow", L"SeekGlow", &g.seekGlow}
+        {"view.seek_glow", L"SeekGlow", &g.seekGlow},
+        {"view.pause_fade", L"PauseFade", &g.pauseFade}
     };
     for (const auto& row : liveRows) {
         const Tweak* live = FindTweak(row.key);
@@ -756,6 +789,23 @@ void TestTweaks(const std::wstring& scratch) {
         Check(tall && g.bandWaveSize == 0 && IniRead(L"Window", L"BandWaveSize", L"") == L"0",
               L"top/bottom waveform size persists and can return to the layout's own size");
     } else Check(false, L"View preferences includes the top or bottom bar waveform height");
+    if (const Tweak *fade = FindTweak("playback.crossfade"), *albums = FindTweak("playback.crossfade_albums"),
+                    *curve = FindTweak("output.volume_curve"), *soft = FindTweak("output.software_volume"),
+                    *gap = FindTweak("library.cover_gap");
+        fade && albums && curve && soft && gap) {
+        const bool startOff = fade->def == 0 && albums->def == 0 && curve->def == 0 && soft->def == 1 && gap->def == 16;
+        SetTweak(*fade, 3); SetTweak(*albums, 1); SetTweak(*curve, 2); SetTweak(*soft, 0); SetTweak(*gap, 30);
+        const bool resting = !g.volume || !IsWindowEnabled(g.volume);
+        g.crossfade = 0; g.crossfadeAlbums = false; g.volumeCurve = 0; g.softwareVolume = true; g.coverGap = 16;
+        LoadPreferences();
+        const bool kept = g.crossfade == 3 && g.crossfadeAlbums && g.volumeCurve == 2 && !g.softwareVolume && g.coverGap == 30 &&
+                          IniRead(L"Player", L"Crossfade", L"") == L"3" && !wcscmp(TweakPage(*fade), L"Playback") &&
+                          !wcscmp(TweakPage(*soft), L"Output") && !wcscmp(TweakPage(*gap), L"Library");
+        for (const Tweak* t : {fade, albums, curve, soft, gap}) SetTweak(*t, t->def);
+        Check(startOff && kept && resting && (!g.volume || IsWindowEnabled(g.volume)) && g.softwareVolume,
+              L"crossfade, volume curve, cordinal's own volume control and cover spacing persist, and the slider "
+              L"rests while the system has the volume");
+    } else Check(false, L"Preferences includes crossfade, the volume curve and control, and cover spacing");
     const Tweak* colors = FindTweak("view.mood_colors");
     const Tweak* smooth = FindTweak("view.smooth_seek");
     if (colors && smooth) {
@@ -989,32 +1039,51 @@ void TestTweaks(const std::wstring& scratch) {
     Check(serviceUi, L"Scrobbling setup exposes all three services and switches between token and browser authentication");
     if (scrobbling) DestroyWindow(scrobbling);
 
-    int effects = 0, nightRow = -1;
-    for (const Tweak& t : Tweaks())
-        if (TweakShown(t) && !strncmp(t.key, "effects.", 8)) {
-            if (!strcmp(t.key, "effects.night_mode")) nightRow = effects;
-            ++effects;
-        }
+    int effects = 0;
+    for (const Tweak& t : Tweaks()) effects += TweakShown(t) && !strncmp(t.key, "effects.", 8);
+    const int night = (int)(FindTweak("effects.night_mode") - Tweaks().data());
     ShowPreferences("effects.night_mode");
     HWND window = ProcessWindow(L"CordinalPreferences");
-    HWND list = window ? FindWindowExW(window, nullptr, WC_LISTVIEWW, nullptr) : nullptr;
+    HWND sheet = window ? FindWindowExW(window, nullptr, L"CordinalPrefSheet", nullptr) : nullptr;
     HWND search = window ? FindWindowExW(window, nullptr, WC_EDITW, nullptr) : nullptr;
     HWND pages = window ? FindWindowExW(window, nullptr, WC_LISTBOXW, nullptr) : nullptr;
     auto choosePage = [&](int page) {
         SendMessageW(pages, LB_SETCURSEL, page, 0);
         SendMessageW(window, WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(pages), LBN_SELCHANGE), (LPARAM)pages);
     };
+    // The sheet holds one control per setting shown, numbered from 1000 by its place in the registry,
+    // with its reset at 3000 on; headings are static text.
+    auto settingsShown = [&] {
+        int n = 0;
+        for (HWND c = sheet ? GetWindow(sheet, GW_CHILD) : nullptr; c; c = GetWindow(c, GW_HWNDNEXT))
+            n += GetDlgCtrlID(c) >= 1000 && GetDlgCtrlID(c) < 1000 + (int)Tweaks().size();
+        return n;
+    };
+    auto hasText = [&](const wchar_t* text) {
+        for (HWND c = sheet ? GetWindow(sheet, GW_CHILD) : nullptr; c; c = GetWindow(c, GW_HWNDNEXT))
+            if (WindowText(c) == text) return true;
+        return false;
+    };
     batch.Next(L"Preferences opens on the asked setting, lists every tweak and searches across all pages");
-    Check(list && pages && ListView_GetItemCount(list) == effects &&
-              ListView_GetNextItem(list, -1, LVNI_SELECTED) == nightRow,
-          L"Preferences opens on the asked-for setting's page with that setting selected");
+    Check(sheet && pages && settingsShown() == effects && GetFocus() && GetDlgCtrlID(GetFocus()) == 1000 + night &&
+              hasText(L"Volume shaping") && hasText(L"Bitcrush"),
+          L"Preferences opens on the asked-for setting's page, under its headings, with that setting's control focused");
+    HWND nightSwitch = sheet ? GetDlgItem(sheet, 1000 + night) : nullptr, nightReset = sheet ? GetDlgItem(sheet, 3000 + night) : nullptr;
+    const bool nightBefore = g.nightMode;
+    if (nightSwitch) SendMessageW(nightSwitch, BM_CLICK, 0, 0);
+    const bool flipped = g.nightMode != nightBefore && IsWindowVisible(nightReset) == (g.nightMode != false);
+    if (nightReset && IsWindowVisible(nightReset)) SendMessageW(nightReset, BM_CLICK, 0, 0);
+    Check(flipped && !g.nightMode && !IsWindowVisible(nightReset),
+          L"a setting's switch changes it at once and shows its reset, which puts the default back and hides again");
     if (pages) choosePage(0);
     const auto shownTweaks = std::count_if(Tweaks().begin(), Tweaks().end(), TweakShown);
-    Check(list && ListView_GetItemCount(list) == (int)shownTweaks, L"All settings lists every tweak this build has");
+    Check(settingsShown() == (int)shownTweaks && hasText(L"Playback") && hasText(L"Online"),
+          L"All settings lists every tweak this build has, under each page's name");
     if (pages) choosePage(1);
     if (search) SetWindowTextW(search, L"night");
-    Check(list && ListView_GetItemCount(list) == 1 && SendMessageW(pages, LB_GETCURSEL, 0, 0) == 0,
+    Check(settingsShown() == 1 && SendMessageW(pages, LB_GETCURSEL, 0, 0) == 0,
           L"a search from any page covers every page");
+    if (search) SetWindowTextW(search, L"");
     Pump(5000, [] { return !g.rgRunning; });
     if (Ready(window && pages && !g.rgRunning, L"ReplayGain controls have an idle worker and an open Preferences window")) {
         const bool automatic = g.rgAutoScan;
@@ -1237,6 +1306,21 @@ void TestThemes() {
     batch.Next(L"the player's tint and the row stripes keep Light and Dark legible, and other themes keep their own");
     Check(legible && tinted && PlayerSurface(foobar, 0) == foobar.surface && RowStripe(foobar) == foobar.bg,
           L"the player's tint and the row stripes keep Light and Dark legible, and other themes keep their own");
+    // An open album's panel takes its cover's hue in Light and Dark without losing its text, stars or
+    // playing row, and stays neutral for a gray cover; other themes keep their accent-tinted panel.
+    bool panelLegible = true, panelTinted = true;
+    for (const Palette* p : {&LightPalette(), &DarkPalette()}) {
+        for (double hue = -1; hue < 360; hue += 15) {
+            Rgb s = AlbumPanelSurface(*p, hue);
+            panelLegible = panelLegible && Contrast(p->text, s) >= 7 && Contrast(p->sub, s) >= 4.5 &&
+                           Contrast(p->accent, s) >= 3 && Contrast(p->playing, s) >= 3;
+            if (hue >= 0) panelTinted = panelTinted && s != AlbumPanelSurface(*p, -1);
+        }
+    }
+    batch.Next(L"an open album's panel takes its cover's hue and keeps Light and Dark legible");
+    Check(panelLegible && panelTinted && AlbumPanelSurface(DarkPalette(), -1) == DarkPalette().surface2 &&
+              AlbumPanelSurface(foobar, 0) == AlbumPanelSurface(foobar, 200),
+          L"an open album's panel takes its cover's hue and keeps Light and Dark legible");
     batch.Next(L"a release offers Light, Dark, Apollo and the system theme; a saved theme it lacks opens as Light or Dark");
     bool offered = true;
     for (ThemeMode t : {ThemeMode::System, ThemeMode::Light, ThemeMode::Dark, ThemeMode::Apollo})

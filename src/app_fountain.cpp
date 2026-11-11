@@ -428,13 +428,12 @@ void LoadWaveLook() {
     }
 }
 
-// The color of what has played on the plain waveform: the position's own while playing, else the
-// state's (playing accent, paused amber, warning red).
-COLORREF WaveformPlayedColor() {
+// The color of what has played on the plain waveform while playing: the position's own, else the
+// accent; a warning is red. Paused is app_waveform.cpp's, which fades to it.
+COLORREF WaveformPlayingColor() {
     Rgb own = DockPlayed();
     bool warn = g.playing != kNone && (g_lib[g.playing].Failed() || g.stopAfterCurrent);
     if (warn) return Ref(P().error);
-    if (g.engine.Paused()) return Ref(P().amber);
     Rgb theme = ThemeInfo(g.themeMode).wavePlayed;  // a pack theme's own waveform colours
     if (own != kThemeColor) return Ref(own);
     if (Rgb chosen = PreferredWaveColor(); chosen != kNoRgb) return Ref(chosen);  // Preferences, Waveform colour
@@ -674,10 +673,9 @@ void AppendWaveLookMenu(HMENU) {}
 void UpdateWaveLookMenu(HMENU) {}
 bool WaveLookCommand(int) { return false; }
 
-COLORREF WaveformPlayedColor() {
+COLORREF WaveformPlayingColor() {
     bool warn = g.playing != kNone && (g_lib[g.playing].Failed() || g.stopAfterCurrent);
     if (warn) return Ref(P().error);
-    if (g.engine.Paused()) return Ref(P().amber);
     Rgb own = DockPlayed();
     Rgb theme = ThemeInfo(g.themeMode).wavePlayed;
     if (own != kThemeColor) return Ref(own);

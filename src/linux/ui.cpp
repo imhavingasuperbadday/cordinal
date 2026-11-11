@@ -213,7 +213,7 @@ void ApplyTheme() {
 
 bool UiAnimating() {
     return ((LiveWaveformShown() || LiveFountainShown() || SeekGlowPulsing()) && (g.playing != kNone || RadioPlaying()) &&
-            !IsPaused() && L.seek.w > 0) ||
+            !IsPaused() && L.seek.w > 0) || PauseFading() ||
            (MiniActive() && g.playing != kNone && !IsPaused()) || PointsChipAnimating() || LyricsAnimating() ||
            (FountainStyleShown() && FountainAppearance().motion && g.playing != kNone && !IsPaused()) ||
            GamesAnimating() || ((g.settings.theme == ThemeMode::Foobar || g.settings.theme == ThemeMode::Apollo) &&
@@ -371,6 +371,7 @@ void SetThumb(CoverImage* image) {
             SDL_UpdateTexture(t, nullptr, image->rgba.data(), image->width * 4);
             SDL_SetTextureScaleMode(t, SDL_SCALEMODE_LINEAR);
             it->second.texture = t;
+            it->second.hue = CoverHue(image->rgba.data(), (size_t)image->width * image->height, false);
         }
     }
     g.redraw = true;

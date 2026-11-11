@@ -82,8 +82,8 @@ namespace {
 // Monotonic clock for retry scheduling, immune to wall-clock changes.
 using Clock = std::chrono::steady_clock;
 
-const wchar_t kUserAgent[] = L"cordinal/0.1.9";
-const char kClientVersion[] = "0.1.9";
+const wchar_t kUserAgent[] = L"cordinal/0.1.10";
+const char kClientVersion[] = "0.1.10";
 
 #ifdef _WIN32
 const wchar_t kSep[] = L"\\";
@@ -144,7 +144,8 @@ struct Client {
     // Guarded by g_mu, except where noted.
     std::mutex g_mu;
     std::condition_variable g_cv;
-    std::thread g_worker;                    // joinable between Start and Stop
+    std::thread g_worker;                    // started by EnsureWorker once there is work, joined by Stop
+    bool g_open = false;                     // between Start and Stop
     bool g_stop = false;
     std::wstring g_dir;                      // set by Start, unchanged while running
     HWND g_notify = nullptr;
@@ -500,9 +501,23 @@ struct Client {
         }
     }
 
-    // Loads the token and queue and starts the worker; a no-op if it is already running.
+    // The sender only has work with an account to send for or a connection to check, so it starts
+    // then: most profiles have no account on at least two of the three services, and an idle
+    // thread costs a stack and a session either way. g_mu held; the new thread waits for it.
+    void EnsureWorker() {
+        if (!g_open || g_stop || g_worker.joinable()) return;
+        cancel = false;
+#ifdef _WIN32
+        session = WinHttpOpen(kUserAgent, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
+                              WINHTTP_NO_PROXY_BYPASS, 0);
+#endif
+        g_worker = std::thread([this] { WorkerLoop(); });
+    }
+
+    // Loads the token and queue, and starts the worker if there is an account; a no-op if it is
+    // already open.
     void Start(const std::wstring& dataDir, HWND notify, UINT msg) {
-        if (g_worker.joinable()) return;
+        if (g_open) return;
         g_dir = dataDir;
         g_notify = notify;
         g_msg = msg;
@@ -527,13 +542,9 @@ struct Client {
                 RewriteQueue();
             }
             g_status.queued = g_queue.size();
+            g_open = true;
+            if (!g_token.empty()) EnsureWorker();
         }
-        cancel = false;
-#ifdef _WIN32
-        session = WinHttpOpen(kUserAgent, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
-                              WINHTTP_NO_PROXY_BYPASS, 0);
-#endif
-        g_worker = std::thread([this] { WorkerLoop(); });
     }
 
     // Cancels requests in flight, then joins the sender.
@@ -541,11 +552,12 @@ struct Client {
         {
             std::lock_guard lock(g_mu);
             g_stop = true;
+            g_open = false;
             ++generation; authJob = 0;
             cancel = true;
         }
 #ifdef _WIN32
-        if (session) WinHttpCloseHandle(session);
+        if (session) WinHttpCloseHandle(session);  // cancels a request in flight
 #endif
         g_cv.notify_all();
         if (g_worker.joinable()) g_worker.join();
@@ -575,6 +587,7 @@ struct Client {
         if (!token.empty()) { queueOwner = owner; RewriteQueue(); }
         ++generation; authJob = 0;
         g_token = token;
+        if (!token.empty()) EnsureWorker();
         g_status.user = token.empty() ? L"" : user;
         g_rejected = false;
         g_backoffMs = 0;
@@ -611,7 +624,7 @@ struct Client {
         std::string json = ListenJson(l, true);
         std::lock_guard lock(g_mu);
         if (json.empty() || l.listenedAt == 0 || g_paused ||
-            (service != Service::ListenBrainz && l.durationMs <= 30000) || g_token.empty() || !g_worker.joinable()) return;
+            (service != Service::ListenBrainz && l.durationMs <= 30000) || g_token.empty() || !g_open) return;
         // Written first: a listen that is only in memory is lost if the app closes.
         if (!AppendLine(json)) { g_status.lastError = L"Could not write the queue file"; PostStatus(); return; }
         g_queue.push_back(std::move(json));
@@ -622,12 +635,15 @@ struct Client {
 
     void Validate(const std::wstring& token) {
         std::lock_guard lock(g_mu);
-        ++generation; authJob = 1; validateToken = Trim(token); g_cv.notify_all();
+        ++generation; authJob = 1; validateToken = Trim(token);
+        EnsureWorker();
+        g_cv.notify_all();
     }
     void Authorize(const std::wstring& key, const std::wstring& secret, const std::wstring& token) {
         std::lock_guard lock(g_mu);
         ++generation; authKey = Trim(key); authSecret = Trim(secret); authToken = Trim(token);
         authJob = token.empty() ? 2 : 3;
+        EnsureWorker();
         g_cv.notify_all();
     }
     void CancelAuthorization() {

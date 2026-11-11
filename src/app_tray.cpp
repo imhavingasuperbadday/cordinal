@@ -170,7 +170,6 @@ void ShowTrayMenu(POINT pt) {
     AppendMenuW(m, MF_STRING | (idle ? MF_GRAYED : 0), IDM_STOP, L"&Stop");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, IDM_MINI_PLAYER, L"&Mini player");
-    AppendMenuW(m, MF_STRING, IDM_TRAY_SHOW, L"Show &cordinal");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING | (StartWithWindows() ? MF_CHECKED : 0), IDM_START_WITH_WINDOWS, L"Start with &Windows");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);

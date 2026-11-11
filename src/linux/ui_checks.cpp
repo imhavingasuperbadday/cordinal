@@ -8,6 +8,8 @@ namespace lx {
 
 int CheckWindowLayouts();
 int CheckLinuxPacks();  // src/tests/selftest_linux_packs.cpp
+int CheckLinuxQueue();  // src/tests/selftest_linux_queue.cpp
+int CheckLinuxTabs();   // src/tests/selftest_linux_tabs.cpp
 
 int CheckLayout() {
     setvbuf(stdout, nullptr, _IONBF, 0);
@@ -107,7 +109,7 @@ int CheckLayout() {
         g.rows = savedRows;
         g_lib = std::move(saved);
     }
-    off += CheckWindowLayouts() + CheckPreferences() + CheckLinuxPacks() + CheckLinuxHeadsets() + CheckLinuxBig() + CheckLinuxHelperFeed() + CheckLinuxAlternateThemes() + CheckTagSuggestions();
+    off += CheckWindowLayouts() + CheckPreferences() + CheckLinuxPacks() + CheckLinuxHeadsets() + CheckLinuxBig() + CheckLinuxHelperFeed() + CheckLinuxAlternateThemes() + CheckTagSuggestions() + CheckLinuxQueue() + CheckLinuxTabs();
     const bool software = SetGpuDrawing(false) && !g.settings.gpuDrawing &&
         std::string_view(SDL_GetRendererName(g.renderer)) == SDL_SOFTWARE_RENDERER &&
         UiSymbolsAvailable() && DrawText(Font::Normal, "Renderer restored", 0, 0, CurrentPalette().text) > 0;
@@ -144,8 +146,15 @@ int CaptureUi(const std::string& dir) {
         // Covers asked for by this frame arrive as messages; the caller pumps them (CapturePump).
         Draw();
         SDL_Surface* s = SDL_RenderReadPixels(g.renderer, nullptr);
+        // SDL_SavePNG arrived in SDL 3.4. The release is built on Debian 13's SDL 3.2, where a capture
+        // falls back to BMP; reference images are made in the Arch tools image, which has 3.4.
+#if SDL_VERSION_ATLEAST(3, 4, 0)
         std::string path = dir + "/" + name + ".png";
         if (!s || !SDL_SavePNG(s, path.c_str())) {
+#else
+        std::string path = dir + "/" + name + ".bmp";
+        if (!s || !SDL_SaveBMP(s, path.c_str())) {
+#endif
             fprintf(stderr, "capture: %s: %s\n", path.c_str(), SDL_GetError());
             ++failures;
         } else {

@@ -22,7 +22,7 @@ size_t ViewMemoryBudget(size_t normal) { return ReducedMemoryMode() ? normal / 2
 // buffers remain live, so playback and editors are unaffected. The next paint recreates what it needs.
 void UpdateViewMemory() {
     ClearCellCache();
-    g.cellCache.rehash(0);
+    ShrinkCellCache();
     ClearBrowserCaches();
     StopGroupArt();
     LibViewReleaseGraphics();
@@ -124,7 +124,7 @@ void CompactLibrary() {
         for (const auto& text : browser[i]) g.panes[i].selected.push_back(g_lib.InternW(text));
     }
     ClearCellCache();
-    g.cellCache.rehash(0);  // drop buckets left over from the larger library
+    ShrinkCellCache();  // drop the text buffer left over from the larger library
     RestorePlaylistPosition();
     LibViewRebuild();
     g.view.shrink_to_fit();

@@ -955,7 +955,7 @@ void ApolloTheme() {
 std::wstring ApolloWindowTitle() {
     if (g.playing == kNone) return L"";
     auto lookup = Lookup(g.playing, true);
-    int index = TokenIndex(g.playingToken, g.playingPl);
+    int index = PlayingIndex(g.playingToken, g.playingPl);
     std::wstring title = (index >= 0 ? std::to_wstring(index + 1) + L". " : L"") + FormatTitle(L"[%artist% - ]%title%", lookup);
     return title + FormatTitle(L"[ (%length%)]", lookup);
 }
@@ -965,7 +965,7 @@ void ApolloTick() {
     std::wstring status;
     if (g.playing != kNone) {
         auto lookup = Lookup(g.playing, true);
-        int index = TokenIndex(g.playingToken, g.playingPl);
+        int index = PlayingIndex(g.playingToken, g.playingPl);
         status = (index >= 0 ? std::to_wstring(index + 1) + L". " : L"") + FormatTitle(L"[%artist% - ]%title%", lookup) + L" " +
                  FormatTitle(L"%playback_time%[ (%length%)]", lookup);
     }

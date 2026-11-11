@@ -209,6 +209,45 @@ private:
     int used_ = 0;
 };
 
+// How far the waveform has faded from its playing color (0) to its paused one (1). WaveformTick moves it
+// with the clock, so the color never depends on how often it is asked for.
+double g_pauseFade = 0;
+ULONGLONG g_pauseFadeAt = 0;
+constexpr double kPauseFadeMs = 300;
+
+bool WarningShown() { return g.playing != kNone && (g_lib[g.playing].Failed() || g.stopAfterCurrent); }
+
+// Advances the fade toward the engine's state; true while it is still moving.
+bool StepPauseFade() {
+    const double target = g.engine.Paused() ? 1.0 : 0.0;
+    const ULONGLONG now = GetTickCount64();
+    const double dt = g_pauseFadeAt ? (double)std::min<ULONGLONG>(now - g_pauseFadeAt, 50) : 0;
+    g_pauseFadeAt = now;
+    if (!g.pauseFade) g_pauseFade = target;
+    else if (g_pauseFade < target) g_pauseFade = std::min(target, g_pauseFade + dt / kPauseFadeMs);
+    else if (g_pauseFade > target) g_pauseFade = std::max(target, g_pauseFade - dt / kPauseFadeMs);
+    return g_pauseFade != target;
+}
+
+// `percent` ease-in-out, so the color settles rather than stopping dead.
+int Eased(double t) { return (int)std::lround(t * t * (3 - 2 * t) * 100); }
+
+}  // namespace
+
+// A warning keeps its red. Otherwise the playing color, turned toward the paused one by the fade; with
+// the fade off, the paused color the moment the engine pauses.
+COLORREF WaveformPlayedColor() {
+    const COLORREF playing = WaveformPlayingColor();
+    if (WarningShown()) return playing;
+    const double fade = g.pauseFade ? g_pauseFade : g.engine.Paused() ? 1.0 : 0.0;
+    if (fade <= 0) return playing;
+    const Rgb now = (Rgb)GetRValue(playing) << 16 | (Rgb)GetGValue(playing) << 8 | GetBValue(playing);
+    const COLORREF paused = Ref(PausedWaveColor(P(), now));
+    return fade >= 1 ? paused : Mix(playing, paused, Eased(fade));
+}
+
+namespace {
+
 // The playhead line over a moodbar: the state color (paused, a warning) or else the text color, which
 // stands out from every mood hue.
 COLORREF MoodPlayhead() {
@@ -418,8 +457,10 @@ void WaveformTick() {
     const bool pulsing = g.seekGlow && WaveformShown() && g.playing != kNone;
     bool animate = (LiveWaveformShown() || pulsing) && !FountainShown() && !g.engine.Paused() && IsWindowVisible(g.seek) &&
                    !IsIconic(g.hwnd);
-    if (animate && !liveTimer) liveTimer = SetTimer(g.seek, kLiveWaveTimer, 33, nullptr) != 0;
-    else if (!animate && liveTimer) { KillTimer(g.seek, kLiveWaveTimer); liveTimer = false; }
+    // The pause fade needs frames too, though the audio has stopped moving.
+    const bool fading = StepPauseFade() && IsWindowVisible(g.seek) && !IsIconic(g.hwnd);
+    if ((animate || fading) && !liveTimer) liveTimer = SetTimer(g.seek, kLiveWaveTimer, 33, nullptr) != 0;
+    else if (!animate && !fading && liveTimer) { KillTimer(g.seek, kLiveWaveTimer); liveTimer = false; }
     int pos = (int)SendMessageW(g.seek, TBM_GETPOS, 0, 0);
     COLORREF played = WaveformPlayedColor(), rest = WaveformRestColor();
     bool live = LiveWaveformShown();

@@ -9,16 +9,17 @@
 namespace app {
 
 // Builds the whole UI, called once from WM_CREATE. Order matters: LoadState first so
-// controls honour restored state, then the tag worker and fonts/controls, the engine,
-// and the tick timer last so no timer fires against a half-built window.
+// controls honour restored state, then arm the tag worker (it starts only when tags are
+// still queued), fonts/controls, the engine, and the tick timer last so no timer fires
+// against a half-built window.
 void CreateMainWindow(HWND hwnd) {
     g.hwnd = hwnd;
     g.closing = false;
     g.dpi = GetDpiForWindow(hwnd);
     LoadState();
-    customcover::Start(g.dataDir);  // before any cover is decoded
+    customcover::Start(g.dataDir);  // folder only; the index loads on the first lookup
     if (!g.showFocusBoxes) SendMessageW(hwnd, WM_CHANGEUISTATE, MAKEWPARAM(UIS_SET, UISF_HIDEFOCUS), 0);
-    g.tagWorker = std::thread(TagWorker, hwnd);
+    ArmTagWorker(hwnd);
     CreateFonts();
     CreateControls(hwnd);
     CreatePointsChip(hwnd);
@@ -33,6 +34,7 @@ void CreateMainWindow(HWND hwnd) {
     std::wstring error;
     if (!g.engine.Init(hwnd, error, true)) ShowMessage(error);
     g.engine.SetLoops(g.loops, 8.0);
+    g.engine.SetCrossfade(kCrossfadeSeconds[std::clamp(g.crossfade, 0, (int)std::size(kCrossfadeSeconds) - 1)]);
     g.engine.SetEq(g.eq);
     ApplyEffects();
     g.engine.SetLimiter(g.rgOn, g.rgHeadphoneHeadroom);
@@ -48,12 +50,13 @@ void CreateMainWindow(HWND hwnd) {
 
 // Raises the parts that do not affect the first frame only after it is on screen: the tray icon,
 // the media flyout and media keys, headset polling, peaks and scrobbling. On a slow launch these
-// used to sit between the window being ready and its first paint.
+// used to sit between the window being ready and its first paint. The headset poller stays down
+// until a saved per-output profile exists; opening the headphones page starts it otherwise.
 void FinishStartup(HWND hwnd) {
     g.startupTheme = false;
     InitTaskbar();
     InitTray();
-    g.headsets.Start();
+    if (SavedOutputProfiles()) g.headsets.Start();
     InitPlatform(hwnd);
     // The last session's song, loaded and paused or playing. Files named on the command line play
     // instead, so nothing is reopened behind them.

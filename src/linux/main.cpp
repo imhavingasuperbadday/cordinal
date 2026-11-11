@@ -211,7 +211,7 @@ int Run(int argc, char** argv) {
         if (!full.empty()) paths.push_back(full);
     }
 
-    SDL_SetAppMetadata("cordinal", "0.1.9", "cordinal");
+    SDL_SetAppMetadata("cordinal", "0.1.10", "cordinal");
     SDL_SetHint(SDL_HINT_VIDEO_WAYLAND_PREFER_LIBDECOR, "1");
     if (parity) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {

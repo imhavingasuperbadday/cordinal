@@ -10,25 +10,76 @@ void EnsurePlaylistIdentities() {
     for (auto& pl : g.playlists) if (!pl.identity) pl.identity = g.nextPlaylistIdentity++;
 }
 
+int PlaylistOfTab(int tab) {
+    return tab >= 0 && tab < (int)g.tabSlots.size() ? g.tabSlots[tab] : -1;
+}
+
+int TabOfPlaylistIndex(int index) { return ::TabOfPlaylist(g.playlists, g.tabSlots, index); }
+
+bool IsAutoTab(int tab) { return IsAutoGroupTab(g.playlists, g.tabSlots, tab); }
+
+namespace {
+
+// The auto-playlist the shared tab shows: the one last opened, found by identity since indices move.
+int ShownAuto() {
+    for (int i = 0; i < (int)g.playlists.size(); ++i)
+        if (g.playlists[i].identity == g.autoTabShown && g.playlists[i].kind == PlaylistKind::Auto) return i;
+    return -1;
+}
+
+}  // namespace
+
+void ShowAutoTabMenu(int tab) {
+    RECT r{};
+    if (!IsAutoTab(tab) || !TabCtrl_GetItemRect(g.tabs, tab, &r)) return;
+    MapWindowPoints(g.tabs, nullptr, reinterpret_cast<POINT*>(&r), 2);
+    HMENU m = CreatePopupMenu();
+    constexpr int kFirst = 1;  // + playlist index; returned, not posted
+    for (int i = 0; i < (int)g.playlists.size(); ++i) {
+        if (g.playlists[i].kind != PlaylistKind::Auto) continue;
+        std::wstring name;
+        for (wchar_t c : g.playlists[i].name) name += c == L'&' ? L"&&" : std::wstring(1, c);  // no mnemonics
+        if (g.layout.tabCounts) name += L"\t" + std::to_wstring(g.playlists[i].items.size());
+        AppendMenuW(m, MF_STRING | (i == g.active ? MF_CHECKED : 0), kFirst + i, name.c_str());
+    }
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(m, MF_STRING, IDM_NEW_AUTO, L"&New auto-playlist...");
+    if (g.playlists[PlaylistOfTab(tab)].kind == PlaylistKind::Auto && PlaylistOfTab(tab) == g.active)
+        AppendMenuW(m, MF_STRING, IDM_EDIT_AUTO, L"&Edit rules...");
+    TPMPARAMS avoid{sizeof(avoid), r};
+    int picked = (int)TrackPopupMenuEx(m, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN | TPM_VERTICAL, r.left, r.bottom,
+                                       g.hwnd, &avoid);
+    DestroyMenu(m);
+    if (picked == IDM_NEW_AUTO || picked == IDM_EDIT_AUTO) PostMessageW(g.hwnd, WM_COMMAND, picked, 0);
+    else if (picked >= kFirst && picked - kFirst < (int)g.playlists.size()) ActivatePlaylist(picked - kFirst);
+}
+
 // Repaints the tab captions from g.playlists: name, an auto-playlist marker and, when the layout
-// asks for it, the item count.
+// asks for it, the item count. The auto-playlists share one tab (TabSlots) that names the one it
+// shows, with a ▾ for its menu.
 // WM_SETREDRAW brackets the updates so the control does not flicker while the count changes.
 void RefreshTabs() {
     EnsurePlaylistIdentities();
+    if (!g.playlists.empty() && g.active < (int)g.playlists.size() && Active().kind == PlaylistKind::Auto)
+        g.autoTabShown = Active().identity;
+    g.tabSlots = TabSlots(g.playlists, g.groupAutoTabs, ShownAuto());
     if (!g.tabs) return;
     SendMessageW(g.tabs, WM_SETREDRAW, FALSE, 0);
-    while (TabCtrl_GetItemCount(g.tabs) > (int)g.playlists.size()) TabCtrl_DeleteItem(g.tabs, TabCtrl_GetItemCount(g.tabs) - 1);
-    for (int i = 0; i < (int)g.playlists.size(); ++i) {
-        std::wstring name = (g.playlists[i].kind == PlaylistKind::Auto ? L"\x26A1 " : L"") + g.playlists[i].name;
-        if (g.layout.tabCounts) name += L" (" + std::to_wstring(g.playlists[i].items.size()) + L")";
+    const int count = (int)g.tabSlots.size();
+    while (TabCtrl_GetItemCount(g.tabs) > count) TabCtrl_DeleteItem(g.tabs, TabCtrl_GetItemCount(g.tabs) - 1);
+    for (int tab = 0; tab < count; ++tab) {
+        const Playlist& pl = g.playlists[g.tabSlots[tab]];
+        std::wstring name = (pl.kind == PlaylistKind::Auto ? L"\x26A1 " : L"") + pl.name;
+        if (IsAutoTab(tab)) name += L" \x25BE";
+        if (g.layout.tabCounts) name += L" (" + std::to_wstring(pl.items.size()) + L")";
         TCITEMW item{};
         item.mask = TCIF_TEXT;
         item.pszText = name.data();
-        if (i < TabCtrl_GetItemCount(g.tabs)) TabCtrl_SetItem(g.tabs, i, &item);
-        else TabCtrl_InsertItem(g.tabs, i, &item);
+        if (tab < TabCtrl_GetItemCount(g.tabs)) TabCtrl_SetItem(g.tabs, tab, &item);
+        else TabCtrl_InsertItem(g.tabs, tab, &item);
     }
-    TabCtrl_SetCurSel(g.tabs, RadioActive() ? -1 : g.active);
-    if (!RadioActive()) TabCtrl_SetCurFocus(g.tabs, g.active);
+    TabCtrl_SetCurSel(g.tabs, RadioActive() ? -1 : TabOfPlaylistIndex(g.active));
+    if (!RadioActive()) TabCtrl_SetCurFocus(g.tabs, TabOfPlaylistIndex(g.active));
     SendMessageW(g.tabs, WM_SETREDRAW, TRUE, 0);
     FitTabs();
 }
@@ -100,7 +151,9 @@ void ActivatePlaylist(int index) {
     bool contentFocused = GetFocus() == g.list || GetFocus() == g.libView;
     if (index != g.active && !wasRadio) Active().position = RememberPosition();
     g.active = index;
-    TabCtrl_SetCurSel(g.tabs, index);
+    // Another auto-playlist renames the shared tab; any other playlist only moves the selection.
+    if (g.playlists[index].kind == PlaylistKind::Auto && g.playlists[index].identity != g.autoTabShown) RefreshTabs();
+    else TabCtrl_SetCurSel(g.tabs, TabOfPlaylistIndex(index));
     const Playlist& pl = g.playlists[index];
     UpdateSearchCue();
     g.sortColumn = pl.sortColumn;
@@ -229,6 +282,19 @@ void ReorderPlaylist(int from, int to) {
     g.dirty = true;
 }
 
+// Moves the active playlist one tab over. Past the shared auto-playlist tab means past all of its
+// playlists; one of those stays where it is, since the shared tab keeps its place.
+void MoveActiveTab(int direction) {
+    int tab = TabOfPlaylistIndex(g.active);
+    if (IsAutoTab(tab)) return;
+    int to = PlaylistOfTab(tab + direction);
+    if (to < 0) return;
+    if (IsAutoTab(tab + direction))
+        for (int i = 0; i < (int)g.playlists.size(); ++i)
+            if (g.playlists[i].kind == PlaylistKind::Auto && (direction > 0 || to > i)) to = i;
+    ReorderPlaylist(g.active, to);
+}
+
 // Copies the active playlist into a new static playlist named "... copy", inserted after it. Auto
 // playlists become static copies: their rules cannot be duplicated verbatim, so they are dropped.
 void DuplicatePlaylist() {
@@ -331,7 +397,7 @@ void BeginRename(int index) {
     if (kind == PlaylistKind::Library || kind == PlaylistKind::Inbox) return;
     EndRename(true);
     RECT r{};
-    if (!TabCtrl_GetItemRect(g.tabs, index, &r)) return;
+    if (!TabCtrl_GetItemRect(g.tabs, TabOfPlaylistIndex(index), &r)) return;
     g_renameIndex = index;
     MapWindowPoints(g.tabs, g.hwnd, reinterpret_cast<POINT*>(&r), 2);
     r.left += S(6);

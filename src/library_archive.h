@@ -15,7 +15,7 @@ struct LibraryArchive {
     bool hasAlbumEditions = false;
     std::map<AlbumId, AlbumMeasurement> albums;
     std::vector<AlbumGroup> albumGroups;
-    std::map<TrackId, TrackMusicBrainz> trackMusicBrainz;
+    TrackMusicBrainzTable trackMusicBrainz;
     TasteState taste;
 };
 

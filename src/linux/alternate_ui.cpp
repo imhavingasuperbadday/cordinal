@@ -311,7 +311,7 @@ void DrawApollo(const Palette& p) {
     for (int i = 0; i < 2; ++i) DrawText(Font::Normal, i ? "Volume" : "Position", a.labels[i].x, TextY(a.labels[i]), p.text, a.labels[i].w);
     double duration = TrackDuration(), position = g.playing == kNone ? 0 : g.engine.Position();
     DrawSlider(L.seek, duration > 0 ? position / duration : 0, duration > 0, L.seek.In(g_mouseX, g_mouseY), p);
-    DrawSlider(L.volume, g.settings.volume, true, L.volume.In(g_mouseX, g_mouseY), p);
+    DrawSlider(L.volume, g.settings.volume, g.settings.softwareVolume, L.volume.In(g_mouseX, g_mouseY), p);
     Sunken(a.statusBox, p);
     std::string status = g.playing == kNone ? "Playback stopped." : std::to_string(g.queuePos + 1) + ". " +
         Utf8(FormatForTrack(L"[%artist% - ]%title%", g.playing, false)) + " " + Utf8(FormatDuration(position)) + " (" + Utf8(FormatDuration(duration)) + ")";
@@ -496,10 +496,42 @@ bool FountainStyleShown() {
     return kExtraThemes && g.settings.theme == ThemeMode::Deltarune && g.settings.size == ViewSize::Normal &&
         g.settings.waveform && appearance.style != 0 && (g.settings.liveFountain || !LiveWaveformShown());
 }
+// How far the waveform has faded from its playing colour (0) to its paused one (1), worked out from when
+// the engine last paused or resumed, so it never depends on how often it is asked for.
+namespace {
+constexpr double kPauseFadeMs = 300;
+struct { bool paused = false; double from = 0; uint64_t since = 0; } pauseFade;
+double FadeAt(uint64_t now) {
+    const double target = pauseFade.paused ? 1 : 0, step = (double)(now - pauseFade.since) / kPauseFadeMs;
+    return pauseFade.from < target ? std::min(target, pauseFade.from + step) : std::max(target, pauseFade.from - step);
+}
+double PauseFadeNow() {
+    const uint64_t now = SDL_GetTicks();
+    const bool paused = IsPaused();
+    if (paused != pauseFade.paused) {
+        pauseFade.from = FadeAt(now);
+        pauseFade.since = now;
+        pauseFade.paused = paused;
+    }
+    if (!g.settings.pauseFade) {
+        pauseFade.from = paused ? 1 : 0;
+        pauseFade.since = now;
+    }
+    return FadeAt(now);
+}
+}  // namespace
+bool PauseFading() { return g.settings.pauseFade && PauseFadeNow() != (IsPaused() ? 1.0 : 0.0); }
 Rgb WavePlayedColor(const Palette& p) {
     if (g.playing != kNone && (g_lib[g.playing].Failed() || g.stopAfterCurrent)) return p.error;
-    if (IsPaused()) return p.amber;
-    return WaveRestingColor(p);
+    const Rgb playing = WaveRestingColor(p);
+    const double fade = PauseFadeNow();
+    if (fade <= 0) return playing;
+    const Rgb paused = PausedWaveColor(p, playing);
+    if (fade >= 1) return paused;
+    const int percent = (int)std::lround(fade * fade * (3 - 2 * fade) * 100);
+    auto mix = [percent](int a, int b) { return a + (b - a) * percent / 100; };
+    return (Rgb)mix((playing >> 16) & 255, (paused >> 16) & 255) << 16 | (Rgb)mix((playing >> 8) & 255, (paused >> 8) & 255) << 8 |
+           (Rgb)mix(playing & 255, paused & 255);
 }
 // The played colour without the paused or warning state: the position's own, then Preferences'
 // Waveform colour, then a pack theme's, then the accent (app_fountain.cpp's order).
@@ -668,7 +700,7 @@ bool DrawAlternate(const Palette& p) {
         }
     }
     double duration = TrackDuration(), position = g.playing == kNone ? 0 : g.engine.Position();
-    DrawSlider(L.volume, g.settings.volume, true, L.volume.In(g_mouseX, g_mouseY), p);
+    DrawSlider(L.volume, g.settings.volume, g.settings.softwareVolume, L.volume.In(g_mouseX, g_mouseY), p);
     DrawSlider(L.seek, duration > 0 ? position / duration : 0, duration > 0, L.seek.In(g_mouseX, g_mouseY), p);
     return true;
 }

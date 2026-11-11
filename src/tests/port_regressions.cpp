@@ -229,6 +229,164 @@ void TestPortedUi(const std::wstring& directory) {
                   TokenIndex(first, g.active) == 1 && TokenIndex(last, g.active) == 3,
               L"moving a track block remaps every surviving playback occurrence to its final slot");
         g.tokens.clear();
+        {
+            // A queued song keeps the slot playback continues from. The list has to show the song
+            // itself: matching that slot marked a different track and could not scroll to this one.
+            const bool grouped = g.groupAlbums;
+            g.groupAlbums = false;
+            TrackId before = g_lib.Add(directory + L"\\queued-before.flac");
+            TrackId song = g_lib.Add(directory + L"\\queued-song.flac");
+            TrackId after = g_lib.Add(directory + L"\\queued-after.flac");
+            TagData tags;
+            tags.title = "Ol' Pickaxe";
+            g_lib.ApplyTags(song, tags);
+            Active().items = {before, song, after};
+            RebuildView();
+            unsigned long long queued = NewToken(song, g.active);
+            g.tokens[queued].anchor = before;
+            g.tokens[queued].anchorIndex = 0;
+            g.tokens[queued].queued = true;
+            const TrackId savedPlaying = g.playing;
+            const auto savedToken = g.playingToken;
+            const int savedPl = g.playingPl;
+            g.playing = song;
+            g.playingToken = queued;
+            g.playingPl = g.active;
+            batch.Next(L"a queued track is found on its own row");
+            Check(TokenIndex(queued, g.active) == 0 && PlayingIndex(queued, g.active) == 1,
+                  L"a queued track keeps the continuation slot and is listed on its own row");
+            RevealPlayingTrack();
+            int selected = ListView_GetNextItem(g.list, -1, LVNI_SELECTED);
+            int pos = selected >= 0 ? ViewPosOfRow(selected) : -1;
+            Check(pos == 1 && Active().items[g.view[(size_t)pos]] == song,
+                  L"showing the playing track selects the queued song");
+            g.playing = savedPlaying;
+            g.playingToken = savedToken;
+            g.playingPl = savedPl;
+            g.tokens.clear();
+            g.groupAlbums = grouped;
+        }
+        {
+            // Now Playing lists only the playing song's album, its tracks wherever they sit in the
+            // list. A search, a song without an album or the preference turned off shows all of it.
+            const bool albumOnly = g.npAlbumOnly;
+            const PlaylistKind kind = Active().kind;
+            const TrackId savedPlaying = g.playing;
+            const auto savedToken = g.playingToken;
+            const int savedPl = g.playingPl;
+            std::vector<TrackId> np;
+            for (int i = 0; i < 5; ++i) {
+                TrackId id = g_lib.Add(directory + L"\\np-album-" + std::to_wstring(i) + L".flac");
+                TagData tags;
+                tags.title = "Now playing album " + std::to_string(i);
+                if (i != 4) tags.album = i == 2 ? "Elsewhere" : "Pickaxe Songs";
+                tags.albumArtist = "Rook";
+                g_lib.ApplyTags(id, tags);
+                np.push_back(id);
+            }
+            Active().kind = PlaylistKind::NowPlaying;
+            Active().items = np;
+            g.filter.clear();
+            g.npAlbumOnly = true;
+            g.playingToken = 0;
+            g.playingPl = g.active;
+            g.playing = np[1];
+            FollowNowPlayingAlbum();
+            batch.Next(L"Now Playing lists the playing album");
+            Check(g.view == std::vector<uint32_t>{0, 1, 3} && NowPlayingAlbumTrack() == np[1],
+                  L"Now Playing lists only the playing song's album");
+            g.playing = np[2];
+            FollowNowPlayingAlbum();
+            Check(g.view == std::vector<uint32_t>{2}, L"Now Playing follows playback into another album");
+            g.filter = L"\"Now playing album\"";
+            RebuildView();
+            Check(g.view.size() == np.size() && NowPlayingAlbumTrack() == kNone,
+                  L"a search in Now Playing looks through the whole list");
+            g.filter.clear();
+            g.playing = np[4];
+            FollowNowPlayingAlbum();
+            Check(g.view.size() == np.size(), L"a song without an album shows the whole Now Playing list");
+            g.playing = np[0];
+            g.npAlbumOnly = false;
+            FollowNowPlayingAlbum();
+            Check(g.view.size() == np.size(), L"with the preference off, Now Playing shows the whole list");
+            g.playing = kNone;
+            g.npAlbumOnly = true;
+            FollowNowPlayingAlbum();
+            Check(g.view.size() == np.size(), L"stopped, Now Playing shows the whole list");
+            g.playing = savedPlaying;
+            g.playingToken = savedToken;
+            g.playingPl = savedPl;
+            g.npAlbumOnly = albumOnly;
+            Active().kind = kind;
+            // Edit > Make album opens with the tracks listed in album order, and Cancel writes nothing.
+            ShowAlbumMaker({np[3], np[0], np[3]});
+            HWND maker = FindWindowW(L"CordinalAlbumMaker", nullptr);
+            HWND list = maker ? GetDlgItem(maker, 300) : nullptr;
+            wchar_t title[64] = {};
+            if (maker) GetDlgItemTextW(maker, 100, title, (int)std::size(title));
+            bool listed = list && SendMessageW(list, LB_GETCOUNT, 0, 0) == 2 && std::wstring(title) == L"Pickaxe Songs" &&
+                          AlbumMakerOpen();
+            if (maker) SendMessageW(maker, WM_COMMAND, IDCANCEL, 0);
+            Check(listed && !AlbumMakerOpen() && !TagWriteBusy(),
+                  L"Make album lists the tracks once each, starts from their album, and Cancel writes nothing");
+        }
+        {
+            // The auto-playlists share one tab at the first one's place. It names the one last
+            // opened, and the tab and playlist indices map both ways around it.
+            const bool groupAuto = g.groupAutoTabs;
+            const uint64_t workflow = Active().identity;
+            const size_t base = g.playlists.size();
+            for (const wchar_t* name : {L"Auto tab one", L"Auto tab two"})
+                InsertPlaylist((int)g.playlists.size(), Playlist{name, {}, PlaylistKind::Auto});
+            NewPlaylist(L"After the autos");
+            const int one = (int)base, two = (int)base + 1, after = (int)base + 2;
+            g.groupAutoTabs = true;
+            ActivatePlaylist(two);
+            const int shared = TabOfPlaylistIndex(two);
+            wchar_t text[128] = {};
+            TCITEMW item{};
+            item.mask = TCIF_TEXT;
+            item.pszText = text;
+            item.cchTextMax = (int)std::size(text);
+            TabCtrl_GetItem(g.tabs, shared, &item);
+            batch.Next(L"auto-playlists share one tab");
+            int autos = 0;
+            for (const auto& pl : g.playlists) autos += pl.kind == PlaylistKind::Auto;
+            Check(TabCtrl_GetItemCount(g.tabs) == (int)g.playlists.size() - autos + 1 && IsAutoTab(shared) &&
+                      TabOfPlaylistIndex(one) == shared && PlaylistOfTab(shared) == two &&
+                      PlaylistOfTab(TabOfPlaylistIndex(after)) == after && TabCtrl_GetCurSel(g.tabs) == shared &&
+                      std::wstring(text).find(L"Auto tab two") != std::wstring::npos,
+                  L"the auto-playlists share one tab that shows the one last opened");
+            int firstAuto = 0;  // the profile may hold auto-playlists of its own before these
+            while (g.playlists[firstAuto].kind != PlaylistKind::Auto) ++firstAuto;
+            ActivatePlaylist(after);
+            // Step left one tab at a time until the shared tab is the next one over, then past it.
+            bool stepped = true;
+            for (int guard = 0; stepped && guard < 64 && !IsAutoTab(TabOfPlaylistIndex(g.active) - 1); ++guard) {
+                int tab = TabOfPlaylistIndex(g.active);
+                MoveActiveTab(-1);
+                stepped = TabOfPlaylistIndex(g.active) == tab - 1;
+            }
+            const int beside = TabOfPlaylistIndex(g.active);
+            MoveActiveTab(-1);
+            Check(stepped && g.active == firstAuto && g.playlists[firstAuto].name == L"After the autos" &&
+                      TabOfPlaylistIndex(g.active) == beside - 1 && IsAutoTab(beside),
+                  L"moving a tab left steps one tab at a time, and past every auto-playlist of the shared tab");
+            g.groupAutoTabs = false;
+            RefreshTabs();
+            Check(TabCtrl_GetItemCount(g.tabs) == (int)g.playlists.size() && !IsAutoTab(TabOfPlaylistIndex(two)),
+                  L"with the preference off, each auto-playlist has its own tab");
+            for (int i = (int)g.playlists.size(); i-- > 0;)
+                if (g.playlists[i].name == L"After the autos" || g.playlists[i].name.starts_with(L"Auto tab ")) {
+                    RemovePlaylist(i);
+                    g.closedPlaylists.pop_back();  // not something for Reopen closed
+                }
+            g.groupAutoTabs = groupAuto;
+            RefreshTabs();
+            for (int i = 0; i < (int)g.playlists.size(); ++i)
+                if (g.playlists[i].identity == workflow) ActivatePlaylist(i);
+        }
         Active().items = dragItems;
         RebuildView();
         MoveTrackBlock({0, 2}, 1);
@@ -626,12 +784,14 @@ void TestPortedUi(const std::wstring& directory) {
     points.recent.push_back({UnixNow(), PointsKind::Play, originalId, 1234});
     SetPointsState(std::move(points));
     size_t retained = g_lib.Count();
-    g.cellCache[UINT64_MAX] = L"stale";
+    RememberCachedCell(UINT64_MAX, L"stale");
     for (int i = 0; i < 200; ++i) g_lib.Add(directory + L"\\orphan-" + std::to_wstring(i) + L".flac");
     CompactLibrary();
     batch.Next(L"idle compaction removes orphan records and rewires stats, queue, tokens, history and points "
                L"while IDs change");
-    Check(!g.compactPending && g_lib.Count() <= retained && g_lib.Find(directory + L"\\orphan-0.flac") == kNone && !g.cellCache.count(UINT64_MAX),
+    std::wstring staleCell;
+    Check(!g.compactPending && g_lib.Count() <= retained && g_lib.Find(directory + L"\\orphan-0.flac") == kNone &&
+              !LookupCachedCell(UINT64_MAX, staleCell),
           L"idle cleanup removes orphan records and invalidates pooled display caches (pending=%d count=%zu retained=%zu tags=%zu import=%d)",
           g.compactPending, g_lib.Count(), retained, g.tagPending.size(), (int)g.importRunning.load());
     TrackId remapped = g_lib.Find(retainedPath);

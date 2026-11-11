@@ -33,6 +33,8 @@ EqSettings ReadEqSettings(const wchar_t* section);
 void WriteEqSettings(const wchar_t* section, const EqSettings& eq);
 void SyncOutputEq(const std::wstring& id);
 void RememberOutputEq(bool remember);
+// True when settings.ini has any OutputEQ-* section (a remembered curve or headroom).
+bool SavedOutputProfiles();
 // User preferences can be saved independently of the library and playback session.
 void SavePreferences();
 bool SaveBackupSettings(std::string& bytes);

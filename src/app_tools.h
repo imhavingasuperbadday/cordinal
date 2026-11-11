@@ -82,6 +82,10 @@ void OnCollectionMessage(WPARAM wp, LPARAM lp);
 void StopCollection();
 void ShowTagEditor(const std::vector<TrackId>& ids);
 bool TagEditorDialogMessage(MSG* msg);
+// Edit > Make album (app_albummaker.cpp): the tracks given become one album, in an order you set.
+void ShowAlbumMaker(const std::vector<TrackId>& ids);
+bool AlbumMakerDialogMessage(MSG* msg);
+bool AlbumMakerOpen();
 void WriteTagsInBackground(const std::vector<TrackId>& ids, const TagEdit& edit, bool announce = true);
 bool CanUndoTagEdit(std::wstring& description);
 void UndoLastTagEdit();

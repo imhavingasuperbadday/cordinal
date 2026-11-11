@@ -22,10 +22,10 @@ struct Budget {
     double memory;
 };
 constexpr Budget kBudgets[] = {
-    {L"empty", L"first start: no library, album view", 7.0},
-    {L"tracks", L"2,000-track library, track list", 6.5},
-    {L"albums", L"2,000-track library, album view with covers", 11.5},
-    {L"playing", L"2,000-track library, album view, playing", 15.25},
+    {L"empty", L"first start: no library, album view", 6.5},
+    {L"tracks", L"2,000-track library, track list", 6.0},
+    {L"albums", L"2,000-track library, album view with covers", 11.0},
+    {L"playing", L"2,000-track library, album view, playing", 13.25},
 };
 
 // A packed build expands the whole native image into private memory, so every byte of program

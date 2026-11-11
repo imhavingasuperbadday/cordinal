@@ -91,6 +91,36 @@ void TestSoftCanvas() {
     Check(after <= before + 1, L"UI: the software canvas draws on its own thread (threads %u before, %u after)", before, after);
 }
 
+// The track list keeps formatted cells in one table and one character buffer. A hit is the first
+// string stored for that key, including an empty one, and clearing drops the lookup.
+void TestCellCache() {
+    using namespace app;
+    testlog::Batch batch(L"UI: the track list's cell cache");
+    ClearCellCache();
+    ShrinkCellCache();
+    std::wstring got = L"untouched";
+    Check(!LookupCachedCell(1, got) && got == L"untouched", L"UI: a missing cell is a cache miss");
+    size_t bytes = 0;
+    for (int i = 0; i < 3000; ++i) {
+        std::wstring text = L"Track " + std::to_wstring(i);
+        bytes += text.size() * sizeof(wchar_t);
+        RememberCachedCell((uint64_t)i * 100 + 3, text);
+    }
+    const uint64_t firstKey = 3, lastKey = 2999ull * 100 + 3, duplicate = 5ull * 100 + 3;
+    Check(LookupCachedCell(firstKey, got) && got == L"Track 0" && LookupCachedCell(lastKey, got) && got == L"Track 2999" &&
+              CellCacheCount() == 3000 && CellCacheBytes() == bytes,
+          L"UI: the cell cache keeps every stored string (count %zu, bytes %zu)", CellCacheCount(), CellCacheBytes());
+    const size_t before = CellCacheBytes();
+    RememberCachedCell(duplicate, L"replaced");
+    Check(LookupCachedCell(duplicate, got) && got == L"Track 5" && CellCacheBytes() == before && CellCacheCount() == 3000,
+          L"UI: storing a cell again keeps the first string");
+    RememberCachedCell(42, L"");
+    Check(LookupCachedCell(42, got) && got.empty() && CellCacheCount() == 3001, L"UI: an empty cell is a cache hit");
+    ClearCellCache();
+    Check(!LookupCachedCell(firstKey, got) && CellCacheCount() == 0, L"UI: clearing the cell cache drops its lookups");
+    ShrinkCellCache();
+}
+
 void TestPlayerSliders() {
     using namespace app;
     testlog::Batch batch;
@@ -562,6 +592,135 @@ void TestFoobarControls() {
 }  // namespace
 
 // Real Win32 controls under a hidden test window: no player instance or user settings are touched.
+// The queue editor and Choose by taste's picks: yours stay ahead of the picks, edits keep that
+// order, picks top themselves up from the shuffle pass or Keep playing like this without repeats,
+// and the Up next panel's keys and drags edit the queue.
+void TestQueueEditor(const std::wstring& scratch) {
+    using namespace app;
+    testlog::Group group(L"queue editor and taste picks");
+    testlog::Batch batch;
+    const auto savedQueue = g.queue;
+    const auto savedTokens = g.tokens;
+    const MainLayout savedLayout = g.layout;
+    const TrackId savedPlaying = g.playing;
+    const auto savedPlayingToken = g.playingToken, savedDecoding = g.decodingToken;
+    const int savedShuffle = g.shuffle;
+    const bool savedTaste = g.taste, savedRadio = g.radio;
+    const Repeat savedRepeat = g.repeat;
+    std::vector<TrackId> ids;
+    for (int i = 0; i < 7; ++i) ids.push_back(g_lib.Add(scratch + L"\\queue-" + std::to_wstring(i) + L".flac"));
+    NewPlaylist(L"Queue editor");
+    Active().items = ids;
+    RebuildView();
+    g.queue.clear();
+    g.queuePicks = 0;
+    g.repeat = Repeat::Off;
+    g.radio = false;
+    g.shuffle = kShuffleTracks;
+    g.shuffleQueue.clear();
+    g.shuffleStarted = false;
+    g.decodingToken = 0;
+    g.playing = ids[0];
+    g.playingToken = NewToken(ids[0], g.active, 0);
+    g.taste = true;
+    auto yours = [] { return std::vector<TrackId>(g.queue.begin(), g.queue.end() - (ptrdiff_t)g.queuePicks); };
+    auto distinct = [&] {
+        std::vector<TrackId> q(g.queue.begin(), g.queue.end());
+        std::sort(q.begin(), q.end());
+        return std::adjacent_find(q.begin(), q.end()) == q.end() && !std::count(q.begin(), q.end(), ids[0]);
+    };
+
+    batch.Next(L"queue: Choose by taste in track shuffle fills the queue from the pass, behind your own tracks");
+    RefreshNext();
+    Check(g.queuePicks == 5 && g.queue.size() == 5 && distinct() && g.shuffleQueue.size() == 1,
+          L"queue: taste picks five tracks from the shuffle pass (%zu picks, %zu left)", g.queuePicks, g.shuffleQueue.size());
+    TrackId mine = g_lib.Add(scratch + L"\\queue-mine.flac");
+    QueueTracks({mine}, false);
+    Check(g.queue.front() == mine && g.queuePicks == 5, L"queue: Add to queue goes ahead of the picks");
+
+    batch.Next(L"queue: moving, keeping and removing keep yours ahead of the picks and top the picks up");
+    TrackId pick = g.queue[1];
+    MoveInQueue({1}, 0);
+    Check(g.queue.front() == pick && yours().size() == 2 && g.queuePicks == 5 && g.shuffleQueue.empty() && distinct(),
+          L"queue: a pick moved among yours becomes yours and the last of the pass replaces it");
+    int at = MoveInQueue({0}, (int)g.queue.size());
+    Check(at == 1 && g.queue[1] == pick && yours().size() == 2, L"queue: your track never moves below the picks");
+    RemoveFromQueue({(int)g.queue.size() - 1});
+    Check(g.queuePicks == 4 && yours().size() == 2, L"queue: a removed pick isn't replaced once the pass is done");
+    std::vector<TrackId> before(g.queue.begin() + 2, g.queue.end());
+    RepickTaste();
+    std::vector<TrackId> after(g.queue.begin() + 2, g.queue.end());
+    std::sort(before.begin(), before.end());
+    std::sort(after.begin(), after.end());
+    Check(g.queuePicks == 4 && before == after, L"queue: New picks returns the old picks to the pass");
+    MoveInQueue({2}, 2, true);
+    Check(yours().size() == 3 && g.queuePicks == 3, L"queue: Keep makes a pick yours where it stands");
+
+    batch.Next(L"queue: picks follow the order, and go when taste no longer chooses");
+    g.radio = true;
+    RefreshNext();
+    bool clean = distinct();
+    for (size_t i = yours().size(); i < g.queue.size(); ++i)
+        clean &= std::find(ids.begin(), ids.end(), g.queue[i]) != ids.end();
+    Check(g.picksMode == 2 && g.queuePicks >= 1 && clean && yours().size() == 3,
+          L"queue: Keep playing like this picks new tracks from the playlist, none twice (%zu picks)", g.queuePicks);
+    g.repeat = Repeat::One;
+    RefreshNext();
+    Check(g.queuePicks == 0 && g.queue.size() == 3, L"queue: Repeat track drops the picks and keeps yours");
+    g.repeat = Repeat::Off;
+    g.taste = false;
+    RefreshNext();
+    Check(g.queuePicks == 0, L"queue: no picks while taste is off");
+
+    batch.Next(L"queue: the Up next panel deletes and drags queued tracks and View > Up next shows it");
+    g.radio = false;
+    g.shuffle = kShuffleOff;
+    g.queue = {ids[1], ids[2], ids[3], ids[4]};
+    g.layout.upNext = true;
+    if (!UpNextPanel()) CreatePanels(g.hwnd);  // the test window builds only the main controls
+    Layout();
+    HWND panel = UpNextPanel();
+    RECT client{};
+    GetClientRect(panel, &client);
+    auto rowY = [](int i) { return S(40) + S(44) * i + S(22); };
+    SendMessageW(panel, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(S(60), rowY(0)));
+    SendMessageW(panel, WM_LBUTTONUP, 0, MAKELPARAM(S(60), rowY(0)));
+    SendMessageW(panel, WM_KEYDOWN, VK_DELETE, 0);
+    Check(g.queue == std::deque<TrackId>{ids[2], ids[3], ids[4]}, L"queue: Delete in the panel removes the selected track (%zu left, panel %dx%d)",
+          g.queue.size(), (int)client.right, (int)client.bottom);
+    SendMessageW(panel, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(S(60), rowY(2)));
+    SendMessageW(panel, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(S(60), rowY(1)));
+    SendMessageW(panel, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(S(60), rowY(0) - S(10)));
+    SendMessageW(panel, WM_LBUTTONUP, 0, MAKELPARAM(S(60), rowY(0) - S(10)));
+    Check(client.bottom > rowY(3) && g.queue == std::deque<TrackId>{ids[4], ids[2], ids[3]},
+          L"queue: dragging the last queued track to the top moves it there");
+    HMENU menu = BuildMenu();
+    g.layout.upNext = false;
+    Layout();
+    UpdateMainMenu(menu);
+    UINT state = GetMenuState(menu, IDM_QUEUE_SHOW, MF_BYCOMMAND);
+    DestroyMenu(menu);
+    Check(state != (UINT)-1 && !(state & MF_CHECKED),
+          L"queue: View > Up next is in the menu and unchecked while the panel is closed");
+
+    g.queue = savedQueue;
+    g.queuePicks = 0;
+    g.tokens = savedTokens;
+    g.layout = savedLayout;
+    Layout();
+    g.playing = savedPlaying;
+    g.playingToken = savedPlayingToken;
+    g.decodingToken = savedDecoding;
+    g.shuffle = savedShuffle;
+    g.taste = savedTaste;
+    g.radio = savedRadio;
+    g.repeat = savedRepeat;
+    g.shuffleQueue.clear();
+    g.shuffleStarted = false;
+    RemovePlaylist(g.active);
+    batch.End();
+}
+
 void TestUiControls(const std::wstring& scratch) {
     using namespace app;
     testlog::Batch batch;
@@ -680,6 +839,7 @@ void TestUiControls(const std::wstring& scratch) {
     }
     TestPlayerSliders();
     TestSoftCanvas();
+    TestCellCache();
     {
         SetWindowTextW(g.search, L"Track 1");
         FlushSearch();
@@ -1598,6 +1758,7 @@ void TestUiControls(const std::wstring& scratch) {
               RowCount());
     }
     batch.End();
+    TestQueueEditor(scratch);
     TestPortedUi(scratch);
     TestReplayGainRestart(scratch);
     TestPersonalization(scratch);

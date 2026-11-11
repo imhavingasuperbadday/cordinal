@@ -56,6 +56,21 @@ inline bool IsSubtrack(std::wstring_view path) { return path.find(L'|') != std::
 class StringPool {
 public:
     using Handle = uint32_t;  // 0 = empty string
+    StringPool() = default;
+    // A moved-from pool is empty and usable: used_ must say "no room" once blocks_ is gone.
+    StringPool(StringPool&& other) noexcept { *this = std::move(other); }
+    StringPool& operator=(StringPool&& other) noexcept {
+        if (this == &other) return *this;
+        blocks_ = std::move(other.blocks_);
+        used_ = std::exchange(other.used_, kBlock);
+        table_ = std::move(other.table_);
+        count_ = std::exchange(other.count_, 0);
+        large_ = std::move(other.large_);
+        other.blocks_.clear();
+        other.table_.clear();
+        other.large_.clear();
+        return *this;
+    }
     Handle Intern(std::string_view s);
     Handle Lookup(std::string_view s) const;  // 0 if `s` was never interned
     std::string_view Get(Handle h) const;
@@ -112,6 +127,9 @@ struct Track {
     uint16_t rgTrackPeak = 0, rgAlbumPeak = 0;             // 1/20000 units, 0 = unknown
     uint64_t audioHash = 0;  // FLAC audio MD5 prefix (TagData::audioHash), 0 = unknown
     uint32_t firstPlayed = 0;  // first counted play, including imported statistics; 0 = unknown
+    // The path index's hash of dir + file, set by Library::Index; it fills the record's last four
+    // bytes of padding. Code that copies a Track over another path copies it with dir and file.
+    uint32_t pathHash = 0;
 
     enum : uint16_t {
         kLoaded = 1,         // tags have been read
@@ -253,7 +271,7 @@ private:
     uint32_t revision_ = 1;
     void Index(TrackId id);
     void Unindex(TrackId id);
-    size_t Slot(StringPool::Handle dir, StringPool::Handle file) const;
+    uint32_t KeyHash(StringPool::Handle dir, StringPool::Handle file) const;
     TrackId FindKey(const std::wstring& key) const;
     void SplitPath(const std::wstring& path, StringPool::Handle& dir, StringPool::Handle& file);
 };
@@ -271,6 +289,14 @@ std::vector<TrackId> TracksAddedSince(uint32_t since);
 // folder or name the same album artist (or artist), so a year or genre missing from some of them
 // does not split it. A track without an album tag brings the untagged tracks of its own folder.
 std::vector<TrackId> AlbumTracksOf(const std::vector<TrackId>& ids);
+// Whether two tracks belong to one album group in the track lists (and Now Playing's album): the same
+// album tag, then the same album artist when either has one, otherwise the same folder, so a
+// compilation without album artists still keeps together.
+inline bool SameAlbum(const Track& a, const Track& b) {
+    if (a.album != b.album) return false;
+    if (a.albumArtist || b.albumArtist) return a.albumArtist == b.albumArtist;
+    return a.dir == b.dir;
+}
 // The search box's "missing:<field>" terms (Library > Find missing information): a track matches
 // when that tag is empty, so the gaps can be listed and then filled in with Edit tags. "any" means
 // any of title, artist, album, year, genre or track number.
@@ -375,6 +401,15 @@ std::wstring CleanPlaylistName(std::wstring_view name);
 std::wstring UniquePlaylistName(const std::vector<Playlist>& playlists, std::wstring_view base);
 int RemapPlaylistIndex(int index, int from, int to);
 bool MovePlaylist(std::vector<Playlist>& playlists, int from, int to);
+// The tab strip's tabs, as the playlist each one shows. Every playlist has its own tab, except that
+// with `groupAuto` and two or more auto-playlists they share one, at the first one's place: it
+// shows `shownAuto` when that is an auto-playlist, else the first. The other auto-playlists are
+// reached from that tab's menu.
+std::vector<int> TabSlots(const std::vector<Playlist>& playlists, bool groupAuto, int shownAuto);
+// Whether `tab` of `slots` is the shared auto-playlist tab.
+bool IsAutoGroupTab(const std::vector<Playlist>& playlists, const std::vector<int>& slots, int tab);
+// The tab that shows playlist `index`: its own, or the shared auto-playlist tab; -1 when none does.
+int TabOfPlaylist(const std::vector<Playlist>& playlists, const std::vector<int>& slots, int index);
 std::vector<std::wstring> FilterWords(std::wstring_view filter);
 bool MatchesTrack(const Library& library, TrackId id, const std::vector<std::wstring>& words);
 // One immutable query over one library. Each field remembers its last pooled value,

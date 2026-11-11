@@ -32,6 +32,7 @@ ID2D1DeviceContext* SoftCanvas::Context(ID2D1Factory* factory) {
         FAILED(device.As(&dxgi)) || FAILED(factory1->CreateDevice(dxgi.Get(), &d2d)) ||
         FAILED(d2d->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &context_)))
         return nullptr;
+    device_ = device;
     context_->SetDpi(96.0f, 96.0f);  // work in pixels; S() does the scaling
     return context_.Get();
 }
@@ -67,9 +68,22 @@ HRESULT SoftCanvas::End(HDC dc, int x, int y) {
     return result;
 }
 
+void SoftCanvas::ReleaseSurface() {
+    if (!target_) return;
+    context_->SetTarget(nullptr);
+    target_.Reset();
+    width_ = height_ = 0;
+    // Direct3D frees a released texture at its next flush, which an idle canvas would never reach.
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> immediate;
+    if (device_ && SUCCEEDED(device_.As(&device))) device->GetImmediateContext(&immediate);
+    if (immediate) immediate->Flush();
+}
+
 void SoftCanvas::Reset() {
     if (context_) context_->SetTarget(nullptr);
     target_.Reset();
     context_.Reset();
+    device_.Reset();
     width_ = height_ = 0;
 }

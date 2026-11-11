@@ -278,6 +278,30 @@ void TestPlaylistUndo() {
     batch.Next(L"duplicate occurrences and history limits");
     Check(OccurrenceMapping({5, 6, 5}, {5, 5, 6}) == std::vector<uint32_t>{0, 2, 1},
           L"repeated tracks keep their order among themselves");
+    {
+        // Against the straightforward rule: the n-th occurrence pairs with the n-th occurrence.
+        std::mt19937 rng(11);
+        bool same = OccurrenceMapping({}, {}).empty() && OccurrenceMapping({4}, {}) == std::vector<uint32_t>{UINT32_MAX};
+        for (int round = 0; round < 40 && same; ++round) {
+            std::vector<TrackId> from(rng() % 300), to;
+            for (auto& id : from) id = rng() % 40 == 0 ? kInvalidTrack - 1 : rng() % 60;
+            to = from;
+            std::shuffle(to.begin(), to.end(), rng);
+            to.resize(to.size() - rng() % (to.size() + 1) / 2);
+            for (int extra = rng() % 20; extra > 0; --extra) to.push_back(rng() % 80);
+            std::vector<uint32_t> expected(from.size(), UINT32_MAX);
+            std::vector<bool> used(to.size());
+            for (size_t i = 0; i < from.size(); ++i)
+                for (size_t j = 0; j < to.size(); ++j)
+                    if (!used[j] && to[j] == from[i]) {
+                        expected[i] = (uint32_t)j;
+                        used[j] = true;
+                        break;
+                    }
+            same &= OccurrenceMapping(from, to) == expected;
+        }
+        Check(same, L"occurrence mapping matches pairing each occurrence in turn, for shuffled, cut and extended lists");
+    }
     Playlist many{L"Many", {0}};
     for (TrackId i = 1; i <= kPlaylistUndoLevels + 5; ++i) {
         before = many.items;

@@ -19,6 +19,7 @@
 #include "ui_internal.h"
 
 #include "album_editions.h"
+#include "album_maker.h"
 #include "metadata_fetch.h"
 #include "musicbrainz.h"
 
@@ -44,7 +45,7 @@ namespace lx {
 
 namespace {
 
-enum class Kind { None, Eq, Headphones, Tags, Prefs, Rules, Organize, Copy, ListenBrainz, Format, Device, Points, Review, Palette, Layout, Packs, Helpers, Games, Editions, Covers, Artist, Export };
+enum class Kind { None, Eq, Headphones, Tags, Prefs, Rules, Organize, Copy, ListenBrainz, Format, Device, Points, Review, Palette, Layout, Packs, Helpers, Games, Editions, Covers, Artist, Export, Album };
 Kind g_kind = Kind::None;
 float g_mx = -1, g_my = -1;
 
@@ -1182,6 +1183,9 @@ const char* const kBitcrushRateNames[] = {"2 kHz", "4 kHz", "6 kHz", "8 kHz", "1
 static_assert(std::size(kBitcrushBitNames) == kBitcrushMaxBits - kBitcrushMinBits + 1 &&
               std::size(kBitcrushRateNames) == std::size(kBitcrushRates));
 const char* const kUndoNames[] = {"1 day", "3 days", "1 week", "7 weeks"};
+const char* const kCrossfadeNames[] = {"Off", "1 second", "2 seconds", "3 seconds", "5 seconds", "8 seconds"};
+const char* const kVolumeCurveNames[] = {"Natural", "Linear", "Cubic", "Decibels (60 dB range)"};
+static_assert(std::size(kCrossfadeNames) == std::size(kCrossfadeSeconds) && std::size(kVolumeCurveNames) == kVolumeCurves);
 const char* const kCoverSourceNames[] = {"Deezer", "iTunes", "MusicBrainz"};
 const char* const kCoverSaveNames[] = {"Save as cover.jpg in the album folder", "Embed in the files' tags",
                                       "Show in cordinal only"};
@@ -1206,6 +1210,18 @@ const Pref kPrefs[] = {
      "The track reopened from the last session starts playing as soon as cordinal opens, instead of waiting paused.",
      PrefType::Bool, 0, 1, 0, 1, [] { return (double)Cfg().resumePlay; },
      [](double v) { Cfg().resumePlay = v != 0; ReopenLastTrack(); Saved(); }},
+    {"crossfade", "Playback", "Crossfade between tracks",
+     "When one track runs into the next on its own, the end of the first fades out as the next fades in. "
+     "A track you start yourself, a radio stream and a section loop still change at once.",
+     PrefType::Choice, 0, (float)std::size(kCrossfadeNames) - 1, 0, 1, [] { return (double)Cfg().crossfade; },
+     [](double v) { Cfg().crossfade = (int)v; ApplyEffects(); RefreshNext(); Saved(); }, kCrossfadeNames},
+    {"crossfade_albums", "Playback", "Crossfade within an album",
+     "Off keeps the tracks of one album gapless, so live and continuous albums flow as recorded; the crossfade "
+     "then only joins different albums.", PrefType::Bool, 0, 1, 0, 1, [] { return (double)Cfg().crossfadeAlbums; },
+     [](double v) { Cfg().crossfadeAlbums = v != 0; RefreshNext(); Saved(); }},
+    {"loops", "Playback", "Game music loops", "How often a game soundtrack rip with loop points plays its loop before fading out.",
+     PrefType::Choice, 0, 3, 2, 1, [] { return (double)Cfg().loops; },
+     [](double v) { Cfg().loops = (int)v; ApplyEffects(); Saved(); }, kLoopNames},
     {"skip_aware_shuffle", "Playback", "Skip-aware shuffle",
      "Shuffle favors tracks you haven't repeatedly skipped in their first 30 seconds. A skip while flipping through "
      "songs counts for less, and one just before you stop doesn't count.", PrefType::Bool,
@@ -1217,12 +1233,19 @@ const Pref kPrefs[] = {
      "Track shuffle and Keep playing like this follow what you finish, rate, replay and come back to. Skips are judged by "
      "their moment, and artists by how often you finish them, not how many of their songs you have.",
      PrefType::Bool, 0, 1, 0, 1, [] { return (double)Cfg().taste; }, [](double v) { SetTaste(v != 0); }},
-    {"loops", "Playback", "Game music loops", "How often a game soundtrack rip with loop points plays its loop before fading out.",
-     PrefType::Choice, 0, 3, 2, 1, [] { return (double)Cfg().loops; },
-     [](double v) { Cfg().loops = (int)v; ApplyEffects(); Saved(); }, kLoopNames},
     {"exclusive", "Output", "Exclusive output",
      "Each track plays at its own rate, bit-perfect at 100% volume with the EQ and ReplayGain off.", PrefType::Bool, 0, 1, 0,
      1, [] { return (double)Cfg().exclusive; }, [](double v) { SetExclusive(v != 0); }},
+    {"software_volume", "Output", "Volume control in cordinal",
+     "Off sends the music at full level and leaves the volume to the system or your amplifier; cordinal's slider "
+     "rests and only mute still works. With Exclusive output, that keeps playback bit-perfect at any level.",
+     PrefType::Bool, 0, 1, 1, 1, [] { return (double)Cfg().softwareVolume; },
+     [](double v) { Cfg().softwareVolume = v != 0; SetVolume(Cfg().volume); Saved(); }},
+    {"volume_curve", "Output", "Volume curve",
+     "How the slider's travel turns into loudness. Natural suits most listening; Linear is the plain level, "
+     "which bunches loudness at the bottom; Cubic gives finer steps when quiet; Decibels spreads 60 dB evenly.",
+     PrefType::Choice, 0, kVolumeCurves - 1, 0, 1, [] { return (double)Cfg().volumeCurve; },
+     [](double v) { Cfg().volumeCurve = (int)v; SetVolume(Cfg().volume); Saved(); }, kVolumeCurveNames},
     {"rg_enabled", "ReplayGain", "ReplayGain", "Plays every track at a similar loudness, using measured or tagged ReplayGain values.",
      PrefType::Bool, 0, 1, 1, 1, [] { return (double)Cfg().rg.on; }, [](double v) { SetReplayGain(v != 0); }},
     {"rg_mode", "ReplayGain", "Level by",
@@ -1295,6 +1318,11 @@ const Pref kPrefs[] = {
      "A soft halo of the seek bar's colours around it that pulses with the beat, brighter where the song is loud. "
      "Every look, whole song or live.", PrefType::Bool, 0, 1, 1, 1, [] { return (double)Cfg().seekGlow; },
      [](double v) { Cfg().seekGlow = v != 0; Saved(); }},
+    {"pause_fade", "View", "Fade the waveform when pausing",
+     "The waveform's colour fades smoothly between playing and paused, instead of switching at once. Paused "
+     "turns amber, or the text colour when your waveform colour is itself amber or yellow.",
+     PrefType::Bool, 0, 1, 1, 1, [] { return (double)Cfg().pauseFade; },
+     [](double v) { Cfg().pauseFade = v != 0; Saved(); }},
     {"live_fountain", "View", "Live audio for Dark Fountain",
      "In the DELTARUNE theme, Dark Fountain follows the audio being heard, including Radio. "
      "Song seeking still works.", PrefType::Bool, 0, 1, 0, 1,
@@ -1327,11 +1355,6 @@ const Pref kPrefs[] = {
      "The live waveform keeps its detail.",
      PrefType::Bool, 0, 1, 0, 1, [] { return (double)Cfg().smoothSeek; },
      [](double v) { Cfg().smoothSeek = v != 0; Saved(); }},
-    {"smooth_scroll", "View", "Smooth scrolling",
-     "The library eases toward where the mouse wheel or Page Up and Page Down take it, instead of "
-     "jumping. Scrollbar drags and keyboard focus still move at once.",
-     PrefType::Bool, 0, 1, 0, 1, [] { return (double)Cfg().smoothScroll; },
-     [](double v) { Cfg().smoothScroll = v != 0; Saved(); }},
     {"wave_reflection", "View", "Waveform reflection",
      "Mirrored reflects the seek bar below its center line, dimmer. Upper half stops at the center line; "
      "Full height mirrors the waveforms as bright below as above (the Moodbar stripe keeps the upper "
@@ -1399,6 +1422,15 @@ const Pref kPrefs[] = {
     {"group_albums", "View", "Group tracks by album", "The track list shows a header with the cover above each album's tracks.",
      PrefType::Bool, 0, 1, 1, 1, [] { return (double)Cfg().groupAlbums; },
      [](double v) { Cfg().groupAlbums = v != 0; RebuildRows(); Saved(); }},
+    {"now_playing_album", "View", "Now Playing shows the playing album",
+     "While a song with an album plays, the Now Playing tab lists just that album. Typing a search looks through the "
+     "whole list again; songs without an album always show the whole list.",
+     PrefType::Bool, 0, 1, 1, 1, [] { return (double)Cfg().npAlbumOnly; },
+     [](double v) { Cfg().npAlbumOnly = v != 0; RebuildRows(); Saved(); }},
+    {"group_auto_tabs", "View", "One tab for auto-playlists",
+     "Auto-playlists such as Recently added and Top rated share one tab; click it again to choose another. Off gives "
+     "each its own tab.", PrefType::Bool, 0, 1, 1, 1, [] { return (double)Cfg().groupAutoTabs; },
+     [](double v) { Cfg().groupAutoTabs = v != 0; g.redraw = true; Saved(); }},
     {"points_chip", "View", "Show level and points",
      "Shows your rank, level and points beside the now-playing lines, and announces a new level.", PrefType::Bool, 0, 1, 0, 1,
      [] { return (double)Cfg().layout.points; }, [](double v) { Cfg().layout.points = v != 0; Saved(); }},
@@ -1409,6 +1441,11 @@ const Pref kPrefs[] = {
     {"time_remaining", "Playback", "Show the time remaining",
      "The time beside the seek bar counts down to the end of the track instead of showing its length.", PrefType::Bool, 0, 1, 1, 1,
      [] { return (double)Cfg().timeRemaining; }, [](double v) { Cfg().timeRemaining = v != 0; Saved(); }},
+    {"smooth_scroll", "View", "Smooth scrolling",
+     "The library eases toward where the mouse wheel or Page Up and Page Down take it, instead of "
+     "jumping. Scrollbar drags and keyboard focus still move at once.",
+     PrefType::Bool, 0, 1, 0, 1, [] { return (double)Cfg().smoothScroll; },
+     [](double v) { Cfg().smoothScroll = v != 0; Saved(); }},
     {"always_on_top", "View", "Always on top", "Keeps cordinal's window above other windows.", PrefType::Bool, 0, 1, 0, 1,
      [] { return (double)Cfg().alwaysOnTop; }, [](double v) { Cfg().alwaysOnTop = v != 0; SDL_SetWindowAlwaysOnTop(g.window, v != 0); Saved(); }},
     {"gpu_drawing", "View", "Draw with the graphics card",
@@ -1432,6 +1469,10 @@ const Pref kPrefs[] = {
          Saved();
          ShowMessage(Cfg().inboxEnabled ? L"New music will wait in the Inbox." : L"New music will be added to the library.");
      }, kNewMusicNames},
+    {"cover_gap", "Library", "Album cover spacing",
+     "The least space between covers in the Albums and Artists views, in pixels. A row spreads out to fill the "
+     "width, up to twice this.", PrefType::Float, 4, 48, 16, 2, [] { return (double)Cfg().coverGap; },
+     [](double v) { Cfg().coverGap = std::clamp((int)std::lround(v), 4, 48); CanvasRelayout(); Saved(); }, nullptr, "px"},
     {"web_start", "Library", "Start the web server with cordinal",
      "Turns on the web server whenever cordinal starts, so a paired phone or browser can play your library.", PrefType::Bool,
      0, 1, 0, 1, [] { return (double)Cfg().webStart; }, [](double v) { Cfg().webStart = v != 0; Saved(); }},
@@ -1456,10 +1497,12 @@ struct PrefLink {
 struct PrefPage {
     const char* name;  // null for All settings
     PrefLink links[4];
+    const char* group = nullptr;  // the caption above the page in the list, where a group starts
 };
+// In the Windows build's groups (app_tweaks.cpp): sound, look, the collection, and the rest.
 const PrefPage kPrefPages[] = {
     {nullptr, {}},
-    {"Playback", {}},
+    {"Playback", {}, "Sound"},
     {"Output", {{"Output device...", OpenOutputDevice}}},
     {"Headphones", {{"Headphones...", OpenHeadphones}}},
     {"ReplayGain",
@@ -1472,12 +1515,46 @@ const PrefPage kPrefPages[] = {
        [] { return (!g.rgRunning || g.rgAuto) && replaygain::HasLibraryTracks(); }, nullptr, true},
       {"Cancel scan", CancelReplayGain, nullptr, [] { return g.rgRunning && !g.rgAuto; }, true}}},
     {"Effects", {{"Equalizer...", OpenEqualizer}}},
-    {"View", {{"Title formatting...", OpenFormat}, {"Customize layout...", OpenLayout}}},
-    {"Startup", {{"Startup defaults...", OpenStartupDefaults}}},
-    {"Scrobbling", {{"Scrobbling...", OpenListenBrainz}}},
-    {"Library", {{"Library folders...", OpenLibraryFolders}, {"Web server...", OpenWebServer}}},
+    {"View", {{"Title formatting...", OpenFormat}, {"Customize layout...", OpenLayout}}, "Look"},
+    {"Library", {{"Library folders...", OpenLibraryFolders}, {"Web server...", OpenWebServer}}, "Collection"},
     {"Online", {{"Fetch missing covers...", FetchMissingCovers, [] { return !CoverFetchBusy(); }}}},
+    {"Scrobbling", {{"Scrobbling...", OpenListenBrainz}}},
+    {"Startup", {{"Startup defaults...", OpenStartupDefaults}}, "General"},
 };
+
+// Headings inside a page, each above the setting it names and the ones after it on that page.
+struct PrefHeading {
+    const char* key;
+    const char* title;
+};
+const PrefHeading kPrefHeadings[] = {
+    {"resume_on", "Resuming"}, {"crossfade", "Track changes"}, {"skip_aware_shuffle", "Shuffle and radio"},
+    {"time_remaining", "Time"}, {"exclusive", "Device"}, {"software_volume", "Volume"},
+    {"rg_enabled", "Levelling"}, {"rg_autoscan", "Measuring"},
+    {"reverb", "Reverb"}, {"loudness_compensation", "Volume shaping"}, {"bitcrush", "Bitcrush"},
+    {"seek_bar", "Seek bar"}, {"wave_color", "Colours"}, {"smooth_seek", "Shape"}, {"group_albums", "Window"},
+    {"sound_effects", "Sounds"}, {"musicbrainz_lookup", "Adding music"}, {"cover_gap", "Sizes"},
+    {"web_start", "Outside cordinal"}, {"convert_recycle", "Conversion"},
+    {"online_covers_deezer", "Covers"}, {"online_lyrics_lrclib", "Lyrics"}, {"online_artist_info", "Artist info"},
+};
+
+int PrefPageOf(const Pref& t) {
+    for (int i = 1; i < (int)std::size(kPrefPages); ++i)
+        if (!strcmp(kPrefPages[i].name, t.page)) return i;
+    return 0;
+}
+
+// The heading a setting sits under on its page: the last one at or before it, so a heading still
+// shows when the setting it names is hidden.
+const char* PrefHeadingOf(int pref) {
+    const char* heading = nullptr;
+    for (int i = 0; i <= pref; ++i) {
+        if (strcmp(kPrefs[i].page, kPrefs[pref].page) || !kPrefs[i].key) continue;
+        for (const PrefHeading& h : kPrefHeadings)
+            if (!strcmp(h.key, kPrefs[i].key)) heading = h.title;
+    }
+    return heading;
+}
 
 struct PrefRow {
     int pref;
@@ -1517,7 +1594,8 @@ std::string PrefText(const Pref& t, double v) {
         case PrefType::Bool: return kOffOn[v != 0];
         case PrefType::Choice: return t.choices[std::clamp((int)std::lround(v), 0, (int)t.max)];
         case PrefType::Float:
-            if (t.unit) snprintf(buf, sizeof(buf), "%+.1f %s", v, t.unit);
+            if (t.unit && !strcmp(t.unit, "dB")) snprintf(buf, sizeof(buf), "%+.1f %s", v, t.unit);
+            else if (t.unit) snprintf(buf, sizeof(buf), "%.0f %s", v, t.unit);
             else snprintf(buf, sizeof(buf), "%.2f", v);
             return buf;
     }
@@ -1548,6 +1626,9 @@ std::vector<int> ShownPrefs() {
         } else if (g_prefs.page && strcmp(kPrefPages[g_prefs.page].name, t.page)) continue;
         shown.push_back(i);
     }
+    // All settings reads as every page in turn, each under its name.
+    if (query.empty() && !g_prefs.page)
+        std::stable_sort(shown.begin(), shown.end(), [](int a, int b) { return PrefPageOf(kPrefs[a]) < PrefPageOf(kPrefs[b]); });
     return shown;
 }
 
@@ -1574,7 +1655,7 @@ std::vector<std::string> Wrap(Font font, const std::string& text, float width) {
 namespace {
 
 void DrawPrefs(const Palette& p) {
-    Rect panel = g_prefs.panel = DrawFrame(p, S(840), S(600), "Preferences");
+    Rect panel = g_prefs.panel = DrawFrame(p, S(860), S(660), "Preferences");
     float pad = S(16), x0 = panel.x + pad, right = panel.R() - pad, top = panel.y + S(52);
     // The search, top right, as on Windows.
     Rect& box = g_prefs.searchBox = {right - S(260), panel.y + S(10), S(260), S(28)};
@@ -1591,6 +1672,10 @@ void DrawPrefs(const Palette& p) {
     g_prefs.pages.clear();
     float py = top;
     for (int i = 0; i < (int)std::size(kPrefPages); ++i) {
+        if (kPrefPages[i].group) {  // the group's caption, above its first page
+            DrawText(Font::Bold, kPrefPages[i].group, x0 + S(12), py + S(8), p.sub, S(148));
+            py += S(30);
+        }
         Rect r{x0, py, S(160), S(30)};
         bool on = g_prefs.search.empty() && i == g_prefs.page;
         if (on) Fill(r, p.select);
@@ -1616,9 +1701,29 @@ void DrawPrefs(const Palette& p) {
     g_prefs.rows.clear();
     if (shown.empty())
         DrawText(Font::Normal, "No setting matches the search.", list.x, list.y + S(8), p.sub);
+    int lastPage = -1;
+    const char* lastHeading = nullptr;
     for (size_t n = 0; n < shown.size(); ++n) {
         int i = shown[n];
         const Pref& t = kPrefs[i];
+        // Headings, as on Windows: All settings names each page, and pages have their own sections.
+        if (g_prefs.search.empty()) {
+            const int page = PrefPageOf(t);
+            if (!g_prefs.page && page != lastPage) {
+                DrawText(Font::Title, kPrefPages[page].name, list.x, y + S(16), p.text, list.w);
+                y += S(52);
+                Fill({list.x, y - S(6), list.w, S(1)}, p.border);
+                lastHeading = nullptr;
+            }
+            lastPage = page;
+            const char* heading = PrefHeadingOf(i);
+            if (heading && heading != lastHeading) {
+                DrawText(Font::Bold, heading, list.x, y + S(12), p.sub, list.w);
+                y += S(40);
+                Fill({list.x, y - S(6), list.w, S(1)}, p.border);
+            }
+            lastHeading = heading;
+        }
         auto help = Wrap(Font::Small, t.help, textW);
         std::string meta = "Default: " + PrefText(t, t.def) + (t.key ? std::string("   Key: ") + t.key : std::string());
         float h = S(12) + LineHeight(Font::Normal) + S(4) + (help.size() + 1) * LineHeight(Font::Small) + S(12);
@@ -4109,6 +4214,354 @@ void OpenFormat() {
     SDL_StartTextInput(g.window);
 }
 
+// --- Make album ------------------------------------------------------------------------------------
+// Edit > Make album, as app_albummaker.cpp on Windows: the tracks given become one album. The fields,
+// compilation flag and cover apply to every track; the list sets their order and numbers. Saving is
+// one tag write (album_maker.h), so Edit > Undo last tag edit takes it back. The panel takes the
+// window as the others do, so tracks are chosen before it opens rather than added from behind it.
+namespace {
+
+enum AlbumField { kAlbumTitle, kAlbumArtist, kAlbumDate, kAlbumGenre, kAlbumDisc, kAlbumDiscTotal, kAlbumFields };
+const char* const kAlbumLabels[] = {"Album", "Album artist", "Year", "Genre", "Disc", "of"};
+
+struct AlbumPanel {
+    AlbumDraft draft;
+    TextField fields[kAlbumFields];
+    int focus = kAlbumTitle;   // a field, or kAlbumFields for the track list
+    std::vector<char> selected;  // per track of draft.tracks
+    int caret = -1;              // the list's focused row
+    int first = 0;               // the first row shown
+    SDL_Texture* preview = nullptr;
+    std::string previewBytes;
+    float previewW = 0, previewH = 0;
+    uint32_t generation = 0;  // a cover search answers only the album maker it was opened for
+    Rect list, art, compilation, artistToTracks, number, save, cancel, buttons[7];
+} g_album;
+bool g_coverOverAlbum = false;  // the cover picker was opened from the album maker, which waits under it
+
+void AlbumPreview(const std::string& bytes) {
+    g_album.previewBytes = bytes;
+    if (g_album.preview) SDL_DestroyTexture(g_album.preview);
+    g_album.preview = nullptr;
+    CoverImage img{};
+    if (bytes.empty() || !DecodeCover(bytes, 320, img)) return;
+    g_album.preview = SDL_CreateTexture(g.renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STATIC, img.width, img.height);
+    if (!g_album.preview) return;
+    SDL_UpdateTexture(g_album.preview, nullptr, img.rgba.data(), img.width * 4);
+    SDL_SetTextureScaleMode(g_album.preview, SDL_SCALEMODE_LINEAR);
+    g_album.previewW = img.width;
+    g_album.previewH = img.height;
+}
+
+void AlbumRelease() {
+    if (g_album.preview) SDL_DestroyTexture(g_album.preview);
+    uint32_t generation = g_album.generation;
+    g_album = AlbumPanel{};
+    g_album.generation = generation;
+}
+
+void AlbumReadFields() {
+    auto& d = g_album.draft;
+    d.title = g_album.fields[kAlbumTitle].text;
+    d.artist = g_album.fields[kAlbumArtist].text;
+    d.date = g_album.fields[kAlbumDate].text;
+    d.genre = g_album.fields[kAlbumGenre].text;
+    d.disc = (uint32_t)std::max(0l, wcstol(g_album.fields[kAlbumDisc].text.c_str(), nullptr, 10));
+    d.discTotal = (uint32_t)std::max(0l, wcstol(g_album.fields[kAlbumDiscTotal].text.c_str(), nullptr, 10));
+}
+
+std::vector<size_t> AlbumSelection() {
+    std::vector<size_t> out;
+    for (size_t i = 0; i < g_album.selected.size(); ++i)
+        if (g_album.selected[i]) out.push_back(i);
+    return out;
+}
+
+void AlbumSelect(const std::vector<size_t>& rows) {
+    g_album.selected.assign(g_album.draft.tracks.size(), 0);
+    for (size_t i : rows)
+        if (i < g_album.selected.size()) g_album.selected[i] = 1;
+    g_album.caret = rows.empty() ? -1 : (int)rows.front();
+    g.redraw = true;
+}
+
+void AlbumFocus(int f) {
+    g_album.focus = std::clamp(f, 0, (int)kAlbumFields);
+    if (g_album.focus < kAlbumFields) {
+        TextField& t = g_album.fields[g_album.focus];
+        t.caret = t.text.size();
+        t.all = !t.text.empty();
+        SDL_StartTextInput(g.window);
+    }
+    g.redraw = true;
+}
+
+void AlbumMove(int delta) {
+    AlbumSelect(MoveAlbumTracks(g_album.draft, AlbumSelection(), delta));
+    g_album.draft.numberTracks = true;  // a new order is what the numbers should say
+}
+
+void AlbumRemoveSelected() {
+    auto rows = AlbumSelection();
+    for (size_t k = rows.size(); k-- > 0;) g_album.draft.tracks.erase(g_album.draft.tracks.begin() + (ptrdiff_t)rows[k]);
+    size_t next = rows.empty() ? 0 : std::min(rows.front(), g_album.draft.tracks.size());
+    AlbumSelect(next < g_album.draft.tracks.size() ? std::vector<size_t>{next} : std::vector<size_t>{});
+}
+
+void AlbumSave() {
+    AlbumReadFields();
+    if (!AlbumDraftProblem(g_album.draft).empty()) return;
+    auto edits = AlbumEdits(g_lib, g_album.draft);
+    if (!edits.empty() && TagWriteBusy()) {
+        ShowMessage(L"Tags are still being written; try again in a moment.");
+        return;
+    }
+    ClosePanel();
+    if (!edits.empty()) SubmitTagWrites(edits, true);
+}
+
+void AlbumChooseCover(const std::wstring& path) {
+    std::string bytes = ReadSmallFile(path, 16 * 1024 * 1024);
+    bool jpeg = bytes.size() >= 8 && (uint8_t)bytes[0] == 0xFF && (uint8_t)bytes[1] == 0xD8;
+    bool png = bytes.size() >= 8 && bytes.compare(0, 4, "\x89PNG") == 0;
+    if (!jpeg && !png) {
+        ShowMessage(L"Covers have to be JPEG or PNG images.");
+        return;
+    }
+    AlbumPreview(bytes);
+    g_album.draft.cover = std::move(bytes);
+    g.redraw = true;
+}
+
+void AlbumOrderMenu(float x, float y) {
+    OpenChoice(x, y, {"By track number", "By title", "By file name", "Reverse"}, -1, [](int order) {
+        OrderAlbum(g_lib, g_album.draft, (AlbumOrder)order);
+        g_album.draft.numberTracks = true;
+        AlbumSelect({});
+    });
+}
+
+constexpr float kAlbumRow = 26;
+
+void DrawAlbumMaker(const Palette& p) {
+    AlbumReadFields();
+    auto& d = g_album.draft;
+    Rect panel = DrawFrame(p, S(760), S(660), "Make album");
+    float pad = S(16), labelW = S(100), rowH = S(26), gap = S(6), artSize = S(150);
+    float x0 = panel.x + pad, right = panel.R() - pad - artSize - S(18), y = panel.y + S(48);
+    auto field = [&](int f, float x, float w, float lw, const char* cue) {
+        DrawText(Font::Normal, kAlbumLabels[f], x, y + (rowH - LineHeight(Font::Normal)) / 2, p.sub, lw - S(8), 2);
+        g_album.fields[f].rect = {x + lw, y, w - lw, rowH};
+        DrawRulesEdit(g_album.fields[f], g_album.fields[f].rect, g_album.focus == f, true, cue, p);
+    };
+    field(kAlbumTitle, x0, right - x0, labelW, nullptr);
+    y += rowH + gap;
+    field(kAlbumArtist, x0, right - x0, labelW, d.compilation ? "Various Artists" : nullptr);
+    y += rowH + gap;
+    float half = std::round((right - x0) / 2);
+    field(kAlbumDate, x0, half - S(8), labelW, "(each keeps its own)");
+    field(kAlbumGenre, x0 + half, half, S(60), "(each keeps its own)");
+    y += rowH + gap;
+    field(kAlbumDisc, x0, labelW + S(60), labelW, "(keep)");
+    field(kAlbumDiscTotal, x0 + labelW + S(60), S(90), S(30), nullptr);
+    y += rowH + gap + S(2);
+    g_album.compilation = {x0 + labelW, y, right - x0 - labelW, S(24)};
+    DrawCheck(g_album.compilation, "Part of a compilation (various artists)", d.compilation ? 1 : 0, p);
+    y += S(28);
+    g_album.artistToTracks = {x0 + labelW, y, right - x0 - labelW, S(24)};
+    DrawCheck(g_album.artistToTracks, "Set every track's artist to the album artist", d.artistToTracks ? 1 : 0, p);
+    // The cover, top right.
+    float ax = panel.R() - pad - artSize, ay = panel.y + S(48);
+    g_album.art = {ax, ay, artSize, artSize};
+    Fill(g_album.art, p.surface2);
+    Frame(g_album.art, p.border);
+    bool removed = d.cover && d.cover->empty();
+    if (g_album.preview && !removed) {
+        float s = (artSize - S(2)) / std::max(g_album.previewW, g_album.previewH);
+        float w = g_album.previewW * s, h = g_album.previewH * s;
+        SDL_FRect dst{ax + (artSize - w) / 2, ay + (artSize - h) / 2, w, h};
+        SDL_RenderTexture(g.renderer, g_album.preview, nullptr, &dst);
+    } else {
+        DrawText(Font::Normal, removed ? "(cover removed)" : "No cover", ax, TextY(g_album.art), p.faint, artSize, 1);
+    }
+    const char* coverLabels[] = {"Choose cover...", "Find cover online...", "Remove cover"};
+    for (int i = 0; i < 3; ++i) {
+        g_album.buttons[i] = {ax, ay + artSize + S(6) + i * S(30), artSize, S(26)};
+        DrawButton(g_album.buttons[i], coverLabels[i], p, false,
+                   i < 2 || (d.cover ? !d.cover->empty() : g_album.preview != nullptr));
+    }
+    // The tracks, with their buttons beside them.
+    y = std::max(y + S(36), ay + artSize + S(100));
+    double seconds = 0;
+    for (TrackId id : d.tracks) seconds += g_lib[id].Duration();
+    std::string heading = "Tracks  (" + std::to_string(d.tracks.size()) + ", " + Utf8(FormatTotalDuration(seconds)) + ")";
+    float buttonsW = S(128), listRight = panel.R() - pad - buttonsW - S(10);
+    DrawText(Font::Normal, heading, x0, y, p.sub, listRight - x0);
+    y += S(24);
+    float bottom = panel.B() - pad - S(28) - S(30) - S(30);
+    Rect list = g_album.list = {x0, y, listRight - x0, std::max(S(60), bottom - y)};
+    Fill(list, p.bg);
+    Frame(list, g_album.focus == kAlbumFields ? p.accent : p.border);
+    const float row = S(kAlbumRow);
+    const int visible = std::max(1, (int)((list.h - S(4)) / row));
+    if (g_album.caret >= 0) g_album.first = std::clamp(g_album.first, g_album.caret - visible + 1, g_album.caret);
+    g_album.first = std::clamp(g_album.first, 0, std::max(0, (int)d.tracks.size() - visible));
+    SDL_Rect clip{(int)list.x + 1, (int)list.y + 1, (int)list.w - 2, (int)list.h - 2};
+    SDL_SetRenderClipRect(g.renderer, &clip);
+    for (int i = g_album.first; i < (int)d.tracks.size() && i < g_album.first + visible; ++i) {
+        Rect r{list.x + S(1), list.y + S(2) + (i - g_album.first) * row, list.w - S(2), row};
+        bool sel = i < (int)g_album.selected.size() && g_album.selected[i];
+        if (sel) Fill(r, p.select);
+        const Track& t = g_lib[d.tracks[i]];
+        uint32_t n = d.numberTracks ? (uint32_t)i + 1 : t.trackNo;
+        uint32_t color = sel ? p.selectText : p.text;
+        if (n) DrawText(Font::Normal, std::to_string(n) + ".", r.x + S(6), TextY(r), sel ? p.selectText : p.sub, S(34));
+        std::wstring line = g_lib.Str(t.title ? t.title : t.file);
+        if (t.artist) line += L"  \x2014  " + g_lib.Str(t.artist);
+        std::string length = Utf8(FormatDuration(t.Duration()));
+        float lengthW = TextWidth(Font::Normal, length);
+        DrawText(Font::Normal, Utf8(line), r.x + S(44), TextY(r), color, r.w - S(44) - lengthW - S(16));
+        DrawText(Font::Normal, length, r.R() - S(8) - lengthW, TextY(r), sel ? p.selectText : p.sub);
+        if (i == g_album.caret && g_album.focus == kAlbumFields) Frame(r, p.accent);
+    }
+    SDL_SetRenderClipRect(g.renderer, nullptr);
+    auto rows = AlbumSelection();
+    const char* listLabels[] = {"Move up", "Move down", "Remove", "Order..."};
+    const bool enabled[] = {!rows.empty() && rows.front() > 0, !rows.empty() && rows.back() + 1 < d.tracks.size(), !rows.empty(),
+                            d.tracks.size() > 1};
+    for (int i = 0; i < 4; ++i) {
+        g_album.buttons[3 + i] = {panel.R() - pad - buttonsW, y + i * S(32), buttonsW, S(28)};
+        DrawButton(g_album.buttons[3 + i], listLabels[i], p, false, enabled[i]);
+    }
+    g_album.number = {x0, list.B() + S(6), list.w, S(24)};
+    DrawCheck(g_album.number, "Number the tracks in this order", d.numberTracks ? 1 : 0, p);
+    // What Save will do, or what keeps it from saving.
+    std::wstring problem = AlbumDraftProblem(d), info;
+    if (problem.empty()) {
+        size_t files = AlbumEdits(g_lib, d).size();
+        info = files == 0 ? L"These tracks already make this album."
+                          : L"Saving writes the tags of " + std::to_wstring(files) + (files == 1 ? L" file" : L" files") +
+                                L". Edit > Undo last tag edit takes it back.";
+    }
+    float by = panel.B() - pad - S(28);
+    DrawText(Font::Small, Utf8(problem.empty() ? info : problem), x0, by - S(26), p.sub, panel.R() - pad - x0 - S(260));
+    g_album.save = {panel.R() - pad - S(248), by, S(140), S(28)};
+    g_album.cancel = {panel.R() - pad - S(100), by, S(100), S(28)};
+    DrawButton(g_album.save, "Make album", p, true, problem.empty());
+    DrawButton(g_album.cancel, "Cancel", p);
+}
+
+void AlbumMouseDown(float x, float y, int clicks) {
+    auto& d = g_album.draft;
+    for (int f = 0; f < kAlbumFields; ++f)
+        if (g_album.fields[f].rect.In(x, y)) {
+            AlbumFocus(f);
+            g_album.fields[f].all = false;
+            return;
+        }
+    if (g_album.compilation.In(x, y)) d.compilation = !d.compilation;
+    else if (g_album.artistToTracks.In(x, y)) d.artistToTracks = !d.artistToTracks;
+    else if (g_album.number.In(x, y)) d.numberTracks = !d.numberTracks;
+    else if (g_album.buttons[0].In(x, y)) {
+        static const SDL_DialogFileFilter filter{"Images", "jpg;jpeg;png"};  // the dialog keeps a pointer to it
+        ChooseFile(kFileAlbumCover, filter);
+    }
+    else if (g_album.buttons[1].In(x, y)) {
+        uint32_t generation = ++g_album.generation;
+        OpenCoverSearchForTags(d.tracks, [generation](const std::string& bytes) {
+            if (g_album.generation != generation || g_album.draft.tracks.empty()) return;  // closed or reopened
+            AlbumPreview(bytes);
+            g_album.draft.cover = bytes;
+        });
+    } else if (g_album.buttons[2].In(x, y)) d.cover = std::string();
+    else if (g_album.buttons[3].In(x, y)) AlbumMove(-1);
+    else if (g_album.buttons[4].In(x, y)) AlbumMove(1);
+    else if (g_album.buttons[5].In(x, y)) AlbumRemoveSelected();
+    else if (g_album.buttons[6].In(x, y) && d.tracks.size() > 1) AlbumOrderMenu(x, g_album.buttons[6].B());
+    else if (g_album.save.In(x, y)) AlbumSave();
+    else if (g_album.cancel.In(x, y)) ClosePanel();
+    else if (g_album.list.In(x, y)) {
+        g_album.focus = kAlbumFields;
+        int i = g_album.first + (int)((y - g_album.list.y - S(2)) / S(kAlbumRow));
+        if (i < 0 || i >= (int)d.tracks.size()) return AlbumSelect({});
+        SDL_Keymod mod = SDL_GetModState();
+        if (mod & SDL_KMOD_CTRL) {
+            g_album.selected[i] = !g_album.selected[i];
+            g_album.caret = i;
+        } else if ((mod & SDL_KMOD_SHIFT) && g_album.caret >= 0) {
+            std::vector<size_t> rows;
+            for (int k = std::min(i, g_album.caret); k <= std::max(i, g_album.caret); ++k) rows.push_back(k);
+            int caret = g_album.caret;
+            AlbumSelect(rows);
+            g_album.caret = caret;
+        } else {
+            AlbumSelect({(size_t)i});
+        }
+    }
+    (void)clicks;
+    g.redraw = true;
+}
+
+void AlbumKey(const SDL_KeyboardEvent& e) {
+    auto& d = g_album.draft;
+    const bool alt = e.mod & SDL_KMOD_ALT, shift = e.mod & SDL_KMOD_SHIFT;
+    if (e.key == SDLK_ESCAPE) return ClosePanel();
+    if (e.key == SDLK_RETURN || e.key == SDLK_KP_ENTER) return AlbumSave();
+    if (e.key == SDLK_TAB) return AlbumFocus((g_album.focus + (shift ? kAlbumFields : 1)) % (kAlbumFields + 1));
+    if (g_album.focus < kAlbumFields) {
+        LineFieldKey(g_album.fields[g_album.focus], e);
+        return;
+    }
+    // The track list.
+    if (alt && (e.key == SDLK_UP || e.key == SDLK_DOWN)) return AlbumMove(e.key == SDLK_UP ? -1 : 1);
+    if (e.key == SDLK_DELETE) return AlbumRemoveSelected();
+    if ((e.mod & SDL_KMOD_CTRL) && e.key == SDLK_A) {
+        std::vector<size_t> all(d.tracks.size());
+        for (size_t i = 0; i < all.size(); ++i) all[i] = i;
+        return AlbumSelect(all);
+    }
+    if ((e.key == SDLK_UP || e.key == SDLK_DOWN) && !d.tracks.empty()) {
+        int to = std::clamp(g_album.caret + (e.key == SDLK_DOWN ? 1 : -1), 0, (int)d.tracks.size() - 1);
+        AlbumSelect({(size_t)to});
+    }
+}
+
+void AlbumText(const std::wstring& text) {
+    if (g_album.focus >= kAlbumFields) return;
+    std::wstring in;
+    const bool numeric = g_album.focus == kAlbumDisc || g_album.focus == kAlbumDiscTotal;
+    for (wchar_t c : text)
+        if (numeric ? (c >= L'0' && c <= L'9') : c >= 32) in += c;
+    LineFieldInsert(g_album.fields[g_album.focus], in);
+}
+
+void AlbumWheel(float x, float y, float dy) {
+    if (!g_album.list.In(x, y)) return;
+    g_album.caret = -1;  // let the list scroll away from the focused row
+    g_album.first = std::max(0, g_album.first - (int)std::lround(dy * 3));
+}
+
+}  // namespace
+
+void OpenAlbumMaker(const std::vector<TrackId>& ids) {
+    if (ids.empty()) return;
+    ClosePanel();
+    AlbumRelease();
+    g_album.draft = DraftAlbum(g_lib, ids);
+    const auto& d = g_album.draft;
+    const std::wstring values[] = {d.title, d.artist, d.date, d.genre, d.disc ? std::to_wstring(d.disc) : L"",
+                                   d.discTotal ? std::to_wstring(d.discTotal) : L""};
+    for (int f = 0; f < kAlbumFields; ++f) g_album.fields[f].text = values[f];
+    for (TrackId id : d.tracks)
+        if (std::string bytes = TrackCoverBytes(g_lib.Path(id)); !bytes.empty()) {
+            AlbumPreview(bytes);
+            break;
+        }
+    g_album.selected.assign(d.tracks.size(), 0);
+    g_kind = Kind::Album;
+    AlbumFocus(kAlbumTitle);
+}
+
 void OpenAlbumEditions(uint32_t group) {
     if (!FindAlbumGroupConst(group)) return;
     ClosePanel();
@@ -4168,6 +4621,12 @@ void ResetPanelRenderer(bool restore) {
         if (g_tags.preview) SDL_DestroyTexture(g_tags.preview);
         g_tags.preview = nullptr;
     }
+    if (restore) {
+        if (!g_album.previewBytes.empty()) AlbumPreview(g_album.previewBytes);
+    } else {
+        if (g_album.preview) SDL_DestroyTexture(g_album.preview);
+        g_album.preview = nullptr;
+    }
     CoverPanelRenderer(restore);
     ResetGameRenderer(restore);
 }
@@ -4194,6 +4653,7 @@ void ClosePanel() {
     if (g_kind == Kind::Copy) g_copy = CopyPanel{};
     if (g_kind == Kind::Games) CloseGames();
     if (g_kind == Kind::Editions) EditionsClose();
+    if (g_kind == Kind::Album) AlbumRelease();
     if (g_kind == Kind::Artist) ArtistPanelClose();
     if (g_kind == Kind::Covers) {
         CoverPanelClose();
@@ -4203,11 +4663,12 @@ void ClosePanel() {
             g_tags.previewBytes.clear();
             g_tags.ids.clear();
         }
-        g_coverOverTags = false;
+        if (g_coverOverAlbum) AlbumRelease();  // so does the album maker, unsaved
+        g_coverOverTags = g_coverOverAlbum = false;
     }
     if (g_kind == Kind::Tags || g_kind == Kind::Covers || g_kind == Kind::Prefs || g_kind == Kind::Rules || g_kind == Kind::Organize || g_kind == Kind::Copy ||
         g_kind == Kind::ListenBrainz || g_kind == Kind::Format || g_kind == Kind::Palette || g_kind == Kind::Games ||
-        g_kind == Kind::Editions)
+        g_kind == Kind::Editions || g_kind == Kind::Album)
         SDL_StopTextInput(g.window);
     if (g_kind == Kind::ListenBrainz) { listenbrainz::CancelAuthorization(g_lb.selected); g_lb = LbPanel{}; }  // a token is not left lying in memory
     const bool exporting = g_kind == Kind::Export;
@@ -4220,9 +4681,11 @@ void ClosePanel() {
 void ShowCoverPanel(bool overTags) {
     if (overTags && g_kind == Kind::Tags) {
         g_coverOverTags = true;  // not ClosePanel: the editor's fields stay as they are
+    } else if (overTags && g_kind == Kind::Album) {
+        g_coverOverAlbum = true;  // the album maker waits underneath in the same way
     } else if (g_kind != Kind::Covers) {
         ClosePanel();
-        g_coverOverTags = false;
+        g_coverOverTags = g_coverOverAlbum = false;
     }
     g_kind = Kind::Covers;
     SDL_StartTextInput(g.window);
@@ -4243,10 +4706,10 @@ void ShowArtistPanel() {
 
 void CoverPanelDone() {
     if (g_kind != Kind::Covers) return;
-    if (g_coverOverTags) {
+    if (g_coverOverTags || g_coverOverAlbum) {
         CoverPanelClose();
-        g_coverOverTags = false;
-        g_kind = Kind::Tags;
+        g_kind = g_coverOverTags ? Kind::Tags : Kind::Album;
+        g_coverOverTags = g_coverOverAlbum = false;
         g.redraw = true;
         return;
     }
@@ -4277,6 +4740,7 @@ void DrawPanel(const Palette& p, float mouseX, float mouseY) {
     else if (g_kind == Kind::Covers) DrawCoverPanel(p, mouseX, mouseY);
     else if (g_kind == Kind::Artist) DrawArtistPanel(p);
     else if (g_kind == Kind::Export) DrawExportPanel(p);
+    else if (g_kind == Kind::Album) DrawAlbumMaker(p);
 }
 
 void PanelMouseDown(float x, float y, int button, int clicks) {
@@ -4305,6 +4769,7 @@ void PanelMouseDown(float x, float y, int button, int clicks) {
     else if (g_kind == Kind::Covers) CoverPanelMouseDown(x, y, button, clicks);
     else if (g_kind == Kind::Artist && button == SDL_BUTTON_LEFT) ArtistPanelMouseDown(x, y);
     else if (g_kind == Kind::Export) ExportPanelMouseDown(x, y);
+    else if (g_kind == Kind::Album) AlbumMouseDown(x, y, clicks);
 }
 
 void PanelMouseMove(float x, float y) {
@@ -4352,6 +4817,8 @@ void PanelWheel(float x, float y, float dy) {
         ArtistPanelWheel(x, y, dy);
     } else if (g_kind == Kind::Export) {
         ExportPanelWheel(x, y, dy);
+    } else if (g_kind == Kind::Album) {
+        AlbumWheel(x, y, dy);
     } else if (g_kind == Kind::Device) {
         g_dev.first = std::clamp(g_dev.first - (int)std::lround(dy * 2), 0, std::max(0, (int)g_dev.devices.size() + 1 - kDeviceRows));
     } else if (g_kind == Kind::Prefs) {
@@ -4393,6 +4860,7 @@ void PanelKey(const SDL_KeyboardEvent& e) {
     else if (g_kind == Kind::Covers) CoverPanelKey(e);
     else if (g_kind == Kind::Artist) ArtistPanelKey(e);
     else if (g_kind == Kind::Export) ExportPanelKey(e);
+    else if (g_kind == Kind::Album) AlbumKey(e);
 }
 
 void PanelText(const char* text) {
@@ -4406,6 +4874,7 @@ void PanelText(const char* text) {
     if (g_kind == Kind::Games && text) GamesText(compat::Widen(text));
     if (g_kind == Kind::Editions && text) EditionsText(text);
     if (g_kind == Kind::Covers && text) CoverPanelText(text);
+    if (g_kind == Kind::Album && text) AlbumText(compat::Widen(text));
     if (g_kind == Kind::Prefs && text && !(g_prefs.focus >= 0 && !strcmp(text, " "))) {
         g_prefs.search += compat::Widen(text);
         g_prefs.scroll = 0;
@@ -4418,6 +4887,7 @@ void PanelFileChosen(int purpose, const std::wstring& path) {
     if (purpose == kFileHelper && g_kind == Kind::Helpers) InstallHelper(path);
     else if (purpose == kFilePack && g_kind == Kind::Packs) InstallPack(path);
     else if (purpose == kFileCover && g_kind == Kind::Tags) ChooseCover(path);
+    else if (purpose == kFileAlbumCover && g_kind == Kind::Album) AlbumChooseCover(path);
     else if (purpose == kFileCoverPick && g_kind == Kind::Covers) CoverPanelFile(path);
     else if (purpose == kFileCoverDirect) CoverFileChosen(path);
     else if (purpose == kFileAutoEq && g_kind == Kind::Eq) ImportAutoEq(path);
@@ -4438,6 +4908,11 @@ bool PanelWantsText(float x, float y) {
         g_lb.keyField.In(x, y) || g_lb.secretField.In(x, y);
     if (g_kind == Kind::Editions) return EditionsWantsText(x, y);
     if (g_kind == Kind::Covers) return CoverPanelWantsText(x, y);
+    if (g_kind == Kind::Album) {
+        for (const TextField& t : g_album.fields)
+            if (t.rect.In(x, y)) return true;
+        return false;
+    }
     if (g_kind == Kind::Palette) return g_palette.field.In(x, y);
     if (g_kind == Kind::Games) return GamesWantsText(x, y);
     if (g_kind == Kind::Format) {

@@ -193,7 +193,7 @@ std::string Fetch(const Candidate& candidate, bool& offline) {
     offline = false;
     std::string query = "releasegroup:\"" + candidate.title + "\" AND artist:\"" + candidate.artist + "\"";
     std::string url = "https://musicbrainz.org/ws/2/release-group?query=" + Encode(query) + "&fmt=json&limit=25";
-    std::string headers = "User-Agent: cordinal/0.1.9 (https://github.com/imhavingasuperbadday/cordinal)\r\n"
+    std::string headers = "User-Agent: cordinal/0.1.10 (https://github.com/imhavingasuperbadday/cordinal)\r\n"
                           "Accept: application/json\r\n";
 #ifdef _WIN32
     void* session = nullptr;
@@ -288,7 +288,8 @@ void Start(const std::wstring& dataDir, bool enabled) {
     s.results.clear();
     s.nextRequest = Clock::time_point{};
     s.lastQueueCheck = Clock::time_point{};
-    s.thread = std::thread(Worker);
+    // The worker starts with the first album to look up (Tick): with lookups off or no albums, the
+    // thread never runs.
 }
 
 void Stop() {
@@ -335,6 +336,7 @@ bool Tick() {
                 s.queue.push_back({candidate.artist, candidate.title});
                 s.queued.insert(std::move(key));
             }
+            if (!s.queue.empty() && s.started && !s.stop && !s.thread.joinable()) s.thread = std::thread(Worker);
             s.wake.notify_all();
         }
     }

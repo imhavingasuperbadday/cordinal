@@ -22,6 +22,7 @@ public:
     bool SetHeadroom(float db);
     const EqSettings& Global() const { return global_; }
     const std::string& Output() const { return output_; }
+    bool Any() const { return !profiles_.empty(); }
 private:
     void Capture(const EqSettings& active);
     std::filesystem::path path_;

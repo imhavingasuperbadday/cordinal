@@ -144,6 +144,53 @@ int After(int index, bool manual) {
     return g.settings.repeat != Repeat::Off ? 0 : -1;
 }
 
+// A weighted draw from `items` for Keep playing like this and its taste picks: the weights follow
+// `from`, which can't be drawn itself, failed tracks are out and the last five heard count for less.
+// With `skipQueued` the queue and the playing track are out too. -1 when nothing can be drawn.
+int DrawLikeThis(const std::vector<TrackId>& items, TrackId from, bool skipQueued) {
+    auto weights = OrderWeights(g_lib, items, from, UnixNow(), g.settings.taste);
+    auto recent = std::min<size_t>(5, g_radioHistory.size());
+    double total = 0;
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (items[i] == from || !g_lib.Contains(items[i]) || g_lib[items[i]].Failed() ||
+            (skipQueued && (items[i] == g.playing || QueuePosition(items[i]))))
+            weights[i] = 0;
+        if (std::find(g_radioHistory.rbegin(), g_radioHistory.rbegin() + recent, items[i]) != g_radioHistory.rbegin() + recent)
+            weights[i] *= 0.15;
+        total += weights[i];
+    }
+    if (total <= 0) return -1;
+    double draw = std::generate_canonical<double, 53>(g.rng) * total;
+    for (size_t i = 0; i < items.size(); ++i)
+        if (weights[i] > 0 && (draw -= weights[i]) < 0) return (int)i;
+    return -1;
+}
+
+constexpr size_t kTastePicks = 5;  // how many picks Choose by taste keeps in the queue
+
+void DropTastePicks() {
+    g.queue.erase(g.queue.end() - (ptrdiff_t)std::min(g.queuePicks, g.queue.size()), g.queue.end());
+    g.queuePicks = 0;
+    g.pickIndex.clear();
+    g.pickFrom = -1;
+}
+
+// Where queue entry `i` plays in Now Playing: a pick at its own position (so the list goes on after
+// it), anything you queued at `anchor`, where the queue broke in.
+int PickIndexAt(size_t i, int anchor) {
+    size_t yours = QueuedByYou();
+    return i >= yours && i - yours < g.pickIndex.size() ? g.pickIndex[i - yours] : anchor;
+}
+
+void PopQueueFront() {
+    if (g.queue.empty()) return;
+    if (QueuedByYou() == 0 && g.queuePicks) {
+        --g.queuePicks;
+        if (!g.pickIndex.empty()) g.pickIndex.pop_front();
+    }
+    g.queue.pop_front();
+}
+
 // Album repeat may build a new pass. Keep the answer on its request token so gapless lookahead,
 // a refreshed answer and manual Next all agree even after the old index moved in the new pass.
 int Following(unsigned long long token, bool manual) {
@@ -158,21 +205,8 @@ int Following(unsigned long long token, bool manual) {
         auto& items = Queue();
         if (info.radioNext >= 0 && info.radioNext < (int)items.size() && items[info.radioNext] == info.radioNextId)
             return info.radioNext;
-        auto weights = OrderWeights(g_lib, items, info.id, UnixNow(), g.settings.taste);
-        double total = 0;
-        for (size_t i = 0; i < items.size(); ++i) {
-            if (items[i] == info.id || !g_lib.Contains(items[i]) || g_lib[items[i]].Failed()) weights[i] = 0;
-            auto recent = std::min<size_t>(5, g_radioHistory.size());
-            if (std::find(g_radioHistory.rbegin(), g_radioHistory.rbegin() + recent, items[i]) != g_radioHistory.rbegin() + recent)
-                weights[i] *= 0.15;
-            total += weights[i];
-        }
-        int pick = -1;
-        if (total > 0) {
-            double draw = std::generate_canonical<double, 53>(g.rng) * total;
-            for (size_t i = 0; i < items.size(); ++i)
-                if (weights[i] > 0 && (draw -= weights[i]) < 0) { pick = (int)i; break; }
-        } else if (info.index >= 0 && info.index < (int)items.size() &&
+        int pick = DrawLikeThis(items, info.id, false);
+        if (pick < 0 && info.index >= 0 && info.index < (int)items.size() &&
                    items[info.index] == info.id && g_lib.Contains(info.id) && !g_lib[info.id].Failed()) {
             pick = info.index;
         }
@@ -204,7 +238,7 @@ Step StepAfter(unsigned long long token, bool manual) {
     // A queued track still at the head of the queue is the one playing.
     size_t from = info.queued && !info.popped && !g.queue.empty() && g.queue.front() == info.id ? 1 : 0;
     for (size_t i = from; i < g.queue.size(); ++i)
-        if (g_lib.Contains(g.queue[i])) return {g.queue[i], info.index, true};
+        if (g_lib.Contains(g.queue[i])) return {g.queue[i], PickIndexAt(i, info.index), true};
     int next = Following(token, manual);
     auto& items = Queue();
     return next >= 0 && next < (int)items.size() ? Step{items[next], next, false} : Step{};
@@ -212,6 +246,7 @@ Step StepAfter(unsigned long long token, bool manual) {
 
 // Tells the engine what follows `token`, for its gapless hand-off.
 void AnswerNext(unsigned long long token, bool failed) {
+    EnsureTastePicks();
     auto it = g_tokens.find(token);
     Step step;
     if (it != g_tokens.end() && !(g.stopAfterCurrent && (token == g.token || !g.token))) step = StepAfter(token, false);
@@ -225,6 +260,9 @@ void AnswerNext(unsigned long long token, bool failed) {
     }
     unsigned long long next = step.queued ? NewQueuedToken(step.index, step.id) : NewToken(step.index, step.id);
     PlayItem item = MakeItem(next, step.id);
+    // Crossfade (Preferences > Playback), as on Windows: an album's own tracks stay gapless unless asked.
+    if (g.settings.crossfade && it != g_tokens.end() && g_lib.Contains(it->second.id) && g_lib.Contains(step.id))
+        item.crossfade = g.settings.crossfadeAlbums || AlbumKeyOf(g_lib[it->second.id]) != AlbumKeyOf(g_lib[step.id]);
     g.engine.SetNext(token, &item);
     PrefetchWaveform(step.id);
 }
@@ -233,7 +271,7 @@ void AnswerNext(unsigned long long token, bool failed) {
 // comes before it is heard, and what follows must see the rest of the queue).
 void LeaveQueue(TokenInfo& info) {
     if (info.queued && !info.popped && !g.queue.empty() && g.queue.front() == info.id) {
-        g.queue.pop_front();
+        PopQueueFront();
         info.popped = true;
         g.redraw = true;
     }
@@ -287,6 +325,15 @@ void LeaveTrack(bool manual) {
 
 }  // namespace
 
+int HeardIndex() {
+    auto& items = Queue();
+    if (g.playing == kNone || items.empty()) return -1;
+    if (g.queuePos >= 0 && (size_t)g.queuePos < items.size() && items[(size_t)g.queuePos] == g.playing)
+        return g.queuePos;
+    auto it = std::find(items.begin(), items.end(), g.playing);
+    return it == items.end() ? -1 : (int)(it - items.begin());
+}
+
 PlaybackSection SectionOf(TrackId id) {
     if (!g_lib.Contains(id)) return {};
     const Track& t = g_lib[id];
@@ -339,6 +386,7 @@ bool IsPaused() { return g.engine.Paused(); }
 
 // What comes after the playing track changed (the queue did): answer the engine's hand-off again.
 void RefreshNext() {
+    EnsureTastePicks();
     if (g.playing == kNone || !g.token) return;
     // Queue entries are removed when decoding reaches them, before they are audible. Replacing
     // that buffered audio here would silently lose an entry that the listener still expects.
@@ -350,11 +398,12 @@ void RefreshNext() {
 // Play next (the front of the queue) or Add to queue (its end): played before the playlist continues.
 void QueueTracks(const std::vector<TrackId>& ids, bool next) {
     if (ids.empty()) return;
+    // Yours go ahead of the taste picks.
     if (next) g.queue.insert(g.queue.begin(), ids.begin(), ids.end());
-    else g.queue.insert(g.queue.end(), ids.begin(), ids.end());
+    else g.queue.insert(g.queue.begin() + (ptrdiff_t)QueuedByYou(), ids.begin(), ids.end());
     PlaySfx(next ? Sfx::PlayNext : Sfx::QueueAdd, (int)g.queue.size());
     ShowMessage((next ? L"Playing next: " : L"Queued: ") + std::to_wstring(ids.size()) + (ids.size() == 1 ? L" track" : L" tracks") +
-                L" (" + std::to_wstring(g.queue.size()) + L" in the queue).");
+                L" (" + std::to_wstring(QueuedByYou()) + L" in the queue).");
     g.redraw = true;
     if (g.playing == kNone) Next();
     else RefreshNext();
@@ -368,7 +417,168 @@ void ClearQueue() {
     TrackId playing = it != g_tokens.end() && it->second.queued && !it->second.popped && !g.queue.empty() && g.queue.front() == it->second.id
                           ? it->second.id : kNone;
     g.queue.clear();
+    g.queuePicks = 0;
+    g.pickIndex.clear();
     if (playing != kNone) it->second.popped = true;
+    RefreshNext();
+    g.redraw = true;
+}
+
+size_t QueuedByYou() { return g.queue.size() - std::min(g.queuePicks, g.queue.size()); }
+
+// Choose by taste fills the queue only where it does the choosing: track shuffle and Keep playing
+// like this, while something from Now Playing plays. Album shuffle keeps albums in order, Repeat
+// track repeats and a station plays itself.
+bool TastePicking() {
+    return g.settings.taste && (g.settings.radio || g.settings.shuffle == kShuffleTracks) &&
+           g.settings.repeat != Repeat::One && !RadioPlaying() && g.playing != kNone && !Queue().empty();
+}
+
+// Keeps kTastePicks picks after what you queued, drawn the way Now Playing would have gone on: the
+// shuffle order after the last pick, or Keep playing like this from it. Each pick plays at its own
+// Now Playing position, so the list goes on after it and nothing comes up twice. Picks drawn in
+// another order, or no longer at their position, are dropped, as are all of them when taste stops
+// choosing.
+void EnsureTastePicks() {
+    bool picking = TastePicking();
+    int mode = g.settings.radio ? 2 : 1;
+    auto& items = Queue();
+    bool stale = g.pickIndex.size() != g.queuePicks || mode != g.picksMode || !picking;
+    for (size_t k = 0; !stale && k < g.pickIndex.size(); ++k) {
+        int at = g.pickIndex[k];
+        stale = at < 0 || at >= (int)items.size() || items[at] != g.queue[QueuedByYou() + k];
+    }
+    bool changed = false;
+    if (stale) {
+        changed = g.queuePicks > 0;
+        DropTastePicks();
+        g.picksMode = picking ? mode : 0;
+    }
+    if (picking) {
+        int base = g.pickFrom >= 0 && g.pickFrom < (int)items.size() ? g.pickFrom : g.queuePos;
+        TrackId from = g.queuePicks ? g.queue.back() : g.playing;
+        for (int guard = 0; g.queuePicks < kTastePicks && guard < (int)items.size() + 8; ++guard) {
+            int k = -1;
+            if (g.settings.radio) {
+                k = DrawLikeThis(items, from, true);
+            } else {
+                k = After(base, false);
+                if (k < 0) break;
+                base = g.pickFrom = k;
+                if (k == g.queuePos || items[k] == g.playing || QueuePosition(items[k])) continue;
+            }
+            if (k < 0 || k >= (int)items.size()) break;
+            g.queue.push_back(items[k]);
+            g.pickIndex.push_back(k);
+            ++g.queuePicks;
+            from = items[k];
+            base = g.pickFrom = k;
+            changed = true;
+        }
+    }
+    if (changed) g.redraw = true;
+}
+
+void InsertIntoQueue(const std::vector<TrackId>& ids, int at) {
+    if (ids.empty()) return;
+    at = std::clamp(at, 0, (int)QueuedByYou());
+    g.queue.insert(g.queue.begin() + at, ids.begin(), ids.end());
+    PlaySfx(at == 0 ? Sfx::PlayNext : Sfx::QueueAdd, (int)g.queue.size());
+    ShowMessage(L"Queued: " + std::to_wstring(ids.size()) + (ids.size() == 1 ? L" track" : L" tracks") + L" (" +
+                std::to_wstring(QueuedByYou()) + L" in the queue).");
+    g.redraw = true;
+    if (g.playing == kNone) Next();
+    else RefreshNext();
+}
+
+// `indices` are queue positions, ascending and distinct. Removing a pick lets another take its place.
+void RemoveFromQueue(const std::vector<int>& indices) {
+    size_t yours = QueuedByYou();
+    bool removed = false;
+    for (auto r = indices.rbegin(); r != indices.rend(); ++r) {
+        if (*r < 0 || *r >= (int)g.queue.size()) continue;
+        if ((size_t)*r >= yours) {
+            size_t k = *r - yours;
+            if (k < g.pickIndex.size()) g.pickIndex.erase(g.pickIndex.begin() + (ptrdiff_t)k);
+            --g.queuePicks;
+        }
+        g.queue.erase(g.queue.begin() + *r);
+        removed = true;
+    }
+    if (!removed) return;
+    RefreshNext();
+    g.redraw = true;
+}
+
+// Moves the entries at `indices` (ascending, distinct) to land before position `to` of the queue as it
+// is now, and returns where the first landed. What lands among yours is yours, picks included;
+// `keep` makes moved picks yours wherever they go. Yours never move below the picks.
+int MoveInQueue(const std::vector<int>& indices, int to, bool keep) {
+    size_t yours = QueuedByYou();
+    std::vector<TrackId> moved;
+    std::vector<int> movedIndex;  // the moved picks' Now Playing positions
+    size_t movedPicks = 0;
+    int before = 0;
+    for (int i : indices) {
+        if (i < 0 || i >= (int)g.queue.size()) continue;
+        moved.push_back(g.queue[i]);
+        if ((size_t)i >= yours) {
+            ++movedPicks;
+            size_t k = i - yours;
+            movedIndex.push_back(k < g.pickIndex.size() ? g.pickIndex[k] : -1);
+        }
+        if (i < to) ++before;
+    }
+    if (moved.empty()) return -1;
+    for (auto r = indices.rbegin(); r != indices.rend(); ++r) {
+        if (*r < 0 || *r >= (int)g.queue.size()) continue;
+        if ((size_t)*r >= yours && (size_t)*r - yours < g.pickIndex.size())
+            g.pickIndex.erase(g.pickIndex.begin() + (ptrdiff_t)(*r - yours));
+        g.queue.erase(g.queue.begin() + *r);
+    }
+    g.queuePicks -= movedPicks;
+    int insert = std::max(0, to - before);
+    int yoursLeft = (int)(yours - (moved.size() - movedPicks));
+    bool allPicks = movedPicks == moved.size();
+    if (keep || !allPicks || insert < yoursLeft) {
+        insert = std::min(insert, yoursLeft);
+    } else {
+        // Picks moved among the picks stay picks, with their positions.
+        insert = std::min(insert, (int)g.queue.size());
+        g.pickIndex.insert(g.pickIndex.begin() + (insert - yoursLeft), movedIndex.begin(), movedIndex.end());
+        g.queuePicks += movedPicks;
+    }
+    g.queue.insert(g.queue.begin() + insert, moved.begin(), moved.end());
+    RefreshNext();
+    g.redraw = true;
+    return insert;
+}
+
+void PlayQueued(TrackId id, int anchor);
+
+// Plays queue entry `index` now: it moves to the head (a pick becomes yours) and playback goes on to it.
+void PlayQueuedAt(int index) {
+    if (index < 0 || index >= (int)g.queue.size()) return;
+    if (index > 0 || QueuedByYou() == 0) MoveInQueue({index}, 0, true);
+    if (g.playing == kNone) {
+        while (!g.queue.empty() && !g_lib.Contains(g.queue.front())) PopQueueFront();
+        if (g.queue.empty()) return;
+        TrackId id = g.queue.front();
+        PopQueueFront();
+        PlayQueued(id, g.queuePos);
+        g_tokens[g.token].popped = true;
+    } else {
+        Next();
+    }
+}
+
+// Replaces the picks with new ones: in shuffle, the order's next tracks after them.
+void RepickTaste() {
+    if (!g.queuePicks) return;
+    int cursor = g.pickFrom;
+    DropTastePicks();
+    g.pickFrom = cursor;  // the order draws on from where the old picks ended
+    PlaySfx(Sfx::Dice);
     RefreshNext();
     g.redraw = true;
 }
@@ -575,6 +785,7 @@ void ApplyEffects() {
     g.engine.SetBitcrush(g.settings.bitcrush);
     g.engine.SetSmartVolume(g.settings.loudnessComp, g.settings.nightMode);
     g.engine.SetLoops(g.settings.loops, 8.0);
+    g.engine.SetCrossfade(kCrossfadeSeconds[std::clamp(g.settings.crossfade, 0, (int)std::size(kCrossfadeSeconds) - 1)]);
 }
 
 void ApplyEq() {
@@ -637,11 +848,12 @@ void Next() {
     auto it = g_tokens.find(g.token);
     if (it != g_tokens.end()) LeaveQueue(it->second);  // skipping the queued track playing now takes it out
     int anchor = it != g_tokens.end() ? it->second.index : g.queuePos;
-    while (!g.queue.empty() && !g_lib.Contains(g.queue.front())) g.queue.pop_front();
+    while (!g.queue.empty() && !g_lib.Contains(g.queue.front())) PopQueueFront();
     if (!g.queue.empty()) {
         TrackId id = g.queue.front();
-        g.queue.pop_front();
-        PlayQueued(id, anchor);
+        int at = PickIndexAt(0, anchor);
+        PopQueueFront();
+        PlayQueued(id, at);
         g_tokens[g.token].popped = true;
         return;
     }
@@ -693,9 +905,11 @@ void SeekTo(double seconds) {
 
 void SetVolume(float volume) {
     g.settings.volume = std::clamp(volume, 0.0f, 1.0f);
-    // A perceptual curve, as the slider means loudness rather than amplitude.
-    float v = g.settings.volume;
-    g.engine.SetVolume(v * v);
+    // The slider means loudness rather than amplitude, so it goes through the chosen curve. With
+    // cordinal's own control off the samples leave at full level (the system sets it); mute still
+    // silences, being a switch rather than a level.
+    const float v = g.settings.volume;
+    g.engine.SetVolume(g.settings.softwareVolume ? VolumeCurveGain(v, g.settings.volumeCurve) : v > 0 ? 1.0f : 0.0f);
     g.redraw = true;
     MprisChanged();
 }
@@ -898,6 +1112,7 @@ void OnEngineEvent(EngineEvent e, unsigned long long token) {
                 g.lastPosition = g.engine.Position();
                 ScrobbleTrackStarted(token, g.playing);
             }
+            EnsureTastePicks();
             g.redraw = true;
             MprisChanged();
             FlushDeferredTags();

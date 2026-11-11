@@ -17,6 +17,38 @@ void TestHeadsets() {
     Check(OutputProfileSection(L"endpoint-a") == OutputProfileSection(L"endpoint-a") &&
           OutputProfileSection(L"endpoint-a") != OutputProfileSection(L"endpoint-b"),
           L"output profile keys are stable and keep distinct endpoints separate");
+    {
+        using namespace app;
+        const std::wstring savedIni = g.iniPath;
+        wchar_t exe[MAX_PATH]{};
+        DWORD exeLen = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        std::wstring dir(exe, exeLen);
+        if (auto slash = dir.find_last_of(L"\\/"); slash != std::wstring::npos) dir.erase(slash);
+        std::wstring folder = dir;
+        if (auto slash = folder.find_last_of(L"\\/"); slash != std::wstring::npos) folder.erase(0, slash + 1);
+        if (_wcsicmp(folder.c_str(), L"unpacked") == 0) {
+            auto slash = dir.find_last_of(L"\\/");
+            if (slash != std::wstring::npos) dir.erase(slash);
+        }
+        std::wstring scratch = dir + L"\\scratch";
+        CreateDirectoryW(scratch.c_str(), nullptr);
+        scratch += L"\\headset-profiles";
+        CreateDirectoryW(scratch.c_str(), nullptr);
+        const std::wstring ini = scratch + L"\\settings.ini";
+        WritePrivateProfileStringW(nullptr, nullptr, nullptr, ini.c_str());
+        DeleteFileW(ini.c_str());
+        g.iniPath = ini;
+        const bool none = !SavedOutputProfiles();
+        IniWrite(L"Player", L"Volume", L"1");
+        const bool ignored = !SavedOutputProfiles();
+        IniWrite(OutputProfileSection(L"endpoint-a").c_str(), L"Remember", L"1");
+        const bool found = SavedOutputProfiles();
+        WritePrivateProfileStringW(nullptr, nullptr, nullptr, ini.c_str());
+        DeleteFileW(ini.c_str());
+        g.iniPath = savedIni;
+        Check(none && ignored && found,
+              L"a saved per-output profile is visible to startup, and other sections are not");
+    }
     batch.Next(L"the BlackShark wire format is exact: the battery query envelope, the handshake flag layout, "
                L"setting payloads, complete matching ACK replies and ten-band EQ curves");
     auto report = BlackSharkReport(3, 0x21);

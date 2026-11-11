@@ -150,6 +150,7 @@ std::vector<MenuItem> BarMenu(int m) {
                     Separator(), Item("Search", kFind, "Ctrl+F"), Separator(),
                     Item("Edit tags...", kEditTags, "Alt+Enter", false, g.focus >= 0 && any),
                     Item("Edit album tags...", kEditAlbumTags, {}, false, !SelectedTracks().empty()),
+                    Item("Make album...", kMakeAlbum, {}, false, !SelectedTracks().empty()),
                     Item("Undo last tag edit", kUndoTags, {}, false, CanUndoTagEdit())};
             if (g_checkingDead && g_playlistFileBusy) items.insert(items.begin() + 11, Item("Cancel checking dead items", kCancelDead));
             if (auto labels = HelperToolLabels(); !labels.empty()) {  // the tools of the helpers that are on
@@ -262,7 +263,7 @@ std::vector<MenuItem> BarMenu(int m) {
             themes.push_back(Separator());
             for (int t = (int)ThemeMode::Deltarune; t < ThemeTotal(); ++t)
                 if (ThemeAvailable((ThemeMode)t)) themes.push_back(Radio(Plain(ThemeInfo((ThemeMode)t).name), kTheme, t, (int)g.settings.theme == t));
-            std::vector<MenuItem> view = {Submenu("Theme", std::move(themes)), Item("Radio", kOpenRadio, "Ctrl+Shift+R"), Item("Lyrics panel", kLyrics, "Ctrl+L", LyricsShown()), Item("Artist info...", kArtistInfo), Item("Customize layout...", kLayout),
+            std::vector<MenuItem> view = {Submenu("Theme", std::move(themes)), Item("Radio", kOpenRadio, "Ctrl+Shift+R"), Item("Lyrics panel", kLyrics, "Ctrl+L", LyricsShown()), Item("Up next", kQueuePanel, "Ctrl+Shift+Q", QueueShown()), Item("Artist info...", kArtistInfo), Item("Customize layout...", kLayout),
                     Submenu("Window size", {Radio("Compact", kViewSize, 0, g.settings.size == ViewSize::Compact),
                         Radio("Normal", kViewSize, 1, g.settings.size == ViewSize::Normal),
                         Radio("Big mode plus", kViewSize, 2, g.settings.size == ViewSize::Spotlight),
@@ -374,6 +375,7 @@ void OpenRowMenu(float x, float y) {
     items.push_back(Item("Sync to iPod...", kIpodSync, {}, false, !IpodBusy()));
     items.push_back(Item("Edit tags...", kEditTags, "Alt+Enter"));
     items.push_back(Item("Edit album tags...", kEditAlbumTags));
+    items.push_back(Item("Make album...", kMakeAlbum));
     // The cover as a submenu: a file or the clipboard's picture becomes the album's cover at once;
     // only an online search needs the picker. Dropping an image on a row does the same.
     std::vector<MenuItem> cover{Item("Choose image file...", kCoverFile),
@@ -387,6 +389,26 @@ void OpenRowMenu(float x, float y) {
     items.push_back(Item("Artist info...", kArtistInfo));
     g_barOpen = -1;
     OpenPopup(x, y, std::move(items));
+}
+
+// The shared auto-playlist tab's menu, under it (app_tabs.cpp ShowAutoTabMenu): every auto-playlist,
+// the open one checked, then New auto-playlist and Edit rules.
+void OpenAutoTabMenu(int tab) {
+    if (tab < 0 || tab >= (int)L.tabRects.size() || !IsAutoTab(tab)) return;
+    std::vector<MenuItem> items;
+    for (int i = 0; i < (int)g.playlists.size(); ++i)
+        if (g.playlists[i].kind == PlaylistKind::Auto) {
+            std::string label = Utf8(g.playlists[i].name);
+            items.push_back(Radio(label, kChoice, i, i == g.active,
+                                  g.settings.layout.tabCounts ? std::to_string(PlaylistTracks(g.playlists[i]).size()) : ""));
+        }
+    items.push_back(Separator());
+    items.push_back(Item("New auto-playlist...", kNewAuto));
+    if (L.tabSlots[tab] == g.active) items.push_back(Item("Edit rules...", kEditAuto));
+    g_choicePick = [](int index) { SetActiveTab(index); };
+    g_barOpen = -1;
+    OpenPopup(L.tabRects[tab].x, L.tabRects[tab].B(), std::move(items));
+    g.redraw = true;
 }
 
 void OpenHeaderMenu(float x, float y) {
@@ -517,6 +539,7 @@ void RunAction(const MenuItem& item) {
         case kEditAlbumTags:
             if (auto sel = SelectedTracks(); !sel.empty()) OpenTagEditor(AlbumTracksOf(sel));
             break;
+        case kMakeAlbum: OpenAlbumMaker(SelectedTracks()); break;
         case kMissingInfo: ShowMissingInformation((size_t)std::max(0, item.arg)); break;
         case kSaveLyricsTags: SaveFetchedLyrics(true); break;
         case kSaveLyricsLrc: SaveFetchedLyrics(false); break;
@@ -613,6 +636,8 @@ void RunAction(const MenuItem& item) {
         case kPoints: OpenPoints(); break;
         case kPalette: OpenPalette(); break;
         case kLyrics: ToggleLyrics(); break;
+        case kQueuePanel: ToggleQueue(); break;
+        case kQueueEdit: QueueEdit(item.arg); break;
         case kArtistInfo: OpenArtistInfo(); break;
         case kOpenRadio: OpenRadio(); break;
         case kBigPanel: ToggleBigPanel(item.arg); break;

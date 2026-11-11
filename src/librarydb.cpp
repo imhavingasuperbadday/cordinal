@@ -564,7 +564,7 @@ static bool WriteDatabase(const std::wstring& file, const Library& library,
                           const std::vector<Playlist>& playlists, const std::vector<PlayEvent>& log,
                           const PointsState* points, const std::map<AlbumId, AlbumMeasurement>& measurements,
                           const std::vector<AlbumGroup>& albumGroups,
-                          const std::map<TrackId, TrackMusicBrainz>& musicBrainz, const TasteState& taste,
+                          const TrackMusicBrainzTable& musicBrainz, const TasteState& taste,
                           std::wstring* error) {
     std::wstring ignored;
     std::wstring& failure = error ? *error : ignored;
@@ -836,8 +836,9 @@ LibraryArchive CaptureLibraryArchive(const std::vector<Playlist>& playlists) {
         data.albums[AlbumKeyOf(data.library[album.members.front()])] = album;
     // Album groups refer to track ids, which ImportTrack preserves; raw UTF-8 fields need no remap.
     data.albumGroups = g_albumGroups;
-    for (const auto& [id, value] : g_trackMusicBrainz)
-        if (data.library.Contains(id)) data.trackMusicBrainz[id] = value;
+    g_trackMusicBrainz.ForEach([&](TrackId id, TrackMusicBrainzTable::Ids ids) {
+        if (data.library.Contains(id)) data.trackMusicBrainz.Set(id, ids.releaseGroup, ids.release);
+    });
     data.taste = CurrentTaste();
     return data;
 }

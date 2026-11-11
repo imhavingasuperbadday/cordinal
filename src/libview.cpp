@@ -16,6 +16,7 @@
 
 #include <bitset>
 #include <list>
+#include <span>
 
 namespace app {
 
@@ -24,12 +25,16 @@ namespace {
 constexpr UINT WM_APP_THUMB = WM_APP + 20;
 const wchar_t kLibViewClass[] = L"CordinalLibraryView";
 constexpr UINT_PTR kScrollTimer = 0x5CA1;  // Smooth scrolling's frame timer on the library view
+// Frees the canvas's window-sized surface once no frame has been drawn for this long. A maximized
+// 1920 x 1080 window holds about 8 MB there, a 4K one over 30 MB, and an idle view needs none of it.
+constexpr UINT_PTR kSurfaceTimer = 0x5CA2;
+constexpr UINT kSurfaceIdleMs = 3000;
 
 // One album in the view: its album artist and album name, the tracks grouped under it, and the
 // lazily-derived cover identity. `letter` is the section heading it lands under in Albums.
 struct Album {
     StringPool::Handle artist = 0, album = 0, date = 0, genre = 0;
-    std::vector<TrackId> tracks;  // the shown edition's tracks (or the ordinary album)
+    uint32_t trackBegin = 0, trackCount = 0;  // a slice of v.albumTracks
     double seconds = 0;
     mutable uint64_t coverKey = 0;  // ThumbLoader::Key of the first track, computed on first draw
     wchar_t letter = L'#';
@@ -62,6 +67,7 @@ struct Bitmap {
     std::list<uint64_t>::iterator lru;
     size_t bytes = 0;
     ULONGLONG missAt = 0;  // when "no art" was cached; a new cover.jpg should not stay hidden
+    double hue = -1;       // the cover's hue (CoverHue), which an open album's panel is washed with
 };
 
 // All view state, touched only on the UI thread: covers are decoded by ThumbLoader workers but
@@ -78,6 +84,7 @@ struct LibView {
     ComPtr<IDWriteInlineObject> ellipsis;
 
     std::vector<Album> albums;
+    std::vector<TrackId> albumTracks;  // every album's tracks, in album order
     std::vector<Artist> artists;
     std::vector<Item> items;
     std::vector<int> albumItem;  // album -> its tile / group item
@@ -108,6 +115,11 @@ struct LibView {
     bool busyDrawn = false;     // the last paint drew a busy spinner
     ULONGLONG busyProbe = 0;    // when a repaint last looked for newly busy tracks
 } v;
+
+std::span<const TrackId> Tracks(const Album& a) {
+    if (!a.trackCount) return {};
+    return {v.albumTracks.data() + a.trackBegin, (size_t)a.trackCount};
+}
 
 void CreateFormats();
 
@@ -153,13 +165,59 @@ D2D1_COLOR_F Mix(Rgb a, Rgb b, float t) {
     return D2D1::ColorF(ca.r + (cb.r - ca.r) * t, ca.g + (cb.g - ca.g) * t, ca.b + (cb.b - ca.b) * t);
 }
 
-std::wstring AlbumTitle(const Album& a) {
-    if (!a.canonicalTitle.empty()) return a.canonicalTitle;
-    if (a.album) return g_lib.Str(a.album);
-    std::wstring t;
-    return a.tracks.size() == 1 && LookupField(a.tracks[0], L"title", t) ? t : L"Unknown album";
+// Decodes a pool string into `out`, reusing its buffer. Painting used to build a fresh wstring
+// for every title on every frame, and the heap kept those blocks after they were freed.
+void AssignPool(std::wstring& out, StringPool::Handle h) {
+    if (!h) {
+        out.clear();
+        return;
+    }
+    const std::string_view utf8 = g_lib.View(h);
+    if (utf8.empty()) {
+        out.clear();
+        return;
+    }
+    if (out.capacity() < utf8.size()) out.reserve(utf8.size());  // one UTF-16 unit per byte is enough
+    out.resize(utf8.size());
+    const int n = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), (int)utf8.size(), out.data(), (int)out.size());
+    if (n <= 0) out.clear();
+    else out.resize((size_t)n);
 }
-std::wstring ArtistName(StringPool::Handle h) { return h ? g_lib.Str(h) : L"Unknown artist"; }
+
+void AppendPool(std::wstring& out, StringPool::Handle h) {
+    if (!h) return;
+    const std::string_view utf8 = g_lib.View(h);
+    if (utf8.empty()) return;
+    const size_t at = out.size();
+    out.resize(at + utf8.size());
+    const int n = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), (int)utf8.size(), out.data() + at, (int)utf8.size());
+    if (n <= 0) out.resize(at);
+    else out.resize(at + (size_t)n);
+}
+
+const std::wstring& AlbumTitle(const Album& a) {
+    if (!a.canonicalTitle.empty()) return a.canonicalTitle;
+    static std::wstring title;
+    if (a.album) {
+        AssignPool(title, a.album);
+        return title;
+    }
+    title.clear();
+    if (a.trackCount == 1) {
+        const Track& track = g_lib[Tracks(a)[0]];
+        if (track.title) AssignPool(title, track.title);
+        else title = StemOf(g_lib.Str(track.file));
+        if (!title.empty()) return title;
+    }
+    title.assign(L"Unknown album", 13);
+    return title;
+}
+const std::wstring& ArtistName(StringPool::Handle h) {
+    static std::wstring name;
+    if (!h) name.assign(L"Unknown artist", 14);
+    else AssignPool(name, h);
+    return name;
+}
 
 wchar_t SectionLetter(StringPool::Handle artist) {
     std::wstring s = g_lib.Str(artist);
@@ -188,12 +246,12 @@ float PanelRight(float width) {
 // Track rows two columns wide when an open album has many tracks and the panel is wide.
 int PanelColumns(const Album& a, float width) {
     float listW = PanelRight(width) - Margin() - F(40);
-    return a.tracks.size() > 10 && listW > F(760) ? 2 : 1;
+    return a.trackCount > 10 && listW > F(760) ? 2 : 1;
 }
 
 float PanelHeight(const Album& a, float width) {
     int cols = PanelColumns(a, width);
-    int rows = (int)(a.tracks.size() + cols - 1) / cols;
+    int rows = (int)(a.trackCount + cols - 1) / cols;
     return std::max(PanelCover(width) + F(40), F(84) + rows * RowH() + F(28));
 }
 
@@ -208,6 +266,7 @@ void BuildGroups() {
         std::vector<std::pair<uint32_t, std::vector<TrackId>>> visible;  // edition id -> visible tracks
     };
     std::vector<ShowEditions> editions;
+    std::vector<std::vector<TrackId>> lists;  // parallel to v.albums, packed into v.albumTracks at the end
     std::unordered_map<uint64_t, size_t> byKey;
     std::unordered_map<uint32_t, size_t> byGroup;
     for (uint32_t row : g.view) {
@@ -229,6 +288,7 @@ void BuildGroups() {
                 a.canonicalTitle = FromUtf8(title);
                 v.albums.push_back(std::move(a));
                 editions.emplace_back();
+                lists.emplace_back();
             }
             // Keep the edition's own album order later; this just records which tracks survived
             // the browser and search filters.
@@ -253,9 +313,10 @@ void BuildGroups() {
             a.artTrack = id;
             v.albums.push_back(std::move(a));
             editions.emplace_back();
+            lists.emplace_back();
         }
         Album& a = v.albums[it->second];
-        a.tracks.push_back(id);
+        lists[it->second].push_back(id);
         a.seconds += t.Duration();
         if (!a.genre) a.genre = t.genre;
     }
@@ -289,36 +350,51 @@ void BuildGroups() {
             chosen = shown->id;
             for (const auto& item : visible) if (item.first == shown->id) allowed.insert(item.second.begin(), item.second.end());
         }
-        a.tracks.clear();
+        lists[index].clear();
         a.seconds = 0;
         a.edition = chosen;
         a.editions = (int)group->editions.size();
         v.chosenEdition[a.group] = chosen;
         for (TrackId id : shown->tracks) {
             if (!allowed.count(id)) continue;
-            a.tracks.push_back(id);
+            lists[index].push_back(id);
             a.seconds += g_lib[id].Duration();
             if (!a.genre) a.genre = g_lib[id].genre;
         }
-        if (a.tracks.empty()) { drop.push_back(index); continue; }
+        if (lists[index].empty()) { drop.push_back(index); continue; }
         a.artTrack = group->artTrack != kInvalidTrack && g_lib.Contains(group->artTrack)
                          ? group->artTrack
-                         : (shown->tracks.empty() ? a.tracks.front() : shown->tracks.front());
+                         : (shown->tracks.empty() ? lists[index].front() : shown->tracks.front());
         std::string title = group->title.empty() ? shown->album : group->title;
         a.canonicalTitle = FromUtf8(title);
     }
-    for (auto it = drop.rbegin(); it != drop.rend(); ++it) v.albums.erase(v.albums.begin() + (ptrdiff_t)*it);
+    for (auto it = drop.rbegin(); it != drop.rend(); ++it) {
+        v.albums.erase(v.albums.begin() + (ptrdiff_t)*it);
+        lists.erase(lists.begin() + (ptrdiff_t)*it);
+    }
+    // Albums can interleave, so the per-album lists are packed only once the edition pass is done.
+    // The temporary lists then go away; scrolling does not allocate one heap block per album.
+    std::vector<TrackId> packed;
+    size_t total = 0;
+    for (const auto& list : lists) total += list.size();
+    packed.reserve(total);
+    for (size_t i = 0; i < lists.size(); ++i) {
+        v.albums[i].trackBegin = (uint32_t)packed.size();
+        v.albums[i].trackCount = (uint32_t)lists[i].size();
+        packed.insert(packed.end(), lists[i].begin(), lists[i].end());
+    }
+    v.albumTracks.swap(packed);
     if (g.libMode == LibraryMode::Artists) {
         // "Toby Fox; Geoffrey Day" is two artists: the album shows under each of them.
         std::unordered_map<StringPool::Handle, uint32_t> byArtist;
         std::vector<StringPool::Handle> names;
         for (int i = 0; i < (int)v.albums.size(); ++i) {
-            BrowserValues(v.albums[i].tracks[0], BrowseField::AlbumArtist, names);
+            BrowserValues(Tracks(v.albums[i])[0], BrowseField::AlbumArtist, names);
             for (StringPool::Handle name : names) {
                 auto [it, added] = byArtist.try_emplace(name, (uint32_t)v.artists.size());
                 if (added) v.artists.push_back(Artist{name, {}, 0});
                 v.artists[it->second].albums.push_back(i);
-                v.artists[it->second].tracks += (uint32_t)v.albums[i].tracks.size();
+                v.artists[it->second].tracks += v.albums[i].trackCount;
             }
         }
         // Split names join the list where they belong alphabetically ("Unknown artist" last).
@@ -346,11 +422,13 @@ void BuildGroups() {
 void GridMetrics(float itemW, int& cols, float& gap) {
     float avail = v.width - Margin() * 2;
     // A compact gallery: covers keep an even rhythm and spread a little to fill the width, but never
-    // so far apart that a row stops reading as one.
-    gap = F(16);
+    // so far apart that a row stops reading as one. Cover spacing (Preferences > Library) sets the
+    // least space; the spread stops at twice that.
+    const float least = (float)F(std::clamp(g.coverGap, 4, 48));
+    gap = least;
     cols = std::max(1, (int)((avail + gap) / (itemW + gap)));
     gap = cols > 1 ? (avail - cols * itemW) / (cols - 1) : 0;
-    gap = std::min(gap, F(32));
+    gap = std::min(gap, least * 2);
 }
 
 void LayoutItems() {
@@ -401,7 +479,7 @@ void LayoutItems() {
         if (col) endRow((int)v.albums.size() - 1);
     } else if (g.libMode == LibraryMode::AlbumTracks) {
         for (int i = 0; i < (int)v.albums.size(); ++i) {
-            float h = std::max(GroupHead() + v.albums[i].tracks.size() * RowH(), GroupArt(W - Margin() * 2)) + F(8);
+            float h = std::max(GroupHead() + v.albums[i].trackCount * RowH(), GroupArt(W - Margin() * 2)) + F(8);
             v.albumItem[i] = (int)v.items.size();
             v.items.push_back({ItemKind::AlbumGroup, {Margin(), y, W - Margin(), y + h}, i});
             y += h + F(24);
@@ -451,8 +529,8 @@ void TrimCovers() {
 // The cached bitmap for an album's cover at `size`, or nullptr after queueing a decode with the
 // loader. The cache key mixes in `size`, so one cover can be held at several DPI-scaled sizes.
 ID2D1Bitmap* Cover(const Album& a, int size) {
-    if (a.tracks.empty()) return nullptr;
-    TrackId id = a.artTrack != kNone && g_lib.Contains(a.artTrack) ? a.artTrack : a.tracks[0];
+    if (!a.trackCount) return nullptr;
+    TrackId id = a.artTrack != kNone && g_lib.Contains(a.artTrack) ? a.artTrack : Tracks(a)[0];
     if (!a.coverKey) {
         a.coverKey = ThumbLoader::Key(g_lib.Path(id), g_lib[id].fileTime);
         if (!a.coverKey) a.coverKey = 1;
@@ -494,10 +572,26 @@ void OnThumb(ThumbResult* r) {
         v.lru.erase(old->second.lru);
     }
     v.lru.push_front(key);
-    v.bitmaps[key] = {bmp, v.lru.begin(), bytes, bmp ? 0 : GetTickCount64()};  // null caches "no art" briefly
+    double hue = bmp ? CoverHue((const uint8_t*)r->image.pixels.data(), r->image.pixels.size(), true) : -1;
+    v.bitmaps[key] = {bmp, v.lru.begin(), bytes, bmp ? 0 : GetTickCount64(), hue};  // null caches "no art" briefly
     v.bitmapBytes += bytes;
     TrimCovers();
     if (bmp) InvalidateRect(v.hwnd, nullptr, FALSE);
+}
+
+// The hue of an album's cover from whichever of its cached sizes has arrived (`size` first), or -1.
+double CachedHue(const Album& a, int size) {
+    if (!a.coverKey) return -1;
+    for (int s : {size, (int)TileArt()}) {
+        auto it = v.bitmaps.find(a.coverKey ^ (uint64_t)s);
+        if (it != v.bitmaps.end() && it->second.bmp) return it->second.hue;
+    }
+    return -1;
+}
+
+// The open album's panel colour: its cover's hue over the theme's surface.
+Rgb PanelSurface(const Album& a, float width) {
+    return AlbumPanelSurface(P(), CachedHue(a, (int)PanelCover(width)));
 }
 
 // Drops every cached bitmap and any queued requests: call when the render target is lost, the cover
@@ -590,21 +684,25 @@ bool RowStars(const D2D1_RECT_F& r) { return r.right - r.left >= F(34 + 120 + 72
 
 // One track row: number, title (and the artist when it differs from the album's), stars, length.
 void DrawTrackRow(const Album& a, int t, D2D1_RECT_F r, bool hover) {
-    TrackId id = a.tracks[t];
+    TrackId id = Tracks(a)[t];
     const Track& tr = g_lib[id];
     bool sel = v.selTrack.count(id) != 0, playing = IsPlaying(id);
     if (sel) Fill(r, Col(P().select));
     else if (hover) Fill(r, Col(P().hover));
     Rgb text = sel ? P().selectText : playing ? P().playing : P().text;
     Rgb sub = sel ? P().selectText : P().sub;
-    std::wstring num = playing ? (g.engine.Paused() ? L"\x275A\x275A" : L"\x25B6") : tr.trackNo ? std::to_wstring(tr.trackNo) : L"";
+    // One buffer each: a scroll paints the same row shapes again, and these stay on the UI thread.
+    static std::wstring num, title, len, who;
+    if (playing) num = g.engine.Paused() ? L"\x275A\x275A" : L"\x25B6";
+    else if (tr.trackNo) num = std::to_wstring(tr.trackNo);
+    else num.clear();
     // A track cordinal is working on shows the spinner where its number goes.
     if (!playing && TrackBusy(id)) DrawSpinnerD2D({r.left + F(15), (r.top + r.bottom) / 2}, sel ? P().selectText : P().accent);
     else Text(num, playing ? v.fGlyph.Get() : v.fNum.Get(), {r.left + F(4), r.top, r.left + F(26), r.bottom}, Col(playing && !sel ? P().playing : sub));
-    std::wstring title;
-    LookupField(id, L"title", title);
+    if (tr.title) AssignPool(title, tr.title);
+    else title = StemOf(g_lib.Str(tr.file));
     float right = r.right - F(6);
-    std::wstring len = FormatDuration(tr.Duration());
+    len = FormatDuration(tr.Duration());
     Text(len, v.fNum.Get(), {right - F(48), r.top, right, r.bottom}, Col(sub));
     right -= F(56);
     if (RowStars(r)) {
@@ -614,29 +712,52 @@ void DrawTrackRow(const Album& a, int t, D2D1_RECT_F r, bool hover) {
     StringPool::Handle artist = tr.artist;
     if (artist && artist != a.artist) {
         float aw = std::min(F(220), std::max(0.f, right - r.left - F(34)) * 0.4f);
-        Text(g_lib.Str(artist), v.fSmall.Get(), {right - aw, r.top, right, r.bottom}, Col(sub));
+        AssignPool(who, artist);
+        Text(who, v.fSmall.Get(), {right - aw, r.top, right, r.bottom}, Col(sub));
         right -= aw + F(8);
     }
     Text(title, playing ? v.fTitle.Get() : v.fText.Get(), {r.left + F(34), r.top, right, r.bottom}, Col(text));
 }
 
-std::wstring AlbumYear(const Album& a) { return a.date ? g_lib.Str(a.date).substr(0, 4) : L""; }
+const std::wstring& AlbumYear(const Album& a) {
+    static std::wstring year;
+    if (!a.date) {
+        year.clear();
+        return year;
+    }
+    AssignPool(year, a.date);
+    if (year.size() > 4) year.resize(4);
+    return year;
+}
 
 // Artist, year, genre and length; Albums & Tracks leaves the year out, as its heading shows it.
-std::wstring AlbumSubtitle(const Album& a, bool year = true) {
-    std::wstring s = ArtistName(a.artist);
-    if (year && a.date) s += L"  \x2022  " + AlbumYear(a);
-    if (a.genre) s += L"  \x2022  " + g_lib.Str(a.genre);
-    s += L"  \x2022  " + std::to_wstring(a.tracks.size()) + (a.tracks.size() == 1 ? L" track, " : L" tracks, ") +
-         FormatTotalDuration(a.seconds);
-    if (a.editions > 1) s += L"  \x2022  " + std::to_wstring(a.editions) + L" editions";
+const std::wstring& AlbumSubtitle(const Album& a, bool year = true) {
+    static std::wstring s;
+    s = ArtistName(a.artist);
+    if (year && a.date) {
+        s += L"  \x2022  ";
+        s += AlbumYear(a);
+    }
+    if (a.genre) {
+        s += L"  \x2022  ";
+        AppendPool(s, a.genre);
+    }
+    s += L"  \x2022  ";
+    s += std::to_wstring(a.trackCount);
+    s += a.trackCount == 1 ? L" track, " : L" tracks, ";
+    s += FormatTotalDuration(a.seconds);
+    if (a.editions > 1) {
+        s += L"  \x2022  ";
+        s += std::to_wstring(a.editions);
+        s += L" editions";
+    }
     return s;
 }
 
 // The panel's track rows (one or two columns) inside `area`.
 D2D1_RECT_F PanelRow(const Album& a, D2D1_RECT_F area, int t) {
     int cols = PanelColumns(a, (float)v.width);
-    int rows = (int)(a.tracks.size() + cols - 1) / cols;
+    int rows = (int)(a.trackCount + cols - 1) / cols;
     int c = t / rows, r = t % rows;
     float colW = (area.right - area.left - (cols - 1) * F(24)) / cols;
     float x = area.left + c * (colW + F(24));
@@ -659,6 +780,13 @@ D2D1_RECT_F PanelEditionRect(const Item& it) {
     return {std::max(right - F(210), Margin() + F(28)), it.rc.top + F(48), right, it.rc.top + F(72)};
 }
 
+// Row rects are in content space, same as v.scroll. A row that only clips the window still draws.
+bool RowOnScreen(D2D1_RECT_F row) {
+    const float top = (float)v.scroll - 1.0f;
+    const float bottom = (float)v.scroll + (float)v.height + 1.0f;
+    return row.bottom >= top && row.top <= bottom;
+}
+
 void DrawItem(const Item& it, int index) {
     bool hover = index == v.hoverItem;
     switch (it.kind) {
@@ -671,16 +799,16 @@ void DrawItem(const Item& it, int index) {
         case ItemKind::Tile: {
             const Album& a = v.albums[it.index];
             bool sel = v.selAlbum[it.index], open = it.index == v.expanded;
-            // Selection is a quiet fill around the cover and its labels; the open album also gets a
-            // rule under its labels, over its panel.
+            // Selection is a quiet fill around the cover and its labels; the open album stands on its
+            // panel's colour, so the tile and the panel under it read as one piece.
             D2D1_RECT_F bg{it.rc.left - F(6), it.rc.top - F(6), it.rc.right + F(6), it.rc.bottom + F(2)};
-            if (sel || open) Fill(bg, Col(sel ? P().select : P().hover));
+            if (sel) Fill(bg, Col(P().select));
+            else if (open) Fill(bg, Col(PanelSurface(a, (float)v.width)));
             else if (hover) Fill(bg, Col(P().hover));
-            if (open) Fill({bg.left, bg.bottom - F(2), bg.right, bg.bottom}, Col(P().border));
             D2D1_RECT_F art{it.rc.left, it.rc.top, it.rc.right, it.rc.top + TileArt()};
-            std::wstring title = AlbumTitle(a);
+            const std::wstring& title = AlbumTitle(a);
             DrawCover(a, art, title);
-            bool playing = std::any_of(a.tracks.begin(), a.tracks.end(), IsPlaying);
+            bool playing = std::any_of(Tracks(a).begin(), Tracks(a).end(), IsPlaying);
             if (hover || playing) {
                 // A square play button in the cover's corner (shows the playing state too).
                 D2D1_RECT_F button = PlayButton(it);
@@ -691,14 +819,29 @@ void DrawItem(const Item& it, int index) {
             // What's playing shows without the mouse too: its title in the playing colour.
             Rgb tc = sel ? P().selectText : playing ? P().playing : P().text, sc = sel ? P().selectText : P().sub;
             Text(title, v.fTitle.Get(), {it.rc.left, art.bottom + F(5), it.rc.right, art.bottom + F(23)}, Col(tc));
-            std::wstring sub = ArtistName(a.artist);
-            if (a.editions > 1) sub += L"  \x2022  " + std::to_wstring(a.editions) + L" editions";
+            static std::wstring sub;
+            sub = ArtistName(a.artist);
+            if (a.editions > 1) {
+                sub += L"  \x2022  ";
+                sub += std::to_wstring(a.editions);
+                sub += L" editions";
+            }
             Text(sub, v.fSmall.Get(), {it.rc.left, art.bottom + F(22), it.rc.right, art.bottom + F(40)}, Col(sc));
             break;
         }
         case ItemKind::Panel: {
             const Album& a = v.albums[it.index];
-            Fill(it.rc, Mix(P().surface2, P().accent, P().dark ? 0.16f : 0.10f));
+            // The cover's colour at the top, settling halfway into the page by the bottom.
+            Rgb surface = PanelSurface(a, it.rc.right);
+            ComPtr<ID2D1GradientStopCollection> stops;
+            D2D1_GRADIENT_STOP stop[2] = {{0, Col(surface)}, {1, Mix(surface, P().bg, 0.5f)}};
+            ComPtr<ID2D1LinearGradientBrush> fade;
+            if (SUCCEEDED(v.rt->CreateGradientStopCollection(stop, 2, &stops)) &&
+                SUCCEEDED(v.rt->CreateLinearGradientBrush(
+                    D2D1::LinearGradientBrushProperties(D2D1::Point2F(0, it.rc.top), D2D1::Point2F(0, it.rc.bottom)),
+                    stops.Get(), &fade)))
+                v.rt->FillRectangle(it.rc, fade.Get());
+            else Fill(it.rc, Col(surface));
             // A notch pointing at the open tile.
             int tileItem = v.albumItem[it.index];
             if (tileItem >= 0) {
@@ -712,14 +855,17 @@ void DrawItem(const Item& it, int index) {
                 sink->AddLine(D2D1::Point2F(cx + F(10), it.rc.top));
                 sink->EndFigure(D2D1_FIGURE_END_CLOSED);
                 sink->Close();
-                v.brush->SetColor(Mix(P().surface2, P().accent, P().dark ? 0.16f : 0.10f));
+                v.brush->SetColor(Col(surface));
                 v.rt->FillGeometry(tri.Get(), v.brush.Get());
             }
             D2D1_RECT_F close = PanelClose(it);
             if (v.hoverClose && hover) Fill(close, Col(P().hover));
             Text(L"\x2715", v.fText.Get(), {close.left + F(5), close.top + F(2), close.right, close.bottom}, Col(P().sub));
             float x = Margin() + F(28), right = PanelRight(it.rc.right);
-            Text(AlbumTitle(a) + L"  \x25B8", v.fSection.Get(), {x, it.rc.top + F(14), right, it.rc.top + F(50)}, Col(P().text));
+            static std::wstring heading;
+            heading = AlbumTitle(a);
+            heading += L"  \x25B8";
+            Text(heading, v.fSection.Get(), {x, it.rc.top + F(14), right, it.rc.top + F(50)}, Col(P().text));
             D2D1_RECT_F subtitle{x, it.rc.top + F(50), right, it.rc.top + F(72)};
             if (HasEditionSwitch(a)) {
                 D2D1_RECT_F chip = PanelEditionRect(it);
@@ -739,8 +885,10 @@ void DrawItem(const Item& it, int index) {
             }
             Text(AlbumSubtitle(a), v.fText.Get(), subtitle, Col(P().sub));
             D2D1_RECT_F area = PanelArea(it);
-            for (int t = 0; t < (int)a.tracks.size(); ++t)
-                DrawTrackRow(a, t, PanelRow(a, area, t), hover && v.hoverRow == t);
+            for (int t = 0; t < (int)a.trackCount; ++t) {
+                D2D1_RECT_F row = PanelRow(a, area, t);
+                if (RowOnScreen(row)) DrawTrackRow(a, t, row, hover && v.hoverRow == t);
+            }
             float side = std::min(PanelCover(it.rc.right), it.rc.bottom - it.rc.top - F(40));
             D2D1_RECT_F art{it.rc.right - Margin() - side, it.rc.top + F(20), it.rc.right - Margin(), it.rc.top + F(20) + side};
             if (side > 0) DrawCover(a, art, AlbumTitle(a));
@@ -754,7 +902,7 @@ void DrawItem(const Item& it, int index) {
             // The heading: the title, and the year on the right over the rows' lengths, then the
             // details and a rule that ties the heading to its tracks.
             float x = GroupX(it.rc), right = it.rc.right - F(6);
-            std::wstring year = AlbumYear(a);
+            const std::wstring& year = AlbumYear(a);
             if (!year.empty()) {
                 Text(year, v.fNum.Get(), {right - F(60), it.rc.top, right, it.rc.top + F(26)}, Col(P().sub));
                 right -= F(68);
@@ -762,7 +910,10 @@ void DrawItem(const Item& it, int index) {
             Text(AlbumTitle(a), v.fHeading.Get(), {x, it.rc.top, right, it.rc.top + F(26)}, Col(P().text));
             Text(AlbumSubtitle(a, false), v.fSmall.Get(), {x, it.rc.top + F(26), it.rc.right - F(6), it.rc.top + F(44)}, Col(P().sub));
             Fill({x - F(6), it.rc.top + GroupHead() - F(6), it.rc.right, it.rc.top + GroupHead() - F(5)}, Col(P().border));
-            for (int t = 0; t < (int)a.tracks.size(); ++t) DrawTrackRow(a, t, GroupRow(it.rc, t), hover && v.hoverRow == t);
+            for (int t = 0; t < (int)a.trackCount; ++t) {
+                D2D1_RECT_F row = GroupRow(it.rc, t);
+                if (RowOnScreen(row)) DrawTrackRow(a, t, row, hover && v.hoverRow == t);
+            }
             break;
         }
         case ItemKind::ArtistTile: {
@@ -774,10 +925,10 @@ void DrawItem(const Item& it, int index) {
             D2D1_RECT_F art{it.rc.left, it.rc.top, it.rc.right, it.rc.top + side};
             DrawCover(v.albums[ar.albums[0]], art, ArtistName(ar.name));
             Rgb tc = sel ? P().selectText : P().text, sc = sel ? P().selectText : P().sub;
-            ComPtr<IDWriteTextLayout> layout;
-            std::wstring name = ArtistName(ar.name);
-            Text(name, v.fTitle.Get(), {it.rc.left, art.bottom + F(8), it.rc.right, art.bottom + F(26)}, Col(tc));
-            std::wstring info = std::to_wstring(ar.albums.size()) + (ar.albums.size() == 1 ? L" album" : L" albums");
+            Text(ArtistName(ar.name), v.fTitle.Get(), {it.rc.left, art.bottom + F(8), it.rc.right, art.bottom + F(26)}, Col(tc));
+            static std::wstring info;
+            info = std::to_wstring(ar.albums.size());
+            info += ar.albums.size() == 1 ? L" album" : L" albums";
             Text(info, v.fSmall.Get(), {it.rc.left, art.bottom + F(26), it.rc.right, art.bottom + F(44)}, Col(sc));
             break;
         }
@@ -831,6 +982,7 @@ void Paint(HDC dc) {
         DropBitmaps();
         InvalidateRect(v.hwnd, nullptr, FALSE);
     }
+    if (!v.gpu) SetTimer(v.hwnd, kSurfaceTimer, kSurfaceIdleMs, nullptr);  // each frame restarts the wait
 }
 
 void CreateFormats() {
@@ -915,10 +1067,10 @@ Hit HitTest(int x, int y) {
                 h.editions = cx >= chip.left && cx < chip.right && cy >= chip.top && cy < chip.bottom;
             }
             D2D1_RECT_F area = PanelArea(it);
-            for (int t = 0; t < (int)a.tracks.size() && h.row < 0; ++t) rowAt(PanelRow(a, area, t), t);
+            for (int t = 0; t < (int)a.trackCount && h.row < 0; ++t) rowAt(PanelRow(a, area, t), t);
         } else if (it.kind == ItemKind::AlbumGroup) {
             const Album& a = v.albums[it.index];
-            for (int t = 0; t < (int)a.tracks.size() && h.row < 0; ++t) rowAt(GroupRow(it.rc, t), t);
+            for (int t = 0; t < (int)a.trackCount && h.row < 0; ++t) rowAt(GroupRow(it.rc, t), t);
         }
         return h;
     }
@@ -990,19 +1142,17 @@ void EnsureVisible(const D2D1_RECT_F& r) {
 std::vector<std::pair<int, int>> AllRows() {
     std::vector<std::pair<int, int>> rows;
     for (int a = 0; a < (int)v.albums.size(); ++a)
-        for (int t = 0; t < (int)v.albums[a].tracks.size(); ++t) rows.emplace_back(a, t);
+        for (int t = 0; t < (int)v.albums[a].trackCount; ++t) rows.emplace_back(a, t);
     return rows;
 }
 
-std::vector<TrackId> ViewTracks() {
-    std::vector<TrackId> all;
-    for (auto& a : v.albums) all.insert(all.end(), a.tracks.begin(), a.tracks.end());
-    return all;
-}
+std::vector<TrackId> ViewTracks() { return v.albumTracks; }
 
 void PlayAlbum(int album, int track) {
     if (album < 0 || album >= (int)v.albums.size()) return;
-    PlayList(v.albums[album].tracks, track);
+    auto slice = Tracks(v.albums[album]);
+    std::vector<TrackId> items(slice.begin(), slice.end());
+    PlayList(items, track);
 }
 
 void ShowEditionPicker(int album, POINT pt) {
@@ -1045,7 +1195,7 @@ void ActivateRow(int album, int track) {
         // A track row in Albums & Tracks plays the whole view from there, like the track list.
         auto all = ViewTracks();
         int index = 0;
-        for (int a = 0; a < album; ++a) index += (int)v.albums[a].tracks.size();
+        for (int a = 0; a < album; ++a) index += (int)v.albums[a].trackCount;
         PlayList(all, index + track);
     } else {
         PlayAlbum(album, track);
@@ -1130,12 +1280,12 @@ void OnClick(int x, int y, bool dbl, WPARAM keys) {
             if (h.row < 0) {
                 if (it.kind == ItemKind::AlbumGroup && !dbl) {  // the header/cover selects the album
                     if (!ctrl) ClearCanvasSelection();
-                    for (TrackId id : a.tracks) v.selTrack.insert(id);
+                    for (TrackId id : Tracks(a)) v.selTrack.insert(id);
                 }
                 if (dbl) PlayAlbum(it.index, 0);
                 break;
             }
-            TrackId id = a.tracks[h.row];
+            TrackId id = Tracks(a)[h.row];
             if (dbl) {
                 ActivateRow(it.index, h.row);
                 break;
@@ -1186,11 +1336,11 @@ void MoveFocus(int dx, int dy) {
         if (rows.empty()) return;
         int cur = -1;
         for (int i = 0; i < (int)rows.size(); ++i)
-            if (v.albums[rows[i].first].tracks[rows[i].second] == v.anchorTrack) cur = i;
+            if (Tracks(v.albums[rows[i].first])[rows[i].second] == v.anchorTrack) cur = i;
         int next = std::clamp(cur < 0 ? 0 : cur + dy, 0, (int)rows.size() - 1);
         auto [a, t] = rows[next];
         ClearCanvasSelection();
-        v.anchorTrack = v.albums[a].tracks[t];
+        v.anchorTrack = Tracks(v.albums[a])[t];
         v.selTrack.insert(v.anchorTrack);
         const Item& it = v.items[v.albumItem[a]];
         D2D1_RECT_F row = GroupRow(it.rc, t);
@@ -1293,6 +1443,7 @@ LRESULT CALLBACK LibViewProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 StopSmoothScroll();
                 LibViewReleaseGraphics();
                 std::vector<Album>().swap(v.albums);
+                std::vector<TrackId>().swap(v.albumTracks);
                 std::vector<Artist>().swap(v.artists);
                 std::vector<Item>().swap(v.items);
                 std::vector<int>().swap(v.albumItem);
@@ -1373,7 +1524,7 @@ LRESULT CALLBACK LibViewProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 const Item& it = v.items[hit.item];
                 bool selected = (it.kind == ItemKind::Tile && v.selAlbum[it.index]) ||
                                 (it.kind == ItemKind::ArtistTile && v.selArtist[it.index]) ||
-                                (hit.row >= 0 && v.selTrack.count(v.albums[it.index].tracks[hit.row]));
+                                (hit.row >= 0 && v.selTrack.count(Tracks(v.albums[it.index])[hit.row]));
                 if (!selected && it.kind != ItemKind::Section) OnClick(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), false, 0);
             }
             return 0;
@@ -1386,6 +1537,11 @@ LRESULT CALLBACK LibViewProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_TIMER:
             if (wp == kScrollTimer) {
                 StepSmoothScroll();
+                return 0;
+            }
+            if (wp == kSurfaceTimer) {
+                KillTimer(h, kSurfaceTimer);
+                v.soft.ReleaseSurface();
                 return 0;
             }
             break;
@@ -1441,6 +1597,12 @@ void LibViewSetCoverSize(int pixels) {
     g.coverSize = v.tile = size;
     if (!v.hwnd) return;
     DropBitmaps();
+    LayoutItems();
+    InvalidateRect(v.hwnd, nullptr, FALSE);
+}
+
+void LibViewRelayout() {
+    if (!v.hwnd) return;
     LayoutItems();
     InvalidateRect(v.hwnd, nullptr, FALSE);
 }
@@ -1502,12 +1664,15 @@ std::vector<TrackId> LibViewSelection() {
     std::vector<TrackId> r;
     for (int a = 0; a < (int)v.albums.size(); ++a) {
         bool whole = v.selAlbum[a];
-        for (TrackId id : v.albums[a].tracks)
+        for (TrackId id : Tracks(v.albums[a]))
             if (whole || v.selTrack.count(id)) r.push_back(id);
     }
     for (int i = 0; i < (int)v.artists.size(); ++i)
         if (v.selArtist[i])
-            for (int a : v.artists[i].albums) r.insert(r.end(), v.albums[a].tracks.begin(), v.albums[a].tracks.end());
+            for (int a : v.artists[i].albums) {
+                auto slice = Tracks(v.albums[a]);
+                r.insert(r.end(), slice.begin(), slice.end());
+            }
     return r;
 }
 
@@ -1515,13 +1680,14 @@ std::vector<AlbumSelection> LibViewSelectedAlbums() {
     std::vector<AlbumSelection> result;
     if (!CanvasActive()) return result;
     for (int i = 0; i < (int)v.albums.size(); ++i) {
-        if (!v.selAlbum[i] || v.albums[i].tracks.empty()) continue;
+        if (!v.selAlbum[i] || !v.albums[i].trackCount) continue;
         const Album& album = v.albums[i];
+        auto slice = Tracks(album);
         AlbumSelection selection;
         selection.groupId = album.group;
         selection.editionId = album.edition;
-        selection.tracks = album.tracks;
-        const Track& first = g_lib[album.tracks.front()];
+        selection.tracks.assign(slice.begin(), slice.end());
+        const Track& first = g_lib[slice.front()];
         selection.artist = first.albumArtist ? g_lib.View(first.albumArtist) : g_lib.View(first.artist);
         selection.album = album.canonicalTitle.empty() ? g_lib.View(first.album) : ToUtf8(album.canonicalTitle);
         selection.date = g_lib.View(first.date);
@@ -1585,12 +1751,12 @@ void LibViewFocusFirst() {
 void LibViewRememberPosition(PlaylistPosition& position) {
     position.canvasScroll = MulDiv(v.scroll, 96, (int)g.dpi);
     if (v.expanded >= 0 && v.expanded < (int)v.albums.size())
-        position.expanded = v.albums[v.expanded].tracks.front();
+        position.expanded = Tracks(v.albums[v.expanded]).front();
     if (g.libMode == LibraryMode::AlbumTracks) position.focus = v.anchorTrack;
     else if (g.libMode == LibraryMode::Artists && v.focus >= 0 && v.focus < (int)v.artists.size())
-        position.focus = v.albums[v.artists[v.focus].albums.front()].tracks.front();
+        position.focus = Tracks(v.albums[v.artists[v.focus].albums.front()]).front();
     else if (g.libMode == LibraryMode::Albums && v.focus >= 0 && v.focus < (int)v.albums.size())
-        position.focus = v.albums[v.focus].tracks.front();
+        position.focus = Tracks(v.albums[v.focus]).front();
 }
 
 // Re-applies a remembered position against the freshly rebuilt groups: selection is reconstructed
@@ -1603,7 +1769,7 @@ void LibViewRestorePosition(const PlaylistPosition& position) {
     const AlbumGroup* expandedGroup = AlbumGroupForTrack(position.expanded);
     const AlbumGroup* focusGroup = AlbumGroupForTrack(position.focus);
     for (int a = 0; a < (int)v.albums.size(); ++a) {
-        const auto& tracks = v.albums[a].tracks;
+        const auto tracks = Tracks(v.albums[a]);
         auto contains = [&](TrackId id) { return std::find(tracks.begin(), tracks.end(), id) != tracks.end(); };
         if (contains(position.expanded) || (v.albums[a].group && expandedGroup && v.albums[a].group == expandedGroup->id))
             v.expanded = a;
@@ -1621,7 +1787,7 @@ void LibViewRestorePosition(const PlaylistPosition& position) {
         for (int i = 0; i < (int)v.artists.size(); ++i) {
             bool all = true;
             for (int a : v.artists[i].albums)
-                for (TrackId id : v.albums[a].tracks) {
+                for (TrackId id : Tracks(v.albums[a])) {
                     all = all && selected.count(id) != 0;
                     if (id == position.focus) v.focus = i;
                 }

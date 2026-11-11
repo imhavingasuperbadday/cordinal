@@ -1,8 +1,9 @@
 // The Tweaks registry (app_tweaks.h) and the Preferences window built from it (File ▸ Preferences,
-// Ctrl+,): a page per area of the registry plus All settings, one search across every page, and each
-// setting with its help, its default and a reset. A change applies at once and goes through the same
-// menu command the setting already has, so the window and the menus can never disagree about what a
-// change does. Pages also link to the windows that hold the rest of their area's settings.
+// Ctrl+,): a page per area of the registry, in captioned groups, plus All settings; one search across
+// every page; and each page a scrolling sheet of its settings under headings, each with its help, its
+// default, its own control and a reset. A change applies at once and goes through the same menu command
+// the setting already has, so the window and the menus can never disagree about what a change does.
+// Pages also link to the windows that hold the rest of their area's settings.
 #include "app.h"
 
 #include "metadata_fetch.h"
@@ -95,6 +96,17 @@ int OpacityIndex(int opacity) {
     return IndexOf(ApolloOpacityTable, opacity);
 }
 
+const wchar_t* const kCrossfadeNames[] = {L"Off", L"1 second", L"2 seconds", L"3 seconds", L"5 seconds", L"8 seconds"};
+const wchar_t* const kVolumeCurveNames[] = {L"Natural", L"Linear", L"Cubic", L"Decibels (60 dB range)"};
+static_assert(std::size(kCrossfadeNames) == std::size(kCrossfadeSeconds) && std::size(kVolumeCurveNames) == kVolumeCurves);
+
+// The length applies from the next track end; the album choice from the next track chosen, which
+// is re-asked now so the track already lined up follows it too.
+void ApplyCrossfade() {
+    g.engine.SetCrossfade(kCrossfadeSeconds[std::clamp(g.crossfade, 0, (int)std::size(kCrossfadeSeconds) - 1)]);
+    RefreshNext();
+}
+
 // Grouped as the window shows them. Keys are permanent: renaming one would orphan saved values.
 const Tweak kTweaks[] = {
     {"playback.resume", L"Player", L"ResumeOn", L"Resume where you left off",
@@ -108,10 +120,19 @@ const Tweak kTweaks[] = {
      L"The track reopened from the last session starts playing as soon as cordinal opens, instead of waiting paused.",
      TweakType::Bool, 0, 1, 0, [] { return (double)g.resumePlay; }, [](double v) { g.resumePlay = v != 0; }, 0,
      [] { ReopenLastTrack(); }},
-    {"playback.time_remaining", L"Player", L"TimeRemaining", L"Show the time remaining",
-     L"The time beside the seek bar counts down to the end of the track instead of up from its start.",
-     TweakType::Bool, 0, 1, 1, [] { return (double)g.timeRemaining; }, [](double v) { g.timeRemaining = v != 0; }, 0,
-     UpdateStatus},
+    {"playback.crossfade", L"Player", L"Crossfade", L"Crossfade between tracks",
+     L"When one track runs into the next on its own, the end of the first fades out as the next fades in. "
+     L"A track you start yourself, a radio stream and a section loop still change at once.",
+     TweakType::Choice, 0, (float)std::size(kCrossfadeNames) - 1, 0, [] { return (double)g.crossfade; },
+     [](double v) { g.crossfade = (int)v; }, 0, ApplyCrossfade, kCrossfadeNames},
+    {"playback.crossfade_albums", L"Player", L"CrossfadeAlbums", L"Crossfade within an album",
+     L"Off keeps the tracks of one album gapless, so live and continuous albums flow as recorded; the crossfade "
+     L"then only joins different albums.", TweakType::Bool, 0, 1, 0, [] { return (double)g.crossfadeAlbums; },
+     [](double v) { g.crossfadeAlbums = v != 0; }, 0, ApplyCrossfade},
+    {"playback.game_loops", L"Player", L"Loops", L"Game music loops",
+     L"How often a game soundtrack rip with loop points plays its loop before fading out.", TweakType::Choice, 0, 3, 2,
+     [] { return (double)g.loops; }, [](double v) { g.loops = (int)v; }, IDM_LOOPS_BASE, nullptr, kLoopNames,
+     nullptr, kTweakRadio},
     {"playback.skip_aware_shuffle", L"Player", L"SkipAwareShuffle", L"Skip-aware shuffle",
      L"Shuffle favors tracks you haven't repeatedly skipped in their first 30 seconds. A skip while flipping through "
      L"songs counts for less, and one just before you stop doesn't count.", TweakType::Bool, 0, 1, 0,
@@ -123,14 +144,20 @@ const Tweak kTweaks[] = {
      L"Track shuffle and Keep playing like this follow what you finish, rate, replay and come back to. Skips are judged by "
      L"their moment, and artists by how often you finish them, not how many of their songs you have.",
      TweakType::Bool, 0, 1, 0, [] { return (double)g.taste; }, [](double v) { g.taste = v != 0; }, IDM_TASTE},
-    {"playback.game_loops", L"Player", L"Loops", L"Game music loops",
-     L"How often a game soundtrack rip with loop points plays its loop before fading out.", TweakType::Choice, 0, 3, 2,
-     [] { return (double)g.loops; }, [](double v) { g.loops = (int)v; }, IDM_LOOPS_BASE, nullptr, kLoopNames,
-     nullptr, kTweakRadio},
     {"output.exclusive", L"Player", L"Exclusive", L"Exclusive output",
      L"Each track plays at its own rate, bit-perfect at 100% volume, and other programs can't play sound meanwhile.",
      TweakType::Bool, 0, 1, 0, [] { return (double)g.exclusive; }, [](double v) { g.exclusive = v != 0; },
      IDM_OUTPUT_SHARED, nullptr, nullptr, nullptr, kTweakRadio},
+    {"output.software_volume", L"Player", L"SoftwareVolume", L"Volume control in cordinal",
+     L"Off sends the music at full level and leaves the volume to Windows or your amplifier; cordinal's slider "
+     L"rests and only mute still works. With Exclusive output, that keeps playback bit-perfect at any level.",
+     TweakType::Bool, 0, 1, 1, [] { return (double)g.softwareVolume; }, [](double v) { g.softwareVolume = v != 0; },
+     0, [] { SetVolumePercent(g.volumePercent); }},
+    {"output.volume_curve", L"Player", L"VolumeCurve", L"Volume curve",
+     L"How the slider's travel turns into loudness. Natural suits most listening; Linear is the plain level, "
+     L"which bunches loudness at the bottom; Cubic gives finer steps when quiet; Decibels spreads 60 dB evenly.",
+     TweakType::Choice, 0, kVolumeCurves - 1, 0, [] { return (double)g.volumeCurve; },
+     [](double v) { g.volumeCurve = (int)v; }, 0, [] { SetVolumePercent(g.volumePercent); }, kVolumeCurveNames},
     {"replaygain.enabled", L"ReplayGain", L"Enabled", L"ReplayGain",
      L"Plays every track at a similar loudness, using measured or tagged ReplayGain values.", TweakType::Bool, 0, 1, 1,
      [] { return (double)g.rgOn; }, [](double v) { g.rgOn = v != 0; }, IDM_RG_ENABLE, nullptr, nullptr, nullptr,
@@ -207,6 +234,11 @@ const Tweak kTweaks[] = {
      L"A soft halo of the seek bar's colours around it that pulses with the beat, brighter where the song is loud. "
      L"Every look, whole song or live.", TweakType::Bool, 0, 1, 1, [] { return (double)g.seekGlow; }, [](double v) { g.seekGlow = v != 0; },
      0, [] { if (g.seek) InvalidateRect(g.seek, nullptr, FALSE); }},
+    {"view.pause_fade", L"Window", L"PauseFade", L"Fade the waveform when pausing",
+     L"The waveform's colour fades smoothly between playing and paused, instead of switching at once. Paused "
+     L"turns amber, or the text colour when your waveform colour is itself amber or yellow.",
+     TweakType::Bool, 0, 1, 1, [] { return (double)g.pauseFade; }, [](double v) { g.pauseFade = v != 0; },
+     0, [] { WaveformTick(); if (g.seek) InvalidateRect(g.seek, nullptr, FALSE); }},
     {"view.live_fountain", L"Window", L"LiveFountain", L"Live audio for Dark Fountain",
      L"In the DELTARUNE theme, the selected fountain style follows the audio being heard, including Radio. "
      L"Song seeking still works.", TweakType::Bool, 0, 1, 0,
@@ -256,6 +288,15 @@ const Tweak kTweaks[] = {
     {"view.group_albums", L"Window", L"GroupAlbums", L"Group tracks by album",
      L"The track list shows a header with the cover above each album's tracks.", TweakType::Bool, 0, 1, 1,
      [] { return (double)g.groupAlbums; }, [](double v) { g.groupAlbums = v != 0; }, IDM_GROUP_ALBUMS},
+    {"view.now_playing_album", L"Window", L"NowPlayingAlbumOnly", L"Now Playing shows the playing album",
+     L"While a song with an album plays, the Now Playing tab lists just that album. Typing a search "
+     L"looks through the whole list again; songs without an album always show the whole list.",
+     TweakType::Bool, 0, 1, 1, [] { return (double)g.npAlbumOnly; }, [](double v) { g.npAlbumOnly = v != 0; }, 0,
+     [] { if (g.hwnd && !g.playlists.empty()) RebuildView(true); }},
+    {"view.group_auto_tabs", L"Window", L"GroupAutoTabs", L"One tab for auto-playlists",
+     L"Auto-playlists such as Recently added and Top rated share one tab; click it again to choose "
+     L"another. Off gives each its own tab.", TweakType::Bool, 0, 1, 1,
+     [] { return (double)g.groupAutoTabs; }, [](double v) { g.groupAutoTabs = v != 0; }, 0, [] { RefreshTabs(); }},
     {"view.taskbar_progress", L"Window", L"TaskbarProgress", L"Show progress on the taskbar",
      L"The taskbar button fills as the track plays.", TweakType::Bool, 0, 1, 1,
      [] { return (double)g.taskbarProgress; }, [](double v) { g.taskbarProgress = v != 0; }, IDM_TASKBAR_PROGRESS},
@@ -414,6 +455,10 @@ const Tweak kTweaks[] = {
      [] { return (double)std::max(0, IndexOf(kTempos, g.tempo)); },
      [](double v) { if (int i = (int)v; i >= 0 && i < (int)std::size(kTempoNames)) SetTempo(kTempos[i]); },
      IDM_TEMPO_BASE, nullptr, kTempoNames, nullptr, kTweakRadio | kTweakLegacyLoad},
+    {"playback.time_remaining", L"Player", L"TimeRemaining", L"Show the time remaining",
+     L"The time beside the seek bar counts down to the end of the track instead of up from its start.",
+     TweakType::Bool, 0, 1, 1, [] { return (double)g.timeRemaining; }, [](double v) { g.timeRemaining = v != 0; }, 0,
+     UpdateStatus},
     {"effects.reverb_mix_choice", L"Effects", L"ReverbMixChoice", L"Reverb amount (preset)",
      L"The menu's preset amounts, as an alternative to dragging the slider: 25%, 40%, 55% or 75%. "
      L"The first preset at or below the slider is shown.",
@@ -426,6 +471,10 @@ const Tweak kTweaks[] = {
      L"Startup defaults offers to keep it for the next start.",
      TweakType::Float, 80, 300, 160, [] { return (double)g.coverSize; },
      [](double v) { LibViewSetCoverSize((int)std::lround(v)); }, 0, nullptr, nullptr, L"px"},
+    {"library.cover_gap", L"Library", L"CoverGap", L"Album cover spacing",
+     L"The least space between covers in the Albums and Artists views, in pixels. A row spreads out to fill the "
+     L"width, up to twice this.", TweakType::Float, 4, 48, 16, [] { return (double)g.coverGap; },
+     [](double v) { g.coverGap = std::clamp((int)std::lround(v), 4, 48); }, 0, LibViewRelayout, nullptr, L"px"},
     {"library.browser_height", L"Library", L"BrowserHeight", L"Column browser height",
      L"The column browser's height in pixels. Drag the splitter under it to change it, too. "
      L"Startup defaults offers to keep it for the next start.",
@@ -568,35 +617,64 @@ const Tweak kTweaks[] = {
      [](double v) { g.layout.hints = v != 0; }, 0, ApplyMainLayout},
 };
 
-// The window's pages: All settings, then one per key prefix in registry order. A page may also
-// link to related windows or actions, using the same commands as the menus.
+// The window's pages: All settings, then one per key prefix, in the groups the page list captions.
+// A page may also link to related windows or actions, using the same commands as the menus.
 struct Link {
     int command;
     const wchar_t* label;
 };
 struct Page {
-    const char* prefix;  // null: every setting
+    const char* prefix;    // null: every setting
     const wchar_t* name;
+    const wchar_t* about;  // the line under the page's title
+    const wchar_t* group;  // the caption above the page in the list, where a group starts
     Link links[4];
 };
 const Page kPages[] = {
-    {nullptr, L"All settings", {}},
-    {"playback.", L"Playback", {}},
-    {"output.", L"Output", {{IDM_HEADPHONES, L"&Headphones and devices..."}}},
-    {"replaygain.", L"ReplayGain",
+    {nullptr, L"All settings", L"Every setting on one page, under the page it belongs to.", nullptr, {}},
+    {"playback.", L"Playback", L"Resuming, how tracks change, shuffle and radio, and this session's speed.", L"Sound", {}},
+    {"output.", L"Output", L"Exclusive output and the volume control.", nullptr,
+     {{IDM_HEADPHONES, L"&Headphones and devices..."}}},
+    {"replaygain.", L"ReplayGain", L"Even loudness from track to track, and measuring it.", nullptr,
      {{IDM_RG_SCAN_SEL, L"Scan &selection"}, {IDM_RG_SCAN_PL, L"Scan &playlist"},
       {IDM_RG_SCAN_ALL, L"Scan &library"}, {IDM_RG_CANCEL, L"&Cancel scan"}}},
-    {"effects.", L"Effects", {{IDM_EQUALIZER, L"&Equalizer..."}}},
-    {"view.", L"View", {{IDM_FORMAT, L"Title &formatting..."}}},
-    {"window.", L"Layout", {{IDM_STARTUP_DEFAULTS, L"&Startup defaults..."}}},
-    {"startup.", L"Startup", {{IDM_STARTUP_DEFAULTS, L"&Startup defaults..."}}},
-    {"convert.", L"Conversion", {}},
-    {"scrobbling.", L"Scrobbling", {{IDM_LISTENBRAINZ, L"&Scrobbling..."}}},
-    {"library.", L"Library",
+    {"effects.", L"Effects", L"Reverb, volume shaping and bitcrush, after the equalizer.", nullptr,
+     {{IDM_EQUALIZER, L"&Equalizer..."}}},
+    {"view.", L"View", L"The seek bar and its colours, and how the window behaves.", L"Look",
+     {{IDM_FORMAT, L"Title &formatting..."}}},
+    {"window.", L"Layout", L"Where the player sits and which parts of the normal window show.", nullptr,
+     {{IDM_STARTUP_DEFAULTS, L"&Startup defaults..."}}},
+    {"library.", L"Library", L"New music, sizes in the library views, and Explorer and the web server.", L"Collection",
      {{IDM_LIBRARY_FOLDERS, L"Library &folders..."}, {IDM_WEB_SERVER, L"&Web server..."}}},
-    {"online.", L"Online", {{IDM_FETCH_COVERS, L"&Fetch missing covers..."}}},
+    {"convert.", L"Conversion", L"Converting to .cord, and putting the originals back.", nullptr, {}},
+    {"online.", L"Online", L"Covers, lyrics and artist info from the web. Each says what it sends, and all start off.",
+     nullptr, {{IDM_FETCH_COVERS, L"&Fetch missing covers..."}}},
+    {"scrobbling.", L"Scrobbling", L"Listens sent to connected services, and your Discord status.", nullptr,
+     {{IDM_LISTENBRAINZ, L"&Scrobbling..."}}},
+    {"startup.", L"Startup", L"How cordinal opens, and what it keeps for next time.", L"General",
+     {{IDM_STARTUP_DEFAULTS, L"&Startup defaults..."}}},
 };
 constexpr int kLinks = (int)std::size(kPages[0].links);
+
+// Headings inside a page, each above the setting it names and the ones after it on that page.
+struct Heading {
+    const char* key;
+    const wchar_t* title;
+};
+const Heading kHeadings[] = {
+    {"playback.resume", L"Resuming"}, {"playback.crossfade", L"Track changes"},
+    {"playback.skip_aware_shuffle", L"Shuffle and radio"}, {"playback.speed", L"Speed and time"},
+    {"output.exclusive", L"Device"}, {"output.software_volume", L"Volume"},
+    {"replaygain.enabled", L"Levelling"}, {"replaygain.auto_measure", L"Measuring"},
+    {"effects.reverb", L"Reverb"}, {"effects.loudness_compensation", L"Volume shaping"}, {"effects.bitcrush", L"Bitcrush"},
+    {"view.seek_bar", L"Seek bar"}, {"view.wave_color", L"Colours"}, {"view.smooth_seek", L"Shape"},
+    {"view.group_albums", L"Window"}, {"view.sound_effects", L"Sounds"}, {"view.wave_style", L"Dark Fountain"},
+    {"view.apollo_analyzer", L"Apollo"}, {"view.foobar_view", L"Album List"},
+    {"window.player_dock", L"Arrangement"}, {"window.transport", L"Parts shown"},
+    {"library.new_music", L"Adding music"}, {"library.explorer_menu", L"Outside cordinal"},
+    {"library.cover_size", L"Sizes"},
+    {"online.covers_deezer", L"Covers"}, {"online.lyrics_lrclib", L"Lyrics"}, {"online.artist_info", L"Artist info"},
+};
 
 bool OnPage(const Tweak& t, int page) {
     const char* prefix = kPages[page].prefix;
@@ -611,28 +689,49 @@ int PageOf(const Tweak& t) {
 
 std::wstring KeyText(const Tweak& t) { return std::wstring(t.key, t.key + strlen(t.key)); }
 
-constexpr int kIdSearch = 100, kIdFilter = 101, kIdList = 102, kIdChoice = 103, kIdNumber = 104, kIdReset = 105,
-              kIdResetAll = 106, kIdPages = 107, kIdLink0 = 110;
+// The heading each setting sits under on its own page: the last one at or before it in the
+// registry, so a heading still shows when the setting it names is filtered out.
+const wchar_t* HeadingOf(int tweak) {
+    const int page = PageOf(kTweaks[tweak]);
+    const wchar_t* heading = nullptr;
+    for (int i = 0; i <= tweak; ++i) {
+        if (PageOf(kTweaks[i]) != page) continue;
+        for (const Heading& h : kHeadings)
+            if (!strcmp(h.key, kTweaks[i].key)) heading = h.title;
+    }
+    return heading;
+}
+
+constexpr int kIdSearch = 100, kIdFilter = 101, kIdSheet = 102, kIdResetAll = 106, kIdPages = 107, kIdLink0 = 110,
+              kIdRow0 = 1000, kIdReset0 = 3000;
+static_assert(kIdRow0 + (int)std::size(kTweaks) <= kIdReset0);
+
+// One line of the sheet: a heading, or a setting with its label, help, control and reset.
+struct SheetRow {
+    int tweak = -1;                    // kTweaks index, or -1 for a heading
+    const wchar_t* heading = nullptr;
+    bool pageHeading = false;          // All settings: a page's name, above its own headings
+    int y = 0, h = 0;                  // in the sheet's content, before scrolling
+    int labelH = 0, helpH = 0;
+    HWND label = nullptr, help = nullptr, control = nullptr, unit = nullptr, reset = nullptr;
+};
+enum StaticKind { kLabel, kHelp, kSubHeading, kPageHeading };
 
 struct PreferencesWindow {
-    HWND hwnd = nullptr, pages = nullptr, search = nullptr, filter = nullptr, list = nullptr, title = nullptr;
-    HWND help = nullptr, choice = nullptr, number = nullptr, reset = nullptr, resetAll = nullptr, close = nullptr;
+    HWND hwnd = nullptr, pages = nullptr, search = nullptr, filter = nullptr, sheet = nullptr, title = nullptr;
+    HWND about = nullptr, resetAll = nullptr, close = nullptr;
     HWND links[kLinks] = {};
-    std::vector<int> rows;  // kTweaks indices shown, in order
+    HFONT titleFont = nullptr;
+    HBRUSH currentBrush = nullptr;  // the focused setting's row
+    std::vector<SheetRow> rows;
     int page = 0;           // kPages index
-    int current = -1;       // the kTweaks index being edited
-    bool filling = false;   // the editor is being filled in, so its notifications are not changes
+    int current = -1;       // the kTweaks index focused or asked for
+    int scroll = 0, contentH = 0, wheel = 0;
+    bool filling = false;   // the controls are being filled in, so their notifications are not changes
 } w;
 
 bool Searching() { return GetWindowTextLengthW(w.search) > 0; }
-
-// A page with only links shows them in place of an empty list.
-bool LinksOnly() {
-    if (Searching()) return false;
-    for (const Tweak& t : kTweaks)
-        if (TweakShown(t) && OnPage(t, w.page)) return false;
-    return true;
-}
+bool ChangedOnly() { return SendMessageW(w.filter, CB_GETCURSEL, 0, 0) == 1; }
 
 void LayoutPreferences();
 
@@ -664,143 +763,346 @@ void RefreshLinks() {
     if (layout) LayoutPreferences();
 }
 
-void ShowEditor() {
-    const bool any = w.current >= 0;
-    const Tweak* t = any ? &kTweaks[w.current] : nullptr;
-    const bool number = any && t->type == TweakType::Float;
-    w.filling = true;
-    std::wstring title = any ? std::wstring(t->label)
-                       : Searching() ? L"No setting matches the search."
-                       : LinksOnly() ? L"These settings have windows of their own."
-                                     : L"Nothing has been changed here.";
-    SetTextIfChanged(w.title, title);
-    std::wstring help;
-    if (any) help = std::wstring(t->help) + L"\nDefault: " + TweakText(*t, t->def) + L".  Key: " + KeyText(*t);
-    SetTextIfChanged(w.help, help);
-    ShowWindow(w.choice, any && !number ? SW_SHOWNA : SW_HIDE);
-    ShowWindow(w.number, number ? SW_SHOWNA : SW_HIDE);
-    ShowWindow(w.reset, any ? SW_SHOWNA : SW_HIDE);
-    if (any && !number) {
-        SendMessageW(w.choice, CB_RESETCONTENT, 0, 0);
-        for (int i = 0; i <= (int)t->max; ++i)
-            SendMessageW(w.choice, CB_ADDSTRING, 0, (LPARAM)(t->choices ? t->choices[i] : kOffOn[i]));
-        SendMessageW(w.choice, CB_SETCURSEL, (WPARAM)(int)t->get(), 0);
-    } else if (number) {
-        wchar_t text[32];
-        swprintf_s(text, L"%.2f", t->get());
-        if (GetFocus() != w.number) SetTextIfChanged(w.number, text);
-    }
-    EnableWindow(w.reset, any && TweakChanged(*t));
-    // The bottom reset covers what the list shows: everything, this page, or the search results.
-    bool changed = false;
-    for (int i : w.rows) changed = changed || TweakChanged(kTweaks[i]);
-    SetTextIfChanged(w.resetAll, Searching() ? L"&Reset these to defaults" : w.page ? L"&Reset page to defaults"
-                                                                               : L"&Reset all to defaults");
-    EnableWindow(w.resetAll, changed);
-    ShowWindow(w.list, LinksOnly() ? SW_HIDE : SW_SHOWNA);
-    ShowWindow(w.resetAll, LinksOnly() ? SW_HIDE : SW_SHOWNA);
-    RefreshLinks();
-    LayoutPreferences();
-    w.filling = false;
+// A typed value as it reads best: 16, 0.4, -2.5.
+std::wstring NumberText(double value) {
+    wchar_t text[32];
+    swprintf_s(text, L"%.2f", value);
+    std::wstring s = text;
+    while (s.size() > 1 && s.back() == L'0') s.pop_back();
+    if (!s.empty() && s.back() == L'.') s.pop_back();
+    return s == L"-0" ? L"0" : s;
 }
 
-// Values may have changed from the menus or the palette while the window was open.
+int RowOf(int tweak) {
+    for (size_t i = 0; i < w.rows.size(); ++i)
+        if (w.rows[i].tweak == tweak && tweak >= 0) return (int)i;
+    return -1;
+}
+
+int SheetHeight() {
+    RECT rc;
+    GetClientRect(w.sheet, &rc);
+    return rc.bottom;
+}
+
+// Heights and places for every row at the sheet's width, then the scroll range.
+void LayoutSheet() {
+    if (!w.sheet) return;
+    RECT rc;
+    GetClientRect(w.sheet, &rc);
+    const int width = rc.right, pad = S(12), gap = S(20);
+    const int controlW = std::clamp(width * 2 / 5, S(150), S(280)), cx = width - pad - controlW;
+    const int textW = std::max(S(120), cx - gap - pad);
+    HDC dc = GetDC(w.sheet);
+    int y = 0;
+    for (SheetRow& row : w.rows) {
+        row.y = y;
+        if (row.tweak < 0) {
+            row.h = row.pageHeading ? S(52) : S(40);
+        } else {
+            auto measure = [&](HFONT font, HWND text) {
+                RECT r{0, 0, textW, 0};
+                HGDIOBJ old = SelectObject(dc, font);
+                std::wstring s = WindowText(text);
+                DrawTextW(dc, s.c_str(), -1, &r, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+                SelectObject(dc, old);
+                return (int)r.bottom;
+            };
+            row.labelH = measure(g.fontBold, row.label);
+            row.helpH = measure(g.font, row.help);
+            const int text = S(12) + row.labelH + S(3) + row.helpH + S(14);
+            const int controls = S(12) + S(26) + S(6) + S(24) + S(12);
+            row.h = std::max(text, controls);
+        }
+        y += row.h;
+    }
+    ReleaseDC(w.sheet, dc);
+    w.contentH = y;
+    w.scroll = std::clamp(w.scroll, 0, std::max(0, w.contentH - (int)rc.bottom));
+    HDWP dwp = BeginDeferWindowPos((int)w.rows.size() * 4);
+    auto place = [&](HWND h, int x, int top, int cw, int ch) {
+        if (h && dwp) dwp = DeferWindowPos(dwp, h, nullptr, x, top, cw, ch, SWP_NOZORDER | SWP_NOACTIVATE);
+    };
+    for (const SheetRow& row : w.rows) {
+        const int top = row.y - w.scroll;
+        if (row.tweak < 0) {
+            place(row.label, pad, top + row.h - S(30), width - pad * 2, S(22));
+            continue;
+        }
+        const Tweak& t = kTweaks[row.tweak];
+        place(row.label, pad, top + S(12), textW, row.labelH);
+        place(row.help, pad, top + S(12) + row.labelH + S(3), textW, row.helpH);
+        if (t.type == TweakType::Float) {
+            place(row.control, cx, top + S(12), S(90), S(26));
+            place(row.unit, cx + S(98), top + S(15), S(60), S(20));
+        } else {
+            place(row.control, cx, top + S(12), t.type == TweakType::Bool ? S(120) : controlW,
+                  t.type == TweakType::Bool ? S(26) : S(300));
+        }
+        place(row.reset, cx, top + S(44), S(84), S(24));
+    }
+    if (dwp) EndDeferWindowPos(dwp);
+    SCROLLINFO si{sizeof(si), SIF_RANGE | SIF_PAGE | SIF_POS, 0, std::max(0, w.contentH - 1), (UINT)rc.bottom, w.scroll};
+    SetScrollInfo(w.sheet, SB_VERT, &si, TRUE);
+    InvalidateRect(w.sheet, nullptr, FALSE);
+}
+
+void ScrollSheetTo(int y) {
+    const int top = std::clamp(y, 0, std::max(0, w.contentH - SheetHeight()));
+    if (top == w.scroll) return;
+    const int dy = w.scroll - top;
+    w.scroll = top;
+    ScrollWindowEx(w.sheet, 0, dy, nullptr, nullptr, nullptr, nullptr, SW_SCROLLCHILDREN | SW_INVALIDATE);
+    SetScrollPos(w.sheet, SB_VERT, w.scroll, TRUE);
+}
+
+// Brings a row wholly into view, with the heading above it when that fits too.
+void RevealRow(int index) {
+    if (index < 0 || index >= (int)w.rows.size()) return;
+    const SheetRow& row = w.rows[index];
+    int top = row.y;
+    if (index > 0 && w.rows[index - 1].tweak < 0) top = w.rows[index - 1].y;
+    const int height = SheetHeight();
+    if (top < w.scroll) ScrollSheetTo(top);
+    else if (row.y + row.h > w.scroll + height) ScrollSheetTo(std::min(top, row.y + row.h - height));
+}
+
+void RedrawRow(int tweak) {
+    int index = RowOf(tweak);
+    if (index < 0) return;
+    RECT rc;
+    GetClientRect(w.sheet, &rc);
+    RECT r{0, w.rows[index].y - w.scroll, rc.right, w.rows[index].y - w.scroll + w.rows[index].h};
+    RedrawWindow(w.sheet, &r, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+}
+
+void SetCurrent(int tweak) {
+    if (tweak == w.current) return;
+    const int old = w.current;
+    w.current = tweak;
+    RedrawRow(old);
+    RedrawRow(tweak);
+    RevealRow(RowOf(tweak));
+}
+
+// The controls follow the values, which may have changed from the menus or the palette.
 void RefreshValues() {
     if (!w.hwnd) return;
-    InvalidateRect(w.list, nullptr, FALSE);
+    w.filling = true;
+    for (const SheetRow& row : w.rows) {
+        if (row.tweak < 0) continue;
+        const Tweak& t = kTweaks[row.tweak];
+        if (t.type == TweakType::Bool) InvalidateRect(row.control, nullptr, FALSE);
+        else if (t.type == TweakType::Choice) {
+            const int value = std::clamp((int)t.get(), 0, (int)t.max);
+            if (SendMessageW(row.control, CB_GETCURSEL, 0, 0) != value) SendMessageW(row.control, CB_SETCURSEL, value, 0);
+        } else if (GetFocus() != row.control) SetTextIfChanged(row.control, NumberText(t.get()));
+        const bool changed = TweakChanged(t);
+        if (((GetWindowLongPtrW(row.reset, GWL_STYLE) & WS_VISIBLE) != 0) != changed) {
+            if (!changed && GetFocus() == row.reset) SetFocus(row.control);
+            ShowWindow(row.reset, changed ? SW_SHOWNA : SW_HIDE);
+        }
+    }
+    w.filling = false;
+    // The bottom reset covers what the sheet shows: everything, this page, or the search results.
+    bool any = false;
+    for (const SheetRow& row : w.rows) any = any || (row.tweak >= 0 && TweakChanged(kTweaks[row.tweak]));
+    SetTextIfChanged(w.resetAll, Searching() ? L"&Reset these to defaults" : w.page ? L"&Reset page to defaults"
+                                                                                  : L"&Reset all to defaults");
+    EnableWindow(w.resetAll, any);
     InvalidateRect(w.pages, nullptr, FALSE);  // the changed counts
-    ShowEditor();
+    RefreshLinks();
+}
+
+LRESULT CALLBACK WheelToSheet(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
+    // A closed choice list never takes the wheel: scrolling the page must not change settings on the way.
+    if (msg == WM_MOUSEWHEEL && !SendMessageW(h, CB_GETDROPPEDSTATE, 0, 0)) return SendMessageW(w.sheet, msg, wp, lp);
+    if (msg == WM_NCDESTROY) RemoveWindowSubclass(h, WheelToSheet, 0);
+    return DefSubclassProc(h, msg, wp, lp);
+}
+
+// Every row's windows, made afresh for what the sheet shows, in tab order.
+void BuildSheet() {
+    for (const SheetRow& row : w.rows)
+        for (HWND h : {row.label, row.help, row.control, row.unit, row.reset})
+            if (h) DestroyWindow(h);
+    auto make = [&](DWORD ex, const wchar_t* cls, const std::wstring& text, DWORD style, int id, HFONT font) {
+        HWND c = CreateWindowExW(ex, cls, text.c_str(), WS_CHILD | WS_VISIBLE | style, 0, 0, 0, 0, w.sheet,
+                                 (HMENU)(INT_PTR)id, g.inst, nullptr);
+        SendMessageW(c, WM_SETFONT, (WPARAM)font, FALSE);
+        return c;
+    };
+    for (size_t i = 0; i < w.rows.size(); ++i) {
+        SheetRow& row = w.rows[i];
+        auto tag = [&](HWND h, StaticKind kind) { SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)(i * 4 + kind)); };
+        if (row.tweak < 0) {
+            row.label = make(0, WC_STATICW, row.heading, SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, 0,
+                             row.pageHeading ? w.titleFont : g.fontBold);
+            tag(row.label, row.pageHeading ? kPageHeading : kSubHeading);
+            continue;
+        }
+        const Tweak& t = kTweaks[row.tweak];
+        row.label = make(0, WC_STATICW, t.label, SS_LEFT | SS_NOPREFIX, 0, g.fontBold);
+        tag(row.label, kLabel);
+        std::wstring help = std::wstring(t.help) + L" Default: " +
+                            (t.type == TweakType::Float ? NumberText(t.def) + (t.unit ? std::wstring(L" ") + t.unit : L"")
+                                                        : TweakText(t, t.def)) + L".";
+        if (Searching()) help += std::wstring(L" (") + kPages[PageOf(t)].name + L")";
+        row.help = make(0, WC_STATICW, help, SS_LEFT | SS_NOPREFIX, 0, g.font);
+        tag(row.help, kHelp);
+        const int id = kIdRow0 + row.tweak;
+        if (t.type == TweakType::Bool) {
+            // An owner-drawn switch named for its setting, so a screen reader says what it turns on.
+            row.control = make(0, WC_BUTTONW, t.label, BS_OWNERDRAW | BS_NOTIFY | WS_TABSTOP, id, g.font);
+        } else if (t.type == TweakType::Choice) {
+            row.control = make(0, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, id, g.font);
+            for (int c = 0; c <= (int)t.max; ++c)
+                SendMessageW(row.control, CB_ADDSTRING, 0, (LPARAM)(t.choices ? t.choices[c] : kOffOn[c]));
+            SendMessageW(row.control, CB_SETCURSEL, (WPARAM)std::clamp((int)t.get(), 0, (int)t.max), 0);
+            SetWindowTheme(row.control, g.dark ? L"DarkMode_CFD" : L"Explorer", nullptr);
+            SetWindowSubclass(row.control, WheelToSheet, 0, 0);
+        } else {
+            row.control = make(WS_EX_CLIENTEDGE, WC_EDITW, NumberText(t.get()), ES_AUTOHSCROLL | WS_TABSTOP, id, g.font);
+            SetWindowTheme(row.control, g.dark ? L"DarkMode_CFD" : L"Explorer", nullptr);
+            row.unit = make(0, WC_STATICW, t.unit ? t.unit : L"", SS_LEFT | SS_NOPREFIX, 0, g.font);
+            tag(row.unit, kHelp);
+        }
+        row.reset = make(0, WC_BUTTONW, L"Reset", BS_PUSHBUTTON | BS_NOTIFY | WS_TABSTOP, kIdReset0 + row.tweak, g.font);
+        ApplyControlTheme(row.reset, g.dark);
+        ShowWindow(row.reset, TweakChanged(t) ? SW_SHOWNA : SW_HIDE);
+    }
 }
 
 void Rebuild(int keep) {
     std::wstring query = WindowText(w.search);
-    const bool changedOnly = SendMessageW(w.filter, CB_GETCURSEL, 0, 0) == 1;
+    const bool changedOnly = ChangedOnly();
     // A search covers every page, so the page list says so.
     if (!query.empty() && w.page != 0) {
         w.page = 0;
         SendMessageW(w.pages, LB_SETCURSEL, 0, 0);
     }
-    std::vector<std::wstring> texts;
-    for (const Tweak& t : kTweaks)
-        texts.push_back(std::wstring(t.label) + L" " + kPages[PageOf(t)].name + L" " + KeyText(t) + L" " + t.help);
-    w.rows.clear();
-    for (int i : RankMatches(texts, query))
-        if (TweakShown(kTweaks[i]) && OnPage(kTweaks[i], w.page) && (!changedOnly || TweakChanged(kTweaks[i]))) w.rows.push_back(i);
-    ListView_SetItemCountEx(w.list, (int)w.rows.size(), 0);
-    auto it = std::find(w.rows.begin(), w.rows.end(), keep);
-    int row = it != w.rows.end() ? (int)(it - w.rows.begin()) : w.rows.empty() ? -1 : 0;
-    w.current = row < 0 ? -1 : w.rows[row];
-    if (row >= 0) {
-        ListView_SetItemState(w.list, row, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-        ListView_EnsureVisible(w.list, row, FALSE);
+    auto wanted = [&](int i) { return TweakShown(kTweaks[i]) && (!changedOnly || TweakChanged(kTweaks[i])); };
+    std::vector<int> picks;
+    if (!query.empty()) {
+        std::vector<std::wstring> texts;
+        for (const Tweak& t : kTweaks)
+            texts.push_back(std::wstring(t.label) + L" " + kPages[PageOf(t)].name + L" " + KeyText(t) + L" " + t.help);
+        for (int i : RankMatches(texts, query))
+            if (wanted(i)) picks.push_back(i);
+    } else {
+        for (int i = 0; i < (int)std::size(kTweaks); ++i)
+            if (wanted(i) && OnPage(kTweaks[i], w.page)) picks.push_back(i);
+        // All settings reads as every page in turn, each under its name.
+        std::stable_sort(picks.begin(), picks.end(), [](int a, int b) { return PageOf(kTweaks[a]) < PageOf(kTweaks[b]); });
     }
-    InvalidateRect(w.list, nullptr, FALSE);
-    ShowEditor();
+    std::vector<SheetRow> rows;
+    int lastPage = -1;
+    const wchar_t* lastHeading = nullptr;
+    for (int i : picks) {
+        if (query.empty()) {
+            const int page = PageOf(kTweaks[i]);
+            if (w.page == 0 && page != lastPage) {
+                rows.push_back({-1, kPages[page].name, true});
+                lastHeading = nullptr;
+            }
+            lastPage = page;
+            const wchar_t* heading = HeadingOf(i);
+            if (heading && heading != lastHeading) rows.push_back({-1, heading});
+            lastHeading = heading;
+        }
+        SheetRow row;
+        row.tweak = i;
+        rows.push_back(row);
+    }
+    SetWindowRedraw(w.sheet, FALSE);
+    for (const SheetRow& row : w.rows)
+        for (HWND h : {row.label, row.help, row.control, row.unit, row.reset})
+            if (h) DestroyWindow(h);
+    w.rows.clear();
+    w.rows = std::move(rows);
+    w.scroll = 0;
+    BuildSheet();
+    w.current = RowOf(keep) >= 0 ? keep : -1;
+    SetTextIfChanged(w.title, !query.empty() ? std::wstring(L"Search") : std::wstring(kPages[w.page].name));
+    const int found = (int)picks.size();
+    SetTextIfChanged(w.about, !query.empty() ? (found == 1 ? std::wstring(L"1 setting matches, from every page.")
+                                                           : std::to_wstring(found) + L" settings match, from every page.")
+                                             : std::wstring(kPages[w.page].about));
+    // Redraw comes back before the layout: the sheet moves when a page has links, and a window
+    // moved with redraw off leaves its old place unpainted, showing the last page's text.
+    SetWindowRedraw(w.sheet, TRUE);
+    LayoutPreferences();
+    RevealRow(RowOf(w.current));
+    RedrawWindow(w.hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+    RefreshValues();
 }
 
-void CommitNumber() {
-    if (w.current < 0 || kTweaks[w.current].type != TweakType::Float) return;
-    std::wstring text = WindowText(w.number);
+void CommitNumber(int tweak) {
+    int index = RowOf(tweak);
+    if (index < 0 || kTweaks[tweak].type != TweakType::Float) return;
+    HWND edit = w.rows[index].control;
+    std::wstring text = WindowText(edit);
     wchar_t* end = nullptr;
     double v = wcstod(text.c_str(), &end);
-    if (end != text.c_str()) SetTweak(kTweaks[w.current], v);
-    wchar_t shown[32];
-    swprintf_s(shown, L"%.2f", kTweaks[w.current].get());
-    SetWindowTextW(w.number, shown);  // a value out of range shows where it was clamped to
+    if (end != text.c_str()) SetTweak(kTweaks[tweak], v);
+    SetWindowTextW(edit, NumberText(kTweaks[tweak].get()).c_str());  // a value out of range shows where it was clamped to
     RefreshValues();
 }
 
 void LayoutPreferences() {
+    if (!w.hwnd) return;
     RECT rc;
     GetClientRect(w.hwnd, &rc);
-    const int pad = S(14), navW = S(160), buttonH = S(26), bottom = rc.bottom - pad - buttonH;
-    MoveWindow(w.pages, pad, pad, navW, std::max(bottom - S(12) - pad, S(80)), TRUE);
-    int x = pad + navW + S(14), width = rc.right - x - pad, y = pad, filterW = S(170);
-    MoveWindow(w.search, x, y, width - filterW - S(8), S(24), TRUE);
+    const int pad = S(16), navW = S(188), buttonH = S(28), bottom = rc.bottom - pad - buttonH;
+    MoveWindow(w.pages, pad, pad, navW, std::max((int)rc.bottom - pad * 2, S(80)), TRUE);
+    const int x = pad + navW + S(22), width = rc.right - x - pad, filterW = S(170);
+    int y = pad;
+    MoveWindow(w.search, x, y, width - filterW - S(8), S(26), TRUE);
     MoveWindow(w.filter, x + width - filterW, y, filterW, S(200), TRUE);
-    y += S(34);
+    y += S(42);
+    MoveWindow(w.title, x, y, width, S(30), TRUE);
+    y += S(32);
+    MoveWindow(w.about, x, y, width, S(20), TRUE);
+    y += S(30);
     int linkCount = 0;
     for (const Link& link : kPages[w.page].links) linkCount += LinkShown(link);
-    const bool linked = linkCount != 0;
-    if (w.hwnd && !LinksOnly()) {
-        int listH = std::max(bottom - y - S(178) - (linked ? S(36) : 0), S(80));
-        MoveWindow(w.list, x, y, width, listH, TRUE);
-        RECT client;
-        GetClientRect(w.list, &client);  // inside the border and the scroll bar, so no horizontal scrolling
-        int listW = client.right - GetSystemMetricsForDpi(SM_CXVSCROLL, g.dpi);
-        ListView_SetColumnWidth(w.list, 0, std::max(listW - S(300), S(160)));
-        y += listH + S(12);
-    }
-    MoveWindow(w.title, x, y, width, S(20), TRUE);
-    y += S(22);
-    MoveWindow(w.help, x, y, width, S(40), TRUE);
-    y += S(46);
-    // Default sits just after whichever editor is showing.
-    const bool number = w.current >= 0 && kTweaks[w.current].type == TweakType::Float;
-    int resetW = S(86), editW = std::min(width - resetW - S(8), S(320)), numberW = S(120);
-    MoveWindow(w.choice, x, y, editW, S(240), TRUE);
-    MoveWindow(w.number, x, y, numberW, buttonH, TRUE);
-    MoveWindow(w.reset, x + (number ? numberW : editW) + S(8), y, resetW, buttonH, TRUE);
-    y = w.hwnd && LinksOnly() ? pad + S(34) + S(30) : y + S(40);  // under the title, with no setting to edit
     const int linkW = std::min(S(190), (width - S(8) * std::max(0, linkCount - 1)) / std::max(1, linkCount));
     for (int i = 0, lx = x; i < kLinks; ++i) {
         if (!LinkShown(kPages[w.page].links[i])) continue;
         MoveWindow(w.links[i], lx, y, linkW, buttonH, TRUE);
         lx += linkW + S(8);
     }
-    MoveWindow(w.resetAll, x, bottom, S(170), buttonH, TRUE);
-    MoveWindow(w.close, rc.right - pad - S(86), bottom, S(86), buttonH, TRUE);
+    if (linkCount) y += buttonH + S(10);
+    // The sheet reaches a row's padding left of the title, so labels line up under it.
+    MoveWindow(w.sheet, x - S(12), y, width + S(12), std::max(bottom - S(12) - y, S(80)), TRUE);
+    MoveWindow(w.resetAll, x, bottom, S(190), buttonH, TRUE);
+    MoveWindow(w.close, rc.right - pad - S(90), bottom, S(90), buttonH, TRUE);
+    LayoutSheet();
 }
 
 void DrawPage(const DRAWITEMSTRUCT* di) {
     if (di->itemID == (UINT)-1) return;
+    const Page& page = kPages[di->itemID];
     const bool selected = di->itemState & ODS_SELECTED;
     RECT r = di->rcItem;
-    FillSolid(di->hDC, r, Ref(selected ? P().select : P().surface));
     SetBkMode(di->hDC, TRANSPARENT);
+    if (page.group) {  // the group's caption, above its first page
+        RECT caption = r;
+        caption.bottom = r.top + S(30);
+        FillSolid(di->hDC, caption, Ref(P().surface));
+        caption.left += S(12);
+        caption.bottom -= S(5);
+        HGDIOBJ old = SelectObject(di->hDC, g.fontBold);
+        SetTextColor(di->hDC, Ref(P().sub));
+        DrawTextW(di->hDC, page.group, -1, &caption, DT_SINGLELINE | DT_BOTTOM | DT_NOPREFIX);
+        SelectObject(di->hDC, old);
+        r.top += S(30);
+    }
+    FillSolid(di->hDC, r, Ref(selected ? P().select : P().surface));
+    if (selected) FillSolid(di->hDC, {r.left, r.top + S(7), r.left + S(3), r.bottom - S(7)}, Ref(P().accent));
     HGDIOBJ old = SelectObject(di->hDC, selected ? g.fontBold : g.font);
-    r.left += S(10);
-    r.right -= S(8);
+    r.left += S(14);
+    r.right -= S(10);
     int changed = 0;
     for (const Tweak& t : kTweaks) changed += TweakShown(t) && OnPage(t, (int)di->itemID) && TweakChanged(t);
     if (changed) {  // how many settings here differ from their defaults
@@ -809,8 +1111,196 @@ void DrawPage(const DRAWITEMSTRUCT* di) {
         DrawTextW(di->hDC, count.c_str(), -1, &r, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX);
     }
     SetTextColor(di->hDC, Ref(selected ? P().selectText : P().text));
-    DrawTextW(di->hDC, kPages[di->itemID].name, -1, &r, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+    DrawTextW(di->hDC, page.name, -1, &r, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
     SelectObject(di->hDC, old);
+}
+
+// An on/off setting as a switch: the track lit in the accent when on, with the knob at that end.
+void DrawSwitch(const DRAWITEMSTRUCT* di) {
+    const int tweak = (int)di->CtlID - kIdRow0;
+    if (tweak < 0 || tweak >= (int)std::size(kTweaks)) return;
+    const bool on = kTweaks[tweak].get() != 0, enabled = !(di->itemState & ODS_DISABLED);
+    RECT r = di->rcItem;
+    FillSolid(di->hDC, r, Ref(tweak == w.current ? P().hover : P().surface));
+    const int trackH = S(20), trackW = S(38), top = r.top + (r.bottom - r.top - trackH) / 2;
+    RECT track{r.left + S(2), top, r.left + S(2) + trackW, top + trackH};
+    const Rgb fill = on && enabled ? P().accent : P().border;
+    HBRUSH brush = CreateSolidBrush(Ref(fill));
+    HPEN pen = CreatePen(PS_SOLID, 1, Ref(fill));
+    HGDIOBJ oldBrush = SelectObject(di->hDC, brush), oldPen = SelectObject(di->hDC, pen);
+    RoundRect(di->hDC, track.left, track.top, track.right, track.bottom, trackH, trackH);
+    const int knob = trackH - S(6), kx = on ? track.right - S(3) - knob : track.left + S(3);
+    HBRUSH knobBrush = CreateSolidBrush(Ref(on && enabled ? TextOn(P().accent) : P().text));
+    HPEN knobPen = CreatePen(PS_SOLID, 1, Ref(on && enabled ? TextOn(P().accent) : P().text));
+    SelectObject(di->hDC, knobBrush);
+    SelectObject(di->hDC, knobPen);
+    Ellipse(di->hDC, kx, track.top + S(3), kx + knob, track.top + S(3) + knob);
+    if ((di->itemState & ODS_FOCUS) && !(di->itemState & ODS_NOFOCUSRECT)) {
+        HPEN ring = CreatePen(PS_SOLID, std::max(1, S(2)), Ref(P().accent));
+        SelectObject(di->hDC, ring);
+        SelectObject(di->hDC, GetStockObject(HOLLOW_BRUSH));
+        RoundRect(di->hDC, track.left - S(2), track.top - S(2), track.right + S(2), track.bottom + S(2), trackH + S(4),
+                  trackH + S(4));
+        SelectObject(di->hDC, knobPen);
+        DeleteObject(ring);
+    }
+    SelectObject(di->hDC, oldBrush);
+    SelectObject(di->hDC, oldPen);
+    DeleteObject(brush);
+    DeleteObject(pen);
+    DeleteObject(knobBrush);
+    DeleteObject(knobPen);
+    RECT text{track.right + S(10), r.top, r.right, r.bottom};
+    SetBkMode(di->hDC, TRANSPARENT);
+    SetTextColor(di->hDC, Ref(enabled ? P().text : P().faint));
+    HGDIOBJ oldFont = SelectObject(di->hDC, g.font);
+    DrawTextW(di->hDC, on ? L"On" : L"Off", -1, &text, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    SelectObject(di->hDC, oldFont);
+}
+
+// The sheet's own paint: row backgrounds, the focused row's accent, the rules between rows and a
+// note when nothing is shown. Labels, help and headings are static controls on top.
+void PaintSheet(HDC dc, const RECT& rc) {
+    FillSolid(dc, rc, Ref(P().surface));
+    const int pad = S(12);
+    for (size_t i = 0; i < w.rows.size(); ++i) {
+        const SheetRow& row = w.rows[i];
+        const int top = row.y - w.scroll;
+        if (top >= rc.bottom || top + row.h <= 0) continue;
+        if (row.tweak < 0) {  // a rule under the heading's words
+            FillSolid(dc, {pad, top + row.h - S(6), rc.right - pad, top + row.h - S(6) + std::max(1, S(1))},
+                      Ref(P().border));
+            continue;
+        }
+        if (row.tweak == w.current) {
+            FillSolid(dc, {0, top, rc.right, top + row.h}, Ref(P().hover));
+            FillSolid(dc, {0, top + S(8), S(3), top + row.h - S(8)}, Ref(P().accent));
+        }
+        if (i + 1 < w.rows.size() && w.rows[i + 1].tweak >= 0)
+            FillSolid(dc, {pad, top + row.h - 1, rc.right - pad, top + row.h}, Ref(P().border));
+    }
+    if (w.rows.empty()) {
+        RECT r{pad, S(12), rc.right - pad, S(60)};
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, Ref(P().sub));
+        HGDIOBJ old = SelectObject(dc, g.font);
+        DrawTextW(dc, Searching() ? L"No setting matches the search." : ChangedOnly() ? L"Nothing has been changed here."
+                                                                                        : L"These settings have windows of their own.",
+                  -1, &r, DT_WORDBREAK | DT_NOPREFIX);
+        SelectObject(dc, old);
+    }
+}
+
+LRESULT CALLBACK SheetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(h, &ps);
+            RECT rc;
+            GetClientRect(h, &rc);
+            HDC mem = CreateCompatibleDC(dc);
+            HBITMAP bmp = CreateCompatibleBitmap(dc, std::max(1L, rc.right), std::max(1L, rc.bottom));
+            HGDIOBJ old = SelectObject(mem, bmp);
+            PaintSheet(mem, rc);
+            BitBlt(dc, ps.rcPaint.left, ps.rcPaint.top, ps.rcPaint.right - ps.rcPaint.left,
+                   ps.rcPaint.bottom - ps.rcPaint.top, mem, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
+            SelectObject(mem, old);
+            DeleteObject(bmp);
+            DeleteDC(mem);
+            EndPaint(h, &ps);
+            return 0;
+        }
+        case WM_SIZE:
+            if (w.hwnd) LayoutSheet();
+            return 0;
+        case WM_MOUSEWHEEL: {
+            w.wheel += GET_WHEEL_DELTA_WPARAM(wp);
+            const int step = w.wheel * S(60) / WHEEL_DELTA;
+            if (step) {
+                w.wheel -= step * WHEEL_DELTA / S(60);
+                ScrollSheetTo(w.scroll - step);
+            }
+            return 0;
+        }
+        case WM_VSCROLL: {
+            SCROLLINFO si{sizeof(si), SIF_ALL};
+            GetScrollInfo(h, SB_VERT, &si);
+            int y = w.scroll;
+            switch (LOWORD(wp)) {
+                case SB_LINEUP: y -= S(24); break;
+                case SB_LINEDOWN: y += S(24); break;
+                case SB_PAGEUP: y -= (int)si.nPage; break;
+                case SB_PAGEDOWN: y += (int)si.nPage; break;
+                case SB_TOP: y = 0; break;
+                case SB_BOTTOM: y = w.contentH; break;
+                case SB_THUMBTRACK:
+                case SB_THUMBPOSITION: y = si.nTrackPos; break;
+            }
+            ScrollSheetTo(y);
+            return 0;
+        }
+        case WM_LBUTTONDOWN: {  // a click on a row's words focuses its control
+            const int y = GET_Y_LPARAM(lp) + w.scroll;
+            for (const SheetRow& row : w.rows)
+                if (row.tweak >= 0 && y >= row.y && y < row.y + row.h) SetFocus(row.control);
+            return 0;
+        }
+        case WM_CTLCOLORSTATIC: {
+            HDC dc = (HDC)wp;
+            const LONG_PTR tag = GetWindowLongPtrW((HWND)lp, GWLP_USERDATA);
+            const size_t index = (size_t)tag / 4;
+            const int kind = (int)(tag % 4);
+            const bool current = index < w.rows.size() && w.rows[index].tweak >= 0 && w.rows[index].tweak == w.current;
+            SetTextColor(dc, Ref(kind == kHelp || kind == kSubHeading ? P().sub : P().text));
+            SetBkColor(dc, Ref(current ? P().hover : P().surface));
+            if (!current) return (LRESULT)g.surfaceBrush;
+            if (!w.currentBrush) w.currentBrush = CreateSolidBrush(Ref(P().hover));
+            return (LRESULT)w.currentBrush;
+        }
+        case WM_CTLCOLORBTN:  // the Reset buttons' corners
+            return (LRESULT)g.surfaceBrush;
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+            return FieldControlColor((HDC)wp);
+        case WM_DRAWITEM:
+            DrawSwitch(reinterpret_cast<DRAWITEMSTRUCT*>(lp));
+            return TRUE;
+        case WM_COMMAND: {
+            const int id = LOWORD(wp), code = HIWORD(wp);
+            if (id >= kIdReset0 && id < kIdReset0 + (int)std::size(kTweaks)) {
+                const int tweak = id - kIdReset0;
+                if (code == BN_SETFOCUS) SetCurrent(tweak);
+                if (code == BN_CLICKED) {
+                    if (int index = RowOf(tweak); index >= 0) SetFocus(w.rows[index].control);
+                    SetTweak(kTweaks[tweak], kTweaks[tweak].def);
+                    RefreshValues();
+                }
+                return 0;
+            }
+            if (id < kIdRow0 || id >= kIdRow0 + (int)std::size(kTweaks)) return 0;
+            const int tweak = id - kIdRow0;
+            const Tweak& t = kTweaks[tweak];
+            if (code == BN_SETFOCUS || code == CBN_SETFOCUS || code == EN_SETFOCUS) {
+                SetCurrent(tweak);
+            } else if (t.type == TweakType::Bool && (code == BN_CLICKED || code == BN_DOUBLECLICKED)) {
+                SetTweak(t, t.get() == 0);
+                RefreshValues();
+            } else if (t.type == TweakType::Choice && code == CBN_SELCHANGE && !w.filling) {
+                SetTweak(t, (double)SendMessageW((HWND)lp, CB_GETCURSEL, 0, 0));
+                RefreshValues();
+            } else if (t.type == TweakType::Float && code == EN_KILLFOCUS && !w.filling) {
+                CommitNumber(tweak);
+            }
+            return 0;
+        }
+        case WM_NCDESTROY:
+            if (w.currentBrush) DeleteObject(w.currentBrush);
+            w.currentBrush = nullptr;
+            break;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
 }
 
 LRESULT CALLBACK PreferencesProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -823,7 +1313,11 @@ LRESULT CALLBACK PreferencesProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 SendMessageW(c, WM_SETFONT, (WPARAM)g.font, TRUE);
                 return c;
             };
-            w.pages = make(0, WC_LISTBOXW, L"Pages", LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS |
+            LOGFONTW lf{};
+            GetObjectW(g.fontBold, sizeof(lf), &lf);
+            lf.lfHeight = lf.lfHeight * 4 / 3;
+            w.titleFont = CreateFontIndirectW(&lf);
+            w.pages = make(0, WC_LISTBOXW, L"Pages", LBS_NOTIFY | LBS_OWNERDRAWVARIABLE | LBS_HASSTRINGS |
                            LBS_NOINTEGRALHEIGHT | WS_TABSTOP, kIdPages);
             for (const Page& page : kPages) SendMessageW(w.pages, LB_ADDSTRING, 0, (LPARAM)page.name);
             SendMessageW(w.pages, LB_SETCURSEL, 0, 0);
@@ -833,38 +1327,22 @@ LRESULT CALLBACK PreferencesProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             SendMessageW(w.filter, CB_ADDSTRING, 0, (LPARAM)L"All settings");
             SendMessageW(w.filter, CB_ADDSTRING, 0, (LPARAM)L"Changed from default");
             SendMessageW(w.filter, CB_SETCURSEL, 0, 0);
-            w.list = make(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
-                          LVS_REPORT | LVS_OWNERDATA | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER | WS_TABSTOP,
-                          kIdList);
-            ListView_SetExtendedListViewStyle(w.list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
-            const struct { const wchar_t* name; int width; } cols[] = {{L"Setting", 260}, {L"Value", 200}, {L"Page", 100}};
-            for (int i = 0; i < 3; ++i) {
-                LVCOLUMNW c{};
-                c.mask = LVCF_TEXT | LVCF_WIDTH;
-                c.pszText = const_cast<wchar_t*>(cols[i].name);
-                c.cx = S(cols[i].width);
-                ListView_InsertColumn(w.list, i, &c);
-            }
             w.title = make(0, WC_STATICW, L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, 0);
-            SendMessageW(w.title, WM_SETFONT, (WPARAM)g.fontBold, TRUE);
-            w.help = make(0, WC_STATICW, L"", SS_LEFT | SS_NOPREFIX, 0);
-            w.choice = make(0, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, kIdChoice);
-            w.number = make(WS_EX_CLIENTEDGE, WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP, kIdNumber);
-            w.reset = make(0, WC_BUTTONW, L"&Default", BS_PUSHBUTTON | WS_TABSTOP, kIdReset);
+            SendMessageW(w.title, WM_SETFONT, (WPARAM)w.titleFont, TRUE);
+            w.about = make(0, WC_STATICW, L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, 0);
             for (int i = 0; i < kLinks; ++i)
                 w.links[i] = make(0, WC_BUTTONW, L"", BS_PUSHBUTTON | WS_TABSTOP, kIdLink0 + i);
+            RegisterAppClass(L"CordinalPrefSheet", SheetProc, 0, false);
+            w.sheet = make(WS_EX_CONTROLPARENT, L"CordinalPrefSheet", L"Settings", WS_VSCROLL | WS_CLIPCHILDREN,
+                           kIdSheet);
+            ApplyControlTheme(w.sheet, g.dark);  // its scroll bar
             w.resetAll = make(0, WC_BUTTONW, L"&Reset all to defaults", BS_PUSHBUTTON | WS_TABSTOP, kIdResetAll);
             w.close = make(0, WC_BUTTONW, L"Close", BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL);
-            for (HWND c : {w.search, w.filter, w.choice, w.number})
-                SetWindowTheme(c, g.dark ? L"DarkMode_CFD" : L"Explorer", nullptr);
-            for (HWND c : {w.reset, w.resetAll, w.close, w.list, w.pages}) ApplyControlTheme(c, g.dark);
+            for (HWND c : {w.search, w.filter}) SetWindowTheme(c, g.dark ? L"DarkMode_CFD" : L"Explorer", nullptr);
+            for (HWND c : {w.resetAll, w.close, w.pages}) ApplyControlTheme(c, g.dark);
             for (HWND c : w.links) ApplyControlTheme(c, g.dark);
-            ListView_SetBkColor(w.list, WindowBg());
-            ListView_SetTextBkColor(w.list, WindowBg());
-            ListView_SetTextColor(w.list, TextColor());
-            SetWindowSubclass(ListView_GetHeader(w.list), HeaderSubclass, 0, 0);  // the track list's flat header
             ApplyWindowTheme(h, P());
-            LayoutPreferences();  // now, not at the first WM_SIZE: the list must have its height before it scrolls
+            LayoutPreferences();
             SetTimer(h, 1, 250, nullptr);  // scan state can change while this modeless window stays open
             return 0;
         }
@@ -884,63 +1362,25 @@ LRESULT CALLBACK PreferencesProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             RECT rc;
             GetClientRect(h, &rc);
             FillRect((HDC)wp, &rc, g.surfaceBrush);
+            // The rule between the page list and the page.
+            const int x = S(16) + S(188) + S(10);
+            FillSolid((HDC)wp, {x, S(16), x + std::max(1, S(1)), rc.bottom - S(16)}, Ref(P().border));
             return 1;
         }
-        case WM_MEASUREITEM:
-            reinterpret_cast<MEASUREITEMSTRUCT*>(lp)->itemHeight = S(30);
+        case WM_MEASUREITEM: {
+            auto* mi = reinterpret_cast<MEASUREITEMSTRUCT*>(lp);
+            mi->itemHeight = S(34) + (mi->itemID < std::size(kPages) && kPages[mi->itemID].group ? S(30) : 0);
             return TRUE;
+        }
         case WM_DRAWITEM:
             DrawPage(reinterpret_cast<DRAWITEMSTRUCT*>(lp));
             return TRUE;
         case WM_CTLCOLORSTATIC:
-            return SurfaceControlColor((HDC)wp, (HWND)lp == w.help ? SubColor() : TextColor());
+            return SurfaceControlColor((HDC)wp, (HWND)lp == w.about ? SubColor() : TextColor());
         case WM_CTLCOLOREDIT:
         case WM_CTLCOLORLISTBOX:
             if ((HWND)lp == w.pages) return SurfaceControlColor((HDC)wp, TextColor());
             return FieldControlColor((HDC)wp);
-        case WM_NOTIFY: {
-            auto* hdr = reinterpret_cast<NMHDR*>(lp);
-            if (hdr->hwndFrom != w.list) break;
-            if (hdr->code == NM_CUSTOMDRAW) {  // palette selection, as the column browser draws it
-                auto* cd = reinterpret_cast<NMLVCUSTOMDRAW*>(hdr);
-                if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
-                if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT || cd->nmcd.dwDrawStage == (CDDS_SUBITEM | CDDS_ITEMPREPAINT)) {
-                    bool selected = ListView_GetItemState(w.list, (int)cd->nmcd.dwItemSpec, LVIS_SELECTED) != 0;
-                    cd->nmcd.uItemState &= ~(CDIS_SELECTED | CDIS_FOCUS | CDIS_HOT);
-                    cd->clrTextBk = selected ? Ref(P().select) : WindowBg();
-                    cd->clrText = selected ? Ref(P().selectText) : cd->iSubItem == 2 ? SubColor() : TextColor();
-                    return cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT ? CDRF_NOTIFYSUBITEMDRAW : CDRF_DODEFAULT;
-                }
-                return CDRF_DODEFAULT;
-            }
-            if (hdr->code == LVN_GETDISPINFOW) {
-                auto* di = reinterpret_cast<NMLVDISPINFOW*>(hdr);
-                if (!(di->item.mask & LVIF_TEXT) || di->item.iItem >= (int)w.rows.size()) return 0;
-                const Tweak& t = kTweaks[w.rows[di->item.iItem]];
-                std::wstring text = di->item.iSubItem == 0 ? std::wstring(t.label)
-                                  : di->item.iSubItem == 1 ? TweakText(t, t.get()) + (TweakChanged(t) ? L"  (changed)" : L"")
-                                                           : std::wstring(kPages[PageOf(t)].name);
-                wcsncpy_s(di->item.pszText, di->item.cchTextMax, text.c_str(), _TRUNCATE);
-                return 0;
-            }
-            if (hdr->code == LVN_ITEMCHANGED) {
-                auto* change = reinterpret_cast<NMLISTVIEW*>(hdr);
-                if ((change->uNewState & LVIS_SELECTED) && change->iItem >= 0 && change->iItem < (int)w.rows.size()) {
-                    w.current = w.rows[change->iItem];
-                    ShowEditor();
-                }
-                return 0;
-            }
-            // Double-click or Space flips an on/off setting; anything else takes you to its editor.
-            const bool space = hdr->code == LVN_KEYDOWN && reinterpret_cast<NMLVKEYDOWN*>(hdr)->wVKey == VK_SPACE;
-            if ((space || hdr->code == NM_DBLCLK) && w.current >= 0) {
-                const Tweak& t = kTweaks[w.current];
-                if (t.type == TweakType::Bool) SetTweak(t, t.get() == 0);
-                else SetFocus(t.type == TweakType::Float ? w.number : w.choice);
-                RefreshValues();
-            }
-            return 0;
-        }
         case WM_COMMAND: {
             int id = LOWORD(wp), code = HIWORD(wp);
             if (id == kIdPages && code == LBN_SELCHANGE) {
@@ -954,21 +1394,16 @@ LRESULT CALLBACK PreferencesProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 Rebuild(w.current);
             } else if (id == kIdFilter && code == CBN_SELCHANGE) {
                 Rebuild(w.current);
-            } else if (id == kIdChoice && code == CBN_SELCHANGE && !w.filling && w.current >= 0) {
-                SetTweak(kTweaks[w.current], (double)SendMessageW(w.choice, CB_GETCURSEL, 0, 0));
-                RefreshValues();
-            } else if (id == kIdNumber && code == EN_KILLFOCUS && !w.filling) {
-                CommitNumber();
-            } else if (id == kIdReset && w.current >= 0) {
-                SetTweak(kTweaks[w.current], kTweaks[w.current].def);
-                RefreshValues();
             } else if (id >= kIdLink0 && id < kIdLink0 + kLinks) {
                 const Link& link = kPages[w.page].links[id - kIdLink0];
                 if (int command = link.command; command && LinkShown(link) && LinkEnabled(command))
                     PostMessageW(g.hwnd, WM_COMMAND, MAKEWPARAM(command, 0), 0);
             } else if (id == kIdResetAll) {
                 int count = 0;
-                for (int i : std::vector<int>(w.rows))  // SetTweak refreshes the window as it goes
+                std::vector<int> shown;
+                for (const SheetRow& row : w.rows)
+                    if (row.tweak >= 0) shown.push_back(row.tweak);
+                for (int i : shown)  // SetTweak refreshes the window as it goes
                     if (TweakChanged(kTweaks[i])) {
                         SetTweak(kTweaks[i], kTweaks[i].def);
                         ++count;
@@ -976,10 +1411,9 @@ LRESULT CALLBACK PreferencesProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 ShowMessage(count == 1 ? L"Reset 1 setting to its default." :
                             L"Reset " + std::to_wstring(count) + L" settings to their defaults.");
                 Rebuild(w.current);
-            } else if (id == IDOK) {  // Enter: commit a typed value, or go from the list to the editor
-                if (GetFocus() == w.number) CommitNumber();
-                else if (GetFocus() == w.list && w.current >= 0)
-                    SetFocus(kTweaks[w.current].type == TweakType::Float ? w.number : w.choice);
+            } else if (id == IDOK) {  // Enter: commit a typed value
+                if (w.current >= 0 && RowOf(w.current) >= 0 && GetFocus() == w.rows[RowOf(w.current)].control)
+                    CommitNumber(w.current);
             } else if (id == IDCANCEL) {
                 DestroyWindow(h);
             }
@@ -989,11 +1423,13 @@ LRESULT CALLBACK PreferencesProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             DestroyWindow(h);
             return 0;
         case WM_NCDESTROY:
+            if (w.titleFont) DeleteObject(w.titleFont);
             w = PreferencesWindow{};
             return 0;
     }
     return DefWindowProcW(h, msg, wp, lp);
 }
+
 
 }  // namespace
 
@@ -1130,7 +1566,7 @@ void ShowPreferences(const char* key) {
     const Tweak* wanted = key ? FindTweak(key) : nullptr;
     if (!w.hwnd) {
         RegisterAppClass(L"CordinalPreferences", PreferencesProc);
-        RECT r{0, 0, S(800), S(600)};
+        RECT r{0, 0, S(900), S(660)};
         AdjustWindowRectExForDpi(&r, WS_OVERLAPPEDWINDOW, FALSE, WS_EX_DLGMODALFRAME, g.dpi);
         RECT owner;
         GetWindowRect(g.hwnd, &owner);
@@ -1152,7 +1588,9 @@ void ShowPreferences(const char* key) {
     Rebuild(keep);
     ShowWindow(w.hwnd, SW_SHOW);
     SetForegroundWindow(w.hwnd);
-    SetFocus(w.list);
+    // The asked-for setting's own control, else the page list to choose from.
+    const int row = wanted ? RowOf(keep) : -1;
+    SetFocus(row >= 0 ? w.rows[row].control : w.pages);
 }
 
 }  // namespace app

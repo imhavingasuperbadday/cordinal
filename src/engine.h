@@ -43,6 +43,9 @@ struct PlayItem {
     double loopStart = 0, loopEnd = 0;
     // No ReplayGain data yet: measure the first seconds as they decode and report Estimated.
     bool estimate = false;
+    // Fade in over the end of the track before it, when the engine's crossfade is on (SetCrossfade).
+    // The application decides per pair, so it can keep an album's tracks gapless.
+    bool crossfade = false;
     std::shared_ptr<LiveAudioSource> live;  // a non-seekable radio stream instead of a file
 };
 
@@ -52,9 +55,13 @@ class Engine {
 public:
     Engine();
     ~Engine();
-    // The UI can defer device/driver allocation until its first Play command.
+    // The UI can defer device/driver allocation until its first Play command. The decode
+    // thread stays down until the first Play, Seek, Stop, SetNext, speed or tempo change,
+    // or a resume; pausing a thread that has not started does not start it.
     bool Init(HWND notify, std::wstring& error, bool deferOutput = false);
     void Shutdown();
+    // True once the decode thread exists. Init leaves it false when output is deferred.
+    bool DecodeThreadStarted();
 
     // `paused` opens the track at `start` without playing it: the first SetPaused(false) carries on
     // from there, so a saved place can be restored without a sound.
@@ -106,6 +113,11 @@ public:
     // `count` times in total, then the loop again while fading out over fadeSeconds. 0 turns loop
     // points off. Applies to tracks opened after the call. Default: 2 passes, 8 s fade.
     void SetLoops(int count, double fadeSeconds);
+    // Crossfade between tracks that follow on their own: the last `seconds` of a track fade out
+    // while the next one (PlayItem::crossfade) fades in, equal power, each at its own ReplayGain.
+    // 0 keeps transitions gapless. Applies from the next track that reaches its last seconds; a
+    // track with no known length, a radio stream or an exclusive-mode rate change stays gapless.
+    void SetCrossfade(double seconds);
 
     bool Paused() const;
     double Position() const;             // seconds into the audible track
@@ -151,5 +163,16 @@ struct RenderEffects {
 std::vector<float> RenderPlayerPcm(const float* stereo, size_t frames, unsigned rate,
                                  const EqSettings& eq, bool replayGainLimiter, float trackGain = 1,
                                  float outputHeadroomDb = 0, const RenderEffects* effects = nullptr);
+// Offline crossfade through the production decode-side mixer: `a` then `b` (interleaved stereo at
+// `rate`), with the last `seconds` of a mixed into the start of b at the gains given (b's gain is
+// applied later by the renderer, so a's samples are scaled by gainA / gainB). For the engine suite.
+std::vector<float> CrossfadePcm(const std::vector<float>& a, const std::vector<float>& b, unsigned rate, double seconds,
+                                float gainA = 1, float gainB = 1);
+// The volume slider (0..1) as a gain, by curve: 0 natural (the square, the default), 1 linear,
+// 2 cubic, 3 decibels (a 60 dB range). Shared by both front ends and MPRIS.
+constexpr int kVolumeCurves = 4;
+// The crossfade lengths Preferences offers, by index (0 is off), on both platforms.
+constexpr double kCrossfadeSeconds[] = {0, 1, 2, 3, 5, 8};
+float VolumeCurveGain(float slider, int curve);
 // Final renderer clipping, preserving NaN payloads and signed zero like std::clamp.
 void ClipPcm(float* samples,size_t count);

@@ -21,6 +21,8 @@ void SetState(State s);
 // `image` is encoded JPEG or PNG bytes for the cover art; empty means none.
 void SetMetadata(const std::wstring& title, const std::wstring& artist, const std::wstring& album,
                  const std::string& image);
+// Replaces only the cover, for art that arrives after the metadata.
+void SetCover(const std::string& image);
 // Seconds. Cheap enough to call once a second.
 void SetTimeline(double position, double duration);
 void Shutdown();

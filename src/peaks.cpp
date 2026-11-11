@@ -664,8 +664,7 @@ public:
         }
         SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
         cacheBytes_ = PruneCache(dir);
-        stop_ = false;
-        thread_ = std::thread(&PeakService::Run, this);
+        stop_ = false;  // the worker starts with the first job (StartWorker)
     }
 
     void Stop() {
@@ -758,12 +757,14 @@ public:
                 prefetch_->ready = now + (rapid ? kRequestDelay : std::chrono::milliseconds(0));
                 jobs_.push_back(std::move(*prefetch_));
                 prefetch_.reset();
+                StartWorker();
                 cv_.notify_one();
                 return false;
             }
             if (!++nextId_) ++nextId_;  // zero means no queued request
             requestId = nextId_;
             jobs_.push_back({requestId, key, path, start, end, now + (rapid ? kRequestDelay : std::chrono::milliseconds(0))});
+            StartWorker();
         }
         cv_.notify_one();
         return false;
@@ -782,6 +783,7 @@ public:
             if (!++nextId_) ++nextId_;
             prefetch_ = Job{nextId_, key, path, start, end, std::chrono::steady_clock::now() + kRequestDelay};
             if (currentList_) cancel_ = true;  // the next track matters more than a list cell
+            StartWorker();
         }
         cv_.notify_one();
     }
@@ -803,6 +805,7 @@ public:
             if (!++nextId_) ++nextId_;
             list_.push_front({nextId_, key, path, start, end, {}});
             if (list_.size() > kListQueue) list_.pop_back();
+            StartWorker();
         }
         cv_.notify_one();
         return false;
@@ -850,6 +853,12 @@ private:
     }
 
     bool running() const { return !dir_.empty(); }
+
+    // Caller holds mx_; the new thread waits for it. A player that never shows a waveform never
+    // starts the thread.
+    void StartWorker() {
+        if (!stop_ && !thread_.joinable()) thread_ = std::thread(&PeakService::Run, this);
+    }
 
     // Caller holds mx_. Entries are replaced in insertion order.
     bool ReadMemory(uint64_t key, Peaks& out) const {

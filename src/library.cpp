@@ -346,27 +346,30 @@ size_t StringPool::Bytes() const {
 // ---------------------------------------------------------------------------
 // Library
 
-// Maps a (dir, file) pair to an open-addressing slot, hashing the same canonical path text that
-// Find and Add compare, so lookups and inserts agree.
-size_t Library::Slot(StringPool::Handle dir, StringPool::Handle file) const {
-    return MapSlot(PathHash(PathKey(TrackPath{0, View(dir), View(file)}.Path())), byPath_.size());
+// Hashes the same canonical path text that Find and Add compare, so lookups and inserts agree.
+// Building that text takes a UTF-16 conversion and a case mapping, so Index keeps the result in
+// the track (Track::pathHash): growing the table, removing a track and passing over a colliding
+// slot then cost no path at all.
+uint32_t Library::KeyHash(StringPool::Handle dir, StringPool::Handle file) const {
+    return PathHash(PathKey(TrackPath{0, View(dir), View(file)}.Path()));
 }
 
 void Library::Index(TrackId id) {
+    tracks_[id].pathHash = KeyHash(tracks_[id].dir, tracks_[id].file);
     if (tracks_.size() * 4 >= byPath_.size() * 3) {
         size_t cap = byPath_.empty() ? 64 : (byPath_.size() * 3 / 2 + 63) & ~size_t(63);
         std::vector<TrackId>().swap(byPath_);
         byPath_.assign(cap, UINT32_MAX);
         for (TrackId t = 0; t < (TrackId)tracks_.size(); ++t) {
             if (t == id) continue;
-            size_t i = Slot(tracks_[t].dir, tracks_[t].file);
+            size_t i = MapSlot(tracks_[t].pathHash, cap);
             while (byPath_[i] != UINT32_MAX) {
                 if (++i == cap) i = 0;
             }
             byPath_[i] = t;
         }
     }
-    size_t cap = byPath_.size(), i = Slot(tracks_[id].dir, tracks_[id].file);
+    size_t cap = byPath_.size(), i = MapSlot(tracks_[id].pathHash, cap);
     while (byPath_[i] != UINT32_MAX) {
         if (++i == cap) i = 0;
     }
@@ -375,7 +378,7 @@ void Library::Index(TrackId id) {
 
 void Library::Unindex(TrackId id) {
     // Linear probing: remove the slot, then re-insert the rest of its cluster.
-    size_t cap = byPath_.size(), i = Slot(tracks_[id].dir, tracks_[id].file);
+    size_t cap = byPath_.size(), i = MapSlot(tracks_[id].pathHash, cap);
     while (byPath_[i] != id) {
         if (byPath_[i] == UINT32_MAX) return;
         if (++i == cap) i = 0;
@@ -384,7 +387,7 @@ void Library::Unindex(TrackId id) {
     for (size_t j = (i + 1 == cap ? 0 : i + 1); byPath_[j] != UINT32_MAX; j = (j + 1 == cap ? 0 : j + 1)) {
         TrackId moved = byPath_[j];
         byPath_[j] = UINT32_MAX;
-        size_t k = Slot(tracks_[moved].dir, tracks_[moved].file);
+        size_t k = MapSlot(tracks_[moved].pathHash, cap);
         while (byPath_[k] != UINT32_MAX) {
             if (++k == cap) k = 0;
         }
@@ -399,7 +402,7 @@ void Library::Reserve(size_t strings, size_t tracks) {
         std::vector<TrackId>().swap(byPath_);
         byPath_.assign(needed, UINT32_MAX);
         for (TrackId t = 0; t < (TrackId)tracks_.size(); ++t) {
-            size_t i = Slot(tracks_[t].dir, tracks_[t].file);
+            size_t i = MapSlot(tracks_[t].pathHash, needed);
             while (byPath_[i] != UINT32_MAX) {
                 if (++i == needed) i = 0;
             }
@@ -418,8 +421,10 @@ void Library::SplitPath(const std::wstring& path, StringPool::Handle& dir, Strin
 TrackId Library::FindKey(const std::wstring& key) const {
     if (byPath_.empty() || key.empty()) return UINT32_MAX;
     size_t cap = byPath_.size();
-    for (size_t i = MapSlot(PathHash(key), cap); byPath_[i] != UINT32_MAX; i = (i + 1 == cap ? 0 : i + 1))
-        if (PathKey(Path(byPath_[i])) == key) return byPath_[i];
+    const uint32_t hash = PathHash(key);
+    // Only a slot whose full hash matches builds its path to compare.
+    for (size_t i = MapSlot(hash, cap); byPath_[i] != UINT32_MAX; i = (i + 1 == cap ? 0 : i + 1))
+        if (tracks_[byPath_[i]].pathHash == hash && PathKey(Path(byPath_[i])) == key) return byPath_[i];
     return UINT32_MAX;
 }
 
@@ -459,6 +464,7 @@ TrackId Library::ImportTrack(const Library& source, TrackId id) {
     Track copy = source[id];
     copy.dir = tracks_[dest].dir;
     copy.file = tracks_[dest].file;
+    copy.pathHash = tracks_[dest].pathHash;
     for (auto member : {&Track::title, &Track::artist, &Track::album, &Track::albumArtist, &Track::genre,
                         &Track::date, &Track::composer, &Track::comment, &Track::grouping, &Track::label})
         copy.*member = Intern(source.View(copy.*member));

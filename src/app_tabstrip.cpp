@@ -140,10 +140,12 @@ int TabAtPoint(HWND tabs, POINT point) {
 }
 
 // The close box for a tab, or an empty rect. Only tabs after the Library (index 0) and outside the
-// Inbox get one, confined to the right 22px of the tab.
+// Inbox get one, confined to the right 22px of the tab. The shared auto-playlist tab has none: it
+// would close only the one it shows, and its end is where its menu's arrow is.
 RECT TabCloseRect(HWND tabs, int index) {
     RECT rect{};
-    if (index > 0 && index < (int)g.playlists.size() && g.playlists[index].kind != PlaylistKind::Inbox &&
+    int pl = PlaylistOfTab(index);
+    if (pl > 0 && g.playlists[pl].kind != PlaylistKind::Inbox && !IsAutoTab(index) &&
         TabCtrl_GetItemRect(tabs, index, &rect)) {
         rect.left = std::max(rect.left, rect.right - S(22));
         rect.right -= S(3);
@@ -167,7 +169,13 @@ LRESULT CALLBACK TabsSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
             return 0;
         }
         if (hit >= 0) SendMessageW(g.hwnd, WM_CHANGEUISTATE, MAKEWPARAM(UIS_SET, UISF_HIDEFOCUS), 0);
-        g_tabDragFrom = hit > 0 ? hit : -1;
+        // The shared auto-playlist tab opens what it shows; clicked again, it offers the others.
+        if (IsAutoTab(hit) && PlaylistOfTab(hit) == g.active && !RadioActive()) {
+            SetFocus(h);
+            ShowAutoTabMenu(hit);
+            return 0;
+        }
+        g_tabDragFrom = hit > 0 && !IsAutoTab(hit) ? hit : -1;
         g_tabDragTo = hit;
         g_tabDragStart = point;
         LRESULT result = DefSubclassProc(h, msg, wp, lp);
@@ -182,11 +190,11 @@ LRESULT CALLBACK TabsSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
         if (GetCapture() == h) ReleaseCapture();
         if (close >= 0) {
             auto rect = TabCloseRect(h, close);
-            if (PtInRect(&rect, point)) RemovePlaylist(close);
+            if (PtInRect(&rect, point)) RemovePlaylist(PlaylistOfTab(close));
             InvalidateRect(h, nullptr, FALSE);
             return 0;
         }
-        if (dragging) { ReorderPlaylist(from, to); return 0; }
+        if (dragging) { ReorderPlaylist(PlaylistOfTab(from), PlaylistOfTab(to)); return 0; }
     }
     if (msg == WM_CAPTURECHANGED || msg == WM_CANCELMODE) {
         g_tabDragFrom = g_tabDragTo = g_tabClosePressed = -1;
@@ -194,11 +202,14 @@ LRESULT CALLBACK TabsSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
         if (msg == WM_CANCELMODE && GetCapture() == h) ReleaseCapture();
         InvalidateRect(h, nullptr, FALSE);
     }
-    if (msg == WM_MBUTTONUP) { RemovePlaylist(TabAtPoint(h, point)); return 0; }
+    if (msg == WM_MBUTTONUP) {
+        if (int tab = TabAtPoint(h, point); !IsAutoTab(tab)) RemovePlaylist(PlaylistOfTab(tab));
+        return 0;
+    }
     if (msg == WM_LBUTTONDBLCLK) {
         if (GetCapture() == h) ReleaseCapture();
         int hit = TabAtPoint(h, point);
-        if (hit >= 0) BeginRename(hit);
+        if (hit >= 0) BeginRename(PlaylistOfTab(hit));
         else { NewPlaylist(L"New Playlist"); BeginRename(g.active); }
         return 0;
     }
@@ -217,10 +228,15 @@ LRESULT CALLBACK TabsSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
     if (msg == WM_KEYDOWN && (SendMessageW(h, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS))
         SendMessageW(g.hwnd, WM_CHANGEUISTATE, MAKEWPARAM(UIS_CLEAR, UISF_HIDEFOCUS), 0);
     if (msg == WM_KEYDOWN && (wp == VK_RETURN || wp == VK_F2)) { BeginRename(g.active); return 0; }
+    // Down opens the shared auto-playlist tab's menu, as a click on it does.
+    if (msg == WM_KEYDOWN && wp == VK_DOWN && IsAutoTab(TabOfPlaylistIndex(g.active)) && !RadioActive()) {
+        ShowAutoTabMenu(TabOfPlaylistIndex(g.active));
+        return 0;
+    }
     if (msg == WM_KEYDOWN && wp == VK_ESCAPE && GetCapture() == h) { ReleaseCapture(); return 0; }
     if (msg == WM_KEYDOWN && (wp == VK_HOME || wp == VK_END)) {
         ActivatePlaylist(wp == VK_HOME ? 0 : (int)g.playlists.size() - 1);
-        TabCtrl_SetCurFocus(h, g.active);
+        TabCtrl_SetCurFocus(h, TabOfPlaylistIndex(g.active));
         return 0;
     }
     if (msg == WM_SETFOCUS || msg == WM_KILLFOCUS) InvalidateRect(h, nullptr, FALSE);
@@ -273,7 +289,7 @@ LRESULT CALLBACK TabsSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
             if (!TabCtrl_GetItemRect(h, i, &r) || r.right <= rc.left || r.left >= rc.right) continue;
             // Flat tabs on the strip: no boxes. The selected tab is marked by a short accent
             // underline; hover just brightens the label.
-            bool playing = i == g.playingPl && g.playing != kNone;
+            bool playing = PlaylistOfTab(i) == g.playingPl && g.playing != kNone;
             bool foobar = FoobarMode();  // foobar2000's tabs: framed boxes, the open one raised
             if (foobar) {
                 RECT b = r;
@@ -291,7 +307,7 @@ LRESULT CALLBACK TabsSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
             item.pszText = text;
             item.cchTextMax = (int)std::size(text);
             TabCtrl_GetItem(h, i, &item);
-            bool closable = i > 0 && g.playlists[i].kind != PlaylistKind::Inbox;
+            bool closable = PlaylistOfTab(i) > 0 && g.playlists[PlaylistOfTab(i)].kind != PlaylistKind::Inbox && !IsAutoTab(i);
             // The label keeps its place whether or not the close box shows over its end.
             RECT tr = r;
             tr.left += S(6);

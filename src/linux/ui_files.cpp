@@ -183,9 +183,17 @@ void ReopenPlaylist() {
     SetActiveTab(index);
 }
 
+// One tab over: past the shared auto-playlist tab means past all of its playlists, and one of those
+// stays where it is, since that tab keeps its place.
 void ReorderPlaylist(int direction) {
     EndRename(true);
-    int target = g.active + direction;
+    const auto slots = CurrentTabSlots();
+    int tab = TabOfPlaylist(g.playlists, slots, g.active), next = tab + direction;
+    if (IsAutoGroupTab(g.playlists, slots, tab) || next < 0 || next >= (int)slots.size()) return;
+    int target = slots[next];
+    if (IsAutoGroupTab(g.playlists, slots, next))
+        for (int i = 0; i < (int)g.playlists.size(); ++i)
+            if (g.playlists[i].kind == PlaylistKind::Auto && (direction > 0 || target > i)) target = i;
     if (g.active <= 0 || target <= 0 || !MovePlaylist(g.playlists, g.active, target)) return;
     g.active = target;
     g.libraryDirty = true;

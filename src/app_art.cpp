@@ -2,6 +2,7 @@
 // Each request carries a generation, so a decode that finishes after the track or DPI changed is
 // thrown away rather than painting the wrong cover.
 #include "app.h"
+#include "thumbs.h"
 
 namespace app {
 
@@ -21,6 +22,7 @@ void ArtWorker(HWND hwnd) {
         auto result = std::make_unique<ArtResult>();
         result->generation = request.generation;
         LoadAlbumArt(request.path, request.size, result->image);
+        result->jpeg = JpegBytes(result->image);
         if (!request.path.empty()) LoadDiscArt(request.path, request.disc, request.discTotal, request.size, result->disc);
         {
             std::lock_guard<std::mutex> lock(g.artMx);
@@ -43,6 +45,7 @@ void LoadArtFor(TrackId id, bool refresh) {
     if (id != kNone && !g.closing && !g.artWorker.joinable()) g.artWorker = std::thread(ArtWorker, g.hwnd);
     g.artFor = id;
     g.art = g.disc = ArtImage{};
+    g.artJpeg.clear();
     ++g.artGeneration;
     {
         std::lock_guard<std::mutex> lock(g.artMx);
@@ -67,9 +70,11 @@ void OnArtResult(LPARAM lp) {
     if (!result || result->generation != g.artGeneration || g.closing) return;
     g.art = std::move(result->image);
     g.disc = std::move(result->disc);
+    g.artJpeg = std::move(result->jpeg);
     InvalidateRect(g.hwnd, &g.artRect, FALSE);
     RefreshPlayerTint();
     PlatformTrackChanged();
+    PlatformArtChanged();
     MiniPlayerTick();
     PanelsTick();
 }

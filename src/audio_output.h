@@ -1,9 +1,11 @@
 // WASAPI output following the Windows default device (on Linux: a PipeWire stream, see
 // linux/audio_pipewire.cpp). Renders interleaved stereo float.
 //
-// Shared mode: through the Windows mixer at the device's mix rate (the engine resamples).
-// Exclusive mode: the device is opened at the rate the engine asks for, in the best integer or
-// float format it accepts, with no Windows mixing or resampling: bit-perfect when the engine
+// Shared mode: through the Windows mixer at the device's mix rate (the engine resamples), in the
+// device's own stereo mix format when that is float or 16/24/32-bit PCM. Any other mix layout is
+// submitted as stereo float and WASAPI converts.
+// Exclusive mode: the device is opened at the rate the engine asks for, trying the widest integer
+// format first and then float, with no Windows mixing or resampling. Bit-perfect when the engine
 // doesn't change the samples either.
 #pragma once
 #include <windows.h>
@@ -12,6 +14,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -30,6 +33,39 @@ struct OutputDevice {
 std::vector<OutputDevice> ListOutputDevices();
 #endif
 enum class SampleFormat : uint8_t { Float32, Int32, Int24In32, Int24, Int16 };
+
+// Exclusive output tries these in order and keeps the first format the device accepts.
+inline constexpr SampleFormat kExclusiveFormats[] = {
+    SampleFormat::Int32, SampleFormat::Int24In32, SampleFormat::Int24, SampleFormat::Float32,
+    SampleFormat::Int16};
+
+// Shared-mode mix layout, detached from WAVEFORMATEX so the choice can be tested without a device.
+// `pcm` is false for IEEE float. `validBits` 0 means the container width. `blockAlign` is the bytes
+// in one interleaved frame; 0 leaves packing to the container width.
+struct MixLayout {
+    unsigned channels = 0;
+    unsigned bits = 0;
+    unsigned validBits = 0;
+    unsigned blockAlign = 0;
+    bool pcm = false;
+};
+
+// Stereo float, or stereo PCM at 16, 24 or 32 bits. nullopt when shared mode should submit float32
+// and let WASAPI convert: a surround mix, or a width this player does not pack.
+inline std::optional<SampleFormat> NativeMixFormat(MixLayout layout) {
+    if (layout.channels != 2) return std::nullopt;
+    const unsigned valid = layout.validBits ? layout.validBits : layout.bits;
+    const unsigned align = layout.blockAlign;
+    if (!layout.pcm) {
+        if (layout.bits == 32 && valid == 32 && (align == 0 || align == 8)) return SampleFormat::Float32;
+        return std::nullopt;
+    }
+    if (valid == 16 && layout.bits == 16 && (align == 0 || align == 4)) return SampleFormat::Int16;
+    if (valid == 32 && layout.bits == 32 && (align == 0 || align == 8)) return SampleFormat::Int32;
+    if (valid == 24 && layout.bits == 24 && (align == 0 || align == 6)) return SampleFormat::Int24;
+    if (valid == 24 && layout.bits == 32 && (align == 0 || align == 8)) return SampleFormat::Int24In32;
+    return std::nullopt;
+}
 
 // float [-1, 1] -> the device format. Exact for samples that came from integers of that width.
 void ConvertSamples(const float* in, size_t samples, SampleFormat fmt, void* out);

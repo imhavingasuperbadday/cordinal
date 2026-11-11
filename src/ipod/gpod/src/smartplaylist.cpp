@@ -199,7 +199,8 @@ bool matches_string(std::string_view value, std::string_view needle,
 }
 
 std::uint32_t default_random_index(std::uint32_t bound) {
-    static thread_local std::mt19937 generator{std::random_device{}()};
+    // Not a thread_local engine: its 5,000 bytes would be allocated for every thread in the process.
+    std::random_device generator;
     std::uniform_int_distribution<std::uint32_t> distribution(0, bound - 1);
     return distribution(generator);
 }

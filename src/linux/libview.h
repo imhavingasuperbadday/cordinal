@@ -35,6 +35,7 @@ void BrowserBlur();
 // g.selected, so the menus and commands act on it as on the list's.
 bool CanvasActive();
 void CanvasRebuild();  // after RebuildRows
+void CanvasRelayout();  // Preferences: the cover spacing changed
 void DrawCanvas(const Rect& area, const Palette& p, float mouseX, float mouseY);
 void CanvasMouseDown(const Rect& area, float x, float y, int button, int clicks, SDL_Keymod mod);
 void CanvasWheel(const Rect& area, float dy, bool ctrl);
@@ -49,6 +50,8 @@ void CanvasChooseEdition(uint32_t group, uint32_t edition);
 
 // ui.cpp, shared with the views.
 void DrawAlbumCover(TrackId first, StringPool::Handle album, const std::wstring& title, const Rect& r, const Palette& p);
+// The hue of the cover DrawAlbumCover draws `width` wide, once it has arrived, or -1.
+double AlbumCoverHue(TrackId first, StringPool::Handle album, float width);
 void OpenTrackMenu(float x, float y);
 void RateTracks(const std::vector<TrackId>& ids, uint8_t rating);
 // playback.cpp: plays `tracks` from `index` as Now Playing.

@@ -452,7 +452,13 @@ inline Group CustomCovers(const std::wstring& scratch) {
     std::wstring a = data + sep + L"Album" + sep + L"01 One.flac", b = data + sep + L"Album" + sep + L"02 Two.flac",
                  c = data + sep + L"Album" + sep + L"03 Three.flac";
     customcover::Start(data);
-    g.Add(customcover::ImageFor(a).empty() && customcover::Count({a, b, c}) == 0, "no track starts with a custom cover");
+    CreateDirectoryW(covers.c_str(), nullptr);
+    const std::string planted = std::string("1\npreset.jpg\t") + ToUtf8(c) + "\n";
+    g.Add(backup::WriteBytes(covers + sep + L"covers.txt", planted) &&
+              customcover::ImageFor(c) == covers + sep + L"preset.jpg" && customcover::Count({c}) == 1,
+          "a covers.txt written after startup is read on the first lookup");
+    g.Add(customcover::Clear({c}) == 1 && customcover::ImageFor(a).empty() && customcover::Count({a, b, c}) == 0,
+          "no track starts with a custom cover");
     std::wstring error;
     g.Add(customcover::Set({a, b}, Jpeg(), error), "a JPEG is given to two tracks");
     std::wstring jpg = customcover::ImageFor(a);

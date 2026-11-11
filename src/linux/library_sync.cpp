@@ -263,9 +263,16 @@ void OnScanResult(ScanResult* r, bool firstScanDone) {
     g.redraw = true;
 }
 
-void StartTagWorker() {
-    g.tagQuit = false;
+// UI thread. TagWorker locks tagMx immediately, so the thread is started with the mutex free.
+void EnsureTagThread() {
+    if (g.tagQuit || g.tagThread.joinable()) return;
     g.tagThread = std::thread(TagWorker);
+}
+
+void StartTagWorker() {
+    // The library load that follows queues any tags that still need reading, and that queue
+    // starts the thread. A library whose tags are loaded keeps the thread down.
+    g.tagQuit = false;
 }
 
 void StopTagWorker() {
@@ -283,6 +290,7 @@ void QueueTags(const std::vector<TrackId>& ids) {
         std::lock_guard lock(g.tagMx);
         for (TrackId id : ids) g_tagJobs.push_back({id, g_lib.Path(id)});
     }
+    EnsureTagThread();
     g.tagCv.notify_one();
 }
 
@@ -297,6 +305,7 @@ void QueueChapters(TrackId id) {
         std::erase_if(g_tagJobs, [](const TagJob& job) { return job.chapters; });
         g_tagJobs.push_front({id, std::move(path), true, g.chapterGeneration});
     }
+    EnsureTagThread();
     g.tagCv.notify_one();
 }
 

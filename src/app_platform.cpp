@@ -573,10 +573,16 @@ void PlatformTrackChanged() {
     g_smtcTrack = g.playing;
     if (g.playing == kNone) return;
     const Track& t = g_lib[g.playing];
+    // The cover is the now-playing pane's decoded copy, re-encoded small by the art worker. Until it
+    // arrives the flyout shows none, and PlatformArtChanged adds it.
     if (g_smtc)
         smtc::SetMetadata(t.title ? g_lib.Str(t.title) : StemOf(g_lib.Str(t.file)), g_lib.Str(t.artist ? t.artist : t.albumArtist),
-                          g_lib.Str(t.album), CoverBytes(g.playing));
+                          g_lib.Str(t.album), g.artFor == g.playing ? g.artJpeg : std::string());
     listenbrainz::PlayingNow(MakeListen(g.playing));
+}
+
+void PlatformArtChanged() {
+    if (g_smtc && !RadioPlaying() && g.playing != kNone && g.artFor == g.playing) smtc::SetCover(g.artJpeg);
 }
 
 // The Discord status follows a new track or a pause at once, and checks for a seek once a second. Off, it costs

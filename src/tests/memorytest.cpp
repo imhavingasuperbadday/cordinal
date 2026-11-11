@@ -6,8 +6,14 @@
 #include "streamfile.h"
 #include "testlog.h"
 #include "thumbs.h"
+#include "album_editions.h"
+#include "track_set.h"
 
+#include <shlwapi.h>
 #include <winioctl.h>
+#include <wrl/client.h>
+#include <map>
+#include <random>
 #include <set>
 
 namespace {
@@ -325,8 +331,11 @@ void TestWorkers(const std::wstring& scratch) {
         return result;
     };
     thumbs.Start(hwnd, WM_APP + 50, cacheDir);
-    batch.Next(L"artwork misses, legacy failure markers and restarts still find the valid cover");
+    batch.Next(L"the cover workers start with the first request, not with the loader");
+    const bool idle = thumbs.Memory().workers == 0;
     auto missing = requestCover();
+    Check(idle && thumbs.Memory().workers == 2, L"the cover workers start with the first request, not with the loader");
+    batch.Next(L"artwork misses, legacy failure markers and restarts still find the valid cover");
     Check(missing && missing->image.Empty() && GetFileAttributesW(legacyMiss.c_str()) == INVALID_FILE_ATTRIBUTES,
           L"missing artwork is returned without a persistent failure marker");
     thumbs.Stop();
@@ -443,6 +452,134 @@ void TestWorkers(const std::wstring& scratch) {
     DeleteTestFolder(scratch + L"\\thumbs");
     DeleteFileW((scratch + L"\\cover.png").c_str());
 }
+// The media flyout keeps its cover for the whole track, so it gets the now-playing pane's decoded
+// copy as a small JPEG instead of the cover file, which can be megabytes.
+void TestFlyoutCover() {
+    ArtImage art;
+    art.width = art.height = 176;
+    art.pixels.resize(176 * 176);
+    for (int y = 0; y < 176; ++y)
+        for (int x = 0; x < 176; ++x) art.pixels[y * 176 + x] = (uint32_t)(x * 0x10000 + y * 0x100 + ((x ^ y) & 0xff));
+    const std::string jpeg = JpegBytes(art);
+    Microsoft::WRL::ComPtr<IStream> stream;
+    stream.Attach(SHCreateMemStream(reinterpret_cast<const BYTE*>(jpeg.data()), (UINT)jpeg.size()));
+    ArtImage back;
+    int w = 0, h = 0;
+    const bool decoded = stream && DecodeImage(stream.Get(), 176, back, 100000000, &w, &h);
+    Check(!jpeg.empty() && jpeg.size() < 64 * 1024 && decoded && w == 176 && h == 176 && JpegBytes(ArtImage{}).empty(),
+          L"the flyout's cover is a small JPEG of the pane's art, and no art gives no bytes");
+}
+
+// The track-keyed containers (track_set.h), the pooled MusicBrainz ids and the path index's stored
+// hashes, each against a plain standard container or a fresh lookup doing the same job.
+void TestTrackContainers() {
+    testlog::Batch batch;
+    std::mt19937 rng(7);
+
+    TrackIdSet set;
+    std::set<TrackId> setOracle;
+    bool setMatches = !set.insert(kInvalidTrack) && set.empty() && !set.contains(kInvalidTrack);
+    for (int i = 0; i < 20000; ++i) {
+        TrackId id = rng() % 5000;
+        if (rng() % 3) setMatches &= set.insert(id) == setOracle.insert(id).second;
+        else setMatches &= set.erase(id) == (setOracle.erase(id) == 1);
+    }
+    for (TrackId id = 0; id < 5100; ++id) setMatches &= set.contains(id) == (setOracle.count(id) == 1);
+    setMatches &= set.size() == setOracle.size() && set.count(70000) == 0;
+    set.clear();
+    setMatches &= set.empty() && set.size() == 0 && !set.contains(0) && set.insert(0) && set.size() == 1;
+    batch.Next(L"the track id bit set");
+    Check(setMatches, L"TrackIdSet inserts, erases and counts as std::set does, ignores the invalid id, and clears");
+
+    TrackIdMap<uint32_t> map;
+    std::map<TrackId, uint32_t> mapOracle;
+    bool mapMatches = true;
+    for (int i = 0; i < 20000; ++i) {
+        TrackId id = rng() % 3000;
+        switch (rng() % 4) {
+        case 0: mapMatches &= map.erase(id) == (mapOracle.erase(id) == 1); break;
+        default: map[id] = mapOracle[id] = rng(); break;
+        }
+    }
+    for (TrackId id = 0; id < 3100; ++id) {
+        auto it = mapOracle.find(id);
+        const uint32_t* found = map.find(id);
+        mapMatches &= it == mapOracle.end() ? found == nullptr : found && *found == it->second;
+    }
+    mapMatches &= map.size() == mapOracle.size() &&
+                  std::equal(map.begin(), map.end(), mapOracle.begin(), mapOracle.end(),
+                             [](const auto& e, const auto& o) { return e.id == o.first && e.value == o.second; });
+    batch.Next(L"the sorted track id map");
+    Check(mapMatches, L"TrackIdMap finds, inserts out of order, overwrites, erases and iterates in id order as std::map does");
+
+    // Ten albums of 200 tracks, set in a scrambled order with some tracks cleared again.
+    TrackMusicBrainzTable table;
+    std::map<TrackId, std::pair<std::string, std::string>> mbOracle;
+    std::vector<TrackId> order(2000);
+    for (TrackId i = 0; i < order.size(); ++i) order[i] = i;
+    std::shuffle(order.begin(), order.end(), rng);
+    auto groupOf = [](TrackId id) { return "4f8b2e1c-0000-4000-8000-00000000000" + std::to_string(id / 200 % 10); };
+    auto releaseOf = [](TrackId id) { return id % 7 ? "a1c3e5f7-1111-4111-8111-00000000000" + std::to_string(id / 200 % 10) : ""; };
+    for (TrackId id : order) {
+        table.Set(id, groupOf(id), releaseOf(id));
+        mbOracle[id] = {groupOf(id), releaseOf(id)};
+    }
+    for (TrackId id = 0; id < 2000; id += 13) {
+        table.Set(id, "", "");
+        mbOracle.erase(id);
+    }
+    auto sameAsOracle = [&](const TrackMusicBrainzTable& t) {
+        bool same = t.size() == mbOracle.size();
+        for (TrackId id = 0; id < 2010; ++id) {
+            auto it = mbOracle.find(id);
+            TrackMusicBrainzTable::Ids ids = t.Get(id);
+            same &= it == mbOracle.end() ? ids.releaseGroup.empty() && ids.release.empty()
+                                         : ids.releaseGroup == it->second.first && ids.release == it->second.second;
+        }
+        TrackId previous = 0;
+        bool first = true, ordered = true;
+        t.ForEach([&](TrackId id, TrackMusicBrainzTable::Ids) {
+            ordered &= first || id > previous;
+            previous = id;
+            first = false;
+        });
+        return same && ordered;
+    };
+    std::vector<uint32_t> newId(2000);
+    for (TrackId i = 0; i < newId.size(); ++i) newId[i] = i;
+    TrackMusicBrainzTable decoded;
+    std::vector<AlbumGroup> groups;
+    bool roundTrip = DecodeAlbumDatabase(EncodeAlbumDatabase({}, table, newId), 2000, nullptr, &groups, &decoded);
+    TrackMusicBrainzTable moved = std::move(decoded);
+    decoded.Set(1, "after a move", "");
+    batch.Next(L"pooled MusicBrainz ids");
+    Check(sameAsOracle(table) && table.MemoryBytes() < 64 * 1024,
+          L"MusicBrainz ids set in any order read back per track, and twenty distinct ids are pooled once each");
+    Check(roundTrip && groups.empty() && sameAsOracle(moved) && decoded.Get(1).releaseGroup == "after a move",
+          L"MusicBrainz ids survive the album section's encoding, and a moved-from table is empty and usable");
+
+    // Many tracks per folder, renamed, compacted and remapped: every lookup goes through the stored
+    // hashes, and must agree with each track's freshly built path.
+    Library library;
+    for (unsigned i = 0; i < 3000; ++i) library.Add(L"C:\\Hash\\Folder " + std::to_wstring(i % 40) + L"\\Song " + std::to_wstring(i) + L".flac");
+    for (TrackId id = 0; id < library.Count(); id += 11) library.Rename(id, L"C:\\Hash\\Renamed\\" + std::to_wstring(id) + L".FLAC");
+    std::vector<TrackId> live;
+    for (TrackId id = 0; id < library.Count(); ++id) if (id % 5) live.push_back(id);
+    auto measurements = std::move(g_albumMeasurements);  // Compact also remaps the global album measurements
+    library.Compact(live);
+    g_albumMeasurements = std::move(measurements);
+    bool indexed = library.Count() == live.size();
+    for (TrackId id = 0; id < library.Count(); ++id) {
+        std::wstring path = library.Path(id);
+        std::wstring upper = path;
+        std::transform(upper.begin(), upper.end(), upper.begin(), ::towupper);
+        indexed &= library.Find(path) == id && library.Find(upper) == id && library.Add(path) == id;
+    }
+    indexed &= library.Find(L"C:\\Hash\\Folder 0\\Song 0.flac") == kInvalidTrack && library.Count() == live.size();
+    batch.Next(L"path index with stored hashes");
+    Check(indexed, L"the path index finds every track by its path, in any case, after renames and a compaction");
+}
+
 }  // namespace
 
 int TestMemoryBehavior(const std::wstring& scratchDir, FILE* log) {
@@ -453,8 +590,10 @@ int TestMemoryBehavior(const std::wstring& scratchDir, FILE* log) {
     testlog::Group checkGroup(L"memory behaviour");
     TestAutoMeasureSelection();
     TestStores(scratch);
+    TestTrackContainers();
     TestRecipes(scratch);
     TestWorkers(scratch);
+    TestFlyoutCover();
     RemoveDirectoryW(scratch.c_str());
     return failures;
 }

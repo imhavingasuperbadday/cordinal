@@ -24,6 +24,7 @@ bool FountainStyleShown();
 bool DrawFountain(const Rect& area, double progress, const Palette& palette,
                   const uint8_t* peaks, size_t count, bool live, bool vertical);
 Rgb WavePlayedColor(const Palette& palette);
+bool PauseFading();  // the waveform is mid-fade between its playing and paused colours
 Rgb WaveRestingColor(const Palette& palette);
 Rgb WaveRestColor(const Palette& palette, bool live);
 void LoadAlternateSettings(const std::map<std::string, std::string>& values);

@@ -167,7 +167,14 @@ void Worker() {
 
 }  // namespace
 
-void StartCovers() { g_thread = std::thread(Worker); }
+// The worker locks g_mx as soon as it runs, so a request starts it only after releasing that
+// mutex. StartCovers itself only clears a previous stop.
+void EnsureCoverThread() {
+    if (g_quit || g_thread.joinable()) return;
+    g_thread = std::thread(Worker);
+}
+
+void StartCovers() { g_quit = false; }
 
 std::string TrackCoverBytes(const std::wstring& path) { return CoverBytes(path, false); }
 
@@ -219,6 +226,7 @@ void RequestThumb(TrackId id, int size) {
         std::lock_guard lock(g_mx);
         g_thumbs.push_back({id, g_lib.Path(id), size});
     }
+    EnsureCoverThread();
     g_cv.notify_one();
 }
 
@@ -235,6 +243,7 @@ void RequestCover(TrackId id) {
         g_wantedDisc = g_lib[id].disc;
         g_wantedDiscTotal = g_lib[id].discTotal;
     }
+    EnsureCoverThread();
     g_cv.notify_one();
 }
 

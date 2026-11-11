@@ -44,6 +44,12 @@ void CreatePanels(HWND parent);
 HWND NowPlayingPanel();
 HWND UpNextPanel();
 void PanelsTick();
+// The queue editor (Up next): a track drag from the list shows where it would land and drops there.
+bool QueueDragOver(const POINT* screen);
+bool QueueDrop(const std::vector<TrackId>& ids);
+void FocusQueue();
+bool QueueShown();
+void ToggleQueue();
 void LoadPanels();
 // Big mode: the docked, resizable panels painted onto one big surface.
 void LayoutBig(HDWP& dwp, RECT r);

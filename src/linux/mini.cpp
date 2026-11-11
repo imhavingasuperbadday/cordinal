@@ -235,7 +235,7 @@ bool MiniEvent(const SDL_Event& e) {
             return true;
         }
         case SDL_EVENT_MOUSE_WHEEL:
-            SetVolume(std::clamp(g.settings.volume + (e.wheel.y > 0 ? 0.05f : -0.05f), 0.0f, 1.0f));
+            if (g.settings.softwareVolume) SetVolume(std::clamp(g.settings.volume + (e.wheel.y > 0 ? 0.05f : -0.05f), 0.0f, 1.0f));
             return true;
         case SDL_EVENT_KEY_DOWN: {
             const bool ctrl = e.key.mod & SDL_KMOD_CTRL, shift = e.key.mod & SDL_KMOD_SHIFT;

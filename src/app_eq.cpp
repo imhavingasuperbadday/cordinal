@@ -27,7 +27,13 @@ void SelectEqPage(bool headphones) {
         g.headphonesWnd = CreateWindowExW(WS_EX_CONTROLPARENT, kHeadphonesClass, L"Headphone EQ",
             WS_CHILD | WS_CLIPCHILDREN, 0, 0, 0, 0, g.eqWnd, (HMENU)(INT_PTR)IDC_EQ_HARDWARE, g.inst, nullptr);
         if (!g.headphonesWnd) { ShowMessage(L"Couldn't open headphone controls."); headphones = false; }
-        else { HeadphonesSync(true); g.headsets.Refresh(); }
+        else {
+            // Refresh only wakes the poller. Start it first, or the wake is lost and the page
+            // stays on an empty snapshot until the next two-second pass that never comes.
+            g.headsets.Start();
+            HeadphonesSync(true);
+            g.headsets.Refresh();
+        }
     }
     g_eqc.headphones = headphones;
     Button_SetCheck(g_eqc.cordinalPage, headphones ? BST_UNCHECKED : BST_CHECKED);

@@ -9,7 +9,6 @@
 #include <algorithm>
 #include <ctime>
 #include <cwctype>
-#include <unordered_map>
 
 void ShuffleByWeights(std::vector<uint32_t>& order, const std::vector<double>& weights, std::mt19937& rng) {
     struct Pick { double key; uint32_t index; };
@@ -117,6 +116,44 @@ bool MovePlaylist(std::vector<Playlist>& playlists, int from, int to) {
     if (from < to) std::rotate(playlists.begin() + from, playlists.begin() + from + 1, playlists.begin() + to + 1);
     else std::rotate(playlists.begin() + to, playlists.begin() + from, playlists.begin() + from + 1);
     return true;
+}
+
+std::vector<int> TabSlots(const std::vector<Playlist>& playlists, bool groupAuto, int shownAuto) {
+    std::vector<int> slots;
+    slots.reserve(playlists.size());
+    int autos = 0, first = -1;
+    for (int i = 0; i < (int)playlists.size(); ++i)
+        if (playlists[i].kind == PlaylistKind::Auto && autos++ == 0) first = i;
+    bool group = groupAuto && autos >= 2;
+    if (group && (shownAuto < 0 || shownAuto >= (int)playlists.size() || playlists[shownAuto].kind != PlaylistKind::Auto))
+        shownAuto = first;
+    for (int i = 0; i < (int)playlists.size(); ++i) {
+        if (!group || playlists[i].kind != PlaylistKind::Auto) slots.push_back(i);
+        else if (i == first) slots.push_back(shownAuto);
+    }
+    return slots;
+}
+
+bool IsAutoGroupTab(const std::vector<Playlist>& playlists, const std::vector<int>& slots, int tab) {
+    // Grouped exactly when some auto-playlist has no tab of its own.
+    if (tab < 0 || tab >= (int)slots.size() || slots[tab] < 0 || slots[tab] >= (int)playlists.size() ||
+        playlists[slots[tab]].kind != PlaylistKind::Auto)
+        return false;
+    int autos = 0;
+    for (const auto& pl : playlists) autos += pl.kind == PlaylistKind::Auto;
+    int tabbed = 0;
+    for (int slot : slots) tabbed += slot >= 0 && slot < (int)playlists.size() && playlists[slot].kind == PlaylistKind::Auto;
+    return tabbed < autos;
+}
+
+int TabOfPlaylist(const std::vector<Playlist>& playlists, const std::vector<int>& slots, int index) {
+    if (index < 0 || index >= (int)playlists.size()) return -1;
+    for (int tab = 0; tab < (int)slots.size(); ++tab)
+        if (slots[tab] == index) return tab;
+    if (playlists[index].kind == PlaylistKind::Auto)
+        for (int tab = 0; tab < (int)slots.size(); ++tab)
+            if (IsAutoGroupTab(playlists, slots, tab)) return tab;
+    return -1;
 }
 
 // Splits a search box into words; double quotes group a phrase into one word.
@@ -260,15 +297,22 @@ bool RecordPlaylistEdit(Playlist& pl, std::vector<TrackId> before, std::wstring 
 }
 
 std::vector<uint32_t> OccurrenceMapping(const std::vector<TrackId>& from, const std::vector<TrackId>& to) {
-    // The n-th occurrence of a track in `from` becomes its n-th occurrence in `to`.
-    std::unordered_map<TrackId, std::vector<uint32_t>> places;
-    for (uint32_t i = (uint32_t)to.size(); i-- > 0;) places[to[i]].push_back(i);
+    // The n-th occurrence of a track in `from` becomes its n-th occurrence in `to`. Each list
+    // becomes (track << 32 | position) keys, sorted, so a track's occurrences sit together in
+    // position order and one merge pairs them: two flat arrays, where a map of position lists cost
+    // a hash node and a vector for every distinct track of a playlist that can be the library.
+    auto keys = [](const std::vector<TrackId>& items) {
+        std::vector<uint64_t> out(items.size());
+        for (size_t i = 0; i < items.size(); ++i) out[i] = (uint64_t)items[i] << 32 | (uint32_t)i;
+        SortRecords(out.begin(), out.end());
+        return out;
+    };
+    const std::vector<uint64_t> a = keys(from), b = keys(to);
     std::vector<uint32_t> mapping(from.size(), UINT32_MAX);
-    for (size_t i = 0; i < from.size(); ++i) {
-        auto it = places.find(from[i]);
-        if (it == places.end() || it->second.empty()) continue;
-        mapping[i] = it->second.back();
-        it->second.pop_back();
+    for (size_t i = 0, j = 0; i < a.size(); ++i) {
+        const uint64_t track = a[i] >> 32;
+        while (j < b.size() && (b[j] >> 32) < track) ++j;
+        if (j < b.size() && (b[j] >> 32) == track) mapping[(uint32_t)a[i]] = (uint32_t)b[j++];
     }
     return mapping;
 }

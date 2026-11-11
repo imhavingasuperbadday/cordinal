@@ -75,7 +75,8 @@ std::filesystem::path choose_destination(const std::filesystem::path& mountpoint
                                       music_dir(mountpoint).string());
     }
 
-    static thread_local std::mt19937 generator{std::random_device{}()};
+    // Not a thread_local engine: its 5,000 bytes would be allocated for every thread in the process.
+    std::random_device generator;
     std::uniform_int_distribution<int> directory_distribution(0, directory_count - 1);
     const int directory = directory_distribution(generator);
     std::ostringstream directory_name;
