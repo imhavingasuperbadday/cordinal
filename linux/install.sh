@@ -422,26 +422,27 @@ program_loads() {
     fi
 }
 
+# Shell functions share variables with their caller, so these names must not reuse install_files' src.
 write_desktop() {
-    src=$1
-    dest=$2
-    stage=$3
+    desk_src=$1
+    desk_dest=$2
+    desk_stage=$3
     exec_line="Exec=$(desktop_escape "$BIN/cordinal") %F"
     icon_line="Icon=$(desktop_escape "$ICON")"
     found_exec=0
     found_icon=0
-    : > "$stage"
+    : > "$desk_stage"
     while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in
             Exec=*) line=$exec_line; found_exec=1 ;;
             Icon=*) line=$icon_line; found_icon=1 ;;
         esac
-        printf '%s\n' "$line" >> "$stage"
-    done < "$src"
-    [ "$found_exec" = 1 ] || printf '%s\n' "$exec_line" >> "$stage"
-    [ "$found_icon" = 1 ] || printf '%s\n' "$icon_line" >> "$stage"
-    [ ! -L "$dest" ] || fail "$dest is a symbolic link. Remove it and run the installer again."
-    install -m 644 "$stage" "$dest"
+        printf '%s\n' "$line" >> "$desk_stage"
+    done < "$desk_src"
+    [ "$found_exec" = 1 ] || printf '%s\n' "$exec_line" >> "$desk_stage"
+    [ "$found_icon" = 1 ] || printf '%s\n' "$icon_line" >> "$desk_stage"
+    [ ! -L "$desk_dest" ] || fail "$desk_dest is a symbolic link. Remove it and run the installer again."
+    install -m 644 "$desk_stage" "$desk_dest"
 }
 
 install_files() {
