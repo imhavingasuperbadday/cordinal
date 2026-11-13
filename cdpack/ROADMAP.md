@@ -83,9 +83,11 @@ first version.
 
 ## 6. Coverage of Windows features
 
-Images with Control Flow Guard tables, signatures, delay-loaded imports or unusual load
-configurations are refused rather than packed. cordinal does not use them today; each needs its own
-loader support and tests before it is accepted.
+Images with Control Flow Guard tables, signatures or unusual load configurations are refused rather
+than packed. cordinal does not use them today; each needs its own loader support and tests before it
+is accepted. Delay-loaded imports are accepted since November 13, 2026 (`spec.md`): the player
+delay-loads the DLLs only some features use, and the fixture calls a delay-loaded function from a
+cold page.
 
 ## 7. Build and review
 

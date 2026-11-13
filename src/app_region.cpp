@@ -242,9 +242,16 @@ void DrawRegion(HDC dc, const RECT& rc, const RECT& channel) {
     int x1 = std::clamp((int)left + (int)(width * (g.regionEnd / dur)), (int)left, (int)channel.right);
     if (x1 <= x0) return;
     RECT band{x0, rc.top, x1, rc.bottom};
-    WORD bits[8] = {0x5555, 0xAAAA, 0x5555, 0xAAAA, 0x5555, 0xAAAA, 0x5555, 0xAAAA};
-    HBITMAP tile = CreateBitmap(8, 8, 1, 1, bits);
-    HBRUSH brush = CreatePatternBrush(tile);
+    // A monochrome pattern brush takes the DC's text and background colours when it fills, so one
+    // brush serves every theme. The live bar repaints up to sixty times a second; it is made once.
+    static const HBRUSH brush = [] {
+        WORD bits[8] = {0x5555, 0xAAAA, 0x5555, 0xAAAA, 0x5555, 0xAAAA, 0x5555, 0xAAAA};
+        HBITMAP tile = CreateBitmap(8, 8, 1, 1, bits);
+        HBRUSH made = CreatePatternBrush(tile);  // keeps its own copy of the pattern
+        DeleteObject(tile);
+        return made;
+    }();
+    if (!brush) return;
     HBRUSH oldBrush = (HBRUSH)SelectObject(dc, brush);
     COLORREF oldText = SetTextColor(dc, TextColor());
     int oldBk = SetBkMode(dc, OPAQUE);
@@ -254,8 +261,6 @@ void DrawRegion(HDC dc, const RECT& rc, const RECT& channel) {
     SetBkColor(dc, oldBkColor);
     SetTextColor(dc, oldText);
     SelectObject(dc, oldBrush);
-    DeleteObject(brush);
-    DeleteObject(tile);
     int w = std::max(1, S(1));
     COLORREF accent = Ref(P().accent);
     FillSolid(dc, {x0, rc.top, x0 + w, rc.bottom}, accent);

@@ -211,7 +211,7 @@ int Run(int argc, char** argv) {
         if (!full.empty()) paths.push_back(full);
     }
 
-    SDL_SetAppMetadata("cordinal", "0.1.10", "cordinal");
+    SDL_SetAppMetadata("cordinal", "0.1.11", "cordinal");
     SDL_SetHint(SDL_HINT_VIDEO_WAYLAND_PREFER_LIBDECOR, "1");
     if (parity) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
@@ -357,7 +357,7 @@ int Run(int argc, char** argv) {
         if (InternetRadio().browser && InternetRadio().browser->Searching()) timeout = std::min(timeout, 250);
         if (HelperVisualizersRunning()) timeout = std::min(timeout, 16);
         if (CanvasScrollAnimating()) timeout = std::min(timeout, 16);
-        if (UiAnimating()) timeout = ui::kFoobarFrameMs;
+        if (UiAnimating()) timeout = SeekAnimationOnly() && !g.settings.wave60Fps ? 33 : ui::kFoobarFrameMs;
         if (PlaylistImportPending()) timeout = 0;
         if (PackGlobalKeysActive()) timeout = std::min(timeout, 100);
         if (WebRunning()) timeout = std::min(timeout, 20);

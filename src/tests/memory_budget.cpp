@@ -7,6 +7,8 @@
 
 #include <thread>
 
+#include <tlhelp32.h>
+
 namespace {
 
 constexpr double kMiB = 1048576.0;
@@ -22,10 +24,10 @@ struct Budget {
     double memory;
 };
 constexpr Budget kBudgets[] = {
-    {L"empty", L"first start: no library, album view", 6.5},
-    {L"tracks", L"2,000-track library, track list", 6.0},
-    {L"albums", L"2,000-track library, album view with covers", 11.0},
-    {L"playing", L"2,000-track library, album view, playing", 13.25},
+    {L"empty", L"first start: no library, album view", 6.0},
+    {L"tracks", L"2,000-track library, track list", 5.5},
+    {L"albums", L"2,000-track library, album view with covers", 10.5},
+    {L"playing", L"2,000-track library, album view, playing", 12.75},
 };
 
 // A packed build expands the whole native image into private memory, so every byte of program
@@ -157,7 +159,27 @@ void Close(Player& player) {
 struct Measured {
     std::wstring report;
     double memory = -1;
+    std::vector<std::wstring> modules;  // every DLL the player had mapped, lower case
 };
+
+// System DLLs only some features need. tools/build.ps1 delay-loads them, so a session that never
+// uses those features never maps them; each one mapped costs private pages and heap.
+constexpr const wchar_t* kOnDemandDlls[] = {L"winhttp.dll", L"ws2_32.dll", L"iphlpapi.dll", L"bcrypt.dll",
+                                            L"hid.dll", L"setupapi.dll", L"xmllite.dll"};
+
+std::vector<std::wstring> ModulesOf(DWORD pid) {
+    std::vector<std::wstring> names;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid);
+    if (snapshot == INVALID_HANDLE_VALUE) return names;
+    MODULEENTRY32W entry{sizeof(entry)};
+    for (BOOL more = Module32FirstW(snapshot, &entry); more; more = Module32NextW(snapshot, &entry)) {
+        std::wstring name = entry.szModule;
+        for (wchar_t& c : name) c = towlower(c);
+        names.push_back(std::move(name));
+    }
+    CloseHandle(snapshot);
+    return names;
+}
 
 // One scenario: a fresh copy of the prepared profile, the player started, settled, then asked.
 Measured Measure(const std::wstring& exe, const std::wstring& base, const std::wstring& scratch, const wchar_t* scenario,
@@ -188,6 +210,7 @@ Measured Measure(const std::wstring& exe, const std::wstring& base, const std::w
     Sleep(2000);
     result.report = RequestReport(player.window, file);
     result.memory = Field(result.report, L"memory ") * kMiB;
+    result.modules = ModulesOf(player.process.dwProcessId);
     Close(player);
     return result;
 }
@@ -317,6 +340,14 @@ void TestMemoryBudget(const std::wstring& root, const std::wstring& scratch) {
         if (!Ready(measured.memory > 0, L"the player answered a memory report")) return;
         Check(mb <= budget.memory, L"%ls: %.2f MB of private working set is within its %.2f MB budget; the report "
               L"above names the owner that grew", budget.scenario, mb, budget.memory);
+        // Nothing in these two states looks anything up online, serves the web player or talks to a device.
+        const bool quiet = !wcscmp(budget.scenario, L"empty") || !wcscmp(budget.scenario, L"tracks");
+        if (quiet && Ready(!measured.modules.empty(), L"the player's module list")) {
+            for (const wchar_t* dll : kOnDemandDlls)
+                Check(std::find(measured.modules.begin(), measured.modules.end(), dll) == measured.modules.end(),
+                      L"%ls: %ls is not mapped until a feature uses it (/DELAYLOAD in tools/build.ps1)",
+                      budget.scenario, dll);
+        }
         if (mb < budget.memory * 0.85)
             fwprintf(g_log, L"memory-budget %ls: %.2f MB is well under %.2f MB; lower the budget to keep the saving\n",
                      budget.scenario, mb, budget.memory);

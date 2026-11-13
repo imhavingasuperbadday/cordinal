@@ -1114,3 +1114,41 @@ bool cord::FoldResidualsAvx2(const double* y, size_t n, const int32_t* coefficie
     _mm256_zeroupper();
     return ok;
 }
+
+// Four frames per pass, two per register ([L, R] of frame f, then of f + 1), so six sums are in
+// flight: as many as the registers hold without spilling. Each is the scalar FIR's own sequence
+// of rounded products and sums: GCC would fuse them into FMAs under -mfma, so contraction is off.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC push_options
+#pragma GCC optimize("fp-contract=off")
+#endif
+double nativeaudio::TruePeakAvx2(const double* x, size_t frames, const double* coeff, double peak) {
+    constexpr int kTaps = 24;
+    const __m256d sign = _mm256_set1_pd(-0.0);
+    __m256d maximum = _mm256_set1_pd(peak);
+    for (size_t f = 0; f < frames; f += 4) {
+        const double* at = x + f * 2;
+        __m256d a1 = _mm256_setzero_pd(), a2 = a1, a3 = a1, b1 = a1, b2 = a1, b3 = a1;
+        for (int k = 0; k < kTaps; ++k) {
+            const double* w = at - k * 2;
+            const __m256d p1 = _mm256_load_pd(coeff + k * 4), p2 = _mm256_load_pd(coeff + (kTaps + k) * 4),
+                          p3 = _mm256_load_pd(coeff + (2 * kTaps + k) * 4);
+            __m256d h = _mm256_loadu_pd(w);
+            a1 = _mm256_add_pd(a1, _mm256_mul_pd(p1, h));
+            a2 = _mm256_add_pd(a2, _mm256_mul_pd(p2, h));
+            a3 = _mm256_add_pd(a3, _mm256_mul_pd(p3, h));
+            h = _mm256_loadu_pd(w + 4);
+            b1 = _mm256_add_pd(b1, _mm256_mul_pd(p1, h));
+            b2 = _mm256_add_pd(b2, _mm256_mul_pd(p2, h));
+            b3 = _mm256_add_pd(b3, _mm256_mul_pd(p3, h));
+        }
+        for (__m256d v : {a1, a2, a3, b1, b2, b3}) maximum = _mm256_max_pd(_mm256_andnot_pd(sign, v), maximum);
+    }
+    __m128d half = _mm_max_pd(_mm256_castpd256_pd128(maximum), _mm256_extractf128_pd(maximum, 1));
+    half = _mm_max_pd(half, _mm_unpackhi_pd(half, half));
+    _mm256_zeroupper();
+    return _mm_cvtsd_f64(half);
+}
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC pop_options
+#endif

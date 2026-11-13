@@ -1,12 +1,14 @@
 // Checks of the formats added for game-music packs and older music: songs inside ZIP archives, DSD
-// (DSF and DSDIFF), tracker modules (MOD, S3M, XM, IT), Commodore 64 SID tunes and MIDI through a
-// SoundFont. Every fixture is written here in code: a tone whose pitch, length and level the
-// decoders must reproduce.
+// (DSF and DSDIFF), tracker modules (MOD, S3M, XM, IT), Commodore 64 SID tunes, MIDI through a
+// SoundFont, and G.726 against cordinal's own reference model of the recommendation. Every fixture
+// is written here in code: a tone whose pitch, length and level the decoders must reproduce, or
+// (G.726) the model's encoding of a signal built here.
 #include "selftest_common.h"
 
 #include "archive.h"
 #include "chiptune/cpu6502.h"
 #include "native_audio.h"
+#include "g726_reference.h"
 
 namespace {
 
@@ -741,6 +743,176 @@ void TestMidi(const std::wstring& dir) {
     Check(Rms(gm, gmRate, 0.05, 0.9) > 0.005, L"MIDI falls back to the General MIDI set in gm.dls (DLS)");
 }
 
+// --- G.726 ---
+
+// 14-bit test signal at 8 kHz that drives every adaptive part of G.726: a chirp, silence (the
+// scale factor's floor), a steady tone (partial band detection), noise straight after it (a
+// transition), a full-scale square and a quiet hiss.
+std::vector<int> G726Signal() {
+    std::vector<int> s;
+    uint32_t noise = 12345;
+    auto random = [&](int amplitude) {
+        noise = noise * 1664525 + 1013904223;
+        return (int)((noise >> 16) % (2 * amplitude + 1)) - amplitude;
+    };
+    for (int i = 0; i < 4000; ++i) {
+        const double t = i / 8000.0;
+        s.push_back((int)std::lround(6000 * std::sin(2 * 3.14159265358979 * (200 * t + 2800 * t * t))));
+    }
+    s.insert(s.end(), 2400, 0);
+    for (int i = 0; i < 4000; ++i) s.push_back((int)std::lround(3000 * std::sin(2 * 3.14159265358979 * 1000 * i / 8000.0)));
+    for (int i = 0; i < 2400; ++i) s.push_back(random(8000));
+    for (int i = 0; i < 2400; ++i) s.push_back((i / 20) % 2 ? 8191 : -8192);
+    for (int i = 0; i < 1600; ++i) s.push_back(random(20));
+    return s;
+}
+
+// The codes packed from the high bits of each byte down (WAV) or from the low bits up (AU).
+std::string PackCodes(const std::vector<unsigned>& codes, unsigned bits, bool lowFirst) {
+    std::string out;
+    uint32_t window = 0;
+    unsigned held = 0;
+    for (unsigned code : codes) {
+        if (lowFirst) window |= code << held;
+        else window = window << bits | code;
+        held += bits;
+        while (held >= 8) {
+            out += (char)(lowFirst ? window & 0xFF : (window >> (held - 8)) & 0xFF);
+            if (lowFirst) window >>= 8;
+            held -= 8;
+        }
+    }
+    if (held) out += (char)(lowFirst ? window & 0xFF : (window << (8 - held)) & 0xFF);
+    return out;
+}
+
+std::string G726Wav(const std::vector<unsigned>& codes, unsigned bits) {
+    const std::string data = PackCodes(codes, bits, false);
+    std::string s = "RIFF";
+    Le32(s, (uint32_t)(4 + 8 + 20 + 12 + 8 + data.size()));
+    s += "WAVEfmt ";
+    Le32(s, 20);
+    Le16(s, 0x45);       // G.726
+    Le16(s, 1);
+    Le32(s, 8000);
+    Le32(s, 1000 * bits);
+    Le16(s, 1);
+    Le16(s, bits);
+    Le16(s, 2);
+    Le16(s, 0);
+    s += "fact";
+    Le32(s, 4);
+    Le32(s, (uint32_t)codes.size());
+    s += "data";
+    Le32(s, (uint32_t)data.size());
+    return s + data;
+}
+
+std::string G726Au(const std::vector<unsigned>& codes, unsigned bits) {
+    const std::string data = PackCodes(codes, bits, true);
+    std::string s = ".snd";
+    Be32(s, 24);
+    Be32(s, (uint32_t)data.size());
+    Be32(s, bits == 4 ? 23 : bits == 3 ? 25 : 26);  // G.721, G.723 at 3 and 5 bits
+    Be32(s, 8000);
+    Be32(s, 1);
+    return s + data;
+}
+
+// cordinal's G.726 decoder against its own reference model of the recommendation
+// (g726_reference.cpp; no FFmpeg). For each rate the model encodes the test signal, and the player
+// must give the model's decode, sample for sample, from WAV and AU files: through dispatch, after
+// seeks, and for random codes no encoder would choose. The model's own round trip must track the
+// source, which catches a wrong table that both could share.
+void TestG726(const std::wstring& dir) {
+    testlog::Batch batch;
+    CreateDirectoryW(dir.c_str(), nullptr);
+    batch.Next(L"G.726 decodes as the reference model of the recommendation does, at every rate, from WAV and AU");
+    const std::vector<int> signal = G726Signal();
+    testlog::Cases exact, seeks, tagged, fuzz, quality, covered;
+    for (unsigned bits = 2; bits <= 5; ++bits) {
+        g726ref::Codec model(bits);
+        const std::vector<unsigned> codes = g726ref::Encode(signal, bits, &model);
+        const std::vector<int> want = g726ref::Decode(codes, bits);
+        const std::wstring rate = std::to_wstring(bits * 8) + L" kbit/s";
+        covered.Add(model.tones > 0 && model.transitions > 0,
+                    rate + L" (" + std::to_wstring(model.tones) + L" tone, " + std::to_wstring(model.transitions) + L" transition samples)");
+        // Quality is measured on the chirp, the speech-like part; the full-scale square overloads
+        // every rate by design.
+        double error = 0, chirpPower = 0;
+        for (size_t i = 0; i < 4000; ++i) {
+            error += (double)(want[i] - signal[i]) * (want[i] - signal[i]);
+            chirpPower += (double)signal[i] * signal[i];
+        }
+        const double snr = 10 * std::log10(chirpPower / std::max(error, 1.0));
+        // The recommendation's own coding at these rates gives roughly 2 to 5 bits of SNR a code bit
+        // on this signal; a wrong table or sign falls far below.
+        static const double kFloor[6] = {0, 0, 8, 14, 19, 24};
+        quality.Add(snr >= kFloor[bits], rate + L" (" + std::to_wstring((int)snr) + L" dB)");
+        // The player, from each container its rate has.
+        for (int container = 0; container < (bits == 2 ? 1 : 2); ++container) {
+            const std::wstring path = dir + L"\\g726-" + std::to_wstring(bits) + (container ? L".au" : L".wav");
+            if (!Ready(WriteTestBytes(path, container ? G726Au(codes, bits) : G726Wav(codes, bits)), L"G.726 file is written"))
+                continue;
+            std::wstring problem;
+            auto d = OpenDecoder(path, 48000, problem);
+            const std::wstring name = rate + (container ? L" AU" : L" WAV");
+            if (!d || d->Rate() != 8000) { exact.Add(false, name + L" does not open"); continue; }
+            std::vector<float> got;
+            float block[4096 * 2];
+            while (size_t n = d->Read(block, 4096)) got.insert(got.end(), block, block + n * 2);
+            // An AU file has no sample count: its last byte may hold a padding code.
+            bool same = !d->Failed() && got.size() / 2 >= want.size() && (container || got.size() / 2 == want.size());
+            size_t first = SIZE_MAX;
+            for (size_t i = 0; same && i < want.size(); ++i) {
+                const float v = std::clamp(want[i] * 4, -32768, 32767) * (1.0f / 32768);
+                if (got[i * 2] != v || got[i * 2 + 1] != v) { same = false; first = i; }
+            }
+            exact.Add(same, name + (first == SIZE_MAX ? L"" : L" (first difference at " + std::to_wstring(first) + L")"));
+            bool seek = true;
+            for (double at : {1.3, 0.2, 1.9}) {
+                const size_t from = (size_t)(at * 8000);
+                seek = seek && d->Seek(at) && d->Read(block, 256) == 256;
+                for (size_t i = 0; seek && i < 512; ++i) seek = block[i] == got[from * 2 + i];
+            }
+            seeks.Add(seek, name);
+            TagData t;
+            tagged.Add(ReadTags(path, t) && t.codec == Codec::G726 && t.sampleRate == 8000 && t.channels == 1 &&
+                           std::abs(t.duration - signal.size() / 8000.0) < 0.01,
+                       name);
+        }
+        // Random codes, including the all-zero code a channel error can bring.
+        std::vector<unsigned> random(16000);
+        uint32_t state = 777 + bits;
+        for (unsigned& c : random) { state = state * 1103515245 + 12345; c = (state >> 16) & ((1u << bits) - 1); }
+        const std::vector<int> randomWant = g726ref::Decode(random, bits);
+        const std::wstring path = dir + L"\\random-" + std::to_wstring(bits) + L".wav";
+        bool same = Ready(WriteTestBytes(path, G726Wav(random, bits)), L"G.726 random-code file is written");
+        std::wstring problem;
+        auto d = same ? OpenDecoder(path, 48000, problem) : nullptr;
+        std::vector<float> got;
+        float block[4096 * 2];
+        while (d && d->Read(block, 4096) > 0) {}
+        same = same && d && d->Seek(0);
+        while (same && got.size() < random.size() * 2) {
+            const size_t n = d->Read(block, 4096);
+            if (!n) break;
+            got.insert(got.end(), block, block + n * 2);
+        }
+        same = same && got.size() == random.size() * 2;
+        for (size_t i = 0; same && i < random.size(); ++i)
+            same = got[i * 2] == std::clamp(randomWant[i] * 4, -32768, 32767) * (1.0f / 32768);
+        fuzz.Add(same, rate);
+    }
+    Check(covered.Passed(), L"the G.726 test signal reaches tone detection and the transition detector at every rate%ls",
+          covered.failed.c_str());
+    Check(quality.Passed(), L"the reference model's own round trip tracks the source at every rate%ls", quality.failed.c_str());
+    Check(exact.Passed(), L"G.726 WAV and AU files decode to the reference model's samples exactly%ls", exact.failed.c_str());
+    Check(seeks.Passed(), L"G.726 seeks forward and back to the samples of a straight read%ls", seeks.failed.c_str());
+    Check(tagged.Passed(), L"G.726 tags give the codec, rate, channel and length%ls", tagged.failed.c_str());
+    Check(fuzz.Passed(), L"random G.726 codes decode as the reference model decodes them%ls", fuzz.failed.c_str());
+}
+
 }  // namespace
 
 void TestFormats(const std::wstring& scratch) {
@@ -750,4 +922,5 @@ void TestFormats(const std::wstring& scratch) {
     TestModules(scratch + L"\\modules");
     TestSid(scratch + L"\\sid");
     TestMidi(scratch + L"\\midi");
+    TestG726(scratch + L"\\g726");
 }

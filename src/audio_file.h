@@ -27,6 +27,13 @@ public:
     File(File&& other) noexcept { Swap(other); }
     File& operator=(File&& other) noexcept { File moved(std::move(other));Swap(moved);return *this; }
     bool Open(const std::wstring& path) {
+        // Release whatever an earlier Open left. The ALAC decoder opens the file to sniff it, then the
+        // MP4 or CAF reader opens it again when Size() is 0, so an empty .m4a, .mp4 or .caf leaked its
+        // first handle and stayed locked against tag writes until the player exited.
+        {
+            File previous;
+            Swap(previous);
+        }
         file_ = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (file_ == INVALID_HANDLE_VALUE) {  // perhaps a song inside a ZIP (archive.h)
@@ -139,6 +146,25 @@ __forceinline uint64_t U64(const uint8_t* p, bool be = false) {
 #endif
 }
 inline bool Is(const uint8_t* p, const char* id) { return memcmp(p, id, 4) == 0; }
+
+// One G.711 byte (ITU-T G.711) expanded to the 16-bit range and scaled to [-1, 1): mu-law when
+// `mu`, otherwise A-law.
+inline float G711(unsigned u, bool mu) {
+    int v;
+    if (mu) {
+        u = (~u) & 255;
+        v = (((u & 15) << 3) + 132) << ((u >> 4) & 7);
+        v = (u & 128) ? 132 - v : v - 132;
+    } else {
+        u ^= 0x55;
+        unsigned e = (u >> 4) & 7;
+        v = (u & 15) << 4;
+        if (e == 0) v += 8;
+        else { v += 264; if (e > 1) v <<= e - 1; }
+        if (!(u & 128)) v = -v;
+    }
+    return v * (1.0f / 32768.0f);
+}
 
 // Convert interleaved samples to float: 16/32-bit integers scale into [-1,1),
 // float32 passes through with non-finite values forced to 0. `samples` counts both

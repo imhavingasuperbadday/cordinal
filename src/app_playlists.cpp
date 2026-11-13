@@ -6,6 +6,8 @@
 // Album grouping adds two header rows per album, so a list row is not a view position.
 #include "app.h"
 #include "archive.h"
+#include "peaks.h"
+#include "wind.h"
 
 #include <algorithm>
 
@@ -748,6 +750,133 @@ int g_playedWidth = -1;
 // Paints a whole track row: its background (selection, hover or the list's own), then every
 // column. The visual style would otherwise paint its own blue hover and a line at each column
 // edge; the list keeps the style for its scroll bars.
+// Wind behind the track list (wind.h). A timer on the list steps the ribbons about 30 times a second
+// while the preference is on and music is heard, and repaints only the list's right part; the rows
+// draw the ribbons over their backgrounds and under their text (DrawListWind), each one's colour
+// mixed by hand from the row's own background toward the accent, since GDI fills have no alpha.
+// Apollo's Windows 2000 list has none, and turning off Windows' animations turns it off too.
+constexpr UINT_PTR kWindTimer = 0x57D1;
+Wind g_wind;
+bool g_windRunning = false;
+ULONGLONG g_windLast = 0;
+
+bool WindAllowed() {
+    BOOL animations = TRUE;
+    SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animations, 0);
+    return g.listWind && g.list && IsWindowVisible(g.list) && !ApolloMode() && animations;
+}
+bool WindHeard() { return (g.playing != kNone || RadioPlaying()) && !g.engine.Paused(); }
+
+// The right part of the list below its header, where the streaks live.
+RECT WindArea() {
+    RECT r{};
+    GetClientRect(g.list, &r);
+    if (HWND header = ListView_GetHeader(g.list)) {
+        RECT hr;
+        GetWindowRect(header, &hr);
+        r.top = std::min(r.bottom, r.top + (int)(hr.bottom - hr.top));
+    }
+    r.left += (r.right - r.left) * 55 / 100;
+    return r;
+}
+
+void StopWind() {
+    if (g_windRunning && g.list) KillTimer(g.list, kWindTimer);
+    g_windRunning = false;
+}
+
+void WindTimer() {
+    if (!WindAllowed()) {
+        StopWind();
+        if (g_wind.Active()) {
+            g_wind.Clear();
+            if (g.list) InvalidateRect(g.list, nullptr, FALSE);
+        }
+        return;
+    }
+    ULONGLONG now = GetTickCount64();
+    float bands[2 * kMoodBands] = {};
+    bool heard = WindHeard() && g.engine.WaveformBands(bands, 2);
+    g_wind.Step(bands + kMoodBands, heard, (float)(now - g_windLast) / 1000);  // the newer half
+    g_windLast = now;
+    RECT area = WindArea();
+    InvalidateRect(g.list, &area, FALSE);
+    if (!heard && !g_wind.Active()) StopWind();
+}
+
+COLORREF WindColor(Rgb bg, float alpha) {
+    Rgb accent = P().accent, out = 0;
+    float t = std::clamp(alpha, 0.0f, 1.0f) * Wind::kBrightest;
+    for (int shift : {16, 8, 0}) {
+        float x = (float)(bg >> shift & 0xFF), y = (float)(accent >> shift & 0xFF);
+        out |= (Rgb)std::lround(x + (y - x) * t) << shift;
+    }
+    return Ref(out);
+}
+
+// The ribbons crossing `clip` (a row, or the empty space under the last one), over its background.
+// Each is a filled lens per pass, a few where it melts into an edge, so a row costs a shape or two
+// instead of a line per segment; the dim halos go down for every ribbon first, then the bright cores,
+// so a ribbon crossing another's glow stays bright instead of cutting into it.
+void DrawListWind(HDC dc, const RECT& clip, COLORREF background) {
+    if (!g_wind.Active() || !g.listWind) return;
+    RECT area = WindArea();
+    RECT part;
+    if (!IntersectRect(&part, &area, &clip)) return;
+    Rgb bg = (Rgb)GetRValue(background) << 16 | (Rgb)GetGValue(background) << 8 | GetBValue(background);
+    float width = (float)(area.right - area.left), height = (float)(area.bottom - area.top), scale = (float)S(100) / 100;
+    float swell = g_wind.Swell();  // the music widens every ribbon on a loud moment or a beat
+    constexpr int kPoints = Wind::kPoints;
+    float lx[kPoints], ly[kPoints], rx[kPoints], ry[kPoints];
+    POINT poly[2 * kPoints];
+    // Edge brightness in four steps: enough for a fade to look smooth, few enough that a ribbon away
+    // from the edges still fills as one polygon.
+    auto band = [](float a) { return (int)std::lround(std::clamp(a, 0.0f, 1.0f) * 4); };
+    int saved = SaveDC(dc);
+    IntersectClipRect(dc, part.left, part.top, part.right, part.bottom);
+    SelectObject(dc, GetStockObject(NULL_PEN));
+    SelectObject(dc, GetStockObject(DC_BRUSH));
+    for (int pass = 0; pass < 2; ++pass) {
+        float pad = (pass ? 0.0f : 1.1f * scale + 0.5f) * swell;
+        for (const WindStreak& s : g_wind.Streaks()) {
+            float fade = Wind::Fade(s);
+            if (fade <= 0.02f) continue;
+            if (area.top + s.maxY * height + pad + 2 < part.top || area.top + s.minY * height - pad - 2 > part.bottom)
+                continue;
+            int n = Wind::Ribbon(s, width, height, scale * swell, pad, lx, ly, rx, ry);
+            if (n < 2) continue;
+            if (!pass) {
+                // The halo's extra width tapers away at the edges (Ribbon), so one fill always does.
+                POINT* p = poly;
+                for (int i = 0; i < n; ++i) *p++ = {area.left + std::lround(lx[i]), area.top + std::lround(ly[i])};
+                for (int i = n - 1; i >= 0; --i) *p++ = {area.left + std::lround(rx[i]), area.top + std::lround(ry[i])};
+                SetDCBrushColor(dc, WindColor(bg, fade * s.weight * Wind::kHalo));
+                Polygon(dc, poly, 2 * n);
+                continue;
+            }
+            // The core melts into an edge in runs of segments that share a brightness: a ribbon clear of
+            // the edges is one fill, and one leaving the right edge becomes a few fading steps.
+            for (int first = 0; first + 1 < n;) {
+                int last = first + 1;
+                int step = band(Wind::EdgeFade(s.x[first], s.y[first]));
+                while (last + 1 < n && band(Wind::EdgeFade(s.x[last], s.y[last])) == step) ++last;
+                float edge = (Wind::EdgeFade(s.x[first], s.y[first]) + Wind::EdgeFade(s.x[last], s.y[last])) / 2;
+                if (edge > 0.01f) {
+                    POINT* p = poly;
+                    for (int i = first; i <= last; ++i)
+                        *p++ = {area.left + std::lround(lx[i]), area.top + std::lround(ly[i])};
+                    for (int i = last; i >= first; --i)
+                        *p++ = {area.left + std::lround(rx[i]), area.top + std::lround(ry[i])};
+                    SetDCBrushColor(dc, WindColor(bg, fade * s.weight * edge));
+                    Polygon(dc, poly, 2 * (last - first + 1));
+                }
+                first = last;
+            }
+        }
+    }
+    RestoreDC(dc, saved);
+}
+
 void DrawTrackRow(NMLVCUSTOMDRAW* cd, int row, TrackId id, bool playing) {
     HDC dc = cd->nmcd.hdc;
     const RECT& rc = cd->nmcd.rc;
@@ -766,16 +895,27 @@ void DrawTrackRow(NMLVCUSTOMDRAW* cd, int row, TrackId id, bool playing) {
         text = Ref(TextOn(P().playing));
     }
     HFONT font = playing && !FoobarMode() ? g.fontBold : g.font;
-    FillSolid(dc, rc, bg);
+    // A wind frame repaints only the list's right part: fill just that part of the row and draw the
+    // ribbons, rather than filling the whole row to put the same background back.
+    RECT dirty{};
+    bool clipped = GetClipBox(dc, &dirty) != ERROR;
+    RECT fill = rc;
+    if (clipped) {
+        IntersectRect(&fill, &rc, &dirty);
+        if (fill.right <= fill.left || fill.bottom <= fill.top) return;
+    }
+    FillSolid(dc, fill, bg);
+    DrawListWind(dc, rc, bg);
     SetBkMode(dc, TRANSPARENT);
     int columns = Header_GetItemCount(g.header);
     // One buffer for every cell of every row: a scroll repaints hundreds of cells, and each one used
-    // to allocate its own string.
+    // to allocate its own string. Cells outside the dirty part are left alone.
     static std::wstring cell;
     for (int sub = 0; sub < columns; ++sub) {
         RECT r{};
         if (!ListView_GetSubItemRect(g.list, row, sub, sub == 0 ? LVIR_LABEL : LVIR_BOUNDS, &r)) continue;
         if (r.right <= rc.left || r.left >= rc.right) continue;
+        if (clipped && (r.right <= dirty.left || r.left >= dirty.right)) continue;
         int type = ColumnType(sub);
         if (HasBadge(type, id)) {
             DrawBadgeCell(dc, row, sub, id, text, bg, font, selected);
@@ -1046,6 +1186,56 @@ void PlayingRowTick() {
     if (width < 0) g_playedWidth = -1;
 }
 
+void ListWindWake() {
+    if (g_windRunning || !WindAllowed() || !WindHeard()) return;
+    g_windRunning = SetTimer(g.list, kWindTimer, 33, nullptr) != 0;
+    g_windLast = GetTickCount64();
+}
+
+void StepListWindForTest(const float energy[3], float seconds) { g_wind.Step(energy, true, seconds); }
+
+LONG ListColumnsRight() {
+    HWND header = ListView_GetHeader(g.list);
+    int n = header ? Header_GetItemCount(header) : 0;
+    if (n <= 0) return 0;
+    RECT r{};
+    Header_GetItemRect(header, Header_OrderToIndex(header, n - 1), &r);
+    MapWindowPoints(header, g.list, (POINT*)&r, 2);  // the header slides left as the list scrolls
+    return r.right;
+}
+
+// Past the last row and right of the last column the list is plain background: the list theme would
+// draw column lines down an empty or short playlist, and the rows' custom draw never reaches the
+// space beside the columns. The wind passes through both.
+void PaintListBlank(HDC dc) {
+    RECT client, last{};
+    GetClientRect(g.list, &client);
+    LONG top = client.top;
+    if (HWND header = ListView_GetHeader(g.list)) {
+        RECT hr;
+        GetWindowRect(header, &hr);
+        top = hr.bottom - hr.top;
+    }
+    int n = ListView_GetItemCount(g.list);
+    LONG rowsEnd = n > 0 && ListView_GetItemRect(g.list, n - 1, &last, LVIR_BOUNDS) ? std::max(client.top, last.bottom) : top;
+    RECT side{std::max(client.left, ListColumnsRight()), top, client.right, std::min(rowsEnd, client.bottom)};
+    RECT below{client.left, rowsEnd, client.right, client.bottom};
+    for (const RECT& r : {side, below}) {
+        if (r.right <= r.left || r.bottom <= r.top) continue;
+        FillSolid(dc, r, WindowBg());
+        DrawListWind(dc, r, WindowBg());
+    }
+}
+
+void ListWindChanged() {
+    if (!g.listWind) {
+        StopWind();
+        g_wind.Clear();
+    }
+    ListWindWake();
+    if (g.list) InvalidateRect(g.list, nullptr, FALSE);
+}
+
 // Mouse tracking for the track drag begun by LVN_BEGINDRAG. The list would otherwise keep the
 // messages (it captures the mouse itself), so the drag lives in this subclass.
 LRESULT CALLBACK ListSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
@@ -1090,7 +1280,12 @@ LRESULT CALLBACK ListSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
     // change moves it; the list itself repaints only the strip it just uncovered. Repaint the whole
     // list on every size message: a width cache here cost about 197 KB in the packed player.
     if (msg == WM_SIZE) InvalidateRect(h, nullptr, FALSE);
+    if (msg == WM_TIMER && wp == kWindTimer) {
+        WindTimer();
+        return 0;
+    }
     if (msg == WM_NCDESTROY) {
+        StopWind();
         EndTrackDrag(false, {});
         RemoveWindowSubclass(h, ListSubclass, 0);
     }
@@ -1138,16 +1333,7 @@ LRESULT OnListNotify(NMHDR* hdr) {
                 // column lines down an empty or short playlist. A drag's insertion mark after the
                 // last row is left alone.
                 if (g_trackDrag.active) return CDRF_DODEFAULT;
-                RECT client, last{};
-                GetClientRect(g.list, &client);
-                int n = ListView_GetItemCount(g.list);
-                if (n > 0 && ListView_GetItemRect(g.list, n - 1, &last, LVIR_BOUNDS)) client.top = std::max(client.top, last.bottom);
-                else if (HWND header = ListView_GetHeader(g.list)) {
-                    RECT hr;
-                    GetWindowRect(header, &hr);
-                    client.top = hr.bottom - hr.top;
-                }
-                if (client.bottom > client.top) FillSolid(cd->nmcd.hdc, client, WindowBg());
+                PaintListBlank(cd->nmcd.hdc);
                 return CDRF_DODEFAULT;
             }
             if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {

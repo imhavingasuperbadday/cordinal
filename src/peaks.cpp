@@ -20,6 +20,7 @@
 #include <cstring>
 #include <cwctype>
 #include <deque>
+#include <emmintrin.h>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -288,18 +289,26 @@ bool PeakAccumulator::Preview(Peaks& out) const {
     return true;
 }
 
+// The per-frame loop uses SSE scalar intrinsics because this file builds without inlining, where
+// std::max is a call. maxss(x, y) is `x > y ? x : y`, exactly std::max(y, x)'s choice, NaN included
+// (a NaN left sample hides the right one, as it always did).
 void PeakAccumulator::Add(const float* stereo, size_t frames) {
+    const __m128 magnitude = _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF));
     while (frames) {
         size_t count = (size_t)std::min<uint64_t>(frames, blockFrames_ - inBlock_);
         const float* end = stereo + count * 2;
-        float maximum = blockMax_;
-        double squares = 0;
+        __m128 maximum = _mm_set_ss(blockMax_);
+        __m128d squares = _mm_setzero_pd();
         for (; stereo != end; stereo += 2) {
-            maximum = std::max(maximum, std::max(std::fabs(stereo[0]), std::fabs(stereo[1])));
-            squares += stereo[0] * stereo[0] + stereo[1] * stereo[1];
+            const __m128 left = _mm_load_ss(stereo), right = _mm_load_ss(stereo + 1);
+            const __m128 louder = _mm_max_ss(_mm_and_ps(right, magnitude), _mm_and_ps(left, magnitude));
+            maximum = _mm_max_ss(louder, maximum);
+            // In float, as `l * l + r * r` is, then added in double.
+            const __m128 power = _mm_add_ss(_mm_mul_ss(left, left), _mm_mul_ss(right, right));
+            squares = _mm_add_sd(squares, _mm_cvtss_sd(squares, power));
         }
-        blockMax_ = maximum;
-        blockSquares_ += squares * 0.5;
+        blockMax_ = _mm_cvtss_f32(maximum);
+        blockSquares_ += _mm_cvtsd_f64(squares) * 0.5;
         split_.Add(end - count * 2, count, blockBands_);
         inBlock_ += count;
         frames -= count;
@@ -376,21 +385,31 @@ void MoodSplit::Add(const float* stereo, size_t frames, double sums[kMoodBands])
         midHigh[1] = midLow[0] = midLow[1] = treble[1] = 0;
         primed = true;
     }
+    // The states live in locals for the loop: as members they could alias `stereo`, so each
+    // sample would store and reload them and wait on that round trip.
+    float l1 = bass[0], l2 = bass[1], h1 = midHigh[0], h2 = midHigh[1], m3 = midLow[0], m4 = midLow[1];
+    float t1 = treble[0], t2 = treble[1];
     double low = 0, mid = 0, high = 0;
     for (const float* end = stereo + frames * 2; stereo != end; stereo += 2) {
         const float x = (stereo[0] + stereo[1]) * 0.5f;
-        const float l1 = bass[0] += a * (x - bass[0]);
-        const float l2 = bass[1] += a * (l1 - bass[1]);
-        const float m1 = x - (midHigh[0] += a * (x - midHigh[0]));
-        const float m2 = m1 - (midHigh[1] += a * (m1 - midHigh[1]));
-        const float m3 = midLow[0] += b * (m2 - midLow[0]);
-        const float m4 = midLow[1] += b * (m3 - midLow[1]);
-        const float t1 = x - (treble[0] += b * (x - treble[0]));
-        const float t2 = t1 - (treble[1] += b * (t1 - treble[1]));
+        l1 += a * (x - l1);
+        l2 += a * (l1 - l2);
+        h1 += a * (x - h1);
+        const float m1 = x - h1;
+        h2 += a * (m1 - h2);
+        const float m2 = m1 - h2;
+        m3 += b * (m2 - m3);
+        m4 += b * (m3 - m4);
+        t1 += b * (x - t1);
+        const float u1 = x - t1;
+        t2 += b * (u1 - t2);
+        const float u2 = u1 - t2;
         low += (double)l2 * l2;
         mid += (double)m4 * m4;
-        high += (double)t2 * t2;
+        high += (double)u2 * u2;
     }
+    bass[0] = l1, bass[1] = l2, midHigh[0] = h1, midHigh[1] = h2, midLow[0] = m3, midLow[1] = m4;
+    treble[0] = t1, treble[1] = t2;
     sums[kMoodBass] += low;
     sums[kMoodMid] += mid;
     sums[kMoodTreble] += high;
@@ -450,10 +469,15 @@ MoodTone MoodOf(const Peaks& p, int first, int last, float center, int buckets) 
     return tone;
 }
 
-float LiveMood::Scale(const float* energy, int buckets, Peaks& out) {
+float LiveMood::Scale(const float* energy, int buckets, Peaks& out, double seconds) {
     constexpr double kRange = 45, kSilent = -100;
-    constexpr double kFall = 0.15;    // dB a frame the ceiling sinks after a loud moment: 4.5 dB/s at 30 fps
-    constexpr double kFollow = 0.03;  // how far a frame moves the balance: about a second to settle
+    constexpr double kFallPerSecond = 4.5;  // dB the ceiling sinks after a loud moment
+    constexpr double kFollow = 0.03;        // how far a 30 fps frame moves the balance: about a second to settle
+    // The first frame counts as one 30 fps frame; a long gap (a stall, a hidden window) as at most three.
+    const double frames = last_ < 0 ? 1.0 : std::clamp(seconds - last_, 0.0, 0.1) * 30;
+    last_ = seconds;
+    const double kFall = kFallPerSecond / 30 * frames;
+    const double follow = 1 - std::pow(1 - kFollow, frames);
     buckets = std::clamp(buckets, 0, kPeakBuckets);
     auto decibels = [](double e) { return e > 0 ? 10 * std::log10(e) : -HUGE_VAL; };
     double loudest = -HUGE_VAL;
@@ -476,8 +500,20 @@ float LiveMood::Scale(const float* energy, int buckets, Peaks& out) {
             ++lit;
         }
     }
-    if (lit) center_ += (balance / lit - center_) * kFollow;
+    if (lit) center_ += (balance / lit - center_) * follow;
     return (float)center_;
+}
+
+const Peaks& SongPeaks::Get(const Peaks& peaks, bool smooth, int radius) {
+    if (!valid_ || smooth != smooth_ || radius != radius_ || std::memcmp(&peaks, &source_, sizeof(Peaks)) != 0) {
+        source_ = peaks;
+        smooth_ = smooth;
+        radius_ = radius;
+        valid_ = true;
+        if (smooth) SmoothPeaks(source_, smoothed_, radius);
+        center_ = MoodCenter(smooth ? smoothed_ : source_);
+    }
+    return smooth ? smoothed_ : source_;
 }
 
 void SmoothPeaks(const Peaks& in, Peaks& out, int radius) {

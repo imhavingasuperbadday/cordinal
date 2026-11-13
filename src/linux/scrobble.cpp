@@ -1,6 +1,6 @@
 // Native scrobbling on Linux: the shared submission module (src/listenbrainz.cpp) started with the profile,
 // a "playing now" notice for each track that starts and a listen for each play that counts, as the Windows
-// build does from app_platform.cpp. The connections window is a panel (panels.cpp). The Discord status
+// build does from app_platform.cpp. The connections window is a panel (panel_setup.cpp). The Discord status
 // (src/discord.cpp) is fed from here too.
 #include "app.h"
 #include "album_editions.h"

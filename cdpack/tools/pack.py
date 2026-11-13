@@ -186,12 +186,43 @@ def filter_code(data, start, size, inverse, rva=None, visited=None):
             at += 1
 
 
+# Delay imports need nothing from the loader: the linker's helper reaches each descriptor through
+# the thunk that calls it, and writes the module handle and the IAT slot itself, so restoring the
+# image with its relocations is enough. The packed headers leave the directory out, as they leave
+# out the load configuration. The helper reads the headers at __ImageBase only when the load config
+# asks it to protect the delay IAT, which would find the packed ones, so that flag is refused.
+def validate_delay_imports(pe):
+    at, size = pe.directory(13)
+    if not at and not size:
+        return
+    require(at and size >= 32 and at + size <= pe.size, "delay-import directory extent")
+    config, config_size = pe.directory(10)
+    if config and config_size >= 0x94:
+        require(not u32(pe.at(config, config_size), 0x90) & 0x1000, "protected delay-load IATs are unsupported")
+
+    def writable(rva, length):
+        return any(s["rva"] <= rva and rva + length <= s["rva"] + align(max(s["virtual"], s["raw_bytes"]))
+                   and s["flags"] & 0x80000000 for s in pe.sections)
+
+    descriptors = pe.memory()[at:at + size]
+    for cursor in range(0, size - 31, 32):
+        attributes, name, module, iat, names, bound, unload, _ = struct.unpack_from("<8I", descriptors, cursor)
+        if not any((attributes, name, module, iat, names, bound, unload)):
+            return
+        require(attributes == 1, "delay-import descriptors must hold RVAs")
+        require(all(0 < rva < pe.size for rva in (name, iat, names)), "delay-import descriptor outside the image")
+        require(writable(module, 8) and writable(iat, 8), "delay-import handle and IAT must be writable")
+        require(all(rva == 0 or rva < pe.size for rva in (bound, unload)), "delay-import tables outside the image")
+    raise ValueError("delay-import directory has no terminating descriptor")
+
+
 def validate_native(pe):
     require(u32(pe.data, pe.opt + 32) == 4096, "native section alignment must be 4096")
     require(not any(s["name"].startswith((b"CDP", b"UPX")) for s in pe.sections), "input is already packed")
     require(not u16(pe.data, pe.opt + 70) & 0x4000, "CFG images require a dedicated loader implementation")
-    for i in (4, 7, 8, 11, 13, 14, 15):
+    for i in (4, 7, 8, 11, 14, 15):
         require(pe.directory(i) == (0, 0), f"unsupported native directory {i}")
+    validate_delay_imports(pe)
     virtual_end, raw_end = 4096, pe.headers
     for section in sorted(pe.sections, key=lambda s: s["rva"]):
         size = align(max(section["virtual"], section["raw_bytes"]))

@@ -66,7 +66,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends build-essential ca-certificates cmake git pkg-config \
-            libsdl3-dev libsdl3-ttf-dev libpipewire-0.3-dev libsystemd-dev libfontconfig-dev libssl-dev
+            libsdl3-dev libsdl3-ttf-dev libpipewire-0.3-dev libfontconfig-dev libssl-dev
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build
         run: |

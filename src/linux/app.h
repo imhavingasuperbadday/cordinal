@@ -143,7 +143,9 @@ struct Settings {
     bool waveform = true;       // off uses a regular seek bar, overriding the saved live display settings
     bool liveWaveform = false;   // animate the audio being heard instead of the whole-song overview
     bool liveFountain = false;   // the DELTARUNE fountain follows audible audio, including radio
+    bool listWind = false;       // wind ribbons behind the track list follow the heard audio (wind.h)
     bool fullLiveWaveform = true; // light the whole live display instead of splitting it at the song position
+    bool wave60Fps = false;      // animate the live seek bar 60 times a second instead of 30
     int bandWaveSize = 0;        // normal top waveform height; 0 follows the layout size
     int seekStyle = 0;           // the seek bar's look, whole song or live: SeekStyle (peaks.h)
     int moodColors = 0;          // the moodbar's colours: MoodColors (peaks.h)
@@ -162,7 +164,7 @@ struct Settings {
     // length and then missed, and both games' current and best streaks.
     std::vector<int> nttGuesses;
     int nttStreak = 0, nttBest = 0, wcfStreak = 0, wcfBest = 0;
-    // Title formatting (panels.cpp): the now-playing lines, the status bar and the window title.
+    // Title formatting (panel_setup.cpp): the now-playing lines, the status bar and the window title.
     std::wstring fmtTitle = L"%title%";
     std::wstring fmtSub = L"[%artist%][  \x2022  %album%][  \x2022  %date%]";
     std::wstring fmtStatus = L"[%codec% | ][%bitrate% kbps | ][%samplerate% Hz | ][%channels% | ]%playback_time% / %length%";
@@ -563,7 +565,7 @@ bool HelperVisualizersRunning();
 void ToggleHelperVisualizer(size_t index);
 void OpenHelperVisualizers(float x, float y);
 void TickHelperVisualizers();
-// The library canvas's Smooth scrolling glide (libview.cpp): the loop ticks it while it runs.
+// The library canvas's Smooth scrolling glide (libview_canvas.cpp): the loop ticks it while it runs.
 void TickCanvasScroll();
 bool CanvasScrollAnimating();
 int CheckLinuxHelperFeed();

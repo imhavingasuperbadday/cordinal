@@ -1,5 +1,5 @@
 // Organizing files on Linux, as app_organize.cpp does on Windows: the confirmed plan from the Organize
-// panel (panels.cpp) moves on a worker with folder scanning paused, so the moves aren't mistaken for
+// panel (panel_organize.cpp) moves on a worker with folder scanning paused, so the moves aren't mistaken for
 // files vanishing and appearing, and the library follows each moved file. Library > Undo last organize
 // reverses the newest run. The filesystem work is organize.cpp's.
 #include "app.h"

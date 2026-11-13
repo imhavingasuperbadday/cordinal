@@ -278,15 +278,11 @@ public:
     static double Gated(const std::vector<double>& blocks);  // for album gain over many tracks
 
 private:
+    // A transposed direct-form II biquad per channel; Add runs it as y = b0 x + z1,
+    // z1 = b1 x - a1 y + z2, z2 = b2 x - a2 y.
     struct Filter {
         double b0, b1, b2, a1, a2;
         double z1[2] = {}, z2[2] = {};
-        double Run(double x, int ch) {
-            double y = b0 * x + z1[ch];
-            z1[ch] = b1 * x - a1 * y + z2[ch];
-            z2[ch] = b2 * x - a2 * y;
-            return y;
-        }
     };
     Filter shelf_{}, highpass_{};
     size_t stepFrames_ = 0, stepFill_ = 0;
@@ -305,20 +301,17 @@ private:
 // inter-sample peaks without over-reading typical material.
 class TruePeak {
 public:
-    TruePeak();
     void Add(const float* stereo, size_t frames);
     float Peak() const { return (float)peak_; }
     // End-of-file peak, including the delayed inter-sample positions. Leaves streaming state intact.
     float FinalPeak() const;
     void Reset();
 
-private:
     static constexpr int kTaps = 24;    // per phase
     static constexpr int kPhases = 4;   // 4x oversampling
-    double coeff_[kPhases][kTaps]{};
-    // Mirrored newest-first stereo history makes each FIR window contiguous.
-    double hist_[kTaps * 2][2]{};
-    int pos_ = 0;
+
+private:
+    double hist_[kTaps - 1][2]{};  // the frames before the next one, oldest first
     double peak_ = 0;
     bool started_ = false;   // history filled from the first sample, so a file doesn't ring at t=0
 };

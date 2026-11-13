@@ -5,6 +5,7 @@
 
 #include "autoplaylist.h"
 #include "inflate.h"
+#include "textcase.h"
 
 #include <windows.h>
 
@@ -18,11 +19,6 @@ namespace {
 
 uint32_t Le16(const std::string& s, size_t at) { return (uint8_t)s[at] | (uint8_t)s[at + 1] << 8; }
 uint32_t Le32(const std::string& s, size_t at) { return Le16(s, at) | Le16(s, at + 2) << 16; }
-
-std::wstring Lower(std::wstring s) {
-    for (auto& c : s) c = (wchar_t)towlower(c);
-    return s;
-}
 
 std::wstring Trim(const std::wstring& s) {
     size_t b = s.find_first_not_of(L" \t\r\n"), e = s.find_last_not_of(L" \t\r\n");
@@ -43,7 +39,7 @@ int ToInt(const std::wstring* v, int def, int lo, int hi) {
 
 bool ToBool(const std::wstring* v, bool def) {
     if (!v || v->empty()) return def;
-    std::wstring s = Lower(*v);
+    std::wstring s = textcase::Fold(*v);
     return !(s == L"0" || s == L"no" || s == L"off" || s == L"false");
 }
 
@@ -98,7 +94,7 @@ void ReadSounds(Pack& pack, PackTheme& t, const std::wstring& file, const IniSec
                 pack.warnings.push_back(file + L": there is no sound effect called " + key);
     for (size_t i = 0; i < std::size(kSoundNames); ++i) {
         const std::wstring* given = named ? named->Get(kSoundNames[i]) : nullptr;
-        std::wstring path = given ? Lower(*given) : L"";
+        std::wstring path = given ? textcase::Fold(*given) : L"";
         std::replace(path.begin(), path.end(), L'\\', L'/');
         const PackEntry* f = given ? FindFile(files, path) : nullptr;
         if (given && !f) pack.warnings.push_back(file + L": the sound " + *given + L" isn't in the pack");
@@ -122,7 +118,7 @@ void ReadTheme(Pack& pack, const std::wstring& file, const std::vector<IniSectio
     t.name = name && !name->empty() ? *name : pack.name;
     // Colours the pack leaves out come from the built-in palette it names as its base.
     const std::wstring* base = theme->Get(L"base");
-    t.palette = base && Lower(*base) == L"dark" ? DarkPalette() : LightPalette();
+    t.palette = base && textcase::Fold(*base) == L"dark" ? DarkPalette() : LightPalette();
     if (const std::wstring* dark = theme->Get(L"dark")) t.palette.dark = ToBool(dark, t.palette.dark);
     if (colors)
         for (const auto& [key, value] : colors->values) {
@@ -203,7 +199,7 @@ void ReadColumns(Pack& pack, const std::vector<IniSection>& ini) {
         c.title = title && !title->empty() ? *title : s.name;
         c.display = *format;
         c.sort = sort && !sort->empty() ? *sort : *format;
-        c.right = align && Lower(*align) == L"right";
+        c.right = align && textcase::Fold(*align) == L"right";
         c.width = ToInt(s.Get(L"width"), 120, 16, 1000);
         if (pack.columns.size() < 64) pack.columns.push_back(std::move(c));
     }
@@ -277,13 +273,13 @@ std::vector<IniSection> ParseIni(const std::string& bytes, bool unquote) {
         at = end == std::wstring::npos ? text.size() : end + 1;
         if (line.empty() || line[0] == L';' || line[0] == L'#') continue;
         if (line[0] == L'[' && line.back() == L']') {
-            out.push_back({Lower(Trim(line.substr(1, line.size() - 2))), {}});
+            out.push_back({textcase::Fold(Trim(line.substr(1, line.size() - 2))), {}});
             continue;
         }
         size_t eq = line.find(L'=');
         if (eq == std::wstring::npos) continue;
         if (out.empty()) out.push_back({});
-        std::wstring key = Lower(Trim(line.substr(0, eq))), value = Trim(line.substr(eq + 1));
+        std::wstring key = textcase::Fold(Trim(line.substr(0, eq))), value = Trim(line.substr(eq + 1));
         std::replace(key.begin(), key.end(), L' ', L'_');
         if (unquote && value.size() >= 2 && value.front() == L'"' && value.back() == L'"') value = value.substr(1, value.size() - 2);
         out.back().values.emplace_back(std::move(key), std::move(value));
@@ -321,7 +317,7 @@ bool ReadPackZip(const std::string& zip, std::vector<PackEntry>& out, std::wstri
         size_t nameLen = Le16(zip, at + 28), next = at + 46 + nameLen + Le16(zip, at + 30) + Le16(zip, at + 32);
         size_t local = Le32(zip, at + 42);
         if (at + 46 + nameLen > zip.size()) return false;
-        std::wstring name = Lower(Utf8(zip.substr(at + 46, nameLen)));
+        std::wstring name = textcase::Fold(Utf8(zip.substr(at + 46, nameLen)));
         std::replace(name.begin(), name.end(), L'\\', L'/');
         at = next;
         if (name.empty() || name.back() == L'/') continue;

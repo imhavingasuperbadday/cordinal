@@ -20,7 +20,8 @@
 // A fixed count per track, so the seek bar's resolution doesn't depend on the track's length.
 constexpr int kPeakBuckets = 600;
 // Cached peaks and the live waveform's texture use this curve to retain quiet detail. The live
-// display's overall height follows its separate note envelope (WaveformMotion in dsp.h).
+// display's overall height follows its separate note envelope (WaveformMotion in dsp.h) and the
+// seek bar's beat pulse (GlowPulse).
 inline uint8_t CompandPeak(float linear) {
     if (!(linear > 0)) return 0;
     return (uint8_t)std::min(255.0f, std::sqrt(std::min(linear, 1.0f)) * 255.0f + 0.5f);
@@ -87,12 +88,14 @@ void FillMood(const double* energy, Peaks& out);
 // The live moodbar's scale. The heard audio's band energies (Engine::WaveformBands) go on a ceiling
 // and a balance that follow the music over a few seconds, so the colours don't flicker frame to
 // frame. Fills the first `buckets` buckets of `out.mood` and returns the center for MoodOf.
+// `seconds` is any clock, as for GlowPulse: the ceiling's fall and the balance's follow go by it,
+// so 60 frames a second settle as fast as 30.
 class LiveMood {
 public:
-    float Scale(const float* energy, int buckets, Peaks& out);
+    float Scale(const float* energy, int buckets, Peaks& out, double seconds);
 
 private:
-    double ceiling_ = 0, center_ = 0;
+    double ceiling_ = 0, center_ = 0, last_ = -1;
     bool started_ = false;
 };
 
@@ -113,6 +116,21 @@ private:
 // Blurs the outline and the colours over about `radius` buckets either side: the soft, rounded
 // shape the Smooth seek bar setting draws.
 void SmoothPeaks(const Peaks& in, Peaks& out, int radius);
+
+// The whole song's peaks as the seek bar draws them, softened when `smooth`, and their MoodCenter.
+// Both follow the peaks alone, which change a few times a track, while the bar repaints up to sixty
+// times a second; a frame bringing the same bytes reuses them instead of blurring again.
+class SongPeaks {
+public:
+    const Peaks& Get(const Peaks& peaks, bool smooth, int radius);
+    float Center() const { return center_; }  // of what Get last returned
+
+private:
+    Peaks source_{}, smoothed_{};
+    int radius_ = -1;
+    bool smooth_ = false, valid_ = false;
+    float center_ = 0;
+};
 
 // How a span of buckets sounds: `bright` from -1 (bassier than this track usually is) to 1
 // (more treble), `level` from 0 (silence) to 1, and each band's mean, 0..1. `center` is MoodCenter

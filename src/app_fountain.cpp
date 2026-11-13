@@ -259,13 +259,25 @@ void RenderSprites(int w, int h, int playY, const std::vector<float>& level, con
     double edgeScroll = fclock.bgsiner * 20;       // 280 game pixels per 7 bgsiner
     // The basin's rounded foot: its rows from 70, where its corners begin.
     double basinTop = h - basin.h * s, footTop = h - 70 * s, bob = std::sin(fclock.siner / 16);
+    // Sample's tiling costs two integer divisions a coordinate. The texture's columns depend on x
+    // alone and every row coordinate on y alone, so they are wrapped once a frame and once a row
+    // here and sampled untiled: the same texels, without a dozen divisions a pixel.
+    auto wrap = [](int u, int n) { return ((u % n) + n) % n; };
+    static std::vector<int> texU1, texU2;
+    texU1.resize(w);
+    texU2.resize(w);
+    for (int x = 0; x < w; ++x) {
+        texU1[x] = wrap((int)std::floor(x / detailScale + fclock.siner / 2), texture.w);
+        texU2[x] = wrap((int)std::floor(x / detailScale + 120 - fclock.hscroll / 2), texture.w);
+    }
     for (int y = 0; y < h; ++y) {
         float hw = minHalf + (maxHalf - minHalf) * level[y];
         // Over the last stretch the column settles to the basin's width, so it pours into its U.
         float settle = std::clamp((float)((y - (footTop - 24 * s)) / (24 * s)), 0.f, 1.f);
         hw += (hwFoot - hw) * settle * settle * (3 - 2 * settle);
-        int ev = (int)std::floor(y / detailScale + edgeScroll);
-        int t1v = (int)std::floor(y / detailScale + fclock.siner / 2), t2v = (int)std::floor(y / detailScale - fclock.siner / 2);
+        const int ev = wrap((int)std::floor(y / detailScale + edgeScroll), edge.h);
+        const int t1v = wrap((int)std::floor(y / detailScale + fclock.siner / 2), texture.h);
+        const int t2v = wrap((int)std::floor(y / detailScale - fclock.siner / 2), texture.h);
         uint32_t* row = bits + (size_t)y * w;
         for (int x = 0; x < w; ++x) {
             double dx = x + 0.5 - cx, past = (std::fabs(dx) - hw) / s;  // texels outside the edge's line
@@ -276,12 +288,12 @@ void RenderSprites(int w, int h, int playY, const std::vector<float>& level, con
             Color c = l.surround;
             if (past < 10) {
                 c = l.backdrop;
-                c = Over(c, Sample(texture, (int)std::floor(x / detailScale + fclock.siner / 2), t1v, true, true), l.col, 0.7f, l.surround);
-                c = Over(c, Sample(texture, (int)std::floor(x / detailScale + 120 - fclock.hscroll / 2), t2v, true, true), l.col, 0.3f, l.surround);
-                c = Over(c, Sample(edge, edgeU(0), ev, false, true), l.col, 1, l.surround);
+                c = Over(c, Sample(texture, texU1[x], t1v, false, false), l.col, 0.7f, l.surround);
+                c = Over(c, Sample(texture, texU2[x], t2v, false, false), l.col, 0.3f, l.surround);
+                c = Over(c, Sample(edge, edgeU(0), ev, false, false), l.col, 1, l.surround);
             }
-            c = Over(c, Sample(edge, edgeU(-wob), ev, false, true), l.col, 0.5f, l.surround);
-            c = Over(c, Sample(edge, edgeU(wob), ev, false, true), l.col, 0.5f, l.surround);
+            c = Over(c, Sample(edge, edgeU(-wob), ev, false, false), l.col, 0.5f, l.surround);
+            c = Over(c, Sample(edge, edgeU(wob), ev, false, false), l.col, 0.5f, l.surround);
             if (y >= footTop) {
                 int bu = (int)std::floor(basin.w / 2.0 + dx / s);
                 double bv = (y - basinTop) / s;

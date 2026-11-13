@@ -1,6 +1,8 @@
 // DSP checks of the self test (see selftest.cpp): loudness (EBU Tech 3341), true peak, the peak
 // limiter, the ReplayGain model, the effects after the EQ (reverb, tempo, smart volume) and waveform peaks.
 #include "selftest_common.h"
+#include "tempo.h"
+#include "wind_checks.h"
 
 #include <winioctl.h>
 #include <xmmintrin.h>
@@ -85,11 +87,22 @@ void TestWaveformMotion() {
     for (size_t i = 1; i < invalid.size(); i += 2) invalid[i] = std::numeric_limits<float>::infinity();
     motion.Add(invalid.data(), invalid.size() / 2, 48000);
     Check(motion.Level() == 0, L"non-finite PCM cannot create a live visual pulse");
+    // Live shapes are normalized to their own loudest moment, so a dense master needs more
+    // contrast between its quieter and louder columns than the whole-song peaks show.
+    WaveformMotion lit;
+    auto pulseNote = tone(48000, 0.02, 0.5f);
+    lit.Add(pulseNote.data(), pulseNote.size() / 2, 48000);
+    std::array<uint8_t, 5> textured{0, 32, 96, 180, 255};
+    lit.Shape(textured.data(), textured.size());
+    Check(textured[2] < textured.back() * 0.5f && std::is_sorted(textured.begin(), textured.end()),
+          L"the live shape darkens its mid columns for contrast while keeping the loudest full height");
 }
 }
 
 void TestVisuals() {
     TestWaveformMotion();
+    int wind = CheckWind();
+    Check(wind == 0, L"the track list's wind stays still in silence, gusts on attacks and drifts off on pause (check %d)", wind);
     testlog::Batch batch;
     AudioVisuals frame;
     batch.Next(L"VIS stopped audio stays silent, a 1 kHz tone lands in its band at each rate, and stop "
@@ -463,6 +476,106 @@ void TestLoudness() {
     double lufs = meter.Integrated();
     Check(std::fabs(lufs + 23.0) < 0.1, L"LOUDNESS EBU 3341 sine: %.2f LUFS (expected -23.00), ReplayGain %+.2f dB", lufs,
           kReplayGainReference - lufs);
+
+    // Independent scalar oracle of the original per-channel K-weighting: the SIMD meter must
+    // produce the same blocks, short-term values and peak bit for bit, across uneven chunks,
+    // step boundaries mid-chunk, a rate that is not a multiple of ten, silence and a NaN.
+    batch.Next(L"LOUDNESS SIMD meter matches the original scalar K-weighting exactly");
+    struct Reference {
+        struct Filter {
+            double b0, b1, b2, a1, a2, z1[2]{}, z2[2]{};
+            double Run(double x, int ch) {
+                double y = b0 * x + z1[ch];
+                z1[ch] = b1 * x - a1 * y + z2[ch];
+                z2[ch] = b2 * x - a2 * y;
+                return y;
+            }
+        } shelf{}, highpass{};
+        size_t stepFrames, fill = 0, count = 0;
+        double sum = 0, steps[4]{}, recent[30]{};
+        std::vector<double> blocks;
+        std::vector<float> shortTerm;
+        float peak = 0;
+        explicit Reference(unsigned rate) {
+            const double pi = 3.14159265358979323846;
+            double f0 = 1681.974450955533, G = 3.999843853973347, Q = 0.7071752369554196;
+            double K = std::tan(pi * f0 / rate);
+            double Vh = std::pow(10.0, G / 20.0), Vb = std::pow(Vh, 0.4996667741545416);
+            double a0 = 1.0 + K / Q + K * K;
+            shelf = {(Vh + Vb * K / Q + K * K) / a0, 2.0 * (K * K - Vh) / a0, (Vh - Vb * K / Q + K * K) / a0,
+                     2.0 * (K * K - 1.0) / a0, (1.0 - K / Q + K * K) / a0};
+            f0 = 38.13547087602444;
+            Q = 0.5003270373238773;
+            K = std::tan(pi * f0 / rate);
+            a0 = 1.0 + K / Q + K * K;
+            highpass = {1.0, -2.0, 1.0, 2.0 * (K * K - 1.0) / a0, (1.0 - K / Q + K * K) / a0};
+            stepFrames = rate / 10;
+        }
+        void Add(const float* x, size_t frames) {
+            for (size_t n = 0; n < frames; ++n) {
+                double total = 0;
+                for (int ch = 0; ch < 2; ++ch) {
+                    float s = x[n * 2 + ch];
+                    peak = std::max(peak, std::fabs(s));
+                    double y = highpass.Run(shelf.Run(s, ch), ch);
+                    total += y * y;
+                }
+                sum += total;
+                if (++fill == stepFrames) {
+                    recent[count % 30] = sum / stepFrames;
+                    steps[count++ % 4] = sum / stepFrames;
+                    sum = 0;
+                    fill = 0;
+                    if (count >= 30) {
+                        double window = 0;
+                        for (double s : recent) window += s;
+                        shortTerm.push_back((float)(window / 30));
+                    }
+                    if (count >= 4)
+                        blocks.push_back((steps[(count - 1) % 4] + steps[(count - 2) % 4] + steps[(count - 3) % 4] +
+                                          steps[(count - 4) % 4]) / 4);
+                }
+            }
+        }
+    };
+    bool identical = true;
+    for (unsigned r : {44100u, 48000u, 22050u, 11025u}) {
+        LoudnessMeter simd(r);
+        Reference reference(r);
+        uint32_t seed = r;
+        std::vector<float> pcm((size_t)r * 9 * 2);
+        for (size_t i = 0; i < pcm.size(); ++i) {
+            const double level = (i / 2) % r < r / 3 ? 0.0 : 0.05 + 0.9 * ((i / 2) % 7919) / 7919.0;
+            pcm[i] = (float)(level * (int32_t)(seed = 1664525 * seed + 1013904223) / 2147483648.0);
+        }
+        pcm[r * 5 + 1] = NAN;  // a NaN sample is not a peak
+        for (size_t at = 0, frames = pcm.size() / 2; at < frames;) {
+            const size_t n = std::min<size_t>(1 + (at * 7) % 6151, frames - at);
+            simd.Add(pcm.data() + at * 2, n);
+            reference.Add(pcm.data() + at * 2, n);
+            at += n;
+        }
+        // Past the NaN the filters hold NaN in both versions; bit for bit, payloads included.
+        const auto& blocks = simd.Blocks();
+        identical &= blocks.size() == reference.blocks.size() && simd.Peak() == reference.peak;
+        for (size_t i = 0; identical && i < blocks.size(); ++i)
+            identical &= std::memcmp(&blocks[i], &reference.blocks[i], sizeof(double)) == 0;
+    }
+    // A clean signal with changing levels, in chunks that cross the step boundaries unevenly.
+    LoudnessMeter simd(44100);
+    Reference reference(44100);
+    std::vector<float> music(44100 * 2 * 12);
+    for (size_t i = 0; i < music.size(); ++i)
+        music[i] = (float)(std::sin(i * 0.0137) * std::sin(i * 0.00007) * (0.2 + 0.7 * ((i / 88200) % 3) / 2.0));
+    for (size_t at = 0, frames = music.size() / 2; at < frames;) {
+        const size_t n = std::min<size_t>(4096 - at % 333, frames - at);
+        simd.Add(music.data() + at * 2, n);
+        reference.Add(music.data() + at * 2, n);
+        at += n;
+    }
+    identical &= simd.Integrated() == LoudnessMeter::Gated(reference.blocks) && simd.Peak() == reference.peak &&
+                 simd.Blocks() == reference.blocks && !reference.shortTerm.empty();
+    Check(identical, L"LOUDNESS SIMD meter matches the original scalar K-weighting exactly");
 }
 
 void TestTruePeak() {
@@ -512,6 +625,27 @@ void TestTruePeak() {
         reference.Add(noise.data()+at*2,frames); optimized.Add(noise.data()+at*2,frames);
         identical &= optimized.Peak()==(float)reference.peak;
         at+=frames;
+    }
+    // Music-like dynamics: a loud start, then quiet and swelling passages, a lone spike and a
+    // NaN, so stretches that cannot beat the peak are skipped and the rest still interpolated.
+    {
+        TruePeak dynamic; Reference oracle;
+        std::vector<float> swell(48000*2*3);
+        for (size_t i=0;i<swell.size();++i) {
+            const double t=i/2/48000.0, level=t<0.2?0.8:t<1?0.05:std::min(1.0,(t-1)*0.6);
+            swell[i]=(float)(level*std::sin(i*0.37+(i&1))*std::sin(i*0.0011));
+        }
+        swell[48000*2+1001]=0.9f; swell[48000*2+5001]=NAN;
+        for (size_t at=0,frames=swell.size()/2;at<frames;) {
+            const size_t n=std::min<size_t>(1+(at*13)%700,frames-at);
+            dynamic.Add(swell.data()+at*2,n); oracle.Add(swell.data()+at*2,n);
+            identical &= dynamic.Peak()==(float)oracle.peak;
+            at+=n;
+        }
+        TruePeak copy=dynamic; Reference tail=oracle;
+        const float silence[24]{};
+        tail.Add(silence,12);
+        identical &= copy.FinalPeak()==(float)tail.peak;
     }
     optimized.Reset(); reference=Reference{};
     reference.Add(noise.data(),17); optimized.Add(noise.data(),17);
@@ -899,6 +1033,107 @@ void TestReplayGainModel() {
     g.rgHeadphoneHeadroom = originalHeadroom;
 }
 
+// A short noise burst on every beat: enough attack for the onset envelope and no tonal bias.
+std::vector<float> TempoClicks(unsigned rate, double bpm, double seconds) {
+    const size_t frames = (size_t)std::lround(rate * seconds);
+    std::vector<float> pcm(frames * 2);
+    const double period = 60.0 / bpm * rate;
+    uint32_t seed = 12345;
+    for (double at = 0; at < frames; at += period) {
+        const size_t start = (size_t)at;
+        const size_t burst = std::min<size_t>((size_t)(rate * 0.02), frames - start);
+        for (size_t k = 0; k < burst; ++k) {
+            seed = seed * 1664525u + 1013904223u;
+            const float noise = ((seed >> 8) / 16777216.0f) * 2 - 1;
+            const float value = 0.8f * noise * (float)std::exp(-(double)k / (0.004 * rate));
+            pcm[(start + k) * 2] += value;
+            pcm[(start + k) * 2 + 1] += value;
+        }
+    }
+    return pcm;
+}
+
+// The same clicks as a 16-bit stereo WAV, for the decoder and scanner path.
+std::string TempoWav(unsigned rate, double bpm, double seconds) {
+    const auto pcm = TempoClicks(rate, bpm, seconds);
+    std::string data(pcm.size() * 2, '\0');
+    for (size_t i = 0; i < pcm.size(); ++i) {
+        const int16_t sample = (int16_t)std::lround(std::clamp(pcm[i], -1.0f, 1.0f) * 32767);
+        data[i * 2] = (char)((uint16_t)sample & 0xFF);
+        data[i * 2 + 1] = (char)((uint16_t)sample >> 8);
+    }
+    std::string wav = "RIFF";
+    auto put32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) wav += (char)(v >> (8 * i)); };
+    auto put16 = [&](uint16_t v) { wav += (char)(v & 0xFF); wav += (char)(v >> 8); };
+    put32(36 + (uint32_t)data.size());
+    wav += "WAVEfmt ";
+    put32(16);
+    put16(1);
+    put16(2);
+    put32(rate);
+    put32(rate * 4);
+    put16(4);
+    put16(16);
+    wav += "data";
+    put32((uint32_t)data.size());
+    return wav + data;
+}
+
+void TestTempo() {
+    testlog::Batch batch;
+    batch.Next(L"BPM finds the beat of steady click tracks at 44.1, 48 and 96 kHz");
+    testlog::Cases steady;
+    for (unsigned rate : {44100u, 48000u, 96000u}) {
+        for (int bpm : {60, 72, 90, 100, 120, 128, 140, 150, 160, 180, 200}) {
+            tempo::Detector detector;
+            detector.Begin(rate);
+            const auto pcm = TempoClicks(rate, bpm, 8);
+            detector.Add(pcm.data(), pcm.size() / 2);
+            steady.Add(std::abs(detector.Bpm() - bpm) <= 1,
+                       std::to_wstring(rate) + L"/" + std::to_wstring(bpm) + L" -> " + std::to_wstring(detector.Bpm()));
+        }
+    }
+    Check(steady.Passed(), L"BPM detects every steady click track within one beat per minute%ls");
+    batch.Next(L"BPM stays empty for silence, noise, a steady tone and a clip too short to count");
+    bool empty = true;
+    std::vector<float> silence(48000 * 2), noise(48000 * 2), tone(48000 * 2);
+    uint32_t seed = 7;
+    for (size_t i = 0; i < 48000; ++i) {
+        seed = seed * 1664525u + 1013904223u;
+        noise[i * 2] = noise[i * 2 + 1] = ((seed >> 8) / 16777216.0f) * 2 - 1;
+        tone[i * 2] = tone[i * 2 + 1] = 0.5f * (float)std::sin(6.28318530718 * 1000 * i / 48000);
+    }
+    for (auto* pcm : {&silence, &noise, &tone}) {
+        tempo::Detector detector;
+        detector.Begin(48000);
+        detector.Add(pcm->data(), pcm->size() / 2);
+        empty &= detector.Bpm() == 0;
+    }
+    tempo::Detector shortClip;
+    shortClip.Begin(48000);
+    const auto brief = TempoClicks(48000, 120, 2);
+    shortClip.Add(brief.data(), brief.size() / 2);
+    empty &= shortClip.Bpm() == 0;
+    Check(empty, L"BPM never invents a tempo from silence, noise, a steady tone or two seconds of clicks");
+    batch.Next(L"BPM gives the same answer when the audio arrives in uneven chunks");
+    bool chunks = true;
+    for (unsigned rate : {44100u, 48000u}) {
+        const auto pcm = TempoClicks(rate, 128, 8);
+        tempo::Detector whole, split;
+        whole.Begin(rate);
+        split.Begin(rate);
+        whole.Add(pcm.data(), pcm.size() / 2);
+        size_t at = 0;
+        for (size_t chunk = 1; at < pcm.size() / 2; chunk = chunk * 3 + 7) {
+            const size_t frames = std::min(chunk, pcm.size() / 2 - at);
+            split.Add(pcm.data() + at * 2, frames);
+            at += frames;
+        }
+        chunks &= split.Bpm() == whole.Bpm() && whole.Bpm() == 128;
+    }
+    Check(chunks, L"BPM is independent of how the decoder's reads are split");
+}
+
 void TestReplayGainScan(const std::wstring& media, const std::wstring& scratch) {
     testlog::Batch batch;
     std::atomic<bool> cancel{false};
@@ -913,6 +1148,34 @@ void TestReplayGainScan(const std::wstring& media, const std::wstring& scratch) 
     auto good = measure(healthy);
     Check(good.ok && std::isfinite(good.trackGain) && good.trackPeak > 0 && !current.load() &&
           ReadTestBytes(healthy) == original, L"RG accepts a complete scan and leaves the source unchanged");
+
+    batch.Next(L"RG scans detect BPM once, keep a tag's BPM, and survive re-reading tags without one");
+    const std::wstring tempoFile = scratch + L"\\rg-tempo.wav";
+    if (Ready(WriteTestBytes(tempoFile, TempoWav(48000, 120, 8)), L"the tempo scan fixture is written")) {
+        auto beat = measure(tempoFile);
+        g_lib[beat.id].flags |= Track::kLoaded;
+        g_lib[beat.id].bpm = 0;
+        g_lib[beat.id].flags &= (uint16_t)~Track::kBpmDetected;
+        replaygain::Apply(beat);
+        const bool detected = beat.ok && beat.bpm >= 119 && beat.bpm <= 121 && g_lib[beat.id].bpm == beat.bpm &&
+                              (g_lib[beat.id].flags & Track::kBpmDetected);
+        TagData tags;
+        g_lib[beat.id].bpm = 128;
+        g_lib[beat.id].flags &= (uint16_t)~Track::kBpmDetected;
+        replaygain::Apply(beat);
+        const bool tagWins = g_lib[beat.id].bpm == 128 && !(g_lib[beat.id].flags & Track::kBpmDetected);
+        g_lib[beat.id].bpm = 120;
+        g_lib[beat.id].flags |= Track::kBpmDetected;
+        g_lib.ApplyTags(beat.id, tags);
+        const bool kept = g_lib[beat.id].bpm == 120 && (g_lib[beat.id].flags & Track::kBpmDetected);
+        g_lib[beat.id].bpm = 0;
+        g_lib[beat.id].flags &= (uint16_t)~Track::kBpmDetected;
+        const auto picked = replaygain::AutoMeasureTracks({}, 10, true);
+        const bool wanted = replaygain::NeedsTempo(beat.id) &&
+                            std::find(picked.begin(), picked.end(), beat.id) != picked.end();
+        Check(detected && tagWins && kept && wanted,
+              L"RG scans fill BPM from the audio, let a tag override it, keep it through a tag read and pick it up when the column asks");
+    }
 
     batch.Next(L"RG rejects a damaged stream after good audio and preserves the previous measurement");
     const std::wstring damaged = scratch + L"\\rg-damaged.flac";
@@ -1063,6 +1326,59 @@ void TestPeaks(const std::wstring& scratch) {
         for (int i = from; i < to; ++i) sum += peaks.mood[band][i];
         return sum / (to - from);
     };
+    // The band split against the original member-state loop, bit for bit across uneven chunks.
+    {
+        struct Reference {
+            float a, b, bass[2], midHigh[2], midLow[2], treble[2];
+            void Add(const float* stereo, size_t frames, double sums[kMoodBands]) {
+                double low = 0, mid = 0, high = 0;
+                for (const float* end = stereo + frames * 2; stereo != end; stereo += 2) {
+                    const float x = (stereo[0] + stereo[1]) * 0.5f;
+                    const float l1 = bass[0] += a * (x - bass[0]);
+                    const float l2 = bass[1] += a * (l1 - bass[1]);
+                    const float m1 = x - (midHigh[0] += a * (x - midHigh[0]));
+                    const float m2 = m1 - (midHigh[1] += a * (m1 - midHigh[1]));
+                    const float m3 = midLow[0] += b * (m2 - midLow[0]);
+                    const float m4 = midLow[1] += b * (m3 - midLow[1]);
+                    const float t1 = x - (treble[0] += b * (x - treble[0]));
+                    const float t2 = t1 - (treble[1] += b * (t1 - treble[1]));
+                    low += (double)l2 * l2;
+                    mid += (double)m4 * m4;
+                    high += (double)t2 * t2;
+                }
+                sums[kMoodBass] += low;
+                sums[kMoodMid] += mid;
+                sums[kMoodTreble] += high;
+                for (float* state : {bass, midHigh, midLow, treble})
+                    for (int i = 0; i < 2; ++i)
+                        if (std::fabs(state[i]) < 1e-20f) state[i] = 0;
+            }
+        };
+        std::vector<float> audio(44100 * 2);
+        uint32_t seed = 7;
+        for (size_t i = 0; i < audio.size(); ++i)
+            audio[i] = (float)((i / 2 % 9000 < 3000 ? 0.0 : 0.6) * (int32_t)(seed = 1664525 * seed + 1013904223) / 2147483648.0);
+        MoodSplit split;
+        split.Begin(44100);
+        split.Add(audio.data(), 1, std::array<double, kMoodBands>{}.data());  // primes it on the first sample
+        Reference reference{split.a, split.b};
+        std::memcpy(reference.bass, split.bass, sizeof(split.bass));
+        std::memcpy(reference.midHigh, split.midHigh, sizeof(split.midHigh));
+        std::memcpy(reference.midLow, split.midLow, sizeof(split.midLow));
+        std::memcpy(reference.treble, split.treble, sizeof(split.treble));
+        double sums[kMoodBands]{}, expected[kMoodBands]{};
+        for (size_t at = 1, frames = audio.size() / 2; at < frames;) {
+            const size_t n = std::min<size_t>(1 + at % 1777, frames - at);
+            split.Add(audio.data() + at * 2, n, sums);
+            reference.Add(audio.data() + at * 2, n, expected);
+            at += n;
+        }
+        batch.Next(L"MOODBAR band split matches the original loop exactly");
+        Check(std::memcmp(sums, expected, sizeof(sums)) == 0 && std::memcmp(split.bass, reference.bass, sizeof(split.bass)) == 0 &&
+                  std::memcmp(split.midLow, reference.midLow, sizeof(split.midLow)) == 0 &&
+                  std::memcmp(split.treble, reference.treble, sizeof(split.treble)) == 0,
+              L"MOODBAR band split matches the original loop exactly");
+    }
     Peaks low{}, high{}, sweep{};
     batch.Next(L"MOODBAR splits bass and treble, colours by balance and keeps an accent's contrast");
     ok = tones({100}, low) && tones({8000}, high) && tones({100, 8000}, sweep);
@@ -1153,11 +1469,27 @@ void TestPeaks(const std::wstring& scratch) {
     Peaks liveOut{};
     std::vector<float> liveEnergy(64 * kMoodBands);
     for (int i = 0; i < 64; ++i) liveEnergy[i * kMoodBands + kMoodBass] = 0.1f, liveEnergy[i * kMoodBands + kMoodTreble] = 1e-6f;
-    live.Scale(liveEnergy.data(), 64, liveOut);
+    live.Scale(liveEnergy.data(), 64, liveOut, 0);
     const bool liveLit = liveOut.mood[kMoodBass][10] == 255 && liveOut.mood[kMoodTreble][10] < 40;
     std::fill(liveEnergy.begin(), liveEnergy.end(), 0.0f);
-    live.Scale(liveEnergy.data(), 64, liveOut);
+    live.Scale(liveEnergy.data(), 64, liveOut, 1.0 / 30);
     const bool liveQuiet = liveOut.mood[kMoodBass][10] == 0;
+    // The scale goes by the clock, not by frames: a loud moment, then a second of music 20 dB
+    // quieter, leaves the same ceiling at 60 frames a second as at 30.
+    auto settled = [](int fps) {
+        LiveMood scale;
+        Peaks out{};
+        std::vector<float> energy(64 * kMoodBands, 1e-6f);
+        for (int i = 0; i < 64; ++i) energy[i * kMoodBands + kMoodBass] = 0.1f;
+        double clock = 0;
+        scale.Scale(energy.data(), 64, out, clock);
+        for (int i = 0; i < 64; ++i) energy[i * kMoodBands + kMoodBass] = 0.001f;
+        for (int frame = 0; frame < fps; ++frame) scale.Scale(energy.data(), 64, out, clock += 1.0 / fps);
+        return (int)out.mood[kMoodBass][10];
+    };
+    const int at30 = settled(30), at60 = settled(60);
+    Check(std::abs(at30 - at60) <= 1 && at30 > 0 && at30 < 255,
+          L"MOODBAR live scale falls by the clock: bass %d at 30 fps, %d at 60 fps", at30, at60);
     Peaks step{}, soft{};
     std::fill(step.v + kPeakBuckets / 2, step.v + kPeakBuckets, (uint8_t)200);
     std::fill(&step.mood[kMoodMid][0], &step.mood[kMoodMid][0] + kPeakBuckets, (uint8_t)90);

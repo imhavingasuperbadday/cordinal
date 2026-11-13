@@ -1,8 +1,11 @@
-// Cordinal PCM/container decoder: RIFF/RIFX, RF64, Wave64, AIFF and AIFF-C.
-// Formats: integer/IEEE PCM, G.711 A-law/mu-law, Microsoft and IMA WAVE ADPCM.
-// Written from the Microsoft WAVE and Apple AIFF specifications; see docs/decoders.md.
+// Cordinal PCM/container decoder: RIFF/RIFX, RF64, Wave64, AIFF and AIFF-C, Sun/NeXT AU and
+// Apple CAF. Formats: integer/IEEE PCM, G.711 A-law/mu-law, Microsoft and IMA WAVE ADPCM, and
+// QuickTime IMA4 ADPCM (AIFF-C and CAF). ALAC in CAF is audio_caf.cpp's.
+// Written from the Microsoft WAVE, Apple AIFF and CAF, and Sun audio file specifications;
+// see docs/decoders.md.
 #include "native_audio.h"
 #include "audio_file.h"
+#include "audio_coded.h"
 #include <cmath>
 #include <cfloat>
 #include <climits>
@@ -10,6 +13,23 @@
 
 namespace {
 using namespace nativeaudio;
+
+// QuickTime IMA4: 34-byte packets per channel, 64 samples each. Above every 16-bit WAVE format tag,
+// which WaveFormat keeps to 16 bits, so a WAV file can never select it.
+constexpr unsigned kIma4 = 0x10000;
+
+// One IMA ADPCM nibble (the step table and index changes are shared by WAVE and QuickTime IMA).
+const int kImaSteps[] = {7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,50,55,60,66,73,80,88,97,107,118,130,143,157,173,190,209,230,253,279,307,337,371,408,449,494,544,598,658,724,796,876,963,1060,1166,1282,1411,1552,1707,1878,2066,2272,2499,2749,3024,3327,3660,4026,4428,4871,5358,5894,6484,7132,7845,8630,9493,10442,11487,12635,13899,15289,16818,18500,20350,22385,24623,27086,29794,32767};
+inline void ImaStep(unsigned q, int& sample, int& index) {
+    static const int changes[] = {-1,-1,-1,-1,2,4,6,8};
+    const int step = kImaSteps[index];
+    int diff = step >> 3;
+    if (q & 1) diff += step >> 2;
+    if (q & 2) diff += step >> 1;
+    if (q & 4) diff += step;
+    sample = std::clamp(sample + ((q & 8) ? -diff : diff), -32768, 32767);
+    index = std::clamp(index + changes[q & 7], 0, 88);
+}
 
 // Format and channel count are constant across a block. Four 24-bit samples come from two
 // overlapping 8-byte loads (bytes 0-7 and 6-13): each 64-bit lane holds two samples, at bit 0
@@ -80,6 +100,17 @@ private:
     bool big_ = false, signed8_ = false, failed_ = false;
     std::vector<float> decoded_;
     int coeff_[7][2]{};
+public:
+    CodedStream coded_;  // a G.722, G.726, GSM or DFPWM stream Open found instead of PCM (tag 0 = none)
+private:
+    // IMA4: the running state at the start of packet imaPacket_, and that state at the start of
+    // every kImaMarkEvery-th packet decoded so far (a few KB for an hour of audio) for seeking.
+    struct ImaState { int sample[8]{}, index[8]{}; };
+    static constexpr uint64_t kImaMarkEvery = 256;
+    bool Ima4Packet(bool output);
+    ImaState ima_;
+    uint64_t imaPacket_ = 0;
+    std::vector<ImaState> imaMarks_;  // starts with packet 0's zero state on first use
 };
 
 // Decode a WAVE fmt chunk. WAVE_FORMAT_EXTENSIBLE (0xFFFE) is unwrapped to its
@@ -94,11 +125,15 @@ bool PcmDecoder::WaveFormat(const uint8_t* p, size_t n) {
     bits_ = U16(p + 14, big_);
     if (format_ == 0xFFFE) {
         static const uint8_t suffix[] = {0,0,0x10,0,0x80,0,0,0xAA,0,0x38,0x9B,0x71};
+        // ComputerCraft's DFPWM GUID, 3ac1fa38-811d-4361-a40d-ce53ca607cd1, as stored.
+        static const uint8_t dfpwm[] = {0x3a,0xc1,0xfa,0x38,0x81,0x1d,0x43,0x61,0xa4,0x0d,0xce,0x53,0xca,0x60,0x7c,0xd1};
+        if (!big_ && n >= 40 && !memcmp(p + 24, dfpwm, sizeof dfpwm)) { format_ = kWaveDfpwm; return true; }
         if (big_ || n < 40 || U16(p + 16) < 22 || U16(p + 18) > bits_ ||
             memcmp(p + 28, suffix, sizeof suffix) != 0) return false;
         format_ = U32(p + 24);
         valid_ = U16(p + 18);
         mask_ = U32(p + 20);
+        if (format_ > 0xFFFF) return false;
     }
     if (format_ == 0x11 || format_ == 2) {
         if (big_ || n < 20 || bits_ != 4 || channels_ > 2 || !channels_) return false;
@@ -115,6 +150,7 @@ bool PcmDecoder::WaveFormat(const uint8_t* p, size_t n) {
             }
         }
     }
+    if (format_ == kWaveGsm && n >= 20) blockFrames_ = U16(p + 18, big_);  // samples per block (320)
     return true;
 }
 
@@ -158,11 +194,14 @@ bool PcmDecoder::Open(const std::wstring& path) {
                     else if (Is(code, "fl64") || Is(code, "FL64")) { format_ = 3; if (bits_ != 64) return false; }
                     else if (Is(code, "ulaw") || Is(code, "ULAW")) { format_ = 7; bits_ = 8; }
                     else if (Is(code, "alaw") || Is(code, "ALAW")) { format_ = 6; bits_ = 8; }
+                    // AIFF-C counts IMA4 in packets of 64 frames, not in frames.
+                    else if (Is(code, "ima4")) { format_ = kIma4; if (declaredFrames > UINT64_MAX / 64) return false; declaredFrames *= 64; }
                     else if (!Is(code, "NONE") && !Is(code, "twos")) return false;
                 }
                 align_ = channels_ * ((bits_ + 7) / 8);
                 // Non-byte AIFF samples are stored in the high bits of their container.
                 if (format_ == 1) { valid_ = bits_; bits_ = ((bits_ + 7) / 8) * 8; }
+                if (format_ == kIma4) { bits_ = 4; align_ = 34 * channels_; blockFrames_ = 64; }
                 formatFound = true;
             } else if (data && !dataFound) {
                 if (n < 8) return false;
@@ -175,6 +214,81 @@ bool PcmDecoder::Open(const std::wstring& path) {
                 dataFound = true;
             }
             at = body + n + (n & 1);
+        }
+    } else if (Is(p, ".snd") || Is(p, "dns.")) {
+        // Sun/NeXT AU: a 24-byte header (data offset, data size, encoding, rate, channels), an
+        // annotation, then the samples. "dns." is the little-endian DEC variant. An unknown data
+        // size (all ones) runs to the end of the file.
+        big_ = Is(p, ".snd");
+        signed8_ = true;
+        p = file_.View(0, 24);
+        if (!p) return false;
+        const uint32_t offset = U32(p + 4, big_), size = U32(p + 8, big_), encoding = U32(p + 12, big_);
+        rate_ = U32(p + 16, big_);
+        channels_ = U32(p + 20, big_);
+        if (offset < 24 || offset > limit) return false;
+        static const uint8_t formats[][2] = {{0, 0}, {7, 8}, {1, 8}, {1, 16}, {1, 24}, {1, 32}, {3, 32}, {3, 64}};
+        if (encoding >= 1 && encoding <= 7) { format_ = formats[encoding][0]; bits_ = formats[encoding][1]; }
+        else if (encoding == 27) { format_ = 6; bits_ = 8; }
+        // G.722, and G.721/G.723 (G.726 at 4, 3 and 5 bits), as coded streams (audio_coded.h).
+        else if (encoding == 24) { format_ = kWaveG722; bits_ = 8; }
+        else if (encoding == 23 || encoding == 25 || encoding == 26) { format_ = kWaveG726; bits_ = encoding == 23 ? 4 : encoding == 25 ? 3 : 5; }
+        else return false;
+        if (!channels_ || channels_ > 8) return false;
+        align_ = format_ == kWaveG726 ? 1 : channels_ * (bits_ / 8);
+        start_ = offset;
+        bytes_ = size == UINT32_MAX ? limit - offset : std::min<uint64_t>(size, limit - offset);
+        formatFound = dataFound = true;
+    } else if (Is(p, "caff")) {
+        // Apple CAF: 64-bit big-endian chunk sizes; 'desc' gives the format and 'data' holds a
+        // 4-byte edit count before the audio. A data size of -1 (still being written) runs to
+        // the end of the file. 'pakt' gives IMA4's valid frame count.
+        if (U16(p + 4, true) != 1) return false;
+        for (uint64_t at = 8; at + 12 <= limit;) {
+            p = file_.View(at, 12);
+            if (!p) return false;
+            uint64_t n = U64(p + 4, true), body = at + 12;
+            const bool desc = Is(p, "desc"), data = Is(p, "data"), pakt = Is(p, "pakt");
+            if (data && n == UINT64_MAX) n = limit - body;
+            if (n > limit - body) return false;
+            if (desc && !formatFound) {
+                if (n < 32 || !(p = file_.View(body, 32))) return false;
+                uint64_t bits = U64(p, true);
+                double rate;
+                memcpy(&rate, &bits, 8);
+                if (!std::isfinite(rate) || rate < 1 || rate > 1048575) return false;
+                rate_ = (unsigned)std::llround(rate);
+                const uint32_t flags = U32(p + 12, true), packetBytes = U32(p + 16, true), packetFrames = U32(p + 20, true);
+                channels_ = U32(p + 24, true);
+                bits_ = U32(p + 28, true);
+                if (!channels_ || channels_ > 8) return false;
+                if (Is(p + 8, "lpcm")) {
+                    format_ = (flags & 1) ? 3 : 1;
+                    big_ = !(flags & 2);
+                    signed8_ = true;
+                    if (packetFrames != 1 || bits_ % 8 || packetBytes != channels_ * (bits_ / 8)) return false;
+                } else if (Is(p + 8, "ulaw") || Is(p + 8, "alaw")) {
+                    format_ = Is(p + 8, "ulaw") ? 7 : 6;
+                    bits_ = 8;
+                } else if (Is(p + 8, "ima4")) {
+                    format_ = kIma4;
+                    bits_ = 4;
+                    blockFrames_ = 64;
+                    if (packetFrames != 64 || packetBytes != 34 * channels_) return false;
+                } else return false;  // ALAC and other packet codecs are not PCM
+                align_ = format_ == kIma4 ? 34 * channels_ : channels_ * (bits_ / 8);
+                formatFound = true;
+            } else if (data && !dataFound) {
+                if (n < 4) return false;
+                start_ = body + 4;
+                bytes_ = n - 4;
+                dataFound = true;
+            } else if (pakt && n >= 24) {
+                if (!(p = file_.View(body, 24))) return false;
+                const uint64_t frames = U64(p + 8, true);
+                if (frames && U32(p + 16, true) == 0) declaredFrames = frames;  // no priming to remove
+            }
+            at = body + n;
         }
     } else {
         bool rf64 = Is(p, "RF64") || Is(p, "BW64"), w64 = Is(p, "riff");
@@ -228,7 +342,20 @@ bool PcmDecoder::Open(const std::wstring& path) {
         }
     }
     if (!formatFound || !dataFound || !rate_ || rate_ > 1048575 || !channels_ || channels_ > 8 || !align_) return false;
-    if (format_ == 0x11 || format_ == 2) {
+    if (format_ == kWaveGsm || format_ == kWaveG722 || format_ == kWaveG726 || format_ == kWaveDfpwm) {
+        // Not PCM: describe the stream for its codec, which OpenPcmDecoder then opens.
+        coded_.tag = format_;
+        coded_.rate = rate_; coded_.channels = channels_; coded_.align = align_; coded_.bits = bits_;
+        coded_.blockFrames = blockFrames_;
+        coded_.start = start_; coded_.bytes = bytes_; coded_.frames = declaredFrames;
+        // AU packs G.721/G.723 codes from the low bits of each byte up; WAV from the high bits down.
+        const uint8_t* magic = file_.View(0, 4);
+        coded_.lowBitsFirst = format_ == kWaveG726 && magic && (Is(magic, ".snd") || Is(magic, "dns."));
+        return false;
+    }
+    if (format_ == kIma4) {
+        total_ = bytes_ / align_ * 64;  // a partial packet has no whole samples
+    } else if (format_ == 0x11 || format_ == 2) {
         unsigned header = channels_ * (format_ == 2 ? 7 : 4);
         total_ = bytes_ / align_ * blockFrames_;
         unsigned tail = (unsigned)(bytes_ % align_);
@@ -253,23 +380,7 @@ float PcmDecoder::Sample(const uint8_t* p) const {
         uint64_t u = U64(p, big_); double d; memcpy(&d, &u, 8);
         return std::isfinite(d) ? (float)std::clamp(d, -(double)FLT_MAX, (double)FLT_MAX) : 0;
     }
-    if (format_ == 6 || format_ == 7) {
-        unsigned u = *p;
-        int v;
-        if (format_ == 7) {
-            u = (~u) & 255;
-            v = (((u & 15) << 3) + 132) << ((u >> 4) & 7);
-            v = (u & 128) ? 132 - v : v - 132;
-        } else {
-            u ^= 0x55;
-            unsigned e = (u >> 4) & 7;
-            v = (u & 15) << 4;
-            if (e == 0) v += 8;
-            else { v += 264; if (e > 1) v <<= e - 1; }
-            if (!(u & 128)) v = -v;
-        }
-        return v * (1.0f / 32768.0f);
-    }
+    if (format_ == 6 || format_ == 7) return G711(*p, format_ == 7);
     static constexpr float scale[] = {1.0f / 128.0f, 1.0f / 32768.0f, 1.0f / 8388608.0f, 1.0f / 2147483648.0f};
     return (float)Raw(p) * scale[bits_ / 8 - 1];
 }
@@ -340,6 +451,21 @@ bool PcmDecoder::Adpcm(uint64_t block) {
     uint64_t offset = block * align_;
     if (offset >= bytes_) return false;
     size_t n = (size_t)std::min<uint64_t>(align_, bytes_ - offset);
+    if (format_ == kIma4) {
+        // Packets carry state from one to the next (Ima4Packet), so reach this one's starting
+        // state from the nearest checkpoint at or before it, or from where decoding stands.
+        if (imaMarks_.empty()) imaMarks_.push_back(ImaState{});
+        if (block != imaPacket_) {
+            const size_t mark = (size_t)std::min<uint64_t>(block / kImaMarkEvery, imaMarks_.size() - 1);
+            if (block < imaPacket_ || mark * kImaMarkEvery > imaPacket_) {
+                ima_ = imaMarks_[mark];
+                imaPacket_ = mark * kImaMarkEvery;
+            }
+            while (imaPacket_ < block)
+                if (!Ima4Packet(false)) return false;
+        }
+        return Ima4Packet(true);
+    }
     unsigned header = channels_ * (format_ == 2 ? 7 : 4);
     if (n < header) return false;
     const uint8_t* p = file_.View(start_ + offset, n);
@@ -369,8 +495,6 @@ bool PcmDecoder::Adpcm(uint64_t block) {
             decoded_[i] = s1[c] * (1.0f / 32768);
         }
     } else {
-        static const int steps[] = {7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,50,55,60,66,73,80,88,97,107,118,130,143,157,173,190,209,230,253,279,307,337,371,408,449,494,544,598,658,724,796,876,963,1060,1166,1282,1411,1552,1707,1878,2066,2272,2499,2749,3024,3327,3660,4026,4428,4871,5358,5894,6484,7132,7845,8630,9493,10442,11487,12635,13899,15289,16818,18500,20350,22385,24623,27086,29794,32767};
-        static const int changes[] = {-1,-1,-1,-1,2,4,6,8};
         for (unsigned c = 0; c < channels_; ++c) {
             s1[c] = (int16_t)U16(p + c * 4);
             delta[c] = p[c * 4 + 2];
@@ -384,13 +508,7 @@ bool PcmDecoder::Adpcm(uint64_t block) {
                 while (at < stop) {
                     unsigned packed = p[at++];
                     for (int half = 0; half < 2; ++half) {
-                        unsigned q = (packed >> (half * 4)) & 15;
-                        int step = steps[delta[c]], diff = step >> 3;
-                        if (q & 1) diff += step >> 2;
-                        if (q & 2) diff += step >> 1;
-                        if (q & 4) diff += step;
-                        s1[c] = std::clamp(s1[c] + ((q & 8) ? -diff : diff), -32768, 32767);
-                        delta[c] = std::clamp(delta[c] + changes[q & 7], 0, 88);
+                        ImaStep((packed >> (half * 4)) & 15, s1[c], delta[c]);
                         if (written[c] < frames) decoded_[written[c] * channels_ + c] = s1[c] * (1.0f / 32768);
                         ++written[c];
                     }
@@ -399,6 +517,34 @@ bool PcmDecoder::Adpcm(uint64_t block) {
         }
         if (channels_ == 2) decoded_.resize(std::min({frames, written[0], written[1]}) * channels_);
     }
+    return true;
+}
+
+// QuickTime IMA4: per channel, a big-endian header holding the predictor's top 9 bits and a 7-bit
+// step index, then 32 bytes of nibbles, low nibble first. All 64 samples come from nibbles; the
+// header's predictor is not itself a sample. The header keeps only 9 bits of the predictor, so
+// Apple's decoder goes on from its own full predictor when the header agrees with it: the same
+// step index and a predictor within 127. Only a header that disagrees resets the state.
+// Decodes packet imaPacket_ from ima_, into decoded_ when `output` is set, and advances.
+bool PcmDecoder::Ima4Packet(bool output) {
+    const uint64_t offset = imaPacket_ * align_;
+    if (offset >= bytes_ || bytes_ - offset < align_) return false;
+    const uint8_t* p = file_.View(start_ + offset, align_);
+    if (!p) return false;
+    if (output) decoded_.resize(64 * channels_);
+    for (unsigned c = 0; c < channels_; ++c, p += 34) {
+        const unsigned header = U16(p, true);
+        const int predictor = (int16_t)(header & 0xFF80), index = (int)(header & 0x7F);
+        if (index > 88) return false;
+        int& sample = ima_.sample[c];
+        int& step = ima_.index[c];
+        if (step != index || std::abs(predictor - sample) > 127) { sample = predictor; step = index; }
+        for (unsigned i = 0; i < 64; ++i) {
+            ImaStep((p[2 + i / 2] >> ((i & 1) * 4)) & 15, sample, step);
+            if (output) decoded_[i * channels_ + c] = sample * (1.0f / 32768);
+        }
+    }
+    if (++imaPacket_ % kImaMarkEvery == 0 && imaPacket_ / kImaMarkEvery == imaMarks_.size()) imaMarks_.push_back(ima_);
     return true;
 }
 
@@ -456,7 +602,18 @@ bool PcmDecoder::Seek(double seconds) {
 
 std::unique_ptr<Decoder> OpenPcmDecoder(const std::wstring& path) {
     auto d = std::make_unique<PcmDecoder>();
-    return d->Open(path) ? std::move(d) : nullptr;
+    if (d->Open(path)) return d;
+    return d->coded_.tag ? OpenCodedStream(path, d->coded_) : nullptr;
+}
+
+std::unique_ptr<Decoder> OpenCodedStream(const std::wstring& path, const CodedStream& s) {
+    switch (s.tag) {
+    case kWaveG722: return OpenG722Decoder(path, &s);
+    case kWaveG726: return OpenG726Decoder(path, s);
+    case kWaveGsm: return OpenGsmDecoder(path, &s);
+    case kWaveDfpwm: return OpenDfpwmDecoder(path, &s);
+    default: return nullptr;
+    }
 }
 
 namespace {

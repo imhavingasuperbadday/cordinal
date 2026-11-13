@@ -4,6 +4,7 @@
 // results back as WM_APP_RG, so it never touches the live library.
 #include "app.h"
 
+#include "alternate_ui.h"
 #include "background_cpu.h"
 #include "decoder.h"
 
@@ -62,8 +63,16 @@ void Start(const std::vector<TrackId>& ids, bool background) {
     g.rgRunIds.clear();
     for (TrackId id : ids) {
         if (id >= g_lib.Count() || !seen.insert(id).second) continue;
-        // Asking for a track that failed before tries it again.
-        if (!background) g_lib[id].flags &= (uint16_t)~Track::kRgScanFailed;
+        // Asking for a track that failed before tries it again, including a tempo that had no
+        // clear beat last time.
+        if (!background) {
+            uint16_t retry = Track::kRgScanFailed;
+            if (!g_lib[id].bpm) retry |= Track::kBpmDetected;
+            if (g_lib[id].flags & retry) {
+                g_lib[id].flags &= (uint16_t)~retry;
+                g.libraryDirty = true;
+            }
+        }
         items.push_back(g_lib.SnapshotPath(id));
         sizeAndTime.emplace_back(g_lib[id].fileSize, g_lib[id].fileTime);
         g.rgRunIds.push_back(id);
@@ -117,7 +126,14 @@ void MaybeAutoMeasure(bool priority) {
         if (r.dirty) g.libraryDirty = true;
         if (r.gains) RefreshGains(false);
     }
-    if (!g.settings.rg.on || !g.settings.rgAutoScan || (g.rgRunning && !g.rgAuto) || BackgroundBusy()) return;
+    // Tempo is only detected for libraries that show the BPM column.
+    const auto& columns = ActiveColumnTypes();
+    const bool wantTempo = std::find(columns.begin(), columns.end(), ui::kColBpm) != columns.end();
+    auto wanted = [wantTempo](TrackId id) {
+        return replaygain::NeedsMeasuring(id) || (wantTempo && replaygain::NeedsTempo(id));
+    };
+    if ((!g.settings.rg.on && !wantTempo) || !g.settings.rgAutoScan || (g.rgRunning && !g.rgAuto) ||
+        BackgroundBusy()) return;
     if (g.rgRunning && !priority) return;
     uint64_t now = SDL_GetTicks();
     if (!g.rgNextAuto) g.rgNextAuto = now + 8000;  // let startup settle first
@@ -125,14 +141,14 @@ void MaybeAutoMeasure(bool priority) {
     if (g.playing != kNone) upcoming.push_back(g.playing);
     bool covered = true, needed = false;
     for (TrackId id : upcoming) {
-        if (id >= g_lib.Count() || !replaygain::NeedsMeasuring(id)) continue;
+        if (id >= g_lib.Count() || !wanted(id)) continue;
         covered &= std::find(g.rgRunIds.begin(), g.rgRunIds.end(), id) != g.rgRunIds.end();
         needed = true;
     }
     if (g.rgRunning && covered) return;
     if (!needed && now < g.rgNextAuto) return;
     g.rgNextAuto = now + 15000;  // when nothing is found: look again later
-    auto ids = replaygain::AutoMeasureTracks(upcoming, kSweepTracks);
+    auto ids = replaygain::AutoMeasureTracks(upcoming, kSweepTracks, wantTempo);
     if (!ids.empty()) Start(ids, true);
 }
 

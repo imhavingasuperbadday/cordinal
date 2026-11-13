@@ -8,6 +8,7 @@
 #include "library.h"
 #include "packs.h"
 #include "sort.h"
+#include "textcase.h"
 
 #ifdef _WIN32
 #include <bcrypt.h>
@@ -48,11 +49,6 @@ std::atomic<unsigned> g_patience{15000};
 
 std::mutex g_activeMx;
 std::shared_ptr<const std::vector<std::shared_ptr<const Helper>>> g_active;
-
-std::wstring Lower(std::wstring s) {
-    for (auto& c : s) c = (wchar_t)towlower(c);
-    return s;
-}
 
 std::wstring Trim(const std::wstring& s) {
     size_t b = s.find_first_not_of(L" \t\r\n"), e = s.find_last_not_of(L" \t\r\n");
@@ -642,7 +638,7 @@ void ForEachField(const std::string& text, const std::function<void(const std::w
         while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) line.pop_back();
         if (line.find_first_not_of(" \t") == std::string::npos) continue;
         size_t eq = line.find('=');
-        std::wstring key = eq == std::string::npos ? L"" : Lower(Trim(ProgramText(line.substr(0, eq))));
+        std::wstring key = eq == std::string::npos ? L"" : textcase::Fold(Trim(ProgramText(line.substr(0, eq))));
         std::replace(key.begin(), key.end(), L' ', L'_');
         std::string value = eq == std::string::npos ? "" : line.substr(eq + 1);
         value.erase(0, std::min(value.size(), value.find_first_not_of(" \t")));
@@ -713,7 +709,7 @@ Helper ParseHelper(const std::wstring& id, const std::wstring& dir, const std::s
         std::replace_if(list.begin(), list.end(), [](wchar_t c) { return c == L',' || c == L';'; }, L' ');
         std::vector<std::wstring> extensions;
         for (std::wstring e : SplitWords(list)) {
-            e = Lower(e);
+            e = textcase::Fold(e);
             e.erase(0, std::min(e.size(), e.find_first_not_of(L"*.")));
             if (e.empty() || e.find_first_of(L"\\/:*?\"<>|.") != std::wstring::npos ||
                 std::find(extensions.begin(), extensions.end(), e) != extensions.end())
@@ -747,7 +743,7 @@ Helper ParseHelper(const std::wstring& id, const std::wstring& dir, const std::s
             HelperTool t;
             t.label = label;
             if (h.tools.size() >= kMaxTools || !command(&s, L"command", kFile | kFiles | kFormat, L"The tool " + label, t.command)) continue;
-            std::wstring output = Lower(text(&s, L"output"));
+            std::wstring output = textcase::Fold(text(&s, L"output"));
             t.output = output == L"tags" ? HelperTool::Tags : output == L"nothing" || output == L"none" ? HelperTool::Nothing : HelperTool::Text;
             t.together = t.command.Has(L"files");
             t.perTrack = !t.together && t.command.UsesTrack();

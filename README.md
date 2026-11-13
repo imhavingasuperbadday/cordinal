@@ -9,7 +9,7 @@ One 1.8 MB program. No installer, no runtime, no codecs to add.
 
 <div align="center">
 
-Current release: **0.1.10** · `cordinal.exe`, 1,805,824 bytes<br>
+Current release: **0.1.11** · `cordinal.exe`, 1,846,272 bytes<br>
 **[Download](https://github.com/imhavingasuperbadday/cordinal/releases/latest)** ·
 [Getting started](#getting-started) · [Guide](#guide) · [Building](#building) ·
 [Issues](https://github.com/imhavingasuperbadday/cordinal/issues)
@@ -42,15 +42,17 @@ library, and treats your files carefully: every tag write is atomic and can be u
 
 ### Formats
 
-FLAC, WAV, AIFF, MP3, MP4/M4A, Ogg Vorbis, Opus, AAC, ALAC, WMA, APE, WavPack, Musepack, AC3 and
-E-AC-3, TTA, Matroska audio, DSD, CUE sheets, tracker modules, MIDI, video game music (NES, SNES,
-Game Boy, Genesis, Commodore 64) and cordinal's own lossless `.cord`.
+FLAC (also in Ogg), WAV, AIFF, MP3, MP4/M4A, Ogg Vorbis, Opus, AAC, ALAC, WMA, APE, WavPack,
+Musepack, AC3 and E-AC-3, TTA, Matroska audio, DSD, Apple CAF, Sun AU, Creative VOC, Amiga 8SVX,
+CRI ADX, GSM 06.10, G.722, G.726, ComputerCraft DFPWM, CUE sheets, tracker modules, MIDI, video game music (NES, SNES, Game Boy, Genesis, Commodore 64) and
+cordinal's own lossless `.cord`.
 
 ### Library and playlists
 
 - Watched folders: new files join on their own, moved files keep their history, unplugged drives
   lose nothing
 - Track list grouped by album, cover grid, albums with tracks, artists, and a column browser
+- BPM detection while tracks are measured, filled in when the BPM column is shown
 - An optional Inbox to review new music before it joins the library
 - Album editions (remaster, deluxe, regional...) sharing one tile, with an edition selector
 - Static playlists, rules-based auto-playlists, Play next and a queue you can reorder by dragging
@@ -351,11 +353,18 @@ protected purchases in their authorized app.
   treble turns its hue to one side of the theme's accent or the other, and louder moments stand out
   more: **Moodbar** draws a flat stripe, **Mood waveform** keeps the waveform's shape.
 - **Seek bar shows** the **Whole song**, or **Live audio**, a moving picture of what is being heard
-  (optionally **with progress**). Radio always shows live audio, and seeking works either way.
+  (optionally **with progress**). Radio always shows live audio, and seeking works either way. The
+  live bar lifts on each beat, so a loud, compressed master still visibly moves.
+- **60 frames a second** (off by default) draws the live waveform and the seek bar's glow 60 times
+  a second instead of 30, for smoother motion; it uses a little more CPU.
 - **Seek bar glow** draws a soft halo that pulses with the beat, brighter where the song is loud.
 - **Fade the waveform when pausing** (on by default) fades the waveform between its playing colour
   and amber instead of switching at once. If your waveform colour is itself amber or yellow, paused
   turns the text colour instead, so you can still tell the two apart.
+- **Wind behind the track list** (off by default) sends soft ribbons drifting across the right of the
+  list while music plays, curling, swelling and gusting with it: wide and slow for bass, short and
+  quick for treble. They pass behind the track text, melt into the list's edges instead of being cut
+  off, stop when you pause, and stay off on Windows while its animation effects are turned off.
 - **Moodbar colours**: Theme, Vivid (the whole colour wheel), Spectrum (red bass, green mids, blue
   treble), Warm, Cool, Colour-blind friendly (blue to orange) or Single colour. **Mood waveform
   colours** can give the Mood waveform a scheme of its own.
@@ -453,7 +462,7 @@ carries those.
 A native Linux build shares the library, decoders, tags and engine with Windows. Its window is drawn
 through SDL3, sound goes through PipeWire, and media keys and the tray use D-Bus. It has the same
 features as Windows but is less tested than the Windows build. The published program is built on
-Debian 13 for 64-bit x86, and it uses that system's libraries: SDL3, SDL3_ttf, PipeWire, libsystemd,
+Debian 13 for 64-bit x86, and it uses that system's libraries: SDL3, SDL3_ttf, PipeWire,
 fontconfig and OpenSSL 3.
 
 On Debian 13 and newer, Ubuntu 25.10 and newer, Fedora 42 and newer, openSUSE Tumbleweed, and Arch
@@ -482,8 +491,8 @@ pinned UPX packer and checking its hash. Releases use cordinal's own packer: `bu
 additionally needs [LLVM-MinGW](https://github.com/mstorsjo/llvm-mingw)'s `clang++` on `PATH` and
 Python 3.14 (see [cdpack/README.md](cdpack/README.md)). Every mode writes `build\cordinal.exe`.
 
-**Linux** needs CMake, a C++20 compiler, SDL3, SDL3_ttf, PipeWire, libsystemd, fontconfig and
-OpenSSL 3:
+**Linux** needs CMake, a C++20 compiler, SDL3, SDL3_ttf, PipeWire, fontconfig and OpenSSL
+3:
 
 ```sh
 cmake -S . -B build-linux && cmake --build build-linux

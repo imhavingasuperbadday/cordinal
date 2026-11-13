@@ -61,6 +61,11 @@ void UpdateNowPlaying();
 void UpdateStatus();
 void ShowPlaybackTime(double pos, double duration);
 void PlayingRowTick();  // grows the playing row's underline (app_playlists.cpp)
+void ListWindWake();    // starts the track list's wind once music is heard (app_playlists.cpp)
+void ListWindChanged(); // the preference changed: start, or clear and repaint (app_playlists.cpp)
+void PaintListBlank(HDC dc);  // the list's space past its rows and columns, with the wind
+LONG ListColumnsRight();      // the list's last column's right edge, in list client coordinates
+void StepListWindForTest(const float energy[3], float seconds);  // feeds the wind heard audio
 void PaintArt(HDC dc);
 void OnEngineEvent(EngineEvent e, unsigned long long token);
 void PrepareWaveform(TrackId id);
@@ -76,6 +81,9 @@ void DrawMoodCell(HDC dc, const RECT& cell, TrackId id, COLORREF bg);
 void OnListPeaksReady();
 void WaveformTick();
 bool WaveformStep(UINT_PTR id);
+// The live waveform's timer interval in milliseconds (app_waveform.cpp): 30 frames a second, or 60
+// when Preferences asks.
+UINT WaveformFrameMs();
 int WaveformPeak(double from, double to);
 COLORREF WaveformPlayedColor();
 // The played colour with no paused state: the position's own, Preferences', a pack theme's or the accent

@@ -154,6 +154,20 @@ for name in ("fixture.exe", "fixture.dll"):
         broken.write_bytes(damaged)
         result = subprocess.run([str(broken)], timeout=10)
         assert result.returncode & 0xffffffff == 0xcd000026, hex(result.returncode & 0xffffffff)
+    # The fixture delay-loads version.dll (fixture_probe checks it maps on first call). The packed
+    # headers leave the directory out; the restored image keeps it. A descriptor that is not
+    # RVA-based is refused rather than packed.
+    pe = pack.Pe(native)
+    delay, delay_bytes = pe.directory(13)
+    assert delay and delay_bytes >= 64, (delay, delay_bytes)
+    assert pack.Pe(packed).directory(13) == (0, 0)
+    broken_delay = bytearray(native)
+    struct.pack_into("<I", broken_delay, pe.offset(delay), 0)
+    try:
+        pack.pack_image(bytes(broken_delay), out / "loader.exe")
+        raise AssertionError("a delay-import descriptor without RVAs was accepted")
+    except ValueError:
+        pass
     cfg = bytearray(native)
     pe = pack.Pe(cfg)
     struct.pack_into("<H", cfg, pe.opt + 70, pack.u16(cfg, pe.opt + 70) | 0x4000)

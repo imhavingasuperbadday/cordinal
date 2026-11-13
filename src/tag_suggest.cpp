@@ -1,5 +1,6 @@
 // Collects the tag editor's completion values and answers prefix lookups. See tag_suggest.h.
 #include "tag_suggest.h"
+#include "textcase.h"
 
 #include <algorithm>
 #include <cwctype>
@@ -25,11 +26,6 @@ std::wstring TrimWide(std::wstring text) {
     while (end > begin && space(text[end - 1])) --end;
     text.erase(end);
     text.erase(0, begin);
-    return text;
-}
-
-std::wstring Fold(std::wstring text) {
-    for (wchar_t& c : text) c = static_cast<wchar_t>(towlower(c));
     return text;
 }
 
@@ -68,7 +64,7 @@ TagSuggestionSet BuildTagSuggestions(const Library& library) {
         for (std::string_view value : firstSeen[i]) {
             std::wstring text = TrimWide(FromUtf8(value));
             if (text.empty()) continue;
-            std::wstring key = Fold(text);
+            std::wstring key = textcase::Fold(text);
             byFold.try_emplace(std::move(key), std::move(text));
         }
         set.fields[i].reserve(byFold.size());
@@ -81,7 +77,7 @@ std::vector<std::wstring> MatchTagSuggestions(const TagSuggestionSet& set, TagSu
                                               std::wstring_view prefix, size_t limit) {
     std::vector<std::wstring> matches;
     if (prefix.empty() || limit == 0) return matches;
-    const std::wstring key = Fold(std::wstring(prefix));
+    const std::wstring key = textcase::Fold(std::wstring(prefix));
     const auto& values = set[field];
     auto it = std::lower_bound(
         values.begin(), values.end(), key,

@@ -525,9 +525,9 @@ bool VorbisDecoder::Packet() {
     packet_.clear();
     if (media_.matroska) {
         if (headerPacket_<3) { packet_=headers_[headerPacket_++];return true; }
-        if (offset_>=media_.packets.size()) return false;
-        size_t index=(size_t)offset_++;const auto& packet=media_.packets[index];const uint8_t* p=media_.Data(index);
-        if (!p) return false;packet_.assign(p,p+packet.bytes);ended_=offset_==media_.packets.size();return true;
+        if (offset_>=media_.Count()) return false;
+        size_t index=(size_t)offset_++;const auto packet=media_.At(index);const uint8_t* p=media_.Data(index);
+        if (!p) return false;packet_.assign(p,p+packet.bytes);ended_=offset_==media_.Count();return true;
     }
     bool continuing = false;
     for (;;) {
@@ -666,7 +666,7 @@ bool VorbisDecoder::Open(const std::wstring& path) {
             packet.start=media_.frames;packet.frames=previous?(previous+n)/4:0;
             media_.frames+=packet.frames;previous=n;
         }
-        if (!media_.Trim(rate_)) return false;total_=media_.skip+media_.valid;
+        if (!media_.Trim(rate_)) return false;media_.Pack();total_=media_.skip+media_.valid;
     } else {
     // The last page is at most 65,307 bytes, regardless of packet size.
     uint64_t from = file_.Size() > 65307 ? file_.Size()-65307 : 0;

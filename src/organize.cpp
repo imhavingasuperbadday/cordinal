@@ -6,6 +6,7 @@
 
 #include "cue.h"
 #include "titleformat.h"
+#include "textcase.h"
 
 #include <shlobj.h>
 
@@ -16,11 +17,6 @@
 namespace {
 
 // Windows paths compare case-insensitively, so every "same file / already planned" test lowers both sides.
-std::wstring LowerPath(std::wstring s) {
-    CharLowerBuffW(s.data(), (DWORD)s.size());
-    return s;
-}
-
 bool Exists(const std::wstring& path) { return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES; }
 
 std::wstring ErrorText(DWORD code) {
@@ -39,8 +35,8 @@ bool IsImage(const std::wstring& path) {
 // Removes `dir` and its parents while they are empty, stopping at any folder in `keep`.
 void RemoveEmptyFolders(std::wstring dir, const std::vector<std::wstring>& keep) {
     while (dir.size() > 3) {
-        std::wstring lower = LowerPath(dir);
-        if (std::any_of(keep.begin(), keep.end(), [&](const std::wstring& k) { return LowerPath(k) == lower; })) return;
+        std::wstring lower = textcase::Path(dir);
+        if (std::any_of(keep.begin(), keep.end(), [&](const std::wstring& k) { return textcase::Path(k) == lower; })) return;
         if (!RemoveDirectoryW(dir.c_str())) return;  // not empty (or not ours to remove)
         dir = DirectoryOf(dir);
     }
@@ -77,7 +73,7 @@ std::wstring SafePathComponent(const std::wstring& s, size_t maxLen) {
     if (r.size() > maxLen) r.resize(maxLen);
     while (!r.empty() && (r.back() == L'.' || r.back() == L' ')) r.pop_back();
     // Reserved device names, with or without an extension.
-    std::wstring stem = LowerPath(r.substr(0, r.find(L'.')));
+    std::wstring stem = textcase::Path(r.substr(0, r.find(L'.')));
     for (const wchar_t* bad : {L"con", L"prn", L"aux", L"nul", L"com1", L"com2", L"com3", L"com4", L"com5", L"com6", L"com7",
                                L"com8", L"com9", L"lpt1", L"lpt2", L"lpt3", L"lpt4", L"lpt5", L"lpt6", L"lpt7", L"lpt8", L"lpt9"})
         if (stem == bad) {
@@ -138,14 +134,14 @@ std::vector<OrganizeMove> PlanOrganize(const std::vector<TrackId>& ids, const st
         size_t budget = 250 - std::min<size_t>(250, dir.size() + ext.size() + 6);
         if (name.size() > budget) name.resize(std::min(name.size(), std::max<size_t>(budget, 8)));
         m.to = dir + name + L"." + ext;
-        if (LowerPath(m.to) == LowerPath(m.from)) {
+        if (textcase::Path(m.to) == textcase::Path(m.from)) {
             m.skip = L"already in place";
         } else {
-            for (int n = 2; (taken.count(LowerPath(m.to)) || Exists(m.to)) && n <= 99; ++n)
+            for (int n = 2; (taken.count(textcase::Path(m.to)) || Exists(m.to)) && n <= 99; ++n)
                 m.to = dir + name + L" (" + std::to_wstring(n) + L")." + ext;
-            if (taken.count(LowerPath(m.to)) || Exists(m.to)) m.skip = L"a file with that name already exists";
+            if (taken.count(textcase::Path(m.to)) || Exists(m.to)) m.skip = L"a file with that name already exists";
         }
-        taken.insert(LowerPath(m.to));
+        taken.insert(textcase::Path(m.to));
         plan.push_back(std::move(m));
     }
     return plan;
@@ -178,14 +174,14 @@ OrganizeResult ExecuteOrganize(const std::vector<OrganizeMove>& plan, const std:
     for (size_t i = 0; i < plan.size(); ++i) {
         const OrganizeMove& m = plan[i];
         if (!m.skip.empty()) {
-            destsBySource[LowerPath(DirectoryOf(m.from))].push_back(L"");  // something stays behind
+            destsBySource[textcase::Path(DirectoryOf(m.from))].push_back(L"");  // something stays behind
             continue;
         }
         SHCreateDirectoryExW(nullptr, DirectoryOf(m.to).c_str(), nullptr);
         // A destination created after the plan was made wins: never replace it.
         if (Exists(m.to)) {
             r.failed.emplace_back(m.from, L"A file with that name appeared before the move.");
-            destsBySource[LowerPath(DirectoryOf(m.from))].push_back(L"");
+            destsBySource[textcase::Path(DirectoryOf(m.from))].push_back(L"");
             continue;
         }
         // The undo record goes first: a crash between the move and the log write would otherwise
@@ -193,21 +189,21 @@ OrganizeResult ExecuteOrganize(const std::vector<OrganizeMove>& plan, const std:
         uint64_t logBefore = 0;
         if (!AppendLog(log, m.to, m.from, &logBefore)) {
             r.failed.emplace_back(m.from, L"Couldn't save the undo log; the file was not moved.");
-            destsBySource[LowerPath(DirectoryOf(m.from))].push_back(L"");
+            destsBySource[textcase::Path(DirectoryOf(m.from))].push_back(L"");
             stoppedAt = i + 1;
             break;  // stop before risking any further moves without an undo record
         }
         if (MoveFileExW(m.from.c_str(), m.to.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH)) {
             r.moved.emplace_back(m.id, m.to);
-            destsBySource[LowerPath(DirectoryOf(m.from))].push_back(DirectoryOf(m.to));
-            sourceCase[LowerPath(DirectoryOf(m.from))] = DirectoryOf(m.from);
+            destsBySource[textcase::Path(DirectoryOf(m.from))].push_back(DirectoryOf(m.to));
+            sourceCase[textcase::Path(DirectoryOf(m.from))] = DirectoryOf(m.from);
         } else {
             // Nothing reached the destination (a partial cross-volume copy is kept in the log so
             // the user can still undo it).
             DWORD error = GetLastError();
             if (!Exists(m.to)) TruncateLog(log, logBefore);
             r.failed.emplace_back(m.from, ErrorText(error));
-            destsBySource[LowerPath(DirectoryOf(m.from))].push_back(L"");
+            destsBySource[textcase::Path(DirectoryOf(m.from))].push_back(L"");
         }
     }
     // The run stopped early; report every file it did not reach, so the summary can't look complete.
@@ -218,7 +214,7 @@ OrganizeResult ExecuteOrganize(const std::vector<OrganizeMove>& plan, const std:
     for (auto& [lower, dests] : destsBySource) {
         auto src = sourceCase.find(lower);
         if (src == sourceCase.end()) continue;
-        bool together = std::all_of(dests.begin(), dests.end(), [&](const std::wstring& d) { return !d.empty() && LowerPath(d) == LowerPath(dests[0]); });
+        bool together = std::all_of(dests.begin(), dests.end(), [&](const std::wstring& d) { return !d.empty() && textcase::Path(d) == textcase::Path(dests[0]); });
         WIN32_FIND_DATAW fd;
         HANDLE h = FindFirstFileW((src->second + kPathSep + L"*").c_str(), &fd);
         bool audioLeft = false;

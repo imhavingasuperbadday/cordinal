@@ -1,6 +1,6 @@
-// The Library tab's view row, column browser and visual views on Linux (libview.cpp), as the Windows
-// build's app_browser.cpp and libview.cpp: Tracks, Albums & Tracks, Albums and Artists, and the
-// Genre | Album artist | Album browser over them.
+// The Library tab's view row, column browser and visual views on Linux (libview.cpp and
+// libview_canvas.cpp), as the Windows build's app_browser.cpp and libview*.cpp: Tracks, Albums & Tracks,
+// Albums and Artists, and the Genre | Album artist | Album browser over them.
 #pragma once
 #include "album_editions.h"
 #include "app.h"
@@ -30,6 +30,11 @@ bool BrowserFocused();
 bool BrowserKey(const SDL_KeyboardEvent& e);  // false for keys the window handles itself
 void BrowserText(const char* text);
 void BrowserBlur();
+// For the views (libview_canvas.cpp): every value of `field` for one track, as the panes split them
+// (several for a multi-value tag, handle 0 for an empty one), and showing the browser with `value`
+// chosen in the pane for `field` (Artists' double-click).
+void BrowserValues(TrackId id, BrowseField field, std::vector<StringPool::Handle>& out);
+void BrowserShowValue(BrowseField field, StringPool::Handle value);
 
 // The visual views, in place of the track list on the Library tab. Their selection is kept in
 // g.selected, so the menus and commands act on it as on the list's.

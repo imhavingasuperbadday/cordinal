@@ -14,8 +14,10 @@ enum class Codec : uint8_t {
     Cord,                // cordinal's own format (cord.h)
     DSD, SID, Module, MIDI,
     Musepack,
+    ADX, G722, GSM, DFPWM,  // game and speech codecs (audio_coded.h, audio_adx.cpp)
+    G726,
 };
-constexpr Codec kLastCodec = Codec::Musepack;  // what a stored codec may be
+constexpr Codec kLastCodec = Codec::G726;  // what a stored codec may be
 const wchar_t* CodecName(Codec c);
 
 struct TagData {

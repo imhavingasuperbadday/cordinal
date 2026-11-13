@@ -1,18 +1,18 @@
-// cordinal on the session bus (sd-bus), on a thread of its own:
+// cordinal on the session bus (the built-in client in dbus.h), on a thread of its own:
 //  - MPRIS (org.mpris.MediaPlayer2.cordinal): media keys, playerctl and bar widgets (Waybar on
 //    Omarchy) see what plays, with its cover, and control it.
 //  - The tray icon (StatusNotifierItem with a dbusmenu menu, as the Windows tray icon has).
 //  - One cordinal at a time: a second one hands its files or command to the first and leaves
 //    (io.github.cordinal.Open on the same name).
 // Getters read a snapshot the UI thread keeps current (MprisChanged); methods post Remote
-// commands to the UI thread.
+// commands to the UI thread. Only the bus thread touches the connection once it has started.
 #include "app.h"
+#include "dbus.h"
 #include "radio_ui.h"
 
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/eventfd.h>
-#include <systemd/sd-bus.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -22,6 +22,9 @@
 namespace lx {
 
 namespace {
+
+using dbus::Reader;
+using dbus::Writer;
 
 constexpr const char* kBusName = "org.mpris.MediaPlayer2.cordinal";
 constexpr const char* kPath = "/org/mpris/MediaPlayer2";
@@ -33,6 +36,7 @@ constexpr const char* kMenuPath = "/MenuBar";
 constexpr const char* kSni = "org.kde.StatusNotifierItem";
 constexpr const char* kMenu = "com.canonical.dbusmenu";
 constexpr const char* kWatcher = "org.kde.StatusNotifierWatcher";
+constexpr dbus::Target kDaemon{"org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", {}};
 
 // What the bus side shows, copied from the UI thread.
 struct Snapshot {
@@ -57,7 +61,7 @@ std::string g_artPath;
 TrackId g_artFor = kNone;
 bool g_seeked = false;
 
-sd_bus* g_bus = nullptr;
+std::unique_ptr<dbus::Bus> g_bus;
 std::thread g_thread;
 int g_wake = -1;  // eventfd: the snapshot changed, or quit
 std::atomic<bool> g_quit{false};
@@ -78,51 +82,27 @@ std::string AutostartPath() {
     return dir + "/autostart/cordinal.desktop";
 }
 
+std::string TrackPath(TrackId id) { return "/io/github/cordinal/track/" + std::to_string(id); }
+
 // --- MPRIS ----------------------------------------------------------------------------------------
-int AppendVariant(sd_bus_message* m, const char* sig, auto&&... value) {
-    int r = sd_bus_message_open_container(m, 'v', sig);
-    if (r >= 0) r = sd_bus_message_append(m, sig, value...);
-    if (r >= 0) r = sd_bus_message_close_container(m);
-    return r;
-}
-
-int AppendEntry(sd_bus_message* m, const char* key, const char* sig, auto&&... value) {
-    int r = sd_bus_message_open_container(m, 'e', "sv");
-    if (r >= 0) r = sd_bus_message_append(m, "s", key);
-    if (r >= 0) r = AppendVariant(m, sig, value...);
-    if (r >= 0) r = sd_bus_message_close_container(m);
-    return r;
-}
-
-int AppendStringList(sd_bus_message* m, const char* key, const std::string& value) {
-    int r = sd_bus_message_open_container(m, 'e', "sv");
-    if (r >= 0) r = sd_bus_message_append(m, "s", key);
-    if (r >= 0) r = sd_bus_message_open_container(m, 'v', "as");
-    if (r >= 0) r = sd_bus_message_append(m, "as", 1, value.c_str());
-    if (r >= 0) r = sd_bus_message_close_container(m);
-    if (r >= 0) r = sd_bus_message_close_container(m);
-    return r;
-}
-
-int GetMetadata(sd_bus*, const char*, const char*, const char*, sd_bus_message* reply, void*, sd_bus_error*) {
+void WriteMetadata(Writer& w) {
     Snapshot s = Snap();
-    int r = sd_bus_message_open_container(reply, 'a', "{sv}");
-    if (r < 0) return r;
+    Writer::Array a = w.Open(8);
+    w.Entry("mpris:trackid", "o");
     if (s.id == kNone) {
-        AppendEntry(reply, "mpris:trackid", "o", "/org/mpris/MediaPlayer2/TrackList/NoTrack");
+        w.O("/org/mpris/MediaPlayer2/TrackList/NoTrack");
     } else {
-        std::string trackId = "/io/github/cordinal/track/" + std::to_string(s.id);
-        AppendEntry(reply, "mpris:trackid", "o", trackId.c_str());
-        if (s.lengthUs > 0) AppendEntry(reply, "mpris:length", "x", s.lengthUs);
-        AppendEntry(reply, "xesam:title", "s", s.title.c_str());
-        if (!s.artist.empty()) AppendStringList(reply, "xesam:artist", s.artist);
-        if (!s.album.empty()) AppendEntry(reply, "xesam:album", "s", s.album.c_str());
-        if (!s.albumArtist.empty()) AppendStringList(reply, "xesam:albumArtist", s.albumArtist);
-        if (s.trackNo) AppendEntry(reply, "xesam:trackNumber", "i", s.trackNo);
-        if (!s.url.empty()) AppendEntry(reply, "xesam:url", "s", s.url.c_str());
-        if (!s.art.empty()) AppendEntry(reply, "mpris:artUrl", "s", s.art.c_str());
+        w.O(TrackPath(s.id));
+        if (s.lengthUs > 0) w.Entry("mpris:length", "x"), w.X(s.lengthUs);
+        w.Entry("xesam:title", "s"), w.S(s.title);
+        if (!s.artist.empty()) w.Entry("xesam:artist", "as"), w.Strings({s.artist});
+        if (!s.album.empty()) w.Entry("xesam:album", "s"), w.S(s.album);
+        if (!s.albumArtist.empty()) w.Entry("xesam:albumArtist", "as"), w.Strings({s.albumArtist});
+        if (s.trackNo) w.Entry("xesam:trackNumber", "i"), w.I(s.trackNo);
+        if (!s.url.empty()) w.Entry("xesam:url", "s"), w.S(s.url);
+        if (!s.art.empty()) w.Entry("mpris:artUrl", "s"), w.S(s.art);
     }
-    return sd_bus_message_close_container(reply);
+    w.Close(a);
 }
 
 int64_t PositionUs(const Snapshot& s) {
@@ -134,158 +114,93 @@ int64_t PositionUs(const Snapshot& s) {
     return (int64_t)(pos * 1e6);
 }
 
-int GetProperty(sd_bus*, const char*, const char*, const char* property, sd_bus_message* reply, void*, sd_bus_error*) {
+// The root and Player interfaces' properties; the tables below give each one's type.
+void GetProperty(std::string_view p, Writer& w) {
+    if (p == "Metadata") return WriteMetadata(w);
     Snapshot s = Snap();
-    std::string_view p = property;
-    if (p == "PlaybackStatus") return sd_bus_message_append(reply, "s", s.status.c_str());
-    if (p == "LoopStatus")
-        return sd_bus_message_append(reply, "s", s.repeat == Repeat::One ? "Track" : s.repeat == Repeat::All ? "Playlist" : "None");
-    if (p == "Shuffle") return sd_bus_message_append(reply, "b", (int)s.shuffle);
-    if (p == "Volume") return sd_bus_message_append(reply, "d", s.volume);
-    if (p == "Position") return sd_bus_message_append(reply, "x", PositionUs(s));
-    if (p == "Rate") return sd_bus_message_append(reply, "d", s.rate);
-    if (p == "MinimumRate") return sd_bus_message_append(reply, "d", 0.375);
-    if (p == "MaximumRate") return sd_bus_message_append(reply, "d", 4.0);
-    if (p == "CanGoNext") return sd_bus_message_append(reply, "b", (int)s.canNext);
-    if (p == "CanGoPrevious") return sd_bus_message_append(reply, "b", (int)s.canPrevious);
-    if (p == "CanSeek") return sd_bus_message_append(reply, "b", (int)(s.id != kNone && s.lengthUs > 0));
-    if (p == "CanPlay" || p == "CanPause" || p == "CanControl" || p == "CanQuit" || p == "CanRaise")
-        return sd_bus_message_append(reply, "b", 1);
-    if (p == "HasTrackList" || p == "Fullscreen" || p == "CanSetFullscreen") return sd_bus_message_append(reply, "b", 0);
-    if (p == "Identity") return sd_bus_message_append(reply, "s", "cordinal");
-    if (p == "DesktopEntry") return sd_bus_message_append(reply, "s", "cordinal");
-    if (p == "SupportedUriSchemes") return sd_bus_message_append(reply, "as", 1, "file");
-    if (p == "SupportedMimeTypes") return sd_bus_message_append(reply, "as", 6, "audio/flac", "audio/mpeg", "audio/ogg", "audio/x-wav", "audio/mp4", "audio/opus");
-    return -EINVAL;
+    if (p == "PlaybackStatus") w.S(s.status);
+    else if (p == "LoopStatus") w.S(s.repeat == Repeat::One ? "Track" : s.repeat == Repeat::All ? "Playlist" : "None");
+    else if (p == "Shuffle") w.B(s.shuffle);
+    else if (p == "Volume") w.D(s.volume);
+    else if (p == "Position") w.X(PositionUs(s));
+    else if (p == "Rate") w.D(s.rate);
+    else if (p == "MinimumRate") w.D(0.375);
+    else if (p == "MaximumRate") w.D(4.0);
+    else if (p == "CanGoNext") w.B(s.canNext);
+    else if (p == "CanGoPrevious") w.B(s.canPrevious);
+    else if (p == "CanSeek") w.B(s.id != kNone && s.lengthUs > 0);
+    else if (p == "HasTrackList" || p == "Fullscreen" || p == "CanSetFullscreen") w.B(false);
+    else if (p == "Identity" || p == "DesktopEntry") w.S("cordinal");
+    else if (p == "SupportedUriSchemes") w.Strings({"file"});
+    else if (p == "SupportedMimeTypes") w.Strings({"audio/flac", "audio/mpeg", "audio/ogg", "audio/x-wav", "audio/mp4", "audio/opus"});
+    else w.B(true);  // CanPlay, CanPause, CanControl, CanQuit, CanRaise
 }
 
-int SetProperty(sd_bus*, const char*, const char*, const char* property, sd_bus_message* value, void*, sd_bus_error*) {
-    std::string_view p = property;
-    if (p == "Volume") {
-        double v = 0;
-        int r = sd_bus_message_read(value, "d", &v);
-        if (r >= 0) Post(Remote::SetVolume, (LPARAM)std::lround(std::clamp(v, 0.0, 1.0) * 1e6));
-        return r;
+void SetProperty(std::string_view p, Reader& r) {
+    if (p == "Volume") Post(Remote::SetVolume, (LPARAM)std::lround(std::clamp(r.D(), 0.0, 1.0) * 1e6));
+    else if (p == "Shuffle") Post(Remote::SetShuffle, r.B());
+    else if (p == "LoopStatus") {
+        std::string_view s = r.S();
+        Post(Remote::SetRepeat, (LPARAM)(s == "Track" ? Repeat::One : s == "Playlist" ? Repeat::All : Repeat::Off));
     }
-    if (p == "Shuffle") {
-        int b = 0;
-        int r = sd_bus_message_read(value, "b", &b);
-        if (r >= 0) Post(Remote::SetShuffle, b);
-        return r;
-    }
-    if (p == "LoopStatus") {
-        const char* s = nullptr;
-        int r = sd_bus_message_read(value, "s", &s);
-        if (r >= 0 && s) Post(Remote::SetRepeat, (LPARAM)(!strcmp(s, "Track") ? Repeat::One : !strcmp(s, "Playlist") ? Repeat::All : Repeat::Off));
-        return r;
-    }
-    return sd_bus_reply_method_return(value, nullptr);
 }
 
-int Method(sd_bus_message* m, void*, sd_bus_error*) {
-    std::string_view name = sd_bus_message_get_member(m);
+void Simple(dbus::Call& c) {
     static const std::pair<std::string_view, Remote> kSimple[] = {
         {"PlayPause", Remote::PlayPause}, {"Play", Remote::Play}, {"Pause", Remote::Pause}, {"Stop", Remote::Stop},
         {"Next", Remote::Next},           {"Previous", Remote::Previous}, {"Raise", Remote::Raise}, {"Quit", Remote::Quit}};
     for (auto& [n, r] : kSimple)
-        if (name == n) {
-            Post(r);
-            return sd_bus_reply_method_return(m, nullptr);
-        }
-    if (name == "Seek") {
-        int64_t offset = 0;
-        sd_bus_message_read(m, "x", &offset);
-        Post(Remote::Seek, (LPARAM)offset);
-    } else if (name == "SetPosition") {
-        const char* track = nullptr;
-        int64_t pos = 0;
-        sd_bus_message_read(m, "ox", &track, &pos);
-        Snapshot s = Snap();
-        if (track && s.id != kNone && std::string(track) == "/io/github/cordinal/track/" + std::to_string(s.id))
-            Post(Remote::SetPosition, (LPARAM)pos);
-    } else if (name == "OpenUri") {
-        const char* uri = nullptr;
-        sd_bus_message_read(m, "s", &uri);
-        if (uri && !strncmp(uri, "file://", 7)) {
-            std::wstring path(4096, L'\0');
-            DWORD size = (DWORD)path.size();
-            if (SUCCEEDED(PathCreateFromUrlW(compat::Widen(uri).c_str(), path.data(), &size, 0))) {
-                path.resize(size);
-                Post(Remote::Open, (LPARAM) new std::vector<std::wstring>{path});
-            }
-        }
+        if (c.msg.member == n) Post(r);
+}
+
+void Seek(dbus::Call& c) { Post(Remote::Seek, (LPARAM)c.in.X()); }
+
+void SetPosition(dbus::Call& c) {
+    std::string_view track = c.in.O();
+    int64_t pos = c.in.X();
+    Snapshot s = Snap();
+    if (s.id != kNone && track == TrackPath(s.id)) Post(Remote::SetPosition, (LPARAM)pos);
+}
+
+void OpenUri(dbus::Call& c) {
+    std::string uri(c.in.S());
+    if (uri.rfind("file://", 0) != 0) return;
+    std::wstring path(4096, L'\0');
+    DWORD size = (DWORD)path.size();
+    if (SUCCEEDED(PathCreateFromUrlW(compat::Widen(uri.c_str()).c_str(), path.data(), &size, 0))) {
+        path.resize(size);
+        Post(Remote::Open, (LPARAM) new std::vector<std::wstring>{path});
     }
-    return sd_bus_reply_method_return(m, nullptr);
 }
 
 // io.github.cordinal.Open(as): files from another cordinal process.
-int OpenMethod(sd_bus_message* m, void*, sd_bus_error*) {
+void OpenMethod(dbus::Call& c) {
     auto* paths = new std::vector<std::wstring>();
-    char** list = nullptr;
-    if (sd_bus_message_read_strv(m, &list) >= 0 && list) {
-        for (char** p = list; *p; ++p) {
-            paths->push_back(compat::Widen(*p));
-            free(*p);
-        }
-        free(list);
-    }
+    for (size_t end = c.in.Open(4); c.in.In(end);) paths->push_back(compat::Widen(std::string(c.in.S()).c_str()));
     if (paths->empty()) {
         delete paths;
         Post(Remote::Raise);
     } else {
         Post(Remote::Open, (LPARAM)paths);
     }
-    return sd_bus_reply_method_return(m, nullptr);
 }
 
-const sd_bus_vtable kRootVtable[] = {
-    SD_BUS_VTABLE_START(0),
-    SD_BUS_METHOD("Raise", "", "", Method, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("Quit", "", "", Method, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_PROPERTY("CanQuit", "b", GetProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_PROPERTY("CanRaise", "b", GetProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_PROPERTY("Fullscreen", "b", GetProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_PROPERTY("CanSetFullscreen", "b", GetProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_PROPERTY("HasTrackList", "b", GetProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_PROPERTY("Identity", "s", GetProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_PROPERTY("DesktopEntry", "s", GetProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_PROPERTY("SupportedUriSchemes", "as", GetProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_PROPERTY("SupportedMimeTypes", "as", GetProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_VTABLE_END};
-
-const sd_bus_vtable kPlayerVtable[] = {
-    SD_BUS_VTABLE_START(0),
-    SD_BUS_METHOD("Next", "", "", Method, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("Previous", "", "", Method, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("Pause", "", "", Method, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("PlayPause", "", "", Method, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("Stop", "", "", Method, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("Play", "", "", Method, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("Seek", "x", "", Method, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("SetPosition", "ox", "", Method, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("OpenUri", "s", "", Method, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_SIGNAL("Seeked", "x", 0),
-    SD_BUS_PROPERTY("PlaybackStatus", "s", GetProperty, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
-    SD_BUS_WRITABLE_PROPERTY("LoopStatus", "s", GetProperty, SetProperty, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
-    SD_BUS_PROPERTY("Rate", "d", GetProperty, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
-    SD_BUS_WRITABLE_PROPERTY("Shuffle", "b", GetProperty, SetProperty, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
-    SD_BUS_PROPERTY("Metadata", "a{sv}", GetMetadata, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
-    SD_BUS_WRITABLE_PROPERTY("Volume", "d", GetProperty, SetProperty, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
-    SD_BUS_PROPERTY("Position", "x", GetProperty, 0, SD_BUS_VTABLE_PROPERTY_EMITS_INVALIDATION),
-    SD_BUS_PROPERTY("MinimumRate", "d", GetProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_PROPERTY("MaximumRate", "d", GetProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_PROPERTY("CanGoNext", "b", GetProperty, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
-    SD_BUS_PROPERTY("CanGoPrevious", "b", GetProperty, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
-    SD_BUS_PROPERTY("CanPlay", "b", GetProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_PROPERTY("CanPause", "b", GetProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_PROPERTY("CanSeek", "b", GetProperty, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
-    SD_BUS_PROPERTY("CanControl", "b", GetProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_VTABLE_END};
-
-const sd_bus_vtable kAppVtable[] = {
-    SD_BUS_VTABLE_START(0),
-    SD_BUS_METHOD("Open", "as", "", OpenMethod, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_VTABLE_END};
+constexpr dbus::Method kRootMethods[] = {{"Raise", "", "", Simple}, {"Quit", "", "", Simple}};
+constexpr dbus::Property kRootProperties[] = {
+    {"CanQuit", "b"}, {"CanRaise", "b"}, {"Fullscreen", "b"}, {"CanSetFullscreen", "b"}, {"HasTrackList", "b"},
+    {"Identity", "s"}, {"DesktopEntry", "s"}, {"SupportedUriSchemes", "as"}, {"SupportedMimeTypes", "as"}};
+constexpr dbus::Method kPlayerMethods[] = {
+    {"Next", "", "", Simple}, {"Previous", "", "", Simple}, {"Pause", "", "", Simple}, {"PlayPause", "", "", Simple},
+    {"Stop", "", "", Simple}, {"Play", "", "", Simple},     {"Seek", "x", "", Seek},    {"SetPosition", "ox", "", SetPosition},
+    {"OpenUri", "s", "", OpenUri}};
+constexpr dbus::SignalInfo kPlayerSignals[] = {{"Seeked", "x"}};
+// Position is polled by clients, never announced, as the specification allows.
+constexpr dbus::Property kPlayerProperties[] = {
+    {"PlaybackStatus", "s"}, {"LoopStatus", "s", true}, {"Rate", "d"},       {"Shuffle", "b", true},
+    {"Metadata", "a{sv}"},   {"Volume", "d", true},     {"Position", "x"},   {"MinimumRate", "d"},
+    {"MaximumRate", "d"},    {"CanGoNext", "b"},        {"CanGoPrevious", "b"}, {"CanPlay", "b"},
+    {"CanPause", "b"},       {"CanSeek", "b"},          {"CanControl", "b"}};
+constexpr dbus::Method kAppMethods[] = {{"Open", "as", "", OpenMethod}};
 
 // --- the tray icon (StatusNotifierItem) and its menu (dbusmenu) ------------------------------------------
 enum MenuId { kPlayPause = 1, kPrevious, kNext, kStop, kSep1, kShow, kSep2, kLogin, kSep3, kExit };
@@ -311,74 +226,56 @@ std::vector<MenuEntry> MenuEntries() {
             {kExit, "E_xit"}};
 }
 
-int AppendMenuProps(sd_bus_message* m, const MenuEntry& e) {
-    int r = sd_bus_message_open_container(m, 'a', "{sv}");
+void WriteMenuProps(Writer& w, const MenuEntry& e) {
+    Writer::Array a = w.Open(8);
     if (e.separator) {
-        AppendEntry(m, "type", "s", "separator");
+        w.Entry("type", "s"), w.S("separator");
     } else {
-        AppendEntry(m, "label", "s", e.label.c_str());
-        AppendEntry(m, "enabled", "b", (int)e.enabled);
+        w.Entry("label", "s"), w.S(e.label);
+        w.Entry("enabled", "b"), w.B(e.enabled);
         if (e.toggle) {
-            AppendEntry(m, "toggle-type", "s", "checkmark");
-            AppendEntry(m, "toggle-state", "i", (int)e.checked);
+            w.Entry("toggle-type", "s"), w.S("checkmark");
+            w.Entry("toggle-state", "i"), w.I(e.checked);
         }
     }
-    if (r >= 0) r = sd_bus_message_close_container(m);
-    return r;
+    w.Close(a);
 }
 
-int MenuGetLayout(sd_bus_message* m, void*, sd_bus_error*) {
-    sd_bus_message* reply = nullptr;
-    int r = sd_bus_message_new_method_return(m, &reply);
-    if (r < 0) return r;
-    sd_bus_message_append(reply, "u", g_menuRevision);
-    sd_bus_message_open_container(reply, 'r', "ia{sv}av");
-    sd_bus_message_append(reply, "i", 0);
-    sd_bus_message_open_container(reply, 'a', "{sv}");
-    AppendEntry(reply, "children-display", "s", "submenu");
-    sd_bus_message_close_container(reply);
-    sd_bus_message_open_container(reply, 'a', "v");
+// The whole menu whatever the arguments ask for: it is one level of ten items.
+void MenuGetLayout(dbus::Call& c) {
+    Writer& w = c.out;
+    w.U(g_menuRevision);
+    w.Align(8);
+    w.I(0);
+    Writer::Array props = w.Open(8);
+    w.Entry("children-display", "s"), w.S("submenu");
+    w.Close(props);
+    Writer::Array children = w.Open(1);
     for (const MenuEntry& e : MenuEntries()) {
-        sd_bus_message_open_container(reply, 'v', "(ia{sv}av)");
-        sd_bus_message_open_container(reply, 'r', "ia{sv}av");
-        sd_bus_message_append(reply, "i", e.id);
-        AppendMenuProps(reply, e);
-        sd_bus_message_open_container(reply, 'a', "v");
-        sd_bus_message_close_container(reply);
-        sd_bus_message_close_container(reply);
-        sd_bus_message_close_container(reply);
+        w.G("(ia{sv}av)");
+        w.Align(8);
+        w.I(e.id);
+        WriteMenuProps(w, e);
+        w.Close(w.Open(1));
     }
-    sd_bus_message_close_container(reply);
-    sd_bus_message_close_container(reply);
-    r = sd_bus_send(nullptr, reply, nullptr);
-    sd_bus_message_unref(reply);
-    return r;
+    w.Close(children);
 }
 
-int MenuGetGroupProperties(sd_bus_message* m, void*, sd_bus_error*) {
+void MenuGetGroupProperties(dbus::Call& c) {
     std::vector<int> ids;
-    const void* data = nullptr;
-    size_t size = 0;
-    if (sd_bus_message_read_array(m, 'i', &data, &size) >= 0)
-        ids.assign((const int*)data, (const int*)data + size / sizeof(int));
-    sd_bus_message* reply = nullptr;
-    int r = sd_bus_message_new_method_return(m, &reply);
-    if (r < 0) return r;
-    sd_bus_message_open_container(reply, 'a', "(ia{sv})");
+    for (size_t end = c.in.Open(4); c.in.In(end);) ids.push_back(c.in.I());
+    Writer::Array rows = c.out.Open(8);
     for (const MenuEntry& e : MenuEntries()) {
         if (!ids.empty() && std::find(ids.begin(), ids.end(), e.id) == ids.end()) continue;
-        sd_bus_message_open_container(reply, 'r', "ia{sv}");
-        sd_bus_message_append(reply, "i", e.id);
-        AppendMenuProps(reply, e);
-        sd_bus_message_close_container(reply);
+        c.out.Align(8);
+        c.out.I(e.id);
+        WriteMenuProps(c.out, e);
     }
-    sd_bus_message_close_container(reply);
-    r = sd_bus_send(nullptr, reply, nullptr);
-    sd_bus_message_unref(reply);
-    return r;
+    c.out.Close(rows);
 }
 
-void MenuClicked(int id) {
+void MenuClicked(int id, std::string_view event) {
+    if (event != "clicked") return;
     switch (id) {
         case kPlayPause: Post(Remote::PlayPause); break;
         case kPrevious: Post(Remote::Previous); break;
@@ -391,38 +288,29 @@ void MenuClicked(int id) {
     }
 }
 
-int MenuEvent(sd_bus_message* m, void*, sd_bus_error*) {
-    int id = 0;
-    const char* event = nullptr;
-    if (sd_bus_message_read(m, "is", &id, &event) >= 0 && event && !strcmp(event, "clicked")) MenuClicked(id);
-    return sd_bus_reply_method_return(m, nullptr);
+void MenuEvent(dbus::Call& c) {
+    int id = c.in.I();
+    MenuClicked(id, c.in.S());
 }
 
-int MenuEventGroup(sd_bus_message* m, void*, sd_bus_error*) {
-    if (sd_bus_message_enter_container(m, 'a', "(isvu)") >= 0) {
-        while (sd_bus_message_enter_container(m, 'r', "isvu") > 0) {
-            int id = 0;
-            const char* event = nullptr;
-            sd_bus_message_read(m, "is", &id, &event);
-            if (event && !strcmp(event, "clicked")) MenuClicked(id);
-            sd_bus_message_skip(m, "vu");
-            sd_bus_message_exit_container(m);
-        }
-        sd_bus_message_exit_container(m);
+void MenuEventGroup(dbus::Call& c) {
+    for (size_t end = c.in.Open(8); c.in.In(end);) {
+        c.in.Struct();
+        int id = c.in.I();
+        MenuClicked(id, c.in.S());
+        c.in.Skip("vu");
     }
-    return sd_bus_reply_method_return(m, "ai", 0);
+    c.out.Close(c.out.Open(4));  // no ids were unknown
 }
 
-int MenuAboutToShow(sd_bus_message* m, void*, sd_bus_error*) { return sd_bus_reply_method_return(m, "b", 0); }
-int MenuAboutToShowGroup(sd_bus_message* m, void*, sd_bus_error*) { return sd_bus_reply_method_return(m, "aiai", 0, 0); }
+void MenuAboutToShow(dbus::Call& c) { c.out.B(false); }
+void MenuAboutToShowGroup(dbus::Call& c) { c.out.Close(c.out.Open(4)), c.out.Close(c.out.Open(4)); }
 
-int MenuProperty(sd_bus*, const char*, const char*, const char* property, sd_bus_message* reply, void*, sd_bus_error*) {
-    std::string_view p = property;
-    if (p == "Version") return sd_bus_message_append(reply, "u", 3u);
-    if (p == "TextDirection") return sd_bus_message_append(reply, "s", "ltr");
-    if (p == "Status") return sd_bus_message_append(reply, "s", "normal");
-    if (p == "IconThemePath") return sd_bus_message_append(reply, "as", 0);
-    return -EINVAL;
+void MenuProperty(std::string_view p, Writer& w) {
+    if (p == "Version") w.U(3);
+    else if (p == "TextDirection") w.S("ltr");
+    else if (p == "Status") w.S("normal");
+    else w.Strings({});  // IconThemePath
 }
 
 std::string IconThemePath() {
@@ -431,17 +319,14 @@ std::string IconThemePath() {
     return (data && *data == '/' ? std::string(data) : std::string(home ? home : "/tmp") + "/.local/share") + "/icons";
 }
 
-int SniProperty(sd_bus*, const char*, const char*, const char* property, sd_bus_message* reply, void*, sd_bus_error*) {
-    std::string_view p = property;
-    if (p == "Category") return sd_bus_message_append(reply, "s", "ApplicationStatus");
-    if (p == "Id") return sd_bus_message_append(reply, "s", "cordinal");
-    if (p == "Title") return sd_bus_message_append(reply, "s", "cordinal");
-    if (p == "Status") return sd_bus_message_append(reply, "s", "Active");
-    if (p == "IconName") return sd_bus_message_append(reply, "s", "cordinal");
-    if (p == "IconThemePath") return sd_bus_message_append(reply, "s", IconThemePath().c_str());
-    if (p == "ItemIsMenu") return sd_bus_message_append(reply, "b", 0);
-    if (p == "Menu") return sd_bus_message_append(reply, "o", kMenuPath);
-    if (p == "ToolTip") {
+void SniProperty(std::string_view p, Writer& w) {
+    if (p == "Category") w.S("ApplicationStatus");
+    else if (p == "Id" || p == "Title" || p == "IconName") w.S("cordinal");
+    else if (p == "Status") w.S("Active");
+    else if (p == "IconThemePath") w.S(IconThemePath());
+    else if (p == "ItemIsMenu") w.B(false);
+    else if (p == "Menu") w.O(kMenuPath);
+    else if (p == "ToolTip") {
         Snapshot s = Snap();
         std::string body;
         if (s.id != kNone && s.status != "Stopped") {
@@ -449,72 +334,67 @@ int SniProperty(sd_bus*, const char*, const char*, const char* property, sd_bus_
             if (s.status == "Paused") body += " (paused)";
         }
         if (!s.output.empty()) body += (body.empty() ? "" : "\n") + s.output;
-        int r = sd_bus_message_open_container(reply, 'r', "sa(iiay)ss");
-        if (r >= 0) r = sd_bus_message_append(reply, "s", "cordinal");
-        if (r >= 0) r = sd_bus_message_append(reply, "a(iiay)", 0);
-        if (r >= 0) r = sd_bus_message_append(reply, "ss", "cordinal", body.c_str());
-        if (r >= 0) r = sd_bus_message_close_container(reply);
-        return r;
+        w.Align(8);
+        w.S("cordinal");
+        w.Close(w.Open(8));  // no pixmaps
+        w.S("cordinal");
+        w.S(body);
     }
-    return -EINVAL;
 }
 
-int SniMethod(sd_bus_message* m, void*, sd_bus_error*) {
-    std::string_view name = sd_bus_message_get_member(m);
-    if (name == "Activate") Post(Remote::Raise);
-    else if (name == "SecondaryActivate") Post(Remote::PlayPause);
-    return sd_bus_reply_method_return(m, nullptr);
+void SniMethod(dbus::Call& c) {
+    if (c.msg.member == "Activate") Post(Remote::Raise);
+    else if (c.msg.member == "SecondaryActivate") Post(Remote::PlayPause);
 }
 
-const sd_bus_vtable kSniVtable[] = {
-    SD_BUS_VTABLE_START(0),
-    SD_BUS_METHOD("Activate", "ii", "", SniMethod, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("SecondaryActivate", "ii", "", SniMethod, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("ContextMenu", "ii", "", SniMethod, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("Scroll", "is", "", SniMethod, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_SIGNAL("NewTitle", "", 0),
-    SD_BUS_SIGNAL("NewIcon", "", 0),
-    SD_BUS_SIGNAL("NewToolTip", "", 0),
-    SD_BUS_SIGNAL("NewStatus", "s", 0),
-    SD_BUS_PROPERTY("Category", "s", SniProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_PROPERTY("Id", "s", SniProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_PROPERTY("Title", "s", SniProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_PROPERTY("Status", "s", SniProperty, 0, 0),
-    SD_BUS_PROPERTY("IconName", "s", SniProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_PROPERTY("IconThemePath", "s", SniProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_PROPERTY("ToolTip", "(sa(iiay)ss)", SniProperty, 0, 0),
-    SD_BUS_PROPERTY("ItemIsMenu", "b", SniProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_PROPERTY("Menu", "o", SniProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_VTABLE_END};
+constexpr dbus::Method kSniMethods[] = {
+    {"Activate", "ii", "", SniMethod}, {"SecondaryActivate", "ii", "", SniMethod},
+    {"ContextMenu", "ii", "", SniMethod}, {"Scroll", "is", "", SniMethod}};
+constexpr dbus::SignalInfo kSniSignals[] = {{"NewTitle", ""}, {"NewIcon", ""}, {"NewToolTip", ""}, {"NewStatus", "s"}};
+constexpr dbus::Property kSniProperties[] = {
+    {"Category", "s"}, {"Id", "s"}, {"Title", "s"}, {"Status", "s"}, {"IconName", "s"}, {"IconThemePath", "s"},
+    {"ToolTip", "(sa(iiay)ss)"}, {"ItemIsMenu", "b"}, {"Menu", "o"}};
+constexpr dbus::Method kMenuMethods[] = {
+    {"GetLayout", "iias", "u(ia{sv}av)", MenuGetLayout},
+    {"GetGroupProperties", "aias", "a(ia{sv})", MenuGetGroupProperties},
+    {"Event", "isvu", "", MenuEvent},
+    {"EventGroup", "a(isvu)", "ai", MenuEventGroup},
+    {"AboutToShow", "i", "b", MenuAboutToShow},
+    {"AboutToShowGroup", "ai", "aiai", MenuAboutToShowGroup}};
+constexpr dbus::SignalInfo kMenuSignals[] = {
+    {"ItemsPropertiesUpdated", "a(ia{sv})a(ias)"}, {"LayoutUpdated", "ui"}, {"ItemActivationRequested", "iu"}};
+constexpr dbus::Property kMenuProperties[] = {{"Version", "u"}, {"TextDirection", "s"}, {"Status", "s"}, {"IconThemePath", "as"}};
 
-const sd_bus_vtable kMenuVtable[] = {
-    SD_BUS_VTABLE_START(0),
-    SD_BUS_METHOD("GetLayout", "iias", "u(ia{sv}av)", MenuGetLayout, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("GetGroupProperties", "aias", "a(ia{sv})", MenuGetGroupProperties, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("Event", "isvu", "", MenuEvent, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("EventGroup", "a(isvu)", "ai", MenuEventGroup, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("AboutToShow", "i", "b", MenuAboutToShow, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("AboutToShowGroup", "ai", "aiai", MenuAboutToShowGroup, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_SIGNAL("ItemsPropertiesUpdated", "a(ia{sv})a(ias)", 0),
-    SD_BUS_SIGNAL("LayoutUpdated", "ui", 0),
-    SD_BUS_SIGNAL("ItemActivationRequested", "iu", 0),
-    SD_BUS_PROPERTY("Version", "u", MenuProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_PROPERTY("TextDirection", "s", MenuProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_PROPERTY("Status", "s", MenuProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_PROPERTY("IconThemePath", "as", MenuProperty, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-    SD_BUS_VTABLE_END};
+const dbus::Interface kObjects[] = {
+    {kPath, kRoot, kRootMethods, kRootProperties, {}, GetProperty},
+    {kPath, kPlayer, kPlayerMethods, kPlayerProperties, kPlayerSignals, GetProperty, SetProperty},
+    {kPath, kApp, kAppMethods, {}, {}},
+    {kSniPath, kSni, kSniMethods, kSniProperties, kSniSignals, SniProperty},
+    {kMenuPath, kMenu, kMenuMethods, kMenuProperties, kMenuSignals, MenuProperty}};
 
 void RegisterWithWatcher() {
-    sd_bus_call_method_async(g_bus, nullptr, kWatcher, "/StatusNotifierWatcher", kWatcher, "RegisterStatusNotifierItem",
-                             nullptr, nullptr, "s", g_sniName.c_str());
+    Writer w;
+    w.S(g_sniName);
+    g_bus->Send({kWatcher, "/StatusNotifierWatcher", kWatcher, "RegisterStatusNotifierItem"}, "s", w);
 }
 
-// The bar can start (or restart) after cordinal: register whenever a watcher appears.
-int OnNameOwnerChanged(sd_bus_message* m, void*, sd_bus_error*) {
-    const char *name = nullptr, *oldOwner = nullptr, *newOwner = nullptr;
-    if (sd_bus_message_read(m, "sss", &name, &oldOwner, &newOwner) >= 0 && name && !strcmp(name, kWatcher) && newOwner && *newOwner)
-        RegisterWithWatcher();
-    return 0;
+// The bar can start (or restart) after cordinal: register whenever a watcher appears. Only the bus
+// daemon's own NameOwnerChanged counts; any peer could send one that looks like it.
+void OnMessage(dbus::Bus& bus, const dbus::Message& m) {
+    if (m.type == dbus::kSignal) {
+        if (m.sender == "org.freedesktop.DBus" && m.member == "NameOwnerChanged" && m.sig == "sss") {
+            Reader r = m.Body();
+            std::string_view name = r.S(), oldOwner = r.S(), newOwner = r.S();
+            (void)oldOwner;
+            if (name == kWatcher && !newOwner.empty()) RegisterWithWatcher();
+        }
+        return;
+    }
+    dbus::Dispatch(bus, m, kObjects);
+}
+
+void Emit(const dbus::Interface& o, const char* member, const char* sig, const Writer& w) {
+    g_bus->Signal(o.path, o.name, member, sig, w);
 }
 
 // --- the bus thread -----------------------------------------------------------------------------------------
@@ -522,18 +402,20 @@ void Run() {
     Snapshot last;
     std::string lastMenu;
     while (!g_quit) {
-        for (int r; (r = sd_bus_process(g_bus, nullptr)) > 0;) {
+        int more = g_bus ? g_bus->Process(64) : 0;
+        if (more < 0) {
+            g_bus.reset();  // closed or malformed: stop, do not spin on a dead socket, do not reconnect
+            fputs("cordinal: session bus closed; media keys and tray are off\n", stderr);
         }
-        pollfd fds[2] = {{sd_bus_get_fd(g_bus), (short)sd_bus_get_events(g_bus), 0}, {g_wake, POLLIN, 0}};
-        uint64_t usec = 0;
-        int timeout = sd_bus_get_timeout(g_bus, &usec) > 0 && usec != UINT64_MAX ? 100 : -1;
-        poll(fds, 2, timeout);
-        if (fds[1].revents & POLLIN) {
+        pollfd fds[2] = {{g_wake, POLLIN, 0}, {g_bus ? g_bus->Fd() : -1, g_bus ? g_bus->Events() : (short)0, 0}};
+        poll(fds, 2, more > 0 ? 0 : g_bus ? g_bus->TimeoutMs() : -1);
+        if (fds[0].revents & POLLIN) {
             uint64_t v;
             if (read(g_wake, &v, sizeof(v)) < 0) {
             }
         }
         if (g_quit) break;
+        if (!g_bus) continue;
         // Tell listeners what changed since the last look.
         Snapshot now;
         bool seeked;
@@ -554,22 +436,25 @@ void Run() {
         if (now.canNext != last.canNext) changed.push_back("CanGoNext");
         if (now.canPrevious != last.canPrevious) changed.push_back("CanGoPrevious");
         if (now.id != last.id || now.lengthUs != last.lengthUs) changed.push_back("CanSeek");
-        if (!changed.empty()) {
-            changed.push_back(nullptr);
-            sd_bus_emit_properties_changed_strv(g_bus, kPath, kPlayer, (char**)changed.data());
+        if (!changed.empty()) dbus::EmitChanged(*g_bus, kObjects[1], changed);
+        if (seeked) {
+            Writer w;
+            w.X(PositionUs(now));
+            Emit(kObjects[1], "Seeked", "x", w);
         }
-        if (seeked) sd_bus_emit_signal(g_bus, kPath, kPlayer, "Seeked", "x", PositionUs(now));
         std::string menuKey;
         for (auto& e : MenuEntries()) menuKey += e.label + (e.enabled ? "1" : "0") + (e.checked ? "1" : "0");
         if (menuKey != lastMenu) {
             lastMenu = menuKey;
-            ++g_menuRevision;
-            sd_bus_emit_signal(g_bus, kMenuPath, kMenu, "LayoutUpdated", "ui", g_menuRevision, 0);
+            Writer w;
+            w.U(++g_menuRevision);
+            w.I(0);
+            Emit(kObjects[4], "LayoutUpdated", "ui", w);
         }
         if (now.status != last.status || now.id != last.id || now.output != last.output)
-            sd_bus_emit_signal(g_bus, kSniPath, kSni, "NewToolTip", "");
+            Emit(kObjects[3], "NewToolTip", "", {});
         last = std::move(now);
-        sd_bus_flush(g_bus);
+        g_bus->Flush();
     }
 }
 
@@ -583,59 +468,56 @@ void Wake() {
 }  // namespace
 
 bool ForwardToRunning(const std::vector<std::string>& args) {
-    sd_bus* bus = nullptr;
-    if (sd_bus_open_user(&bus) < 0) return false;
-    sd_bus_error err = SD_BUS_ERROR_NULL;
-    sd_bus_message* reply = nullptr;
-    int has = 0;
-    if (sd_bus_call_method(bus, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "NameHasOwner", &err,
-                           &reply, "s", kBusName) >= 0)
-        sd_bus_message_read(reply, "b", &has);
-    sd_bus_message_unref(reply);
-    sd_bus_error_free(&err);
-    if (!has) {
-        sd_bus_unref(bus);
-        return false;
-    }
+    auto bus = dbus::Bus::OpenUser();
+    if (!bus) return false;
+    Writer name;
+    name.S(kBusName);
+    dbus::Target hasOwner = kDaemon;
+    hasOwner.member = "NameHasOwner";
+    auto has = bus->CallSync(hasOwner, "s", name, 25000);
+    if (!has || has->type != dbus::kReturn || has->sig != "b" || !has->Body().B()) return false;
     static const std::pair<const char*, const char*> kCommands[] = {
         {"--play-pause", "PlayPause"}, {"--play", "Play"}, {"--pause", "Pause"}, {"--stop", "Stop"},
         {"--next", "Next"},            {"--previous", "Previous"}, {"--quit", "Quit"}};
     if (args.size() == 1)
         for (auto& [arg, method] : kCommands)
             if (args[0] == arg) {
-                const char* iface = !strcmp(method, "Quit") ? kRoot : kPlayer;
-                sd_bus_call_method(bus, kBusName, kPath, iface, method, nullptr, nullptr, "");
-                sd_bus_unref(bus);
+                bus->CallSync({kBusName, kPath, !strcmp(method, "Quit") ? kRoot : kPlayer, method}, "", {}, 25000);
                 return true;
             }
-    sd_bus_message* m = nullptr;
-    if (sd_bus_message_new_method_call(bus, &m, kBusName, kPath, kApp, "Open") >= 0) {
-        std::vector<const char*> list;
-        for (auto& a : args) list.push_back(a.c_str());
-        list.push_back(nullptr);
-        sd_bus_message_append_strv(m, (char**)list.data());
-        sd_bus_call(bus, m, 0, nullptr, nullptr);
-        sd_bus_message_unref(m);
-    }
-    sd_bus_unref(bus);
+    Writer list;
+    Writer::Array a = list.Open(4);
+    for (auto& arg : args) list.S(arg);
+    list.Close(a);
+    bus->CallSync({kBusName, kPath, kApp, "Open"}, "as", list, 25000);
     return true;
 }
 
 void StartMpris() {
-    if (sd_bus_open_user(&g_bus) < 0) {
-        g_bus = nullptr;
-        return;  // no session bus: no media keys or tray, the rest works
+    g_bus = dbus::Bus::OpenUser();
+    if (!g_bus) {
+        fputs("cordinal: no session bus; media keys and tray are off\n", stderr);
+        return;  // the rest works
     }
-    sd_bus_add_object_vtable(g_bus, nullptr, kPath, kRoot, kRootVtable, nullptr);
-    sd_bus_add_object_vtable(g_bus, nullptr, kPath, kPlayer, kPlayerVtable, nullptr);
-    sd_bus_add_object_vtable(g_bus, nullptr, kPath, kApp, kAppVtable, nullptr);
-    sd_bus_add_object_vtable(g_bus, nullptr, kSniPath, kSni, kSniVtable, nullptr);
-    sd_bus_add_object_vtable(g_bus, nullptr, kMenuPath, kMenu, kMenuVtable, nullptr);
-    sd_bus_request_name(g_bus, kBusName, 0);
+    g_bus->onMessage = OnMessage;
+    // The player's name is taken before anything else, so a second cordinal started at once finds it.
+    dbus::Target request = kDaemon;
+    request.member = "RequestName";
+    Writer name;
+    name.S(kBusName);
+    name.U(0);
+    g_bus->CallSync(request, "su", name, 5000);
     g_sniName = "org.kde.StatusNotifierItem-" + std::to_string(getpid()) + "-1";
-    sd_bus_request_name(g_bus, g_sniName.c_str(), 0);
-    sd_bus_match_signal(g_bus, nullptr, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
-                        "NameOwnerChanged", OnNameOwnerChanged, nullptr);
+    Writer sni;
+    sni.S(g_sniName);
+    sni.U(0);
+    g_bus->Send(request, "su", sni);
+    dbus::Target match = kDaemon;
+    match.member = "AddMatch";
+    Writer rule;
+    rule.S("type='signal',sender='org.freedesktop.DBus',path='/org/freedesktop/DBus',"
+           "interface='org.freedesktop.DBus',member='NameOwnerChanged'");
+    g_bus->Send(match, "s", rule);
     RegisterWithWatcher();
     g_wake = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     g_quit = false;
@@ -644,12 +526,14 @@ void StartMpris() {
 }
 
 void StopMpris() {
-    if (!g_bus) return;
+    if (!g_thread.joinable()) {
+        g_bus.reset();
+        return;
+    }
     g_quit = true;
     Wake();
-    if (g_thread.joinable()) g_thread.join();
-    sd_bus_flush_close_unref(g_bus);
-    g_bus = nullptr;
+    g_thread.join();
+    g_bus.reset();
     if (g_wake >= 0) close(g_wake);
     g_wake = -1;
 }

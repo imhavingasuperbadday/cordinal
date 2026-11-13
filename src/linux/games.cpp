@@ -13,6 +13,7 @@
 #include "cue.h"
 #include "decoder.h"
 #include "libview.h"
+#include "textcase.h"
 
 #include <cwctype>
 #include <unordered_map>
@@ -110,14 +111,9 @@ std::vector<int> Distribution() {
     return d;
 }
 
-std::wstring Lower(std::wstring s) {
-    for (auto& c : s) c = (wchar_t)towlower(c);
-    return s;
-}
-
 // "Song (2011 Remaster)" and "Song [Live]" match "Song": what's in brackets is edition detail.
 std::wstring BareTitle(TrackId id) {
-    std::wstring t = Lower(g_lib.Str(g_lib[id].title)), out;
+    std::wstring t = textcase::Fold(g_lib.Str(g_lib[id].title)), out;
     int depth = 0;
     for (wchar_t c : t) {
         if (c == L'(' || c == L'[') ++depth;
@@ -137,7 +133,7 @@ std::wstring ArtistOf(TrackId id) {
 }
 
 bool SameSong(TrackId a, TrackId b) {
-    return a == b || (BareTitle(a) == BareTitle(b) && Lower(ArtistOf(a)) == Lower(ArtistOf(b)));
+    return a == b || (BareTitle(a) == BareTitle(b) && textcase::Fold(ArtistOf(a)) == textcase::Fold(ArtistOf(b)));
 }
 
 std::wstring SongLabel(TrackId id) {
@@ -320,7 +316,7 @@ void SubmitGuess(TrackId id) {
 // Up to eight distinct songs matching every typed word in title or artist; titles that start with
 // what was typed come first.
 void UpdateSuggestions() {
-    std::wstring typed = Lower(q.guess);
+    std::wstring typed = textcase::Fold(q.guess);
     q.suggestions.clear();
     q.suggestion = 0;
     std::vector<std::wstring> words;
@@ -336,9 +332,9 @@ void UpdateSuggestions() {
     for (TrackId id = 0; id < (TrackId)g_lib.Count() && found.size() < 400; ++id) {
         const Track& t = g_lib[id];
         if (!t.InLibrary() || !t.title) continue;
-        std::wstring title = Lower(g_lib.Str(t.title)), hay = title + L" " + Lower(ArtistOf(id));
+        std::wstring title = textcase::Fold(g_lib.Str(t.title)), hay = title + L" " + textcase::Fold(ArtistOf(id));
         bool all = std::all_of(words.begin(), words.end(), [&](const std::wstring& w) { return hay.find(w) != std::wstring::npos; });
-        if (!all || !seen.insert(BareTitle(id) + L"\x1F" + Lower(ArtistOf(id))).second) continue;
+        if (!all || !seen.insert(BareTitle(id) + L"\x1F" + textcase::Fold(ArtistOf(id))).second) continue;
         found.push_back({title.rfind(typed, 0) == 0 ? 0 : 1, id});
     }
     for (int rank = 0; rank < 2; ++rank)

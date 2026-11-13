@@ -9,7 +9,9 @@
 //
 // Seek bar glow draws a halo of each column's colour around the bar, past its edges and ends, that
 // pulses with the beat of what is heard (peaks.h GlowPulse), for every look, whole song or live.
-// While it plays, the whole song's bar then repaints on the live waveform's timer.
+// While it plays, the whole song's bar then repaints on the live waveform's timer, 30 frames a
+// second or 60 when Preferences asks. The live bar itself also lifts on each beat, so its height
+// moves with the music even on a loud, compressed master.
 //
 // The moodbar looks (Preferences, Seek bar) colour the bar by its sound instead (peaks.h
 // MoodPalette, in the Moodbar colours scheme): a flat stripe, or the waveform's own columns, for the
@@ -50,7 +52,7 @@ struct Waveform {
 
 Waveform g_wave;
 constexpr UINT_PTR kLiveWaveTimer = 0xF0A2;
-bool liveTimer = false;
+UINT liveTimerMs = 0;  // the live timer's interval while it runs, 0 when it is not set
 
 // Repaints are whole-bar: the stock trackbar invalidates only the strip its thumb passed through,
 // which leaves stale columns over the rest of the waveform. No background erase either - every
@@ -448,6 +450,9 @@ void OnPeaksReady(uint32_t requestId) {
     Repaint();
 }
 
+// The live waveform's timer interval: 30 frames a second by default, or 60 when Preferences asks.
+UINT WaveformFrameMs() { return g.wave60Fps ? 16 : 33; }
+
 // UpdateStatus calls this every tick. The bar repaints only when the playhead or the color
 // actually changed; the fountain wakes first, since it animates on its own clock.
 void WaveformTick() {
@@ -459,8 +464,16 @@ void WaveformTick() {
                    !IsIconic(g.hwnd);
     // The pause fade needs frames too, though the audio has stopped moving.
     const bool fading = StepPauseFade() && IsWindowVisible(g.seek) && !IsIconic(g.hwnd);
-    if ((animate || fading) && !liveTimer) liveTimer = SetTimer(g.seek, kLiveWaveTimer, 33, nullptr) != 0;
-    else if (!animate && !fading && liveTimer) { KillTimer(g.seek, kLiveWaveTimer); liveTimer = false; }
+    const UINT frameMs = WaveformFrameMs();
+    if ((animate || fading) && !liveTimerMs) liveTimerMs = SetTimer(g.seek, kLiveWaveTimer, frameMs, nullptr) ? frameMs : 0;
+    else if ((animate || fading) && liveTimerMs != frameMs) {
+        // The frame-rate preference changed while the timer ran: restart it at the new interval.
+        KillTimer(g.seek, kLiveWaveTimer);
+        liveTimerMs = SetTimer(g.seek, kLiveWaveTimer, frameMs, nullptr) ? frameMs : 0;
+    } else if (!animate && !fading && liveTimerMs) {
+        KillTimer(g.seek, kLiveWaveTimer);
+        liveTimerMs = 0;
+    }
     int pos = (int)SendMessageW(g.seek, TBM_GETPOS, 0, 0);
     COLORREF played = WaveformPlayedColor(), rest = WaveformRestColor();
     bool live = LiveWaveformShown();
@@ -534,11 +547,10 @@ bool DrawWaveform(HDC dc, const RECT& rc, const RECT& channel, double frac) {
     }
     int right = left + width;
     int cy = (rc.top + rc.bottom) / 2, half = std::max(1, (int)(rc.bottom - rc.top) / 2 - S(2));
-    // The whole song's peaks, softened when Smooth seek bar is on.
+    // The whole song's peaks, softened when Smooth seek bar is on; kept across frames until they change.
     const bool song = !live && known && g_wave.ready;
-    static Peaks smoothed;
-    if (song && g.smoothSeek) SmoothPeaks(g_wave.peaks, smoothed, kSmoothRadius);
-    const Peaks& peaks = song && g.smoothSeek ? smoothed : g_wave.peaks;
+    static SongPeaks songPeaks;
+    const Peaks& peaks = song ? songPeaks.Get(g_wave.peaks, g.smoothSeek, kSmoothRadius) : g_wave.peaks;
     // A track whose peaks are still unknown has no mood yet; a live waveform takes its colours from
     // the audio being heard.
     const int style = live || song ? std::clamp(g.seekStyle, 0, kSeekStyles - 1) : kSeekWaveform;
@@ -556,9 +568,9 @@ bool DrawWaveform(HDC dc, const RECT& rc, const RECT& channel, double frac) {
         if (live) {
             std::array<float, 256 * kMoodBands> bands{};
             g.engine.WaveformBands(bands.data(), livePeaks.size());
-            center = liveScale.Scale(bands.data(), (int)livePeaks.size(), liveMood);
+            center = liveScale.Scale(bands.data(), (int)livePeaks.size(), liveMood, GetTickCount64() / 1000.0);
         } else {
-            center = MoodCenter(peaks);
+            center = songPeaks.Center();
         }
     }
     // Live audio counts as heard unless its progress is split off (Seek bar shows, with progress).
@@ -578,7 +590,7 @@ bool DrawWaveform(HDC dc, const RECT& rc, const RECT& channel, double frac) {
     const int room = std::min(cy - (int)rc.top, (int)rc.bottom - cy - 1) - glow - 1;  // a pixel short of the edge
     const int stripeHalf = stripe && glow ? std::clamp(room, 1, half) : half;
     static GlowPulse pulse;
-    if (glow && (g.playing != kNone || RadioPlaying()) && !g.engine.Paused()) {
+    if ((glow || live) && (g.playing != kNone || RadioPlaying()) && !g.engine.Paused()) {
         std::array<uint8_t, 256> heard{};
         if (live) heard = livePeaks;
         else g.engine.WaveformPeaks(heard.data(), heard.size());
@@ -621,6 +633,9 @@ bool DrawWaveform(HDC dc, const RECT& rc, const RECT& channel, double frac) {
     const int span = half + 1;
     auto bandStart = [span](int i) { return i * span / WaveShades::kBands; };
     auto columns = [&](auto& fills) {
+        // Neighbouring mood columns mostly share a colour, so the last one's shades are kept.
+        WaveShades moodShades;
+        COLORREF moodShadesOf = CLR_INVALID;
         for (int x = left; x < right; x += step) {
             // The loudest bucket under this column (up to the next one), so short peaks aren't lost
             // when columns are wide. The last column is clipped to the channel, leaving no gap there.
@@ -631,6 +646,9 @@ bool DrawWaveform(HDC dc, const RECT& rc, const RECT& channel, double frac) {
                 buckets.first = std::clamp((x - left) * 256 / width, 0, 255);
                 buckets.last = std::clamp((x + step - left) * 256 / width, buckets.first + 1, 256);
                 for (int b = buckets.first; b < buckets.last; ++b) v = std::max<int>(v, livePeaks[b]);
+                // The beat swells the whole live display, using the same pulse as the seek bar's
+                // glow, so a compressed master still moves instead of holding one height.
+                v = std::min(255, (int)std::lround(v * (1 + 0.30f * beat)));
                 rms = v;
             } else if (song) {
                 buckets = BucketsFor(x, x + step, left, width);
@@ -643,7 +661,6 @@ bool DrawWaveform(HDC dc, const RECT& rc, const RECT& channel, double frac) {
             const bool played = allPlayed || x < playedX;
             const WaveShades* shades = played ? &playedShades : &restShades;
             COLORREF tint = played ? playedTint : restTint;
-            WaveShades moodShades;
             if (mood) {
                 const MoodTone tone = live ? MoodOf(liveMood, buckets.first, buckets.last, center, (int)livePeaks.size())
                                            : MoodOf(peaks, buckets.first, buckets.last, center);
@@ -658,7 +675,10 @@ bool DrawWaveform(HDC dc, const RECT& rc, const RECT& channel, double frac) {
                     lastEnd = {tint, percent};
                     continue;
                 }
-                moodShades = ShadesOf(tint, bg);
+                if (tint != moodShadesOf) {
+                    moodShades = ShadesOf(tint, bg);
+                    moodShadesOf = tint;
+                }
                 shades = &moodShades;
             }
             const WaveShades& s = *shades;
@@ -697,8 +717,8 @@ bool DrawWaveform(HDC dc, const RECT& rc, const RECT& channel, double frac) {
     const int headWidth = std::max(2, S(2));
     const RECT head{playedX - headWidth / 2, cy - stripeHalf, playedX - headWidth / 2 + headWidth,
                     reflect ? cy + stripeHalf + 1 : cy + 1};
-    // Every look can repaint 30 times a second (live, or a whole song's glow), and the moodbar's and
-    // the glow's blended colours overflow WaveFills' groups into one GDI call per rectangle, so
+    // Every look can repaint 30 or 60 times a second (live, or a whole song's glow), and the moodbar's
+    // and the glow's blended colours overflow WaveFills' groups into one GDI call per rectangle, so
     // the bar is built in pixels whenever the target allows, upright or not. Other targets keep
     // the GDI path below.
     if (const DibTarget target = DibTargetOf(dc); target != DibTarget::None) {

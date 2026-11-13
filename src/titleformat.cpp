@@ -3,6 +3,7 @@
 // Every field lookup is routed through the caller's FieldLookup, so nothing here knows about the
 // library. Depth and work caps keep a pathological pattern from running away.
 #include "titleformat.h"
+#include "textcase.h"
 
 #include <windows.h>
 
@@ -51,11 +52,6 @@ long long Multiply(long long a, long long b) {
     if (a > 0 ? (b > 0 ? a > hi / b : b < lo / a) : (b > 0 ? a < lo / b : a < hi / b))
         return (a < 0) != (b < 0) ? lo : hi;
     return a * b;
-}
-
-std::wstring Lower(std::wstring s) {
-    for (auto& c : s) c = (wchar_t)towlower(c);
-    return s;
 }
 
 // A user function's parameters while its body runs: %param% is the argument as it was evaluated.
@@ -116,7 +112,7 @@ private:
                     i_ = s_.size();
                     break;
                 }
-                std::wstring name = Lower(s_.substr(i_ + 1, end - i_ - 1));
+                std::wstring name = textcase::Fold(s_.substr(i_ + 1, end - i_ - 1));
                 i_ = end + 1;
                 if (name.empty()) {
                     out.text += L'%';
@@ -170,7 +166,7 @@ private:
         ++i_;  // '$'
         size_t start = i_;
         while (i_ < s_.size() && (iswalnum(s_[i_]) || s_[i_] == L'_')) ++i_;
-        std::wstring name = Lower(s_.substr(start, i_ - start));
+        std::wstring name = textcase::Fold(s_.substr(start, i_ - start));
         if (i_ >= s_.size() || s_[i_] != L'(') return {L"$" + name, false};
         ++i_;
         std::vector<Value> args;
@@ -359,8 +355,8 @@ std::vector<TitleFunction> ParseTitleFunctions(const std::wstring& source, std::
             args.back() += c;
         }
         TitleFunction f;
-        f.name = Lower(Trim(args[0]));
-        for (size_t k = 1; k + 1 < args.size(); ++k) f.params.push_back(Lower(Trim(args[k])));
+        f.name = textcase::Fold(Trim(args[0]));
+        for (size_t k = 1; k + 1 < args.size(); ++k) f.params.push_back(textcase::Fold(Trim(args[k])));
         f.body = args.size() > 1 ? Trim(args.back()) : L"";
         std::wstring problem;
         if (!closed) problem = L"has no closing parenthesis";

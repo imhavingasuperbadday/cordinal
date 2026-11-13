@@ -80,13 +80,19 @@ void OrderAlbum(const Library& library, AlbumDraft& d, AlbumOrder order) {
             break;
         case AlbumOrder::Title:
         case AlbumOrder::FileName:
-            std::stable_sort(v.begin(), v.end(), [&](TrackId a, TrackId b) {
-                auto field = order == AlbumOrder::Title ? &Track::title : &Track::file;
-                std::wstring sa = library.Str(library[a].*field), sb = library.Str(library[b].*field);
-                if (sa.empty() != sb.empty()) return sb.empty();
-                return StrCmpLogicalW(sa.c_str(), sb.c_str()) < 0;
+        {
+            // Str() converts from UTF-8 on every call, so the keys are made once, not once per comparison.
+            auto field = order == AlbumOrder::Title ? &Track::title : &Track::file;
+            std::vector<std::pair<std::wstring, TrackId>> keyed;
+            keyed.reserve(v.size());
+            for (TrackId id : v) keyed.emplace_back(library.Str(library[id].*field), id);
+            std::stable_sort(keyed.begin(), keyed.end(), [](const auto& a, const auto& b) {
+                if (a.first.empty() != b.first.empty()) return b.first.empty();
+                return StrCmpLogicalW(a.first.c_str(), b.first.c_str()) < 0;
             });
+            for (size_t i = 0; i < v.size(); ++i) v[i] = keyed[i].second;
             break;
+        }
         case AlbumOrder::Reverse: std::reverse(v.begin(), v.end()); break;
     }
 }

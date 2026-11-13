@@ -23,9 +23,9 @@ if ($LASTEXITCODE) { throw 'Freestanding loader build failed.' }
 if ($LASTEXITCODE) { throw 'Loader is not self-contained.' }
 foreach ($kind in @('exe', 'dll')) {
     $fixtureFlags = @('-std=c++20', '-O2', '-fno-stack-protector', '-nostdlib',
-        '-Wl,--entry,fixture_entry,--no-insert-timestamp')
+        '-Wl,--entry,fixture_entry,--no-insert-timestamp,--delayload=version.dll')
     if ($kind -eq 'dll') { $fixtureFlags += @('-DCDP_TEST_DLL', '-shared') }
-    & $compiler @fixtureFlags (Join-Path $repo 'cdpack/tests/pe_fixture.cpp') '-o' (Join-Path $Out "fixture.$kind") '-lkernel32'
+    & $compiler @fixtureFlags (Join-Path $repo 'cdpack/tests/pe_fixture.cpp') '-o' (Join-Path $Out "fixture.$kind") '-lkernel32' '-lversion'
     if ($LASTEXITCODE) { throw "PE $kind fixture build failed." }
 }
 & $compiler @flags (Join-Path $repo 'cdpack/tests/dll_host.cpp') '-o' (Join-Path $Out 'dll-host.exe')

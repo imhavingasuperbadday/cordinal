@@ -5,6 +5,7 @@
 
 #include "playlog.h"
 #include "sections.h"
+#include "textcase.h"
 
 #include <algorithm>
 #include <cmath>
@@ -54,20 +55,13 @@ const wchar_t* const kKindNames[] = {L"Listening", L"Play",          L"Discovery
                                      L"Album run", L"Full album",    L"Collection", L"New album", L"Back pay"};
 static_assert(std::size(kKindNames) == (size_t)PointsKind::BackPay + 1);
 
-std::wstring Lower(std::wstring s) {
-    if (!s.empty())
-        LCMapStringEx(LOCALE_NAME_USER_DEFAULT, LCMAP_LOWERCASE | LCMAP_LINGUISTIC_CASING, s.c_str(), (int)s.size(), s.data(),
-                      (int)s.size(), nullptr, nullptr, 0);
-    return s;
-}
-
 // Album and album artist, case-insensitively, as one 64-bit hash (FNV-1a over the lowercased
 // strings, with a separator so "a"|"bc" and "ab"|"c" differ). 0 for tracks without an album:
 // they never form an album run or a new album. A hash collision is astronomically unlikely.
 uint64_t AlbumKey(const Track& t) {
     if (!t.album) return 0;
-    std::wstring album = Lower(g_lib.Str(t.album));
-    std::wstring artist = Lower(g_lib.Str(t.albumArtist ? t.albumArtist : t.artist));
+    std::wstring album = textcase::Linguistic(g_lib.Str(t.album));
+    std::wstring artist = textcase::Linguistic(g_lib.Str(t.albumArtist ? t.albumArtist : t.artist));
     uint64_t h = 1469598103934665603ull;
     for (wchar_t c : album) h = (h ^ (uint64_t)c) * 1099511628211ull;
     h = (h ^ 0x1full) * 1099511628211ull;  // separator: album then artist

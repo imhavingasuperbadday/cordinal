@@ -853,6 +853,7 @@ bool MpegDecoder::Open(const std::wstring& path) {
         frameCount_=offsets_.size();
         media_.frames=offsets_.size()*header_.samples;
         if (!media_.Trim(header_.rate)) return false;
+        media_.Pack();
         skip_=media_.skip;total_=media_.valid;target_=skip_;reservoir_.reserve(4096);return total_>0;
     }
     uint64_t at = 0;
@@ -994,7 +995,7 @@ bool MpegDecoder::Frame() {
     } else {
         if (!IndexThrough(frame_)) return false;
         uint64_t offset = offsets_[frame_++];
-        size = media_.matroska?media_.packets[(size_t)offset].bytes:(size_t)std::min<uint64_t>(65536,file_.Size()-offset);
+        size = media_.matroska?media_.At((size_t)offset).bytes:(size_t)std::min<uint64_t>(65536,file_.Size()-offset);
         p = media_.matroska?media_.Data((size_t)offset):file_.View(offset,size);
     }
     CORDINAL_CORE_SCOPE;

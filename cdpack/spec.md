@@ -6,9 +6,15 @@ Version 2, 2026-11-04, was first used for the 0.1.5 release; version 1, 2026-10-
 
 This specification is independent of UPX. Integer fields are little endian. Only AMD64 PE32+
 images with 4096-byte section alignment and ordinary imports, resources, DIR64 relocations,
-TLS and x64 unwind information are accepted. Signed, managed, delay-import and CFG-instrumented
+TLS, x64 unwind information and delay imports are accepted. Signed, managed and CFG-instrumented
 images are rejected until those contracts have dedicated tests. Unsupported inputs fail before
 writing an executable. The native subsystem and DLL characteristics are retained.
+Delay imports need no loader support: the image's own helper reaches each descriptor through the
+thunk that calls it and writes the module handle and IAT slot, which are ordinary relocated image
+data. Every descriptor must hold RVAs inside the image, with its handle and IAT in writable
+sections, and a load configuration that asks for protected delay-load IATs is refused, because that
+helper would read the packed headers. The packed headers leave the delay-import directory out; the
+reconstructed native image keeps it.
 The initial profile leaves the packed load-config directory empty and accepts only the tested
 default MSVC configuration without OS-managed CFG/SEH/EH-continuation tables. The original load
 configuration remains byte-identical in the reconstructed native image; the native CRT initializes

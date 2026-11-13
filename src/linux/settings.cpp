@@ -208,7 +208,9 @@ void LoadSettings() {
     s.waveform = ToInt(v, "waveform", 1) != 0;
     s.liveWaveform = ToInt(v, "live_waveform", 0) != 0;
     s.liveFountain = ToInt(v, "live_fountain", 0) != 0;
+    s.listWind = ToInt(v, "list_wind", 0) != 0;
     s.fullLiveWaveform = ToInt(v, "full_live_waveform", 1) != 0;
+    s.wave60Fps = ToInt(v, "wave_60fps", 0) != 0;
     s.bandWaveSize = std::clamp(ToInt(v, "band_wave_size", 0), 0, 5);
     s.seekStyle = std::clamp(ToInt(v, "seek_style", 0), 0, 2);
     s.moodColors = std::clamp(ToInt(v, "mood_colors", 0), 0, kMoodColorSchemes - 1);
@@ -452,7 +454,9 @@ void SaveSettings() {
     text += "live_waveform=" + std::to_string(s.liveWaveform) + "\n";
     text += "waveform=" + std::to_string(s.waveform) + "\n";
     text += "live_fountain=" + std::to_string(s.liveFountain) + "\n";
+    text += "list_wind=" + std::to_string(s.listWind) + "\n";
     text += "full_live_waveform=" + std::to_string(s.fullLiveWaveform) + "\n";
+    text += "wave_60fps=" + std::to_string(s.wave60Fps) + "\n";
     text += "band_wave_size=" + std::to_string(s.bandWaveSize) + "\n";
     text += "mood_wave_colors=" + std::to_string(s.moodWaveColors) + "\nwave_color=" + std::to_string(s.waveColor) +
             "\nwave_rest_color=" + std::to_string(s.waveRestColor) + "\n";

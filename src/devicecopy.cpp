@@ -10,6 +10,7 @@
 #include "organize.h"
 #include "replaygain.h"
 #include "tags.h"
+#include "textcase.h"
 
 #include <shlobj.h>
 #ifdef _WIN32
@@ -28,11 +29,6 @@ namespace {
 #ifdef _WIN32
 using Microsoft::WRL::ComPtr;
 #endif
-
-std::wstring Lower(std::wstring s) {
-    CharLowerBuffW(s.data(), (DWORD)s.size());
-    return s;
-}
 
 bool Exists(const std::wstring& path) { return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES; }
 
@@ -411,7 +407,7 @@ std::vector<CopyItem> PlanCopy(const std::vector<TrackId>& ids, const std::wstri
     std::wstring dest = destIn;
     while (!device && dest.size() > 3 && (dest.back() == L'\\' || dest.back() == L'/')) dest.pop_back();
     std::unordered_map<std::wstring, const CopyRecord*> records;
-    for (const CopyRecord& r : manifest) records[Lower(r.rel)] = &r;
+    for (const CopyRecord& r : manifest) records[textcase::Path(r.rel)] = &r;
     const unsigned kbps = CopyKbps(format);
     std::vector<CopyItem> plan;
     std::unordered_set<std::wstring> taken;
@@ -445,7 +441,7 @@ std::vector<CopyItem> PlanCopy(const std::vector<TrackId>& ids, const std::wstri
         if (name.size() > budget) name.resize(std::max<size_t>(budget, 8));
         item.rel = dir + name + L"." + ext;
         auto free = [&](const std::wstring& rel) {
-            const std::wstring key = Lower(rel);
+            const std::wstring key = textcase::Path(rel);
             if (taken.count(key)) return false;
             auto r = records.find(key);
             if (r != records.end()) return true;  // cordinal's own copy: it may be replaced
@@ -457,8 +453,8 @@ std::vector<CopyItem> PlanCopy(const std::vector<TrackId>& ids, const std::wstri
             plan.push_back(std::move(item));
             continue;
         }
-        taken.insert(Lower(item.rel));
-        if (auto r = records.find(Lower(item.rel)); r != records.end()) {
+        taken.insert(textcase::Path(item.rel));
+        if (auto r = records.find(textcase::Path(item.rel)); r != records.end()) {
             const CopyRecord& c = *r->second;
             item.done = c.from == item.from && c.size == item.size && c.time == item.time && c.format == (item.convert ? kbps : 0) &&
                         (device || Exists(dest + kPathSep + item.rel));
@@ -475,14 +471,14 @@ std::vector<std::wstring> StaleCopies(const std::vector<CopyItem>& plan, const s
     std::unordered_set<std::wstring> wanted, folders;
     for (const CopyItem& item : plan)
         if (item.skip.empty()) {
-            wanted.insert(Lower(item.rel));
-            folders.insert(Lower(RelDir(item.rel)));
+            wanted.insert(textcase::Path(item.rel));
+            folders.insert(textcase::Path(RelDir(item.rel)));
         }
     std::vector<std::wstring> stale;
     for (const CopyRecord& r : manifest) {
         if (r.sets.size() != 1 || r.sets[0] != set) continue;  // another playlist or a selection still wants it
         // A cover image stays while its folder still has songs this playlist wants.
-        if (IsImage(r.rel) ? !folders.count(Lower(RelDir(r.rel))) : !wanted.count(Lower(r.rel))) stale.push_back(r.rel);
+        if (IsImage(r.rel) ? !folders.count(textcase::Path(RelDir(r.rel))) : !wanted.count(textcase::Path(r.rel))) stale.push_back(r.rel);
     }
     return stale;
 }
@@ -499,9 +495,9 @@ CopyResult ExecuteCopy(const std::vector<CopyItem>& plan, const CopySettings& s,
     if (!target) target = std::make_unique<FolderTarget>(s.dest);
 
     std::unordered_map<std::wstring, size_t> index;
-    for (size_t i = 0; i < manifest.size(); ++i) index[Lower(manifest[i].rel)] = i;
+    for (size_t i = 0; i < manifest.size(); ++i) index[textcase::Path(manifest[i].rel)] = i;
     auto record = [&](CopyRecord r) {
-        auto [it, added] = index.try_emplace(Lower(r.rel), manifest.size());
+        auto [it, added] = index.try_emplace(textcase::Path(r.rel), manifest.size());
         if (added) manifest.push_back(std::move(r));
         else {
             std::vector<std::wstring> sets = std::move(manifest[it->second].sets);
@@ -557,8 +553,8 @@ CopyResult ExecuteCopy(const std::vector<CopyItem>& plan, const CopySettings& s,
         const CopyItem& item = plan[i];
         if (!item.skip.empty()) continue;
         const std::wstring source = AudioFileOf(item.from), srcDir = DirectoryOf(source);
-        auto [folder, first] = folders.try_emplace(Lower(srcDir), srcDir, RelDir(item.rel));
-        if (!first && Lower(folder->second.second) != Lower(RelDir(item.rel))) folder->second.second = L"?";  // spread over folders
+        auto [folder, first] = folders.try_emplace(textcase::Path(srcDir), srcDir, RelDir(item.rel));
+        if (!first && textcase::Path(folder->second.second) != textcase::Path(RelDir(item.rel))) folder->second.second = L"?";  // spread over folders
         CopyRecord rec{item.rel, item.from, item.size, item.time, item.convert ? s.kbps : 0, {}};
         if (item.done) {
             record(std::move(rec));
@@ -610,7 +606,7 @@ CopyResult ExecuteCopy(const std::vector<CopyItem>& plan, const CopySettings& s,
             if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !IsImage(fd.cFileName)) continue;
             const std::wstring from = srcDir + kPathSep + fd.cFileName;
             CopyRecord rec{relDir + kPathSep + fd.cFileName, from, FileSize(from), FileTime(from), 0, {}};
-            auto r = index.find(Lower(rec.rel));
+            auto r = index.find(textcase::Path(rec.rel));
             const bool ours = r != index.end();
             if (ours && manifest[r->second].size == rec.size && manifest[r->second].time == rec.time && target->Exists(rec.rel))
                 record(std::move(rec));
@@ -642,17 +638,17 @@ CopyResult ExecuteCopy(const std::vector<CopyItem>& plan, const CopySettings& s,
         target->Remove(stale, removed);
         std::unordered_set<std::wstring> gone;
         for (size_t i = 0; i < stale.size(); ++i) {
-            if (removed[i]) gone.insert(Lower(stale[i]));
+            if (removed[i]) gone.insert(textcase::Path(stale[i]));
             else result.failed.push_back({stale[i], L"Couldn't remove this earlier copy."});
         }
         result.removed = gone.size();
         // Files other playlists still want stay, but no longer count as this playlist's.
         std::unordered_set<std::wstring> wanted;
-        for (const CopyItem& item : kept) wanted.insert(Lower(item.rel));
+        for (const CopyItem& item : kept) wanted.insert(textcase::Path(item.rel));
         std::vector<CopyRecord> left;
         for (CopyRecord& r : manifest) {
-            if (gone.count(Lower(r.rel))) continue;
-            if (!wanted.count(Lower(r.rel)) && !IsImage(r.rel) && r.sets.size() > 1) std::erase(r.sets, s.set);
+            if (gone.count(textcase::Path(r.rel))) continue;
+            if (!wanted.count(textcase::Path(r.rel)) && !IsImage(r.rel) && r.sets.size() > 1) std::erase(r.sets, s.set);
             left.push_back(std::move(r));
         }
         manifest = std::move(left);

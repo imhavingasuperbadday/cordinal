@@ -11,7 +11,7 @@
 //   tabs (Library, Now Playing, playlists...)                                         | search
 //   view row (Library tab): Tracks, Albums & Tracks, Albums, Artists | Browser
 //   the column browser (Library tab, when shown)
-//   column headers, then the track list with album headers over each album's tracks (or a view, libview.cpp)
+//   column headers, then the track list with album headers over each album's tracks (or a view, libview_canvas.cpp)
 //   status: message or playback | work in progress | track count and length
 //
 // Everything is drawn with the SDL renderer, laid out in pixels from the display scale. Where Windows
@@ -216,7 +216,7 @@ bool UiAnimating() {
             !IsPaused() && L.seek.w > 0) || PauseFading() ||
            (MiniActive() && g.playing != kNone && !IsPaused()) || PointsChipAnimating() || LyricsAnimating() ||
            (FountainStyleShown() && FountainAppearance().motion && g.playing != kNone && !IsPaused()) ||
-           GamesAnimating() || ((g.settings.theme == ThemeMode::Foobar || g.settings.theme == ThemeMode::Apollo) &&
+           GamesAnimating() || ListWindAnimating() || ((g.settings.theme == ThemeMode::Foobar || g.settings.theme == ThemeMode::Apollo) &&
            (g.playing != kNone ? !IsPaused() : g_visuals.Moving()));
 }
 
@@ -229,7 +229,7 @@ bool SeekAnimationOnly() {
           !IsPaused() && L.seek.w > 0)) return false;
     if (g_drag != Drag::None || g.searchFocused || !g_popups.empty() || g_folders.open || g_aboutOpen ||
         g_web.open || g_exclude.open || PanelOpen() || StartupReviewOpen() || MiniActive()) return false;
-    if (PointsChipAnimating() || LyricsAnimating() || GamesAnimating()) return false;
+    if (PointsChipAnimating() || LyricsAnimating() || GamesAnimating() || ListWindAnimating()) return false;
     if (FountainStyleShown() && FountainAppearance().motion && g.playing != kNone && !IsPaused()) return false;
     return !((g.settings.theme == ThemeMode::Foobar || g.settings.theme == ThemeMode::Apollo) &&
              (g.playing != kNone ? !IsPaused() : g_visuals.Moving()));

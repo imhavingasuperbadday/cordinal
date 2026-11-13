@@ -8,6 +8,7 @@
 // Fonts load privately while their pack is on; global keys use the desktop shortcut portal.
 #include "alternate_ui.h"
 #include "ui_internal.h"
+#include "dbus.h"
 #include "draw.h"
 #include "dsp.h"
 #include "packs.h"
@@ -15,7 +16,6 @@
 #include "titleformat.h"
 
 #include <cwctype>
-#include <systemd/sd-bus.h>
 
 #include <deque>
 #include <filesystem>
@@ -303,17 +303,22 @@ int FindCommand(const std::vector<PaletteCommand>& commands, const std::wstring&
 
 // The portal owns desktop-wide grabs, including under Wayland. All calls are asynchronous and all
 // callbacks run on the UI thread. Disconnecting closes the session and any pending consent request.
+// Response and Activated count only from the connection that answered our portal calls, so another
+// session peer cannot fire a shortcut by sending a look-alike signal straight to this connection.
 struct GlobalBinding {
     const Loaded* owner;
     std::string id, trigger;
     std::wstring command;
 };
 std::vector<GlobalBinding> g_globalBindings;
-sd_bus* g_shortcutBus = nullptr;
-std::string g_shortcutSession, g_shortcutRequest, g_shortcutPrefix;
+std::unique_ptr<dbus::Bus> g_shortcutBus;
+std::string g_shortcutSession, g_shortcutRequest, g_shortcutPrefix, g_portalOwner;
 bool g_creatingSession = false;
 bool g_shortcutsBound = false;
 std::vector<std::wstring> g_shortcutActivations;
+constexpr const char* kPortal = "org.freedesktop.portal.Desktop";
+constexpr const char* kPortalPath = "/org/freedesktop/portal/desktop";
+constexpr const char* kShortcuts = "org.freedesktop.portal.GlobalShortcuts";
 
 void GlobalWarning(const wchar_t* reason) {
     for (const auto& b : g_globalBindings)
@@ -321,84 +326,72 @@ void GlobalWarning(const wchar_t* reason) {
     g.redraw = true;
 }
 
-void StringOption(sd_bus_message* m, const char* key, const std::string& value) {
-    sd_bus_message_open_container(m, 'e', "sv");
-    sd_bus_message_append(m, "s", key);
-    sd_bus_message_open_container(m, 'v', "s");
-    sd_bus_message_append(m, "s", value.c_str());
-    sd_bus_message_close_container(m);
-    sd_bus_message_close_container(m);
+void StringOption(dbus::Writer& w, const char* key, const std::string& value) {
+    w.Entry(key, "s");
+    w.S(value);
 }
 
-int ShortcutReply(sd_bus_message* m, void*, sd_bus_error*) {
-    if (sd_bus_message_is_method_error(m, nullptr)) {
+void ShortcutReply(const dbus::Message* m) {
+    if (!m || m->type == dbus::kError) {
         GlobalWarning(L"the desktop global shortcut portal is unavailable");
         g_shortcutRequest.clear();
+    } else if (g_portalOwner.empty()) {
+        g_portalOwner = m->sender;
     }
-    return 0;
 }
 
-void SendShortcutRequest(sd_bus_message* m, const char* token) {
+void SendShortcutRequest(const char* method, const char* sig, const dbus::Writer& body, const char* token) {
     g_shortcutRequest = g_shortcutPrefix + token;
-    if (sd_bus_call_async(g_shortcutBus, nullptr, m, ShortcutReply, nullptr, 5000000) < 0) {
-        GlobalWarning(L"couldn't contact the desktop global shortcut portal");
-        g_shortcutRequest.clear();
-    }
-    sd_bus_message_unref(m);
+    g_shortcutBus->Call({kPortal, kPortalPath, kShortcuts, method}, sig, body, 5000, ShortcutReply);
 }
 
 void BindGlobalKeys() {
-    sd_bus_message* m = nullptr;
-    if (sd_bus_message_new_method_call(g_shortcutBus, &m, "org.freedesktop.portal.Desktop",
-        "/org/freedesktop/portal/desktop", "org.freedesktop.portal.GlobalShortcuts", "BindShortcuts") < 0) return;
-    sd_bus_message_append(m, "o", g_shortcutSession.c_str());
-    sd_bus_message_open_container(m, 'a', "(sa{sv})");
+    dbus::Writer w;
+    w.O(g_shortcutSession);
+    dbus::Writer::Array shortcuts = w.Open(8);
     for (const auto& b : g_globalBindings) {
-        sd_bus_message_open_container(m, 'r', "sa{sv}");
-        sd_bus_message_append(m, "s", b.id.c_str());
-        sd_bus_message_open_container(m, 'a', "{sv}");
-        StringOption(m, "description", ToUtf8(b.command));
-        StringOption(m, "preferred_trigger", b.trigger);
-        sd_bus_message_close_container(m);
-        sd_bus_message_close_container(m);
+        w.Align(8);
+        w.S(b.id);
+        dbus::Writer::Array options = w.Open(8);
+        StringOption(w, "description", ToUtf8(b.command));
+        StringOption(w, "preferred_trigger", b.trigger);
+        w.Close(options);
     }
-    sd_bus_message_close_container(m);
-    sd_bus_message_append(m, "s", "");  // the portal may show its own shortcut chooser
-    sd_bus_message_open_container(m, 'a', "{sv}");
-    StringOption(m, "handle_token", "bind");
-    sd_bus_message_close_container(m);
-    SendShortcutRequest(m, "bind");
+    w.Close(shortcuts);
+    w.S("");  // the portal may show its own shortcut chooser
+    dbus::Writer::Array options = w.Open(8);
+    StringOption(w, "handle_token", "bind");
+    w.Close(options);
+    SendShortcutRequest("BindShortcuts", "oa(sa{sv})sa{sv}", w, "bind");
 }
 
-int ShortcutResponse(sd_bus_message* m, void*, sd_bus_error*) {
-    if (g_shortcutRequest != sd_bus_message_get_path(m)) return 0;
+// Response(ua{sv}) to CreateSession (a session_handle) or BindShortcuts (the shortcuts it accepted).
+void ShortcutResponse(const dbus::Message& m) {
+    if (m.sig != "ua{sv}" || g_shortcutRequest.empty() || g_shortcutRequest != m.path) return;
     g_shortcutRequest.clear();
-    uint32_t response = 2;
-    if (sd_bus_message_read(m, "u", &response) < 0 || response != 0) {
+    dbus::Reader r = m.Body();
+    if (r.U() != 0) {
         GlobalWarning(L"the desktop did not approve these global shortcuts");
-        return 0;
+        return;
+    }
+    std::vector<std::string> accepted;
+    std::string session;
+    for (size_t end = r.Open(8); r.In(end);) {
+        r.Struct();
+        std::string_view key = r.S(), type = r.G();
+        if (key == "shortcuts" && type == "a(sa{sv})") {
+            for (size_t list = r.Open(8); r.In(list);) {
+                r.Struct();
+                accepted.emplace_back(r.S());
+                r.Skip("a{sv}");
+            }
+        } else if (key == "session_handle" && (type == "s" || type == "o")) {
+            session = type == "s" ? r.S() : r.O();
+        } else {
+            r.Skip(type);
+        }
     }
     if (!g_creatingSession) {
-        std::vector<std::string> accepted;
-        if (sd_bus_message_enter_container(m, 'a', "{sv}") > 0) {
-            while (sd_bus_message_enter_container(m, 'e', "sv") > 0) {
-                const char* key = nullptr;
-                sd_bus_message_read(m, "s", &key);
-                if (key && std::string_view(key) == "shortcuts" &&
-                    sd_bus_message_enter_container(m, 'v', "a(sa{sv})") > 0) {
-                    sd_bus_message_enter_container(m, 'a', "(sa{sv})");
-                    while (sd_bus_message_enter_container(m, 'r', "sa{sv}") > 0) {
-                        const char* id = nullptr;
-                        if (sd_bus_message_read(m, "s", &id) > 0) accepted.push_back(id);
-                        sd_bus_message_skip(m, "a{sv}");
-                        sd_bus_message_exit_container(m);
-                    }
-                    sd_bus_message_exit_container(m);
-                    sd_bus_message_exit_container(m);
-                } else sd_bus_message_skip(m, "v");
-                sd_bus_message_exit_container(m);
-            }
-        }
         for (const auto& b : g_globalBindings)
             if (std::find(accepted.begin(), accepted.end(), b.id) == accepted.end())
                 g_keyWarnings.push_back({b.owner, L"keys.ini: the desktop did not bind " + b.command});
@@ -407,38 +400,25 @@ int ShortcutResponse(sd_bus_message* m, void*, sd_bus_error*) {
         });
         g_shortcutsBound = !g_globalBindings.empty();
         g.redraw = true;
-        return 0;
+        return;
     }
     g_creatingSession = false;
-    if (sd_bus_message_enter_container(m, 'a', "{sv}") > 0) {
-        while (sd_bus_message_enter_container(m, 'e', "sv") > 0) {
-            const char* key = nullptr;
-            sd_bus_message_read(m, "s", &key);
-            if (key && std::string_view(key) == "session_handle") {
-                const char* session = nullptr;
-                if (sd_bus_message_enter_container(m, 'v', "s") > 0 &&
-                    sd_bus_message_read(m, "s", &session) > 0) {
-                    g_shortcutSession = session;
-                    sd_bus_message_exit_container(m);
-                }
-            } else sd_bus_message_skip(m, "v");
-            sd_bus_message_exit_container(m);
-        }
-    }
+    g_shortcutSession = session;
     if (g_shortcutSession.empty()) GlobalWarning(L"the desktop returned no shortcut session");
     else BindGlobalKeys();
-    return 0;
 }
 
-int ShortcutActivated(sd_bus_message* m, void*, sd_bus_error*) {
-    const char *session = nullptr, *id = nullptr;
-    if (sd_bus_message_read(m, "os", &session, &id) < 0 ||
-        !g_shortcutsBound || g_shortcutSession != session) return 0;
+void ShortcutSignal(dbus::Bus&, const dbus::Message& m) {
+    if (m.type != dbus::kSignal || g_portalOwner.empty() || m.sender != g_portalOwner) return;
+    if (m.iface == "org.freedesktop.portal.Request" && m.member == "Response") return ShortcutResponse(m);
+    if (m.iface != kShortcuts || m.member != "Activated" || m.path != kPortalPath || m.sig.rfind("os", 0) != 0) return;
+    dbus::Reader r = m.Body();
+    std::string_view session = r.O(), id = r.S();
+    if (!g_shortcutsBound || g_shortcutSession != session) return;
     for (const auto& b : g_globalBindings) if (b.id == id) {
         g_shortcutActivations.push_back(b.command);
         break;
     }
-    return 0;
 }
 
 std::string GlobalTrigger(const Binding& b) {
@@ -465,29 +445,30 @@ std::string GlobalTrigger(const Binding& b) {
 
 void StartGlobalKeys() {
     if (g_globalBindings.empty()) return;
-    if (sd_bus_open_user(&g_shortcutBus) < 0) {
+    g_shortcutBus = dbus::Bus::OpenUser();
+    if (!g_shortcutBus) {
         GlobalWarning(L"no desktop session bus is available");
         return;
     }
-    const char* unique = nullptr;
-    sd_bus_get_unique_name(g_shortcutBus, &unique);
-    std::string sender = unique ? unique + 1 : "";
+    g_shortcutBus->onMessage = ShortcutSignal;
+    std::string sender = g_shortcutBus->Unique().substr(1);
     std::replace(sender.begin(), sender.end(), '.', '_');
     g_shortcutPrefix = "/org/freedesktop/portal/desktop/request/" + sender + "/";
-    sd_bus_match_signal_async(g_shortcutBus, nullptr, "org.freedesktop.portal.Desktop", nullptr,
-        "org.freedesktop.portal.Request", "Response", ShortcutResponse, nullptr, nullptr);
-    sd_bus_match_signal_async(g_shortcutBus, nullptr, "org.freedesktop.portal.Desktop",
-        "/org/freedesktop/portal/desktop", "org.freedesktop.portal.GlobalShortcuts",
-        "Activated", ShortcutActivated, nullptr, nullptr);
-    sd_bus_message* m = nullptr;
-    if (sd_bus_message_new_method_call(g_shortcutBus, &m, "org.freedesktop.portal.Desktop",
-        "/org/freedesktop/portal/desktop", "org.freedesktop.portal.GlobalShortcuts", "CreateSession") < 0) return;
-    sd_bus_message_open_container(m, 'a', "{sv}");
-    StringOption(m, "handle_token", "create");
-    StringOption(m, "session_handle_token", "cordinal");
-    sd_bus_message_close_container(m);
+    for (const char* rule : {"type='signal',sender='org.freedesktop.portal.Desktop',"
+                             "interface='org.freedesktop.portal.Request',member='Response'",
+                             "type='signal',sender='org.freedesktop.portal.Desktop',path='/org/freedesktop/portal/desktop',"
+                             "interface='org.freedesktop.portal.GlobalShortcuts',member='Activated'"}) {
+        dbus::Writer w;
+        w.S(rule);
+        g_shortcutBus->Send({"org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "AddMatch"}, "s", w);
+    }
+    dbus::Writer w;
+    dbus::Writer::Array options = w.Open(8);
+    StringOption(w, "handle_token", "create");
+    StringOption(w, "session_handle_token", "cordinal");
+    w.Close(options);
     g_creatingSession = true;
-    SendShortcutRequest(m, "create");
+    SendShortcutRequest("CreateSession", "a{sv}", w, "create");
 }
 
 // The bindings of the packs that are on (a later pack wins a key), and what was wrong with the rest.
@@ -585,19 +566,21 @@ void ApplyAll() {
 }  // namespace
 
 void StopPackGlobalKeys() {
-    g_shortcutBus = sd_bus_flush_close_unref(g_shortcutBus);
+    g_shortcutBus.reset();
     g_shortcutSession.clear();
     g_shortcutRequest.clear();
+    g_portalOwner.clear();
     g_shortcutsBound = false;
     g_shortcutActivations.clear();
 }
 
 bool PackGlobalKeysActive() { return g_shortcutBus != nullptr; }
 
+// A non-blocking drain on the UI thread; the main loop's 100 ms wait cap is the delivery latency.
 void TickPackGlobalKeys() {
     if (!g_shortcutBus) return;
-    int result;
-    while ((result = sd_bus_process(g_shortcutBus, nullptr)) > 0) {}
+    int result = 1;
+    for (int round = 0; round < 4 && result > 0; ++round) result = g_shortcutBus->Process(32);
     if (result < 0) {
         GlobalWarning(L"the desktop shortcut connection closed");
         StopPackGlobalKeys();

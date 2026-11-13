@@ -103,7 +103,15 @@ public:
     bool Open(const std::wstring& path) {
         // The magic cookie is an ALACSpecificConfig: block size, sample width, history
         // parameters, Rice limit, channel count and sample rate.
-        if (!media_.OpenMp4(path) || media_.codec!=0x616c6163 || media_.config.size()<24) return false;
+        const uint8_t* magic=media_.file.Open(path)?media_.file.View(0,4):nullptr;
+        const bool caf=magic && Is(magic,"caff");
+        if (!(caf?media_.OpenCaf(path):media_.OpenMp4(path)) || media_.codec!=0x616c6163) return false;
+        // A CAF cookie may wrap the config in QuickTime atoms: 'frma' naming the format, then an
+        // 'alac' atom whose version and flags come before it. Unwrap both.
+        auto& c=media_.config;
+        if (caf && c.size()>=12 && !memcmp(c.data()+4,"frma",4)) c.erase(c.begin(),c.begin()+12);
+        if (caf && c.size()>=12 && !memcmp(c.data()+4,"alac",4)) c.erase(c.begin(),c.begin()+12);
+        if (media_.config.size()<24) return false;
         const auto* p=media_.config.data();
         block_=U32(p,true); bits_=p[5]; historyWeight_=p[6]; historyStart_=p[7]; riceLimit_=p[8]; channels_=p[9];
         unsigned rate=U32(p+20,true);

@@ -8,6 +8,7 @@
 #include "inflate.h"
 #include "organize.h"
 #include "streamfile.h"
+#include "textcase.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -90,11 +91,6 @@ std::wstring PathKey(std::wstring s) {
 }
 // Archive names are kept apart ignoring case everywhere, since an archive made on Linux may be
 // unpacked on Windows.
-std::wstring Fold(std::wstring s) {
-    for (wchar_t& c : s) c = (wchar_t)towlower(c);
-    return s;
-}
-
 bool Inside(const std::wstring& path, const std::wstring& dir) {
     if (dir.empty() || path.size() <= dir.size()) return false;
     const bool ends = dir.back() == L'\\' || dir.back() == L'/';
@@ -134,7 +130,7 @@ std::wstring Unique(const std::wstring& name, std::unordered_set<std::wstring>& 
         tail = name.substr(dot);
     }
     std::wstring candidate = name;
-    for (int n = 2; !taken.insert(Fold(candidate)).second; ++n) candidate = stem + L" (" + std::to_wstring(n) + L")" + tail;
+    for (int n = 2; !taken.insert(textcase::Fold(candidate)).second; ++n) candidate = stem + L" (" + std::to_wstring(n) + L")" + tail;
     return candidate;
 }
 
@@ -553,7 +549,7 @@ ExportChoices ListChoices(const Library& library, const std::vector<Playlist>& p
         const Track& t = library[id];
         if (!Shown(t, showOriginals)) continue;
         std::wstring artist = ArtistOf(library, t);
-        auto [a, newArtist] = artistKey.try_emplace(Fold(artist), c.artists.size());
+        auto [a, newArtist] = artistKey.try_emplace(textcase::Fold(artist), c.artists.size());
         if (newArtist) {
             c.artists.push_back({std::move(artist), {}, 0});
             albumKey.emplace_back();
@@ -561,7 +557,7 @@ ExportChoices ListChoices(const Library& library, const std::vector<Playlist>& p
         }
         ExportChoices::Artist& ar = c.artists[a->second];
         std::wstring album = library.Str(t.album);
-        auto [b, newAlbum] = albumKey[a->second].try_emplace(Fold(album), ar.albums.size());
+        auto [b, newAlbum] = albumKey[a->second].try_emplace(textcase::Fold(album), ar.albums.size());
         if (newAlbum) {
             ar.albums.push_back({std::move(album), {}});
             ids[a->second].emplace_back();
@@ -578,23 +574,36 @@ ExportChoices ListChoices(const Library& library, const std::vector<Playlist>& p
                 std::wstring title = t.title ? library.Str(t.title) : library.Str(t.file);
                 songs.push_back({std::move(title), std::move(path)});
             }
+            std::vector<std::wstring> folded;
+            folded.reserve(songs.size());
+            for (const auto& song : songs) folded.push_back(textcase::Fold(song.title));
             std::vector<size_t> order(songs.size());
             for (size_t k = 0; k < order.size(); ++k) order[k] = k;
             std::stable_sort(order.begin(), order.end(), [&](size_t x, size_t y) {
                 if (ids[i][j][x].order != ids[i][j][y].order) return ids[i][j][x].order < ids[i][j][y].order;
-                return Fold(songs[x].title) < Fold(songs[y].title);
+                return folded[x] < folded[y];
             });
             std::vector<ExportChoices::Song> sorted;
             for (size_t k : order) sorted.push_back(std::move(songs[k]));
             songs = std::move(sorted);
         }
-    auto byName = [](const std::wstring& a, const std::wstring& b) {
-        if (a.empty() != b.empty()) return b.empty();
-        return Fold(a) < Fold(b);
+    // Names are folded once each, not once per comparison; empty names go last.
+    auto sortByName = [](auto& items) {
+        std::vector<std::pair<std::wstring, size_t>> keys;
+        keys.reserve(items.size());
+        for (size_t k = 0; k < items.size(); ++k) keys.emplace_back(textcase::Fold(items[k].name), k);
+        std::sort(keys.begin(), keys.end(), [&](const auto& a, const auto& b) {
+            const bool ae = items[a.second].name.empty(), be = items[b.second].name.empty();
+            if (ae != be) return be;
+            return a.first < b.first;
+        });
+        std::decay_t<decltype(items)> sorted;
+        sorted.reserve(items.size());
+        for (const auto& key : keys) sorted.push_back(std::move(items[key.second]));
+        items = std::move(sorted);
     };
-    for (auto& ar : c.artists)
-        std::sort(ar.albums.begin(), ar.albums.end(), [&](const auto& a, const auto& b) { return byName(a.name, b.name); });
-    std::sort(c.artists.begin(), c.artists.end(), [&](const auto& a, const auto& b) { return byName(a.name, b.name); });
+    for (auto& ar : c.artists) sortByName(ar.albums);
+    sortByName(c.artists);
     for (const Playlist& p : playlists)
         if (p.kind == PlaylistKind::Static) c.playlists.push_back({p.name, p.items.size()});
     return c;
@@ -702,8 +711,8 @@ ExportResult Export(const ExportSource& source, const std::wstring& zip, const s
     for (const std::wstring& root : source.roots)
         if (!root.empty()) roots.push_back(Trimmed(root));
     std::sort(roots.begin(), roots.end(), [](const std::wstring& a, const std::wstring& b) { return a.size() > b.size(); });
-    std::unordered_set<std::wstring> tops{Fold(FromUtf8(kCollectionManifest)), Fold(FromUtf8(kReadme)), Fold(kPlaylists),
-                                          Fold(kOther)},
+    std::unordered_set<std::wstring> tops{textcase::Fold(FromUtf8(kCollectionManifest)), textcase::Fold(FromUtf8(kReadme)), textcase::Fold(kPlaylists),
+                                          textcase::Fold(kOther)},
         others;
     std::unordered_map<std::wstring, std::wstring> topOf, otherOf;  // root, or PathKey(folder) -> its name
     for (Item& item : items) {

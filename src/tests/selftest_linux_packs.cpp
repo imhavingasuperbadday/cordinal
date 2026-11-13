@@ -2,6 +2,7 @@
 // fonts provide fixtures; every pack and settings write goes to a temporary profile, removed afterward.
 #ifndef _WIN32
 #include "../linux/app.h"
+#include "../linux/dbus.h"
 #include "../linux/text.h"
 #include "../linux/ui_internal.h"
 #include "packs.h"
@@ -16,7 +17,7 @@
 #include <fstream>
 #include <unistd.h>
 #include <signal.h>
-#include <systemd/sd-bus.h>
+#include <poll.h>
 
 namespace lx {
 namespace {
@@ -61,83 +62,71 @@ bool Write(const std::filesystem::path& path, const std::string& bytes) {
 }
 
 // A private session bus and portal peer exercise the wire protocol without a desktop consent dialog.
+// The peer speaks through the same client as the player, on its own connection and thread.
 struct ShortcutPortal {
-    sd_bus* bus = nullptr;
-    sd_bus_slot* slot = nullptr;
+    static constexpr const char* kPath = "/org/freedesktop/portal/desktop";
+    static constexpr const char* kSession = "/org/freedesktop/portal/desktop/session/mock";
+    std::unique_ptr<dbus::Bus> bus;
     std::thread worker;
     std::atomic<bool> stop{false}, valid{false}, deny{false};
     std::string oldAddress;
     bool hadAddress = false;
     int pid = 0;
+    std::string shortcut;  // worker only
 
-    static int Request(sd_bus_message* call, void* data, sd_bus_error*) {
-        auto& self = *(ShortcutPortal*)data;
-        bool create = std::string_view(sd_bus_message_get_member(call)) == "CreateSession";
-        std::string sender = sd_bus_message_get_sender(call) + 1;
+    void Request(dbus::Bus& b, const dbus::Message& call) {
+        bool create = call.member == "CreateSession";
+        if (call.path != kPath || call.iface != "org.freedesktop.portal.GlobalShortcuts" ||
+            call.sig != (create ? "a{sv}" : "oa(sa{sv})sa{sv}"))
+            return b.Error(call, "org.freedesktop.DBus.Error.UnknownMethod", "the mock portal has no such method");
+        std::string sender = call.sender.substr(1);
         std::replace(sender.begin(), sender.end(), '.', '_');
         std::string path = "/org/freedesktop/portal/desktop/request/" + sender + (create ? "/create" : "/bind");
         if (!create) {
-            const char* session = nullptr;
-            const char* id = nullptr;
-            bool ok = sd_bus_message_read(call, "o", &session) > 0 &&
-                std::string_view(session) == "/org/freedesktop/portal/desktop/session/mock" &&
-                sd_bus_message_enter_container(call, 'a', "(sa{sv})") > 0 &&
-                sd_bus_message_enter_container(call, 'r', "sa{sv}") > 0 &&
-                sd_bus_message_read(call, "s", &id) > 0 && id && *id;
-            self.shortcut = id ? id : "";
-            bool trigger = false;
-            if (ok && sd_bus_message_enter_container(call, 'a', "{sv}") > 0) {
-                while (sd_bus_message_enter_container(call, 'e', "sv") > 0) {
-                    const char* key = nullptr;
-                    sd_bus_message_read(call, "s", &key);
-                    if (std::string_view(key) == "preferred_trigger") {
-                        const char* value = nullptr;
-                        if (sd_bus_message_enter_container(call, 'v', "s") > 0 &&
-                            sd_bus_message_read(call, "s", &value) > 0) {
-                            trigger = std::string_view(value) == "CTRL+ALT+k";
-                            sd_bus_message_exit_container(call);
-                        }
-                    } else sd_bus_message_skip(call, "v");
-                    sd_bus_message_exit_container(call);
+            dbus::Reader r = call.Body();
+            bool ok = r.O() == kSession, trigger = false;
+            shortcut.clear();
+            size_t list = r.Open(8);
+            if (ok && r.In(list)) {
+                r.Struct();
+                shortcut = r.S();
+                for (size_t end = r.Open(8); r.In(end);) {
+                    r.Struct();
+                    std::string_view key = r.S(), type = r.G();
+                    if (key == "preferred_trigger" && type == "s") trigger = r.S() == "CTRL+ALT+k";
+                    else r.Skip(type);
                 }
             }
-            self.valid = ok && trigger;
+            valid = ok && r.ok() && !shortcut.empty() && trigger;
         }
-        sd_bus_reply_method_return(call, "o", path.c_str());
-        sd_bus_message* response = nullptr;
-        sd_bus_message_new_signal(self.bus, &response, path.c_str(), "org.freedesktop.portal.Request", "Response");
-        sd_bus_message_append(response, "u", self.deny ? 1u : 0u);
-        sd_bus_message_open_container(response, 'a', "{sv}");
+        dbus::Writer handle;
+        handle.O(path);
+        b.Reply(call, "o", handle);
+        dbus::Writer response;
+        response.U(deny ? 1 : 0);
+        dbus::Writer::Array results = response.Open(8);
         if (create) {
-            sd_bus_message_open_container(response, 'e', "sv");
-            sd_bus_message_append(response, "s", "session_handle");
-            sd_bus_message_open_container(response, 'v', "s");
-            sd_bus_message_append(response, "s", "/org/freedesktop/portal/desktop/session/mock");
-            sd_bus_message_close_container(response);
-            sd_bus_message_close_container(response);
+            response.Entry("session_handle", "s");
+            response.S(kSession);
         } else {
-            sd_bus_message_open_container(response, 'e', "sv");
-            sd_bus_message_append(response, "s", "shortcuts");
-            sd_bus_message_open_container(response, 'v', "a(sa{sv})");
-            sd_bus_message_open_container(response, 'a', "(sa{sv})");
-            sd_bus_message_open_container(response, 'r', "sa{sv}");
-            sd_bus_message_append(response, "s", self.shortcut.c_str());
-            sd_bus_message_open_container(response, 'a', "{sv}");
-            sd_bus_message_close_container(response);
-            sd_bus_message_close_container(response);
-            sd_bus_message_close_container(response);
-            sd_bus_message_close_container(response);
-            sd_bus_message_close_container(response);
+            response.Entry("shortcuts", "a(sa{sv})");
+            dbus::Writer::Array list = response.Open(8);
+            response.Align(8);
+            response.S(shortcut);
+            response.Close(response.Open(8));
+            response.Close(list);
         }
-        sd_bus_message_close_container(response);
-        sd_bus_send(self.bus, response, nullptr);
-        sd_bus_message_unref(response);
-        if (!create && !self.deny)
-            sd_bus_emit_signal(self.bus, "/org/freedesktop/portal/desktop", "org.freedesktop.portal.GlobalShortcuts",
-                "Activated", "osta{sv}", "/org/freedesktop/portal/desktop/session/mock", self.shortcut.c_str(), uint64_t(1), 0);
-        return 1;
+        response.Close(results);
+        b.Signal(path, "org.freedesktop.portal.Request", "Response", "ua{sv}", response);
+        if (!create && !deny) {
+            dbus::Writer activated;
+            activated.O(kSession);
+            activated.S(shortcut);
+            activated.X(1);  // the timestamp, a uint64 on the wire
+            activated.Close(activated.Open(8));
+            b.Signal(kPath, "org.freedesktop.portal.GlobalShortcuts", "Activated", "osta{sv}", activated);
+        }
     }
-    std::string shortcut;  // worker only
 
     bool Start() {
         if (const char* address = getenv("DBUS_SESSION_BUS_ADDRESS")) hadAddress = true, oldAddress = address;
@@ -150,19 +139,21 @@ struct ShortcutPortal {
         pid = atoi(number);
         address[strcspn(address, "\n")] = 0;
         setenv("DBUS_SESSION_BUS_ADDRESS", address, 1);
-        if (sd_bus_open_user(&bus) < 0 || sd_bus_request_name(bus, "org.freedesktop.portal.Desktop", 0) < 0) return false;
-        static const sd_bus_vtable table[] = {
-            SD_BUS_VTABLE_START(0),
-            SD_BUS_METHOD("CreateSession", "a{sv}", "o", Request, SD_BUS_VTABLE_UNPRIVILEGED),
-            SD_BUS_METHOD("BindShortcuts", "oa(sa{sv})sa{sv}", "o", Request, SD_BUS_VTABLE_UNPRIVILEGED),
-            SD_BUS_VTABLE_END
+        bus = dbus::Bus::OpenUser();
+        if (!bus) return false;
+        dbus::Writer name;
+        name.S("org.freedesktop.portal.Desktop");
+        name.U(0);
+        auto owned = bus->CallSync({"org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "RequestName"},
+                                   "su", name, 5000);
+        if (!owned || owned->type != dbus::kReturn || owned->Body().U() != 1) return false;  // primary owner
+        bus->onMessage = [this](dbus::Bus& b, const dbus::Message& m) {
+            if (m.type == dbus::kCall) Request(b, m);
         };
-        if (sd_bus_add_object_vtable(bus, &slot, "/org/freedesktop/portal/desktop",
-            "org.freedesktop.portal.GlobalShortcuts", table, this) < 0) return false;
         worker = std::thread([this] {
-            while (!stop) {
-                while (sd_bus_process(bus, nullptr) > 0) {}
-                sd_bus_wait(bus, 10000);
+            while (!stop && bus->Process(64) >= 0) {
+                pollfd p{bus->Fd(), bus->Events(), 0};
+                poll(&p, 1, 10);
             }
         });
         return true;
@@ -171,13 +162,125 @@ struct ShortcutPortal {
         StopPackGlobalKeys();
         stop = true;
         if (worker.joinable()) worker.join();
-        sd_bus_slot_unref(slot);
-        sd_bus_flush_close_unref(bus);
+        bus.reset();
         if (pid > 0) kill(pid, SIGTERM);
         if (hadAddress) setenv("DBUS_SESSION_BUS_ADDRESS", oldAddress.c_str(), 1);
         else unsetenv("DBUS_SESSION_BUS_ADDRESS");
     }
 };
+
+// A message as the client frames one, with a body supplied byte for byte.
+std::string Frame(std::string_view sig, const dbus::Writer& body, int fds = -1) {
+    dbus::Writer h;
+    h.Y('l'), h.Y(dbus::kSignal), h.Y(0), h.Y(1);
+    h.U((uint32_t)body.b.size());
+    h.U(7);
+    dbus::Writer::Array fields = h.Open(8);
+    auto field = [&](uint8_t code, const char* type, std::string_view value) {
+        h.Align(8), h.Y(code), h.G(type);
+        *type == 'g' ? h.G(value) : h.S(value);
+    };
+    field(1, "o", "/io/github/cordinal");
+    field(2, "s", "io.github.cordinal.Test");
+    field(3, "s", "Probe");
+    if (!sig.empty()) field(8, "g", sig);
+    if (fds >= 0) h.Align(8), h.Y(9), h.G("u"), h.U((uint32_t)fds);
+    h.Close(fields);
+    h.Align(8);
+    return h.b + body.b;
+}
+
+int Parse(const std::string& bytes, dbus::Message& m) {
+    size_t used = 0;
+    return dbus::ParseMessage(bytes, m, used);
+}
+
+// The session-bus codec: what it writes reads back, a partial message waits, and every malformed form
+// the parser has to refuse closes the stream instead of reaching a handler.
+void CheckBusCodec(const std::function<void(bool, const char*)>& check) {
+    dbus::Writer body;
+    body.S("org.mpris.MediaPlayer2.Player");
+    dbus::Writer::Array dict = body.Open(8);
+    body.Entry("Volume", "d"), body.D(0.5);
+    body.Entry("xesam:artist", "as"), body.Strings({"Artist \xff"});
+    body.Close(dict);
+    body.Close(body.Open(4));
+    std::string bytes = Frame("sa{sv}as", body);
+    dbus::Message m;
+    size_t used = 0;
+    bool parsed = dbus::ParseMessage(bytes, m, used) == 1 && used == bytes.size();
+    dbus::Reader r = m.Body();
+    std::string_view iface = r.S();
+    size_t end = r.Open(8);
+    r.Struct();
+    std::string_view key = r.S(), type = r.G();
+    double volume = r.D();
+    r.Struct();
+    r.S(), r.G();
+    r.Open(4);
+    std::string_view artist = r.S();
+    check(parsed && m.path == "/io/github/cordinal" && m.member == "Probe" && m.serial == 7 && iface == "org.mpris.MediaPlayer2.Player" &&
+              key == "Volume" && type == "d" && volume == 0.5 && artist == "Artist \xEF\xBF\xBD" && r.pos() == end && r.ok(),
+          "session-bus messages read back as written, with invalid UTF-8 replaced");
+    dbus::Message partial;
+    check(Parse(bytes.substr(0, bytes.size() - 1), partial) == 0, "a session-bus message cut short waits for the rest");
+
+    // dbus-daemon's reply to Hello and its NameAcquired signal, byte for byte: every header field a reply
+    // or a signal from the bus carries, in the daemon's own order.
+    static const char kDaemonHex[] =
+        "6c02010109000000010000003d00000006017300040000003a312e30000000000501750001000000080167000173000007017300"
+        "140000006f72672e667265656465736b746f702e4442757300000000040000003a312e30006c04010109000000020000008d0000"
+        "0001016f00150000002f6f72672f667265656465736b746f702f4442757300000002017300140000006f72672e66726565646573"
+        "6b746f702e4442757300000000030173000c0000004e616d6541637175697265640000000006017300040000003a312e30000000"
+        "00080167000173000007017300140000006f72672e667265656465736b746f702e4442757300000000040000003a312e3000";
+    std::string daemon;
+    for (size_t i = 0; kDaemonHex[i] && kDaemonHex[i + 1]; i += 2) daemon += (char)std::stoi(std::string(kDaemonHex + i, 2), nullptr, 16);
+    dbus::Message reply, acquired;
+    size_t first = 0, second = 0;
+    bool both = dbus::ParseMessage(daemon, reply, first) == 1 &&
+                dbus::ParseMessage(std::string_view(daemon).substr(first), acquired, second) == 1 && first + second == daemon.size();
+    check(both && reply.type == dbus::kReturn && reply.replySerial == 1 && reply.dest == ":1.0" &&
+              reply.sender == "org.freedesktop.DBus" && reply.Body().S() == ":1.0" && acquired.type == dbus::kSignal &&
+              acquired.member == "NameAcquired" && acquired.path == "/org/freedesktop/DBus",
+          "the bus daemon's Hello reply and NameAcquired signal parse field by field");
+
+    auto refused = [&](std::string_view sig, std::string raw, const char* what) {
+        dbus::Writer w;
+        w.b = std::move(raw);
+        dbus::Message out;
+        check(Parse(Frame(sig, w), out) < 0, what);
+    };
+    refused("b", std::string("\x02\0\0\0", 4), "a boolean other than 0 or 1 closes the session bus");
+    refused("s", std::string("\x03\0\0\0abcd", 8), "a string without its NUL closes the session bus");
+    refused("ay", std::string("\x64\0\0\0\x01", 5), "an array longer than its message closes the session bus");
+    refused("yu", std::string("\x01\x01\0\0\x05\0\0\0", 8), "non-zero padding closes the session bus");
+    refused("y", std::string("\x01\x02", 2), "bytes past the signature close the session bus");
+    refused("h", std::string("\0\0\0\0", 4), "a file descriptor in a signature closes the session bus");
+    refused(std::string(70, 'a') + "y", std::string("\0\0\0\0", 4), "a signature nested too deeply closes the session bus");
+    dbus::Writer deep, shallow;
+    for (int i = 0; i < 70; ++i) deep.G("v");
+    deep.G("y"), deep.Y(1);
+    for (int i = 0; i < 3; ++i) shallow.G("v");
+    shallow.G("y"), shallow.Y(1);
+    dbus::Message out;
+    check(Parse(Frame("v", deep), out) < 0 && Parse(Frame("v", shallow), out) == 1,
+          "variants nested too deeply close the session bus and shallow ones read");
+    check(Parse(Frame("", {}, 1), out) < 0 && Parse(Frame("", {}, 0), out) == 1,
+          "a message carrying file descriptors closes the session bus; GDBus's count of none does not");
+    std::string big = Frame("", {});
+    uint32_t huge = 2u << 20;
+    memcpy(&big[4], &huge, 4);
+    check(Parse(big, out) < 0, "a message over the size cap closes the session bus before its body arrives");
+    std::string endian = Frame("", {});
+    endian[0] = 'x';
+    check(Parse(endian, out) < 0, "an unknown byte order closes the session bus");
+
+    auto addresses = dbus::ParseAddresses("tcp:host=localhost,port=1;unixexec:path=/bin/sh;autolaunch:;unix:dir=/tmp;"
+                                          "unix:path=/run/a%zz;unix:path=/run/user/1000/bus,guid=00;unix:abstract=%2Fcordinal");
+    check(addresses.size() == 2 && !addresses[0].abstract && addresses[0].path == "/run/user/1000/bus" &&
+              addresses[1].abstract && addresses[1].path == "/cordinal",
+          "the session bus connects to unix paths and abstract sockets only, never tcp or an exec address");
+}
 
 }  // namespace
 
@@ -188,6 +291,7 @@ int CheckLinuxPacks() {
         fflush(stdout);
         failed += !ok;
     };
+    CheckBusCodec(check);
     const FontFixture regular = ReadFont("monospace:weight=regular", false);
     const FontFixture bold = ReadFont("monospace:weight=bold", true);
     if (regular.bytes.empty() || regular.family.empty() || regular.family.size() >= LF_FACESIZE ||

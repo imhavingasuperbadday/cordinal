@@ -2,10 +2,10 @@
 #
 #   cmake -S . -B build-linux -DCMAKE_BUILD_TYPE=Release && cmake --build build-linux
 #
-# Needs SDL3, SDL3_ttf, PipeWire (libpipewire-0.3), libsystemd (sd-bus), fontconfig and OpenSSL 3
-# (the web server's HTTPS away from home).
+# Needs SDL3, SDL3_ttf, PipeWire (libpipewire-0.3), fontconfig and OpenSSL 3 (the web server's HTTPS
+# away from home). D-Bus is spoken by the player's own client (src/linux/dbus.cpp), not a library.
 cmake_minimum_required(VERSION 3.20)
-project(cordinal VERSION 0.1.10 LANGUAGES CXX)
+project(cordinal VERSION 0.1.11 LANGUAGES CXX)
 
 if(WIN32)
     message(FATAL_ERROR "On Windows, build with build.bat")
@@ -19,7 +19,6 @@ endif()
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
-pkg_check_modules(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
 pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
 find_package(SDL3 REQUIRED CONFIG)
 find_package(SDL3_ttf REQUIRED CONFIG)
@@ -38,12 +37,12 @@ set_source_files_properties(src/audio_avx.cpp PROPERTIES COMPILE_OPTIONS "-mavx2
 
 # The portable core, compiled against the Windows API subset in src/linux/compat.
 add_library(cordinal_core STATIC
-    src/album_editions.cpp src/album_maker.cpp src/archive.cpp src/autoplaylist.cpp src/cue.cpp src/decoder.cpp src/dsp.cpp src/engine.cpp src/game_music.cpp src/inflate.cpp src/musicbrainz.cpp src/metadata_fetch.cpp src/coverfetch.cpp src/customcover.cpp src/coverupload.cpp src/discart.cpp
+    src/album_editions.cpp src/album_editions_db.cpp src/album_editions_edit.cpp src/album_editions_title.cpp src/album_maker.cpp src/archive.cpp src/autoplaylist.cpp src/cue.cpp src/decoder.cpp src/dsp.cpp src/engine.cpp src/game_music.cpp src/inflate.cpp src/musicbrainz.cpp src/metadata_fetch.cpp src/coverfetch.cpp src/customcover.cpp src/coverupload.cpp src/discart.cpp
     src/discord.cpp src/library.cpp src/librarydb.cpp src/listenbrainz.cpp src/migration.cpp src/backup.cpp src/playlog.cpp src/points.cpp src/taste.cpp src/radio.cpp src/radio_browser.cpp src/radio_stream.cpp src/radio_hls.cpp src/scanner.cpp src/sfx.cpp src/sort.cpp src/steam.cpp
-    src/headsets.cpp src/helpers.cpp src/streamfile.cpp src/tags.cpp src/tagwriter.cpp src/tagwriter_flacogg.cpp src/tagwriter_mp3mp4.cpp
+    src/headsets.cpp src/helpers.cpp src/streamfile.cpp src/tags.cpp src/tags_fields.cpp src/tags_flacogg.cpp src/tags_id3.cpp src/tags_mp4.cpp src/tags_riff.cpp src/tagwriter.cpp src/tagwriter_flacogg.cpp src/tagwriter_mp3mp4.cpp
     src/tagwriter_cord.cpp src/tagundo.cpp src/playlist_files.cpp src/playlist.cpp src/md5.cpp src/cord_encode.cpp src/cord_export.cpp
     src/convert.cpp src/organize.cpp src/devicecopy.cpp src/collection.cpp src/linux/recycle.cpp
-    src/titleformat.cpp src/peaks.cpp src/theme_palette.cpp src/replaygain.cpp src/eq_profile.cpp
+    src/titleformat.cpp src/peaks.cpp src/tempo.cpp src/theme_palette.cpp src/replaygain.cpp src/eq_profile.cpp
     src/tag_suggest.cpp src/packs.cpp src/web_audio.cpp src/web_catalog.cpp src/web_http.cpp src/web_library.cpp src/web_server.cpp src/web_ui.cpp
     src/web_aac.cpp src/web_acme.cpp src/web_reach.cpp src/web_remote.cpp src/qr.cpp src/linux/tls_openssl.cpp
     ${AUDIO} ${CHIPS} ${ENCODE} ${IPOD} src/linux/compat/compat.cpp src/linux/audio_pipewire.cpp src/linux/sfx_pipewire.cpp)
@@ -64,9 +63,11 @@ target_link_libraries(cordinal-core-test PRIVATE cordinal_core)
 # The player.
 add_executable(cordinal
     src/linux/main.cpp src/linux/ui.cpp src/linux/radio_ui.cpp src/linux/text.cpp src/linux/settings.cpp src/linux/library_sync.cpp
-    src/linux/playback.cpp src/linux/cover.cpp src/linux/mpris.cpp src/linux/web.cpp src/linux/replaygain.cpp
-    src/linux/tagwrite.cpp src/linux/panels.cpp src/linux/cord_export.cpp src/linux/convert_run.cpp src/linux/expand.cpp
-    src/linux/organize_run.cpp src/linux/copy_run.cpp src/linux/collection_run.cpp src/linux/ipod_run.cpp src/linux/libview.cpp src/linux/scrobble.cpp src/linux/sounds.cpp src/linux/points_ui.cpp src/linux/lyrics.cpp src/linux/mini.cpp src/linux/packs_ui.cpp src/linux/helpers_ui.cpp src/linux/preferences_ui.cpp src/linux/games.cpp src/linux/editions_ui.cpp src/linux/coverfetch_ui.cpp src/linux/artistinfo_ui.cpp
+    src/linux/playback.cpp src/linux/cover.cpp src/linux/mpris.cpp src/linux/dbus.cpp src/linux/web.cpp src/linux/replaygain.cpp
+    src/linux/tagwrite.cpp src/linux/panels.cpp src/linux/panel_album.cpp src/linux/panel_eq.cpp src/linux/panel_organize.cpp
+    src/linux/panel_palette.cpp src/linux/panel_points.cpp src/linux/panel_prefs.cpp src/linux/panel_rules.cpp src/linux/panel_setup.cpp
+    src/linux/panel_tags.cpp src/linux/cord_export.cpp src/linux/convert_run.cpp src/linux/expand.cpp
+    src/linux/organize_run.cpp src/linux/copy_run.cpp src/linux/collection_run.cpp src/linux/ipod_run.cpp src/linux/libview.cpp src/linux/libview_canvas.cpp src/linux/scrobble.cpp src/linux/sounds.cpp src/linux/points_ui.cpp src/linux/lyrics.cpp src/linux/mini.cpp src/linux/packs_ui.cpp src/linux/helpers_ui.cpp src/linux/preferences_ui.cpp src/linux/games.cpp src/linux/editions_ui.cpp src/linux/coverfetch_ui.cpp src/linux/artistinfo_ui.cpp
     src/linux/ui_model.cpp src/linux/ui_layout.cpp src/linux/ui_menus.cpp src/linux/ui_dialogs.cpp
     src/linux/ui_draw.cpp src/linux/ui_input.cpp src/linux/ui_files.cpp src/linux/ui_checks.cpp src/linux/queue_ui.cpp
     src/tests/selftest_linux_packs.cpp src/tests/selftest_linux_headsets.cpp
@@ -126,7 +127,7 @@ else()
 endif()
 target_include_directories(cordinal PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_compile_options(cordinal PRIVATE -Wall -Wno-unused-parameter -Wno-sign-compare -Wno-missing-field-initializers)
-target_link_libraries(cordinal PRIVATE cordinal_core SDL3::SDL3 SDL3_ttf::SDL3_ttf PkgConfig::SYSTEMD PkgConfig::FONTCONFIG)
+target_link_libraries(cordinal PRIVATE cordinal_core SDL3::SDL3 SDL3_ttf::SDL3_ttf PkgConfig::FONTCONFIG)
 
 install(TARGETS cordinal RUNTIME DESTINATION bin)
 install(FILES LICENSE DESTINATION share/licenses/cordinal)

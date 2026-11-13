@@ -114,7 +114,7 @@ void Roots(Result& r) {
     // Consecutive folders on a drive share the longest directory prefix. The result is an
     // editable location, never a filename guess that could join two different songs.
     std::vector<std::wstring> extra;
-    for (auto dir : dirs) {
+    for (const auto& dir : dirs) {
         if (dir.empty()) continue;
         bool covered = false;
         for (const auto& m : r.maps)

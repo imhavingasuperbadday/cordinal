@@ -255,7 +255,8 @@ std::vector<ConvertItem> PlanConvert(const std::vector<std::pair<TrackId, std::w
         else if (exporting && ext != L"cord") item.skip = L"not a .cord file";
         else if (exporting) item.to = path.substr(0, dot) + L"." + kCordExports[(unsigned)format].extension;
         else if (ext == L"cord") item.skip = L"already .cord";
-        else if (ext != L"flac" && ext != L"fla" && ext != L"wav" && ext != L"wave" && ext != L"aif" && ext != L"aiff" && ext != L"aifc")
+        else if (ext != L"flac" && ext != L"fla" && ext != L"wav" && ext != L"wave" && ext != L"aif" && ext != L"aiff" && ext != L"aifc" &&
+                 ext != L"au" && ext != L"snd" && ext != L"caf")
             item.skip = L"not lossless audio cordinal can read exactly";
         else {
             item.to = path.substr(0, dot) + L".cord";

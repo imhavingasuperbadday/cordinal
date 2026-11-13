@@ -169,7 +169,7 @@ void PaintAbout(HDC dc, RECT rc) {
     const int right = a.width - a.pad;
     if (a.icon) DrawIconEx(dc, a.iconRect.left, a.iconRect.top, a.icon, a.iconSize, a.iconSize, 0, nullptr, DI_NORMAL);
     DrawAboutText(dc, a.titleFont, TextColor(), L"cordinal", a.textLeft, a.titleTop, right - a.textLeft, DT_SINGLELINE);
-    DrawAboutText(dc, g.font, SubColor(), L"Version 0.1.10", a.textLeft, a.versionTop, right - a.textLeft, DT_SINGLELINE);
+    DrawAboutText(dc, g.font, SubColor(), L"Version 0.1.11", a.textLeft, a.versionTop, right - a.textLeft, DT_SINGLELINE);
     DrawAboutText(dc, g.font, TextColor(), kAboutTagline, a.textLeft, a.taglineTop, right - a.textLeft, DT_WORDBREAK);
     FillSolid(dc, {a.pad, a.ruleY, right, a.ruleY + 1}, Ref(P().border));
     int y = a.rowsTop;

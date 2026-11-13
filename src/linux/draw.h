@@ -1,5 +1,5 @@
-// Drawing primitives shared by the Linux window (ui.cpp) and its dialogs (panels.cpp): rectangles
-// in pixels, sizes scaled from the Windows build's 96-DPI measurements, and filled shapes.
+// Drawing primitives shared by the Linux window (ui.cpp) and its dialogs (panels.cpp, panel_*.cpp):
+// rectangles in pixels, sizes scaled from the Windows build's 96-DPI measurements, and filled shapes.
 #pragma once
 #include "app.h"
 #include "text.h"

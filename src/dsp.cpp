@@ -1,6 +1,7 @@
 // Equalizer, EBU R128 loudness and true-peak DSP (see dsp.h). Everything works on interleaved
 // stereo float in [-1, 1]; filter state is per-instance and the meters accumulate without clipping.
 #include "dsp.h"
+#include "audio_kernels.h"
 
 #include <algorithm>
 #include <cmath>
@@ -171,7 +172,8 @@ void WaveformMotion::Add(const float* stereo, size_t frames, unsigned rate) {
         double seconds = (double)block_ / rate;
         attack_ = (float)(1 - std::exp(-seconds / 0.006));
         release_ = (float)(1 - std::exp(-seconds / 0.120));
-        follow_ = (float)(1 - std::exp(-seconds / 0.100));
+        // A longer recent level makes a note's attack stand out more on loud, compressed music.
+        follow_ = (float)(1 - std::exp(-seconds / 0.350));
     }
     for (size_t i = 0; i < frames; ++i) {
         float left = stereo[i * 2], right = stereo[i * 2 + 1];
@@ -201,8 +203,11 @@ void WaveformMotion::Shape(uint8_t* peaks, size_t buckets) const {
     float maximum = *std::max_element(peaks, peaks + buckets), level = Level();
     for (size_t i = 0; i < buckets; ++i) {
         // Keep the recent waveform's texture, but move the whole display on the current note.
+        // Squared detail gives the live shape more contrast than the whole-song peaks: the
+        // display is normalized to its own loudest moment, so a dense master would otherwise
+        // read as a near-solid block.
         float detail = maximum > 0 ? peaks[i] / maximum : 0;
-        peaks[i] = (uint8_t)std::clamp(std::lround(255 * level * (0.35f + 0.65f * detail)), 0l, 255l);
+        peaks[i] = (uint8_t)std::clamp(std::lround(255 * level * (0.35f + 0.65f * detail * detail)), 0l, 255l);
     }
 }
 
@@ -982,18 +987,39 @@ LoudnessMeter::LoudnessMeter(unsigned rate) {
 
 // K-weights each sample (shelf then high-pass), then folds it into 400 ms blocks of 100 ms steps,
 // so consecutive blocks overlap by 75%. peak_ is the meter's own sample peak, not the true peak.
+// The two channels run side by side, one per SIMD lane, through the same operations in the same
+// order as the per-channel filter, so every value is bit-identical to filtering them one at a time.
 void LoudnessMeter::Add(const float* x, size_t frames) {
     FlushDenormals flush;  // silence between tracks would otherwise slow the scan down
-    for (size_t n = 0; n < frames; ++n) {
-        double sum = 0;
-        for (int ch = 0; ch < 2; ++ch) {
-            float s = x[n * 2 + ch];
-            peak_ = std::max(peak_, std::fabs(s));
-            double y = highpass_.Run(shelf_.Run(s, ch), ch);
-            sum += y * y;
+    const __m128d sb0 = _mm_set1_pd(shelf_.b0), sb1 = _mm_set1_pd(shelf_.b1), sb2 = _mm_set1_pd(shelf_.b2),
+                  sa1 = _mm_set1_pd(shelf_.a1), sa2 = _mm_set1_pd(shelf_.a2);
+    const __m128d hb0 = _mm_set1_pd(highpass_.b0), hb1 = _mm_set1_pd(highpass_.b1), hb2 = _mm_set1_pd(highpass_.b2),
+                  ha1 = _mm_set1_pd(highpass_.a1), ha2 = _mm_set1_pd(highpass_.a2);
+    __m128d s1 = _mm_loadu_pd(shelf_.z1), s2 = _mm_loadu_pd(shelf_.z2);
+    __m128d h1 = _mm_loadu_pd(highpass_.z1), h2 = _mm_loadu_pd(highpass_.z2);
+    const __m128 magnitude = _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF));
+    __m128 peak = _mm_set_ss(peak_);  // max keeps its second operand, so a NaN sample is skipped as before
+    while (frames) {
+        // Up to the end of the current 100 ms step.
+        const size_t n = stepFrames_ ? std::min(frames, stepFrames_ - stepFill_) : frames;
+        __m128d sum = _mm_set_sd(stepSum_);
+        for (const float* end = x + n * 2; x != end; x += 2) {
+            const __m128 in = _mm_loadl_pi(_mm_setzero_ps(), (const __m64*)x);
+            peak = _mm_max_ps(_mm_and_ps(in, magnitude), peak);
+            const __m128d v = _mm_cvtps_pd(in);
+            const __m128d y = _mm_add_pd(_mm_mul_pd(sb0, v), s1);
+            s1 = _mm_add_pd(_mm_sub_pd(_mm_mul_pd(sb1, v), _mm_mul_pd(sa1, y)), s2);
+            s2 = _mm_sub_pd(_mm_mul_pd(sb2, v), _mm_mul_pd(sa2, y));
+            const __m128d k = _mm_add_pd(_mm_mul_pd(hb0, y), h1);
+            h1 = _mm_add_pd(_mm_sub_pd(_mm_mul_pd(hb1, y), _mm_mul_pd(ha1, k)), h2);
+            h2 = _mm_sub_pd(_mm_mul_pd(hb2, y), _mm_mul_pd(ha2, k));
+            const __m128d squares = _mm_mul_pd(k, k);
+            sum = _mm_add_sd(sum, _mm_add_sd(squares, _mm_unpackhi_pd(squares, squares)));
         }
-        stepSum_ += sum;
-        if (++stepFill_ == stepFrames_) {
+        stepSum_ = _mm_cvtsd_f64(sum);
+        frames -= n;
+        stepFill_ += n;
+        if (stepFill_ == stepFrames_) {
             recent_[stepCount_ % recent_.size()] = stepSum_ / stepFrames_;
             steps_[stepCount_++ % 4] = stepSum_ / stepFrames_;
             stepSum_ = 0;
@@ -1009,6 +1035,12 @@ void LoudnessMeter::Add(const float* x, size_t frames) {
             }
         }
     }
+    _mm_storeu_pd(shelf_.z1, s1);
+    _mm_storeu_pd(shelf_.z2, s2);
+    _mm_storeu_pd(highpass_.z1, h1);
+    _mm_storeu_pd(highpass_.z2, h2);
+    peak = _mm_max_ps(peak, _mm_shuffle_ps(peak, peak, 1));
+    peak_ = _mm_cvtss_f32(peak);
 }
 
 // The BS.1770 double gate: drop blocks below -70 LUFS, then those below (mean - 10 LU), and take
@@ -1056,57 +1088,145 @@ double LoudnessMeter::HighLoudness() const {
 // True peak: 4x polyphase windowed-sinc interpolation. Phase 0 is the sample itself; phases
 // 1..3 estimate the waveform between samples. Each phase is normalised to unity gain so a DC
 // signal reads its own value rather than a windowing error.
+//
+// The work is ordered for speed without changing a single result: every interpolated value is
+// still the same products summed in the same order (newest sample first), only several frames
+// run side by side so the additions overlap, and a stretch whose loudest sample cannot reach the
+// peak found so far skips the filter, since nothing it computed could raise the maximum.
 
 namespace {
 double Sinc(double x) { return x == 0.0 ? 1.0 : std::sin(kPi * x) / (kPi * x); }
+
+constexpr int kTpTaps = TruePeak::kTaps;
+struct TruePeakTable {
+    alignas(32) double c[3][kTpTaps][4];  // phases 1..3, each coefficient in four lanes for SIMD
+    // How far an interpolated value can exceed the largest sample its window reads: the largest
+    // sum of |coefficient| over a phase, with room for the rounding of 24 products and sums.
+    double reach;
+};
+
+const TruePeakTable& PeakTable() {
+    static const TruePeakTable table = [] {
+        TruePeakTable t{};
+        // Phase 0 is the original sample, so the remaining phases must be quarter,
+        // half and three-quarter samples from an integer delay, even with an even tap count.
+        const double center = kTpTaps / 2 - 1;
+        double reach = 0;
+        for (int p = 1; p < TruePeak::kPhases; ++p) {
+            double coeff[kTpTaps], sum = 0;
+            for (int k = 0; k < kTpTaps; ++k) {
+                const double x = (k - center) - p / (double)TruePeak::kPhases;
+                const double window = 0.54 - 0.46 * std::cos(2.0 * kPi * k / (kTpTaps - 1));
+                coeff[k] = Sinc(x) * window;
+                sum += coeff[k];
+            }
+            if (sum != 0)
+                for (double& c : coeff) c /= sum;
+            double magnitude = 0;
+            for (int k = 0; k < kTpTaps; ++k) {
+                for (double& lane : t.c[p - 1][k]) lane = coeff[k];
+                magnitude += std::fabs(coeff[k]);
+            }
+            reach = std::max(reach, magnitude);
+        }
+        t.reach = reach * (1 + 1e-9);
+        return t;
+    }();
+    return table;
 }
 
-TruePeak::TruePeak() {
-    // Phase 0 is the original sample, so the remaining phases must be quarter,
-    // half and three-quarter samples from an integer delay, even with an even tap count.
-    const double center = kTaps / 2 - 1;
-    for (int p = 0; p < kPhases; ++p) {
-        double sum = 0;
-        for (int k = 0; k < kTaps; ++k) {
-            const double x = (k - center) - p / (double)kPhases;
-            const double window = 0.54 - 0.46 * std::cos(2.0 * kPi * k / (kTaps - 1));
-            coeff_[p][k] = Sinc(x) * window;
-            sum += coeff_[p][k];
-        }
-        if (sum != 0)
-            for (int k = 0; k < kTaps; ++k) coeff_[p][k] /= sum;
+// This file builds without inlining, so the per-sample loops below spell their intrinsics out.
+double Larger(__m128d v) { return _mm_cvtsd_f64(_mm_max_pd(v, _mm_unpackhi_pd(v, v))); }
+
+// Phases 1..3 of four frames x[0..3] (each window reaches back to x[-23]); each lane is one
+// channel. Returns `maximum` raised to their magnitudes.
+__m128d Interpolate4(const double (*x)[2], const TruePeakTable& t, __m128d maximum) {
+    __m128d a1 = _mm_setzero_pd(), a2 = a1, a3 = a1, b1 = a1, b2 = a1, b3 = a1;
+    __m128d c1 = a1, c2 = a1, c3 = a1, d1 = a1, d2 = a1, d3 = a1;
+    for (int k = 0; k < kTpTaps; ++k) {
+        const __m128d p1 = _mm_load_pd(t.c[0][k]), p2 = _mm_load_pd(t.c[1][k]), p3 = _mm_load_pd(t.c[2][k]);
+        __m128d h = _mm_load_pd(x[0 - k]);
+        a1 = _mm_add_pd(a1, _mm_mul_pd(p1, h));
+        a2 = _mm_add_pd(a2, _mm_mul_pd(p2, h));
+        a3 = _mm_add_pd(a3, _mm_mul_pd(p3, h));
+        h = _mm_load_pd(x[1 - k]);
+        b1 = _mm_add_pd(b1, _mm_mul_pd(p1, h));
+        b2 = _mm_add_pd(b2, _mm_mul_pd(p2, h));
+        b3 = _mm_add_pd(b3, _mm_mul_pd(p3, h));
+        h = _mm_load_pd(x[2 - k]);
+        c1 = _mm_add_pd(c1, _mm_mul_pd(p1, h));
+        c2 = _mm_add_pd(c2, _mm_mul_pd(p2, h));
+        c3 = _mm_add_pd(c3, _mm_mul_pd(p3, h));
+        h = _mm_load_pd(x[3 - k]);
+        d1 = _mm_add_pd(d1, _mm_mul_pd(p1, h));
+        d2 = _mm_add_pd(d2, _mm_mul_pd(p2, h));
+        d3 = _mm_add_pd(d3, _mm_mul_pd(p3, h));
     }
+    const __m128d sign = _mm_set1_pd(-0.0);
+    for (__m128d v : {a1, a2, a3, b1, b2, b3, c1, c2, c3, d1, d2, d3}) maximum = _mm_max_pd(_mm_andnot_pd(sign, v), maximum);
+    return maximum;
 }
+
+__m128d Interpolate1(const double (*x)[2], const TruePeakTable& t, __m128d maximum) {
+    __m128d a1 = _mm_setzero_pd(), a2 = a1, a3 = a1;
+    for (int k = 0; k < kTpTaps; ++k) {
+        const __m128d h = _mm_load_pd(x[0 - k]);
+        a1 = _mm_add_pd(a1, _mm_mul_pd(_mm_load_pd(t.c[0][k]), h));
+        a2 = _mm_add_pd(a2, _mm_mul_pd(_mm_load_pd(t.c[1][k]), h));
+        a3 = _mm_add_pd(a3, _mm_mul_pd(_mm_load_pd(t.c[2][k]), h));
+    }
+    const __m128d sign = _mm_set1_pd(-0.0);
+    for (__m128d v : {a1, a2, a3}) maximum = _mm_max_pd(_mm_andnot_pd(sign, v), maximum);
+    return maximum;
+}
+}  // namespace
 
 void TruePeak::Add(const float* stereo, size_t frames) {
+    if (!frames) return;
     // Start from a steady signal rather than silence: a file does not begin with a step from
     // nothing, and it keeps the first samples from ringing a false peak into the result.
-    if (!started_ && frames) {
+    if (!started_) {
         for (auto& sample : hist_)
             for (int ch = 0; ch < 2; ++ch) sample[ch] = stereo[ch];
         started_ = true;
     }
+    const TruePeakTable& t = PeakTable();
+    const bool wide = nativeaudio::FastAudioKernels();
+    constexpr size_t kHistory = kTaps - 1, kChunk = 256, kStretch = 32;
+    // The history, then the chunk's frames, as doubles: every window is contiguous.
+    alignas(32) double work[kHistory + kChunk][2];
+    std::memcpy(work, hist_, sizeof(hist_));
+    double (*const x)[2] = work + kHistory;
+    // Lanes are channels. NaN never enters it (max keeps its second operand), as before.
     const __m128d sign = _mm_set1_pd(-0.0);
     __m128d maximum = _mm_set1_pd(peak_);
-    for (size_t n = 0; n < frames; ++n) {
-        const __m128d sample = _mm_cvtps_pd(_mm_loadl_pi(_mm_setzero_ps(), (const __m64*)(stereo + n * 2)));
-        _mm_storeu_pd(hist_[pos_], sample);
-        _mm_storeu_pd(hist_[pos_ + kTaps], sample);
-        maximum = _mm_max_pd(_mm_andnot_pd(sign, sample), maximum);
-        __m128d sum1 = _mm_setzero_pd(), sum2 = _mm_setzero_pd(), sum3 = _mm_setzero_pd();
-        for (int k = 0; k < kTaps; ++k) {
-            // Each lane is one channel; each phase retains the scalar accumulation order.
-            const __m128d history = _mm_loadu_pd(hist_[pos_ + k]);
-            sum1 = _mm_add_pd(sum1, _mm_mul_pd(_mm_set1_pd(coeff_[1][k]), history));
-            sum2 = _mm_add_pd(sum2, _mm_mul_pd(_mm_set1_pd(coeff_[2][k]), history));
-            sum3 = _mm_add_pd(sum3, _mm_mul_pd(_mm_set1_pd(coeff_[3][k]), history));
+    while (frames) {
+        const size_t count = std::min(frames, kChunk);
+        for (size_t n = 0; n < count; ++n) {
+            const __m128d sample = _mm_cvtps_pd(_mm_loadl_pi(_mm_setzero_ps(), (const __m64*)(stereo + n * 2)));
+            _mm_store_pd(x[n], sample);
+            maximum = _mm_max_pd(_mm_andnot_pd(sign, sample), maximum);
         }
-        maximum = _mm_max_pd(_mm_andnot_pd(sign, sum1), maximum);
-        maximum = _mm_max_pd(_mm_andnot_pd(sign, sum2), maximum);
-        maximum = _mm_max_pd(_mm_andnot_pd(sign, sum3), maximum);
-        if (--pos_ < 0) pos_ = kTaps - 1;
+        for (size_t at = 0; at < count; at += kStretch) {
+            const size_t n = std::min(kStretch, count - at);
+            __m128d loudest = _mm_setzero_pd();
+            for (size_t i = at; i < at + n + kHistory; ++i) loudest = _mm_max_pd(_mm_andnot_pd(sign, _mm_load_pd(work[i])), loudest);
+            // The 1e-300 keeps the rounding bound sound for subnormal samples.
+            if (Larger(loudest) * t.reach + 1e-300 <= Larger(maximum)) continue;
+            size_t f = 0;
+            if (wide && n >= 4) {
+                f = n & ~size_t(3);
+                maximum = _mm_max_pd(_mm_set1_pd(nativeaudio::TruePeakAvx2(x[at], f, t.c[0][0], Larger(maximum))), maximum);
+            }
+            for (; f + 4 <= n; f += 4) maximum = Interpolate4(x + at + f, t, maximum);
+            for (; f < n; ++f) maximum = Interpolate1(x + at + f, t, maximum);
+        }
+        std::memmove(work, work + count, sizeof(hist_));
+        stereo += count * 2;
+        frames -= count;
     }
-    peak_ = _mm_cvtsd_f64(_mm_max_pd(maximum, _mm_unpackhi_pd(maximum, maximum)));
+    std::memcpy(hist_, work, sizeof(hist_));
+    peak_ = Larger(maximum);
 }
 
 float TruePeak::FinalPeak() const {
@@ -1119,13 +1239,7 @@ float TruePeak::FinalPeak() const {
     return tail.Peak();
 }
 
-void TruePeak::Reset() {
-    for (auto& ch : hist_)
-        for (double& v : ch) v = 0;
-    pos_ = 0;
-    peak_ = 0;
-    started_ = false;
-}
+void TruePeak::Reset() { *this = TruePeak{}; }
 
 // ---------------------------------------------------------------------------
 // Peak limiter. The sliding minimum of the gain each frame needs over the look-ahead, averaged

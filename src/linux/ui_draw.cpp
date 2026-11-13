@@ -4,6 +4,7 @@
 #include "discart.h"
 #include "taste.h"
 #include "ui_internal.h"
+#include "wind.h"
 
 #include <array>
 
@@ -284,22 +285,20 @@ bool RequestPeaks(TrackId id, Peaks& peaks, uint32_t& request) {
 // call gives exactly the pixels the per-column Fill calls did, with a fraction of the draw calls.
 class WaveFills {
 public:
+    WaveFills() { slots_.fill(-1); }
+
     void Reset() {
         for (int i = 0; i < used_; ++i) groups_[i].rects.clear();
         used_ = 0;
+        slots_.fill(-1);
     }
 
     void Add(const Rect& r, uint32_t color) {
         if (!(r.w > 0) || !(r.h > 0)) return;
-        int i = 0;
-        while (i < used_ && groups_[i].color != color) ++i;
-        if (i == used_) {
-            if (used_ == kGroups) {  // more shades than the two color schemes can name
-                Fill(r, color);
-                return;
-            }
-            groups_[i].color = color;
-            ++used_;
+        const int i = Group(color);
+        if (i < 0) {  // more colours than the groups hold: draw the rest one by one
+            Fill(r, color);
+            return;
         }
         groups_[i].rects.push_back({r.x, r.y, r.w, r.h});
     }
@@ -317,14 +316,32 @@ public:
     }
 
 private:
-    // Played and rest, each six body and mirror bands and two edges; a moodbar's colours overflow
-    // into single fills.
-    static constexpr int kGroups = 32;
-    struct Group {
+    // Played and rest take six body and mirror bands and two edges each, but the glow's fading rows
+    // and a moodbar's colours add many more, and every colour past the groups costs a draw call of
+    // its own on every frame. So there are as many groups as Windows has (app_waveform.cpp), found
+    // through a small hash table rather than a scan of them all.
+    static constexpr int kGroups = 256, kSlotBits = 9, kSlots = 1 << kSlotBits;
+    static_assert(kSlots >= 2 * kGroups, "the table must keep free slots for its probes to end");
+
+    // The group holding `color`, opened when it is new; -1 when every group is taken.
+    int Group(uint32_t color) {
+        for (uint32_t h = (color * 2654435761u) >> (32 - kSlotBits);; h = (h + 1) & (kSlots - 1)) {
+            const int at = slots_[h];
+            if (at >= 0 && groups_[at].color == color) return at;
+            if (at >= 0) continue;
+            if (used_ == kGroups) return -1;
+            groups_[used_].color = color;
+            slots_[h] = (int16_t)used_;
+            return used_++;
+        }
+    }
+
+    struct ColorGroup {
         uint32_t color = 0;
         std::vector<SDL_FRect> rects;
     };
-    std::array<Group, kGroups> groups_{};
+    std::array<ColorGroup, kGroups> groups_{};
+    std::array<int16_t, kSlots> slots_{};
     int used_ = 0;
 };
 
@@ -369,9 +386,8 @@ bool DrawWaveform(const Rect& r, double frac, const Palette& p) {
     float half = std::max(1.0f, std::floor((vertical ? r.w : r.h) / 2) - S(2));
     // The whole song's peaks, softened when Smooth seek bar is on (app_waveform.cpp's radius).
     const bool song = !live && g_wave.ready;
-    static Peaks smoothed;
-    if (song && g.settings.smoothSeek) SmoothPeaks(g_wave.peaks, smoothed, 8);
-    const Peaks& peaks = song && g.settings.smoothSeek ? smoothed : g_wave.peaks;
+    static SongPeaks songPeaks;
+    const Peaks& peaks = song ? songPeaks.Get(g_wave.peaks, g.settings.smoothSeek, 8) : g_wave.peaks;
     // A track whose peaks are still unknown has no mood yet; a live waveform takes its colours from
     // the audio being heard.
     const int style = live || song ? std::clamp(g.settings.seekStyle, 0, kSeekStyles - 1) : kSeekWaveform;
@@ -390,9 +406,9 @@ bool DrawWaveform(const Rect& r, double frac, const Palette& p) {
         if (live) {
             std::array<float, 256 * kMoodBands> bands{};
             g.engine.WaveformBands(bands.data(), livePeaks.size());
-            center = liveScale.Scale(bands.data(), (int)livePeaks.size(), liveMood);
+            center = liveScale.Scale(bands.data(), (int)livePeaks.size(), liveMood, SDL_GetTicks() / 1000.0);
         } else {
-            center = MoodCenter(peaks);
+            center = songPeaks.Center();
         }
     }
     // The stripe's columns touch; the waveform's stand a pixel apart.
@@ -412,7 +428,8 @@ bool DrawWaveform(const Rect& r, double frac, const Palette& p) {
     const float room = std::min(cy - acrossTop, acrossBottom - cy - 1) - glow - 1;  // a pixel short of the edge
     const float stripeHalf = stripe && glow ? std::clamp(room, 1.0f, half) : half;
     static GlowPulse pulse;
-    if (glow && (g.playing != kNone || RadioPlaying()) && !IsPaused()) {
+    // The live waveform swells with the same pulse, glow or not, as on Windows.
+    if ((glow || live) && (g.playing != kNone || RadioPlaying()) && !IsPaused()) {
         std::array<uint8_t, 256> heard{};
         if (live) heard = livePeaks;
         else g.engine.WaveformPeaks(heard.data(), heard.size());
@@ -466,6 +483,10 @@ bool DrawWaveform(const Rect& r, double frac, const Palette& p) {
     // The stripe's two ends glow sideways too, so the halo goes all the way around.
     struct EndGlow { uint32_t tint = 0; int percent = 0; };
     EndGlow firstEnd, lastEnd;
+    // Neighbouring mood columns mostly share a colour, so the last one's shades are kept.
+    Shades moodShades;
+    uint32_t moodShadesOf = 0;
+    bool moodShadesKept = false;
     for (float x = left; x < right; x += step) {
         int count = live ? (int)livePeaks.size() : kPeakBuckets;
         int first = std::clamp((int)((x - left) * count / width), 0, count - 1);
@@ -475,6 +496,11 @@ bool DrawWaveform(const Rect& r, double frac, const Palette& p) {
             v = std::max<int>(v, live ? livePeaks[b] : g_wave.ready ? peaks.v[b] : 0);
             rms = std::max<int>(rms, live ? livePeaks[b] : g_wave.ready ? peaks.rms[b] : 0);
         }
+        if (live) {
+            // The beat swells the whole live display, so a compressed master still moves.
+            v = std::min(255, (int)std::lround(v * (1 + 0.30f * beat)));
+            rms = v;
+        }
         float h = std::max(1.0f, std::floor(half * v / 255));
         float body = std::clamp(std::floor(half * rms / 255), 1.0f, h);
         const Shades* shades = x < playedX ? &playedShades : &restShades;
@@ -482,7 +508,6 @@ bool DrawWaveform(const Rect& r, double frac, const Palette& p) {
         // Live audio counts as heard unless its progress is split off, as `rest` already says.
         const bool heard = x < playedX || (live && g.settings.fullLiveWaveform);
         uint32_t tint = x < playedX ? played : rest;
-        Shades moodShades;
         if (mood) {
             const MoodTone tone = live ? MoodOf(liveMood, first, last, center, count) : MoodOf(peaks, first, last, center);
             tint = moods.Pick(tone, heard);
@@ -496,7 +521,11 @@ bool DrawWaveform(const Rect& r, double frac, const Palette& p) {
                 lastEnd = {tint, percent};
                 continue;
             }
-            moodShades = shadesOf(tint);
+            if (!moodShadesKept || tint != moodShadesOf) {
+                moodShades = shadesOf(tint);
+                moodShadesOf = tint;
+                moodShadesKept = true;
+            }
             shades = &moodShades;
         }
         const Shades& s = *shades;
@@ -959,6 +988,75 @@ void DrawGroupHeader(const Group& gr, int index, float top, float right, const P
     DrawText(Font::Normal, Utf8(year.empty() ? artist : artist + L"  \x00B7  " + year), x, TextY(line2), p.sub, r - x);
 }
 
+// Wind behind the track list (wind.h; app_playlists.cpp, DrawListWind): each frame steps the ribbons
+// from the heard audio, which are drawn once over the whole list between the row backgrounds and their
+// text, in the accent at a low alpha: a soft halo and a bright core, one geometry call each, so a row a
+// ribbon crosses costs nothing of its own. Apollo's list has none, as on Windows.
+namespace {
+Wind g_listWind;
+uint64_t g_listWindLast = 0;
+bool ListWindHeard() { return (g.playing != kNone || RadioPlaying()) && !IsPaused(); }
+Rect ListWindArea() { return {L.rows.x + L.rows.w * 0.55f, L.rows.y, L.rows.w * 0.45f, L.rows.h}; }
+
+void StepListWind() {
+    uint64_t now = SDL_GetTicks();
+    float seconds = g_listWindLast ? (now - g_listWindLast) / 1000.0f : 0;
+    g_listWindLast = now;
+    if (!g.settings.listWind || g.settings.theme == ThemeMode::Apollo) {
+        g_listWind.Clear();
+        return;
+    }
+    float bands[2 * kMoodBands] = {};
+    bool heard = ListWindHeard() && g.engine.WaveformBands(bands, 2);
+    g_listWind.Step(bands + kMoodBands, heard, seconds);  // the newer half
+}
+
+// One ribbon as a triangle strip between its two edges: a single call, its alpha in the vertices. The
+// core's alpha also melts into the area's edges (Wind::EdgeFade); the halo's extra width has already
+// tapered away by then, so it keeps its own. The music's swell widens both.
+void EmitRibbon(const WindStreak& s, const Rect& area, bool halo, float alpha, const Palette& p) {
+    float swell = g_listWind.Swell();
+    float pad = halo ? (1.1f * g.scale + 0.5f) * swell : 0.0f;
+    float lx[Wind::kPoints], ly[Wind::kPoints], rx[Wind::kPoints], ry[Wind::kPoints];
+    int n = Wind::Ribbon(s, area.w, area.h, g.scale * swell, pad, lx, ly, rx, ry);
+    if (n < 2) return;
+    SDL_Vertex v[2 * Wind::kPoints];
+    int idx[6 * (Wind::kPoints - 1)];
+    float base = std::clamp(alpha, 0.0f, 1.0f) * Wind::kBrightest;
+    for (int i = 0; i < n; ++i) {
+        SDL_FColor c = FColor(p.accent, halo ? base : base * Wind::EdgeFade(s.x[i], s.y[i]));
+        v[2 * i] = {{area.x + lx[i], area.y + ly[i]}, c, {0, 0}};
+        v[2 * i + 1] = {{area.x + rx[i], area.y + ry[i]}, c, {0, 0}};
+        if (i + 1 < n) {
+            int* t = idx + 6 * i;
+            t[0] = 2 * i; t[1] = 2 * i + 1; t[2] = 2 * i + 2;
+            t[3] = 2 * i + 1; t[4] = 2 * i + 3; t[5] = 2 * i + 2;
+        }
+    }
+    SDL_RenderGeometry(g.renderer, nullptr, v, 2 * n, idx, 6 * (n - 1));
+}
+
+void DrawListWind(const Rect& rows, const Palette& p) {
+    if (!g_listWind.Active()) return;
+    Rect area = ListWindArea();
+    if (area.w <= 0 || area.h <= 0) return;
+    SDL_Rect part{(int)area.x, (int)area.y, (int)std::ceil(area.w), (int)std::ceil(area.h)};
+    SDL_SetRenderClipRect(g.renderer, &part);
+    for (int pass = 0; pass < 2; ++pass)  // every halo first, so a core crossing one stays bright
+        for (const WindStreak& s : g_listWind.Streaks()) {
+            float fade = Wind::Fade(s);
+            if (fade <= 0.02f) continue;
+            EmitRibbon(s, area, pass == 0, fade * s.weight * (pass ? 1.0f : Wind::kHalo), p);
+        }
+    SDL_Rect restore{(int)rows.x, (int)rows.y, (int)rows.w, (int)rows.h};
+    SDL_SetRenderClipRect(g.renderer, &restore);
+}
+}  // namespace
+
+bool ListWindAnimating() {
+    return g.settings.listWind && g.settings.theme != ThemeMode::Apollo && (ListWindHeard() || g_listWind.Active());
+}
+
 // The list (app_playlists.cpp, DrawTrackRow; app_ui.cpp, HeaderSubclass): the header on the list's
 // own background with quiet labels and short dividers, then the rows: selection, hover or nothing
 // behind them, and each column's text with the album header's parts left out.
@@ -993,12 +1091,30 @@ void DrawList(const Palette& p) {
 
     SDL_Rect clip{(int)L.rows.x, (int)L.rows.y, (int)L.rows.w, (int)L.rows.h};
     SDL_SetRenderClipRect(g.renderer, &clip);
+    StepListWind();
     int first = (int)(g.scroll / L.rowH), last = std::min((int)g_lines.size(), first + (int)(L.rows.h / L.rowH) + 2);
     int hover = g_popups.empty() ? LineAt(g_mouseY) : -1;
     bool npTab = pl.kind == PlaylistKind::NowPlaying;
     int heard = npTab ? HeardIndex() : -1;
     const char* mark = g.playing != kNone && IsPaused() ? "\xE2\x9D\x99\xE2\x9D\x99" : nullptr;
     std::string playingMark = Utf8(ThemeInfo(g.settings.theme).playingMark);
+    auto playingLine = [&](const Line& ln) {
+        return heard >= 0 && ln.row >= 0 && g.playing == g.rows[ln.row] && npTab && ln.row < (int)g.rowItems.size() &&
+               g.rowItems[ln.row] == (size_t)heard;
+    };
+    // Backgrounds first, then the wind once for the whole list, then the text: a ribbon crossing a row
+    // is one shape rather than one per row.
+    for (int line = std::max(0, first - 1); line < last; ++line) {
+        const Line& ln = g_lines[line];
+        if (ln.row < 0) continue;
+        bool sel = ln.row < (int)g.selected.size() && g.selected[ln.row];
+        Rect r{L.rows.x, L.rows.y + line * L.rowH - g.scroll, total - L.rows.x, L.rowH};
+        if (sel) Fill(r, p.select);
+        else if (line == hover) Fill(r, p.hover);
+        else if (line % 2) Fill(r, RowStripe(p));  // every other row a shade off (DrawTrackRow)
+        if (playingLine(ln) && g.settings.theme == ThemeMode::Foobar) Fill(r, p.playing);
+    }
+    DrawListWind(L.rows, p);
     for (int line = std::max(0, first - 1); line < last; ++line) {
         const Line& ln = g_lines[line];
         float y = L.rows.y + line * L.rowH - g.scroll;
@@ -1009,16 +1125,11 @@ void DrawList(const Palette& p) {
         TrackId id = g.rows[ln.row];
         Rect r{L.rows.x, y, total - L.rows.x, L.rowH};
         bool sel = ln.row < (int)g.selected.size() && g.selected[ln.row];
-        if (sel) Fill(r, p.select);
-        else if (line == hover) Fill(r, p.hover);
-        else if (line % 2) Fill(r, RowStripe(p));  // every other row a shade off (DrawTrackRow)
-        bool isPlaying = heard >= 0 && g.playing == id && npTab && ln.row < (int)g.rowItems.size() &&
-                         g.rowItems[ln.row] == (size_t)heard;
+        bool isPlaying = playingLine(ln);
         const Track& t = g_lib[id];
         uint32_t color = sel ? p.selectText : isPlaying ? p.playing : (t.flags & (Track::kMissing | Track::kFailed)) ? p.faint : p.text;
         Font font = isPlaying ? Font::Bold : Font::Normal;
         if (isPlaying && g.settings.theme == ThemeMode::Foobar) {
-            Fill(r, p.playing);
             color = TextOn(p.playing);
             font = Font::Normal;
         } else if (isPlaying) {

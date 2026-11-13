@@ -7,6 +7,7 @@
 #include "game_music.h"
 #include "library.h"
 #include "native_audio.h"
+#include "audio_coded.h"
 #include "helpers.h"
 
 #include <windows.h>
@@ -191,9 +192,20 @@ std::unique_ptr<Decoder> OpenDecoder(const std::wstring& path, unsigned fallback
     else if (ext == L"mka") d = OpenMatroskaDecoder(path);
     else if (ext == L"ape") d = OpenApeDecoder(path);
     else if (ext == L"mpc" || ext == L"mp+" || ext == L"mpp") d = OpenMusepackDecoder(path);
+    else if (ext == L"au" || ext == L"snd") d = OpenPcmDecoder(path);
+    else if (ext == L"caf") {
+        d = OpenPcmDecoder(path);
+        if (!d) d = OpenAlacDecoder(path);
+    } else if (ext == L"voc") d = OpenVocDecoder(path);
+    else if (ext == L"adx") d = OpenAdxDecoder(path);
+    else if (ext == L"g722") d = OpenG722Decoder(path);
+    else if (ext == L"gsm") d = OpenGsmDecoder(path);
+    else if (ext == L"dfpwm") d = OpenDfpwmDecoder(path);
+    else if (ext == L"8svx" || ext == L"svx" || ext == L"16sv") d = OpenSvxDecoder(path);
     else if (ext == L"ogg" || ext == L"oga") {
         d = OpenVorbisDecoder(path);
         if (!d) d = OpenOpusDecoder(path);
+        if (!d) d = OpenFlacDecoder(path);
     } else if (ext == L"opus") d = OpenOpusDecoder(path);
     else if (ext == L"m4a" || ext == L"m4b" || ext == L"mp4" || ext == L"alac") {
         d = OpenAlacDecoder(path);
@@ -234,9 +246,10 @@ std::unique_ptr<PcmReader> OpenPcmReader(const std::wstring& path, std::wstring&
     const std::wstring ext = ExtOf(path);
     std::unique_ptr<PcmReader> r;
     if (ext == L"flac" || ext == L"fla") r = OpenFlacExact(path);
-    else if (ext == L"wav" || ext == L"wave" || ext == L"aif" || ext == L"aiff" || ext == L"aifc") r = OpenPcmExact(path);
+    else if (ext == L"wav" || ext == L"wave" || ext == L"aif" || ext == L"aiff" || ext == L"aifc" || ext == L"au" ||
+             ext == L"snd" || ext == L"caf") r = OpenPcmExact(path);
     else if (ext == L"cord") r = OpenCordExact(path);
-    if (!r) error = L"Couldn't read the exact samples of " + FileNameOf(path) + L": only FLAC, integer WAV or AIFF and "
-                    L"cordinal's own format can be read exactly, and the file must not be damaged.";
+    if (!r) error = L"Couldn't read the exact samples of " + FileNameOf(path) + L": only FLAC, integer WAV, "
+                    L"AIFF, AU or CAF and cordinal's own format can be read exactly, and the file must not be damaged.";
     return r;
 }

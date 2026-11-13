@@ -6,12 +6,14 @@
 #include "decoder.h"
 
 // One entry point per container or codec family; OpenDecoder selects one by file extension.
+// WAV family, AIFF/AIFF-C, Sun/NeXT AU and CAF (PCM, G.711, IMA4; CAF ALAC is OpenAlacDecoder's).
 std::unique_ptr<Decoder> OpenPcmDecoder(const std::wstring& path);
 std::unique_ptr<Decoder> OpenFlacDecoder(const std::wstring& path);
 // A FLAC stream in memory the caller keeps alive, such as an embedded resource. Never Matroska.
 std::unique_ptr<Decoder> OpenFlacDecoder(const uint8_t* data, size_t size);
 std::unique_ptr<Decoder> OpenVorbisDecoder(const std::wstring& path);
 std::unique_ptr<Decoder> OpenMpegDecoder(const std::wstring& path);
+// ALAC in MP4 or CAF.
 std::unique_ptr<Decoder> OpenAlacDecoder(const std::wstring& path);
 std::unique_ptr<Decoder> OpenAacDecoder(const std::wstring& path);
 std::unique_ptr<Decoder> OpenWmaDecoder(const std::wstring& path);
@@ -29,10 +31,19 @@ std::unique_ptr<Decoder> OpenMatroskaDecoder(const std::wstring& path);
 std::unique_ptr<Decoder> OpenCordDecoder(const std::wstring& path);
 // DSD in DSF or uncompressed DSDIFF, as PCM near 88.2 kHz.
 std::unique_ptr<Decoder> OpenDsdDecoder(const std::wstring& path);
+// CRI ADX game audio (standard encoding), played once through its loop.
+std::unique_ptr<Decoder> OpenAdxDecoder(const std::wstring& path);
+// Creative Voice Files (.voc): 8-bit, 16-bit and G.711 sound blocks with their silences.
+std::unique_ptr<Decoder> OpenVocDecoder(const std::wstring& path);
+// Amiga IFF 8SVX (plain, Fibonacci- or exponential-delta) and 16SV samples, played once.
+std::unique_ptr<Decoder> OpenSvxDecoder(const std::wstring& path);
+// Their length and text fields. Defined beside the decoders, which already walk the blocks.
+struct TagData;
+bool ReadVocTags(const std::wstring& path, TagData& out);
+bool ReadSvxTags(const std::wstring& path, TagData& out);
 // Tracker modules (MOD, S3M, XM, IT), played once through to where they would repeat.
 std::unique_ptr<Decoder> OpenModuleDecoder(const std::wstring& path);
 // A module's name, format and length.
-struct TagData;
 bool ReadModuleTags(const std::wstring& path, TagData& out);
 // Standard MIDI files through a SoundFont or DLS bank (audio_midi.cpp says which bank is used).
 // Null when the file can't be read or no bank can be found.

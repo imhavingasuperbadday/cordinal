@@ -1157,7 +1157,7 @@ const Probe& ProbeFile(TrackId id) {
     p.fileTime = t.fileTime;
     switch (t.codec) {
         case Codec::MP3: case Codec::MP2: case Codec::AAC: case Codec::WMA: case Codec::Vorbis: case Codec::Opus: case Codec::AC3:
-        case Codec::Musepack:
+        case Codec::Musepack: case Codec::ADX: case Codec::G722: case Codec::GSM: case Codec::DFPWM: case Codec::G726:
             p.bits = 16;
             break;
         default: break;

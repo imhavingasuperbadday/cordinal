@@ -1,9 +1,28 @@
-// Native PE/TLS/DLL fixture: imports, DIR64 pointers, static TLS, thread callbacks and zero pages.
+// Native PE/TLS/DLL fixture: imports, delay imports, DIR64 pointers, static TLS, thread callbacks and
+// zero pages.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <delayimp.h>
 #include <psapi.h>
 
 extern "C" {
+// The fixture links without a C runtime, so it brings the delay-load helper the linker's thunks call
+// (tools/build.ps1 delay-loads version.dll). It reads only the descriptor and the image's own RVAs,
+// as the toolchains' helpers do; their IAT slots start as relocated pointers to those thunks.
+extern IMAGE_DOS_HEADER __ImageBase;
+FARPROC WINAPI __delayLoadHelper2(PCImgDelayDescr descriptor, FARPROC *slot) {
+    char *base = reinterpret_cast<char *>(&__ImageBase);
+    HMODULE *module = reinterpret_cast<HMODULE *>(base + descriptor->rvaHmod);
+    if (!*module)
+        *module = LoadLibraryExA(base + descriptor->rvaDLLName, nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    const FARPROC *iat = reinterpret_cast<FARPROC *>(base + descriptor->rvaIAT);
+    const ULONGLONG name = reinterpret_cast<ULONGLONG *>(base + descriptor->rvaINT)[slot - iat];
+    FARPROC function = *module ? GetProcAddress(*module, base + name + 2) : nullptr;
+    if (!function)
+        ExitProcess(16);
+    return *slot = function;
+}
+
 struct Template {
     unsigned long long value;
     const void *pointer;
@@ -91,6 +110,11 @@ __declspec(dllexport) unsigned fixture_probe() {
     fixture_zero[sizeof(fixture_zero) / 2] = 17;
     if (fixture_zero[sizeof(fixture_zero) / 2] != 17)
         return 9;
+    // A delay-loaded DLL maps on the first call through its thunk, not when the image loads.
+    if (GetModuleHandleA("version.dll"))
+        return 17;
+    if (!GetFileVersionInfoSizeA("kernel32.dll", nullptr) || !GetModuleHandleA("version.dll"))
+        return 18;
     return 0;
 }
 #ifdef CDP_TEST_DLL

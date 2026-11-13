@@ -251,6 +251,7 @@ using ui::Column;
 using ui::kColumns;
 using ui::kColumnCount;
 using ui::kColRating;
+using ui::kColBpm;
 using ui::kColCover;
 using ui::kColMood;
 using ui::kColTrackNo;
@@ -342,7 +343,9 @@ struct App {
     bool waveform = true;      // off uses a regular seek bar, overriding live waveform and fountain settings
     bool liveWaveform = false;  // animate the audio being heard instead of the whole-song overview
     bool liveFountain = false;  // let the DELTARUNE fountain follow audible audio, including radio
+    bool listWind = false;      // wind ribbons behind the track list follow the heard audio (wind.h)
     bool fullLiveWaveform = true;  // light the whole live display instead of splitting it at the song position
+    bool wave60Fps = false;     // animate the live seek bar 60 times a second instead of 30
     int bandWaveSize = 0;       // normal top/bottom waveform height; 0 follows the layout preset
     int seekStyle = 0;          // the seek bar's look, whole song or live: SeekStyle (peaks.h)
     int moodColors = 0;         // the moodbar's colours: MoodColors (peaks.h)

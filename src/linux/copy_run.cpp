@@ -1,5 +1,5 @@
 // Copying to a folder or device on Linux, as app_copy.cpp does on Windows: the confirmed plan from
-// the Copy panel (panels.cpp) runs on a worker with progress in the status bar and Cancel copy in the
+// the Copy panel (panel_organize.cpp) runs on a worker with progress in the status bar and Cancel copy in the
 // Library menu. A phone is reached through its mounted folder (GNOME's and KDE's MTP mounts), so every
 // destination is a folder. The work is devicecopy.cpp's; originals are only read.
 #include "app.h"

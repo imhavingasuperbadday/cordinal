@@ -1,4 +1,4 @@
-// Cordinal FLAC decoder, implemented from RFC 9639. Native FLAC, 1..8 channels,
+// Cordinal FLAC decoder, implemented from RFC 9639. Native, Matroska and Ogg FLAC, 1..8 channels,
 // 4..32-bit PCM, fixed/LPC/verbatim/constant subframes, both Rice methods, wasted
 // bits and every stereo assignment. Frames are authenticated before being emitted.
 #include "native_audio.h"
@@ -394,7 +394,7 @@ public:
         }
         return rate_ && total_ <= previous + gap;
     }
-    bool CanPreview() const override { return FastSeek() || (!media_.matroska && total_ && file_.Size() > start_); }
+    bool CanPreview() const override { return FastSeek() || (!packets_ && total_ && file_.Size() > start_); }
     bool PreviewSeek(double& seconds) override;
     double Duration() const override { return (double)(total_-media_.skip) / rate_; }
     unsigned Rate() const override { return rate_; }
@@ -419,6 +419,7 @@ private:
     size_t maxFrame_ = 0, buffered_ = 0, cursor_ = 0;
     uint64_t start_ = 0, offset_ = 0, total_ = 0, pos_ = 0, nextSample_ = 0;
     bool exact_, failed_ = false;
+    bool packets_ = false;  // frames come from media_'s packets (Matroska or Ogg), not the file
     std::array<uint8_t, 16> md5_{};
     std::vector<Point> seek_;
     std::vector<int32_t> samples32_;
@@ -455,7 +456,7 @@ bool FlacDecoder::PreviewSeek(double& seconds) {
     return false;
 }
 
-// Open a native FLAC stream or a FLAC track muxed in Matroska. Metadata blocks
+// Open a native FLAC stream or a FLAC track muxed in Matroska or Ogg. Metadata blocks
 // are walked with STREAMINFO first; when the total sample count is absent the
 // last frame is located by scanning the tail for a CRC-valid header.
 bool FlacDecoder::Open(File file, const std::wstring& path) {
@@ -466,9 +467,14 @@ bool FlacDecoder::Open(File file, const std::wstring& path) {
     if (p && U32(p,true)==0x1a45dfa3) {
         media_.file=std::move(file_);
         if (!media_.OpenMatroska(path) || media_.codec!=AudioFlac) return false;
+        packets_=true;
+    } else if (p && Is(p,"OggS")) {
+        media_.file=std::move(file_);
+        if (!media_.OpenOggFlac(path)) return false;
+        packets_=true;
     }
     auto view=[&](uint64_t offset,size_t size)->const uint8_t* {
-        if (!media_.matroska) return file_.View(offset,size);
+        if (!packets_) return file_.View(offset,size);
         if (offset>media_.config.size() || size>media_.config.size()-offset) return nullptr;
         return media_.config.data()+offset;
     };
@@ -482,7 +488,7 @@ bool FlacDecoder::Open(File file, const std::wstring& path) {
         unsigned type = p[0] & 127, n = (unsigned)p[1] << 16 | (unsigned)p[2] << 8 | p[3];
         bool last = (p[0] & 128) != 0;
         at += 4;
-        uint64_t metadataSize=media_.matroska?media_.config.size():file_.Size();
+        uint64_t metadataSize=packets_?media_.config.size():file_.Size();
         if (at > metadataSize || n > metadataSize - at || type == 127 || (first && type != 0)) return false;
         if (type == 0) {
             if (!first || n != 34) return false;
@@ -516,7 +522,7 @@ bool FlacDecoder::Open(File file, const std::wstring& path) {
         at += n;
         if (last) break;
     }
-    if (media_.matroska) {
+    if (packets_) {
         seek_.clear();media_.frames=0;
         for (size_t i=0;i<media_.packets.size();++i) {
             auto& packet=media_.packets[i];p=media_.Data(i);Header h;
@@ -525,6 +531,13 @@ bool FlacDecoder::Open(File file, const std::wstring& path) {
             packet.start=media_.frames;packet.frames=h.frames;media_.frames+=h.frames;
         }
         if (!media_.Trim(rate_)) return false;
+        media_.Pack();
+        // Ogg has no trimming: the frames hold the stream, which STREAMINFO's total (when given)
+        // must match, or a cut-off file would pass for a complete one.
+        if (!media_.matroska) {
+            if (total_ && total_!=media_.frames) return false;
+            media_.valid=media_.frames;
+        }
         total_=media_.skip+media_.valid;start_=offset_=0;
         return Frame() && (!media_.skip || Seek(0));
     }
@@ -627,17 +640,17 @@ template<class T> bool FlacDecoder::DecodeFrame(const uint8_t* p, size_t bytes, 
 // Decode the frame at the current offset and make it the current buffer,
 // rejecting a frame whose first sample does not continue the stream.
 bool FlacDecoder::Frame() {
-    uint64_t end=media_.matroska?media_.packets.size():file_.Size();
+    uint64_t end=packets_?media_.Count():file_.Size();
     if (failed_ || (total_ && nextSample_>=total_)) return false;
     if (offset_ >= end) { failed_ = total_ && nextSample_ < total_; return false; }
-    size_t n = media_.matroska?media_.packets[(size_t)offset_].bytes:(size_t)std::min<uint64_t>(maxFrame_, file_.Size() - offset_);
-    const uint8_t* p = media_.matroska?media_.Data((size_t)offset_):file_.View(offset_, n);
+    size_t n = packets_?media_.At((size_t)offset_).bytes:(size_t)std::min<uint64_t>(maxFrame_, file_.Size() - offset_);
+    const uint8_t* p = packets_?media_.Data((size_t)offset_):file_.View(offset_, n);
     CORDINAL_CORE_SCOPE;
     Header h;
     if (!p || !ParseHeader(p, n, rate_, bits_, channels_, h) || h.frames > maxBlock_) { failed_ = true; return false; }
     if (!fixedBlock_) fixedBlock_ = h.frames;
-    uint64_t firstSample = media_.matroska?media_.packets[(size_t)offset_].start:h.variable ? h.number : h.number * fixedBlock_;
-    if (firstSample != nextSample_ || (!media_.matroska && total_ && h.frames > total_ - std::min(total_, firstSample))) {
+    uint64_t firstSample = packets_?media_.At((size_t)offset_).start:h.variable ? h.number : h.number * fixedBlock_;
+    if (firstSample != nextSample_ || (!packets_ && total_ && h.frames > total_ - std::min(total_, firstSample))) {
         failed_ = true; return false;
     }
     size_t used = 0;
@@ -647,7 +660,7 @@ bool FlacDecoder::Frame() {
     if (seek_.empty() || firstSample >= seek_.back().sample + rate_ * 2ull) seek_.push_back({firstSample, offset_});
     buffered_=total_?(size_t)std::min<uint64_t>(h.frames,total_-firstSample):h.frames;
     nextSample_ = firstSample + buffered_;
-    offset_ += media_.matroska?1:used;
+    offset_ += packets_?1:used;
     cursor_ = 0;
     return true;
 }
@@ -674,7 +687,7 @@ bool FlacDecoder::Seek(double seconds) {
         cursor_ = (size_t)(target - bufferedStart); pos_ = target; return true;
     }
     failed_ = false;
-    if (target == total_) { offset_ = media_.matroska?media_.packets.size():file_.Size(); buffered_ = cursor_ = 0; pos_ = nextSample_ = total_; return true; }
+    if (target == total_) { offset_ = packets_?media_.Count():file_.Size(); buffered_ = cursor_ = 0; pos_ = nextSample_ = total_; return true; }
     auto point = std::upper_bound(seek_.begin(), seek_.end(), target,
                                   [](uint64_t sample, const Point& p) { return sample < p.sample; });
     if (point != seek_.begin()) --point;

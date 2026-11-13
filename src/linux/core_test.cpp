@@ -31,6 +31,7 @@
 #include "backup.h"
 #include "collection.h"
 #include "tests/discord_checks.h"
+#include "tests/wind_checks.h"
 #include "tests/metadata_checks.h"
 #include "tests/tag_suggest_checks.h"
 #include "convert.h"
@@ -520,6 +521,7 @@ int CheckEq() {
 }
 
 int CheckWaveform(const char* flac, const char* vorbis, const char* opus) {
+    if (int wind = CheckWind()) return 40 + wind;  // the track list's wind (wind.h)
     for (unsigned rate : {44100u, 48000u, 96000u}) {
         std::vector<float> note(rate / 50 * 2), silence(rate / 10 * 2);
         for (size_t i = 0; i < note.size() / 2; ++i) {

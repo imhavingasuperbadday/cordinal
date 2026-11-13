@@ -512,6 +512,52 @@ void TestCrc16() {
                    cases.failed.c_str());
 }
 
+// A packed packet index must read back exactly what the parser built and find the same packet for
+// any sample, while a 6-hour AAC file (about 940,000 packets) shrinks from 30 MB to about 2 MB.
+// The list mixes back-to-back runs, ADTS-style header gaps, a frame-count change, oversized and
+// segmented packets, so both the packed and the whole group forms are read.
+void TestPackedPackets() {
+    using nativeaudio::Packet;
+    uint32_t seed = 0x51ED270B;
+    auto next = [&] { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+    nativeaudio::PacketFile file;
+    uint64_t offset = 4096, start = 0;
+    for (size_t i = 0; i < 940000; ++i) {
+        Packet p;
+        p.bytes = 300 + next() % 500;
+        p.frames = i == 939999 ? 512 : 1024;
+        if (i >= 500000 && i < 500300) offset += 7;               // ADTS headers between frames
+        if (i == 600123) p.bytes = 70000;                         // too large for a 16-bit size
+        if (i >= 700000 && i < 700040) { p.first = (uint32_t)i; p.pieces = 2; }  // gathered segments
+        if (i == 800000) offset += 1000;                          // a jump to the next chunk
+        p.offset = offset; p.start = start;
+        offset += p.bytes; start += p.frames;
+        file.packets.push_back(p);
+    }
+    const std::vector<Packet> built = file.packets;
+    file.Pack();
+    size_t wrong = 0;
+    for (size_t i = 0; i < built.size(); ++i) {
+        const Packet a = file.At(i), &b = built[i];
+        wrong += a.offset != b.offset || a.start != b.start || a.bytes != b.bytes || a.frames != b.frames ||
+                 a.first != b.first || a.pieces != b.pieces;
+    }
+    size_t lost = 0;
+    for (uint64_t sample : {uint64_t(0), uint64_t(1023), uint64_t(1024), start - 1, start, start + 5000}) {
+        auto at = std::upper_bound(built.begin(), built.end(), sample,
+                                   [](uint64_t v, const Packet& p) { return v < p.start; });
+        lost += file.Find(sample) != (at == built.begin() ? 0 : size_t(at - built.begin() - 1));
+    }
+    for (int k = 0; k < 2000; ++k) {
+        const uint64_t sample = (uint64_t(next()) << 8 | next()) % (start + 1);
+        lost += file.Find(sample) != (size_t)(sample / 1024 < built.size() ? sample / 1024 : built.size() - 1);
+    }
+    testlog::Check(file.Count() == built.size() && !wrong && !lost && file.IndexBytes() < 2500000,
+                   L"PACKETS a packed index of %zu packets reads back unchanged (%zu wrong, %zu misplaced "
+                   L"seeks) in %zu bytes instead of %zu", file.Count(), wrong, lost, file.IndexBytes(),
+                   built.size() * sizeof(Packet));
+}
+
 // The entropy loops read through register-held windows (FastBits, BitWindow, LittleWindow). On
 // every packet length they must return the bounded cursor's bits, hand back its position, and
 // fail where it fails: a read past the limit, including one that only the padded tail could serve.
@@ -701,12 +747,132 @@ void TestMusepack(const std::wstring& scratch) {
     }
 }
 
+// AU, CAF (PCM, ALAC, IMA4), AIFF-C IMA4, VOC, Ogg FLAC and 8SVX against make-fixtures.ps1's
+// references: the lossless files hold media\sine.wav's samples, and the others must match FFmpeg's
+// decode of them, written as a 16-bit WAV, sample for sample. Fibonacci 8SVX is checked against
+// its encoder's reconstruction instead, as FFmpeg takes each byte's nibbles in the other order.
+// The speech and game codecs (G.722, GSM 06.10, DFPWM, ADX) are checked against FFmpeg's
+// decode too. Every reference is 16-bit, so the floats compare exactly. Each file also opens
+// through dispatch, seeks exactly (backwards too: delta and ADPCM state restarts or restores a
+// checkpoint), and reads its tags.
+void TestMoreContainers(const std::wstring& root, const std::wstring& scratch) {
+    testlog::Batch batch;
+    batch.Next(L"AU, CAF, AIFF-C IMA4, VOC, Ogg FLAC, 8SVX, G.722, GSM, DFPWM and ADX decode to their "
+               L"reference samples exactly, seek exactly and read their tags");
+    struct Pair { const wchar_t* file; const wchar_t* reference; Codec codec; unsigned channels = 2; };
+    const Pair pairs[] = {
+        {L"native\\sine.au", L"media\\sine.wav", Codec::PCM},       {L"native\\sine.caf", L"media\\sine.wav", Codec::PCM},
+        {L"native\\alac.caf", L"media\\sine.wav", Codec::ALAC},     {L"native\\sine.oga", L"media\\sine.wav", Codec::FLAC},
+        {L"native\\sine.voc", L"media\\sine.wav", Codec::PCM},      {L"native\\ulaw.au", L"native\\ulaw-au-ref.wav", Codec::PCM},
+        {L"native\\ima4.caf", L"native\\ima4-caf-ref.wav", Codec::PCM},
+        {L"native\\ima4.aifc", L"native\\ima4-aifc-ref.wav", Codec::PCM},
+        {L"native\\u8.voc", L"native\\u8-voc-ref.wav", Codec::PCM}, {L"native\\fib.8svx", L"native\\fib-8svx-ref.wav", Codec::PCM, 1},
+        {L"native\\stereo.8svx", L"native\\stereo-8svx-ref.wav", Codec::PCM},
+        {L"native\\g722.wav", L"native\\g722-wav-ref.wav", Codec::G722, 1}, {L"native\\g722.au", L"native\\g722-au-ref.wav", Codec::G722, 1},
+        {L"native\\raw.g722", L"native\\raw-g722-ref.wav", Codec::G722, 1},
+        {L"native\\raw.gsm", L"native\\raw-gsm-ref.wav", Codec::GSM, 1}, {L"native\\gsm.wav", L"native\\gsm-wav-ref.wav", Codec::GSM, 1},
+        {L"native\\raw.dfpwm", L"native\\raw-dfpwm-ref.wav", Codec::DFPWM, 1},
+        {L"native\\dfpwm.wav", L"native\\dfpwm-wav-ref.wav", Codec::DFPWM, 1},
+        {L"native\\stereo.adx", L"native\\stereo-adx-ref.wav", Codec::ADX}};
+    testlog::Cases same, seeks, tagged;
+    for (const Pair& pair : pairs) {
+        std::wstring error;
+        auto d = OpenDecoder(root + L"\\" + pair.file, 48000, error);
+        auto ref = OpenPcmDecoder(root + L"\\" + pair.reference);
+        // An 8-bit VOC's rate comes from a time constant: 44107.5 Hz here, which cordinal rounds
+        // and FFmpeg truncates.
+        if (!d || !ref || !error.empty() || d->Rate() - ref->Rate() + 1 > 2) {
+            same.Add(false, std::wstring(pair.file) + (!d ? L": does not open" : !ref ? L": no reference" : !error.empty() ? L": " + error
+                                                      : L": rate " + std::to_wstring(d->Rate()) + L" against " + std::to_wstring(ref->Rate())));
+            continue;
+        }
+        std::vector<float> got, want;
+        float block[4096 * 2];
+        while (size_t n = d->Read(block, 4096)) got.insert(got.end(), block, block + n * 2);
+        while (size_t n = ref->Read(block, 4096)) want.insert(want.end(), block, block + n * 2);
+        const uint64_t frames = got.size() / 2;
+        size_t differ = 0, differing = 0;
+        while (differ < std::min(got.size(), want.size()) && got[differ] == want[differ]) ++differ;
+        double largest = 0;
+        for (size_t i = 0; i < std::min(got.size(), want.size()); ++i) {
+            differing += got[i] != want[i];
+            largest = std::max(largest, std::abs((double)got[i] - want[i]) * 32768);
+        }
+        wchar_t detail[200];
+        swprintf(detail, 200, L"%ls: %llu frames against %llu, first difference at sample %zu (%g against %g), %zu differ, "
+                 L"by up to %g", pair.file, (unsigned long long)frames, (unsigned long long)(want.size() / 2), differ,
+                 differ < got.size() ? got[differ] * 32768.0 : 0.0, differ < want.size() ? want[differ] * 32768.0 : 0.0,
+                 differing, largest);
+        same.Add(!d->Failed() && got == want && frames == (uint64_t)std::llround(d->Duration() * d->Rate()), detail);
+        // Forward, back to near the start, then forward again.
+        bool exact = true;
+        for (double at : {0.5, 0.01, 0.75}) {
+            const uint64_t first = (uint64_t)(at * d->Rate());
+            exact = exact && first + 128 <= frames && d->Seek(at) && d->Read(block, 128) == 128;
+            for (size_t i = 0; exact && i < 256; ++i) exact = block[i] == got[first * 2 + i];
+        }
+        seeks.Add(exact, pair.file);
+        TagData tags;
+        const bool svx = wcsstr(pair.file, L"8svx") != nullptr;
+        tagged.Add(ReadTags(root + L"\\" + pair.file, tags) && tags.codec == pair.codec && tags.sampleRate == d->Rate() &&
+                       tags.channels == pair.channels && std::abs(tags.duration - d->Duration()) < 0.001 &&
+                       (!svx || (tags.title == "Test Sample" && tags.artist == "Test Artist")),
+                   pair.file);
+    }
+    Check(same.Passed(), L"each file gives exactly its reference's samples and its stated length%ls", same.failed.c_str());
+    Check(seeks.Passed(), L"each file seeks forward and back to the samples of a straight read%ls", seeks.failed.c_str());
+    Check(tagged.Passed(), L"each file's tags give its codec, rate, channels and length (and 8SVX its name and author)%ls",
+          tagged.failed.c_str());
+    // Integer AU and CAF convert losslessly: the exact reader gives the WAV's very samples.
+    std::wstring error;
+    auto wav = OpenPcmReader(root + L"\\media\\sine.wav", error);
+    auto au = OpenPcmReader(root + L"\\native\\sine.au", error);
+    std::vector<int32_t> a(4096 * 2), b(4096 * 2);
+    bool identical = wav && au && au->Format().frames == wav->Format().frames && au->Format().bits == 16;
+    while (identical) {
+        const size_t n = wav->Read(a.data(), 4096);
+        identical = au->Read(b.data(), 4096) == n && std::equal(a.begin(), a.begin() + n * 2, b.begin());
+        if (!n) break;
+    }
+    Check(identical && !au->Damaged() && au->Digest() == wav->Digest(), L"AU reads exactly, for lossless conversion");
+    // Cut-off and scribbled-over copies either refuse to open or play finite samples to an end.
+    testlog::Cases damaged;
+    for (const Pair& pair : pairs) {
+        const std::string bytes = ReadTestBytes(root + L"\\" + pair.file);
+        if (bytes.size() < 4096) { damaged.Add(false, pair.file); continue; }
+        const std::wstring name = pair.file + 7;  // past "native\"
+        const std::wstring copy = scratch + L"\\damaged-" + name;
+        bool sound = true;
+        for (int variant = 0; variant < 6; ++variant) {
+            std::string broken = bytes;
+            if (variant < 3) broken.resize(variant == 0 ? 40 : variant == 1 ? bytes.size() / 2 + 1 : bytes.size() - 3);
+            else for (size_t i = 0; i < 64; ++i) broken[(i * 7919 + variant * 104729) % broken.size()] ^= (char)(0x5A + i);
+            if (!WriteTestBytes(copy, broken)) { sound = false; break; }
+            std::wstring refused;
+            auto d = OpenDecoder(copy, 48000, refused);
+            if (!d) continue;
+            float block[4096 * 2];
+            uint64_t total = 0;
+            while (size_t n = d->Read(block, 4096)) {
+                for (size_t i = 0; i < n * 2; ++i) sound = sound && std::isfinite(block[i]);
+                total += n;
+                if (total > 100000000) { sound = false; break; }
+            }
+            sound = sound && d->Seek(d->Duration() / 3) && std::isfinite(d->Duration());
+        }
+        damaged.Add(sound, pair.file);
+    }
+    Check(damaged.Passed(), L"damaged copies refuse to open or play finite samples to an end%ls", damaged.failed.c_str());
+}
+
 void TestNativeCodecs(const std::wstring& root, const std::wstring& scratch) {
     testlog::Batch batch;
     TestMusepack(scratch);
+    TestMoreContainers(root, scratch);
     TestWaveformPreviews(root, scratch);
     TestPcmBlocks(scratch);
     TestCrc16();
+    TestPackedPackets();
     TestBitWindows();
     TestLosslessKernels();
     TestMp4TimeScales(root, scratch);
@@ -721,6 +887,23 @@ void TestNativeCodecs(const std::wstring& root, const std::wstring& scratch) {
         Check(!OpenDecoder(scratch + L"\\not-present.ogg", 48000, missing) &&
                   missing.find(L"the file is empty") == std::wstring::npos,
               L"DECODER an unreadable file is not reported as empty");
+        // The ALAC decoder's MP4 and CAF readers opened an empty file a second time and leaked the
+        // first handle, so the file stayed locked against tag writes until exit. Every extension is
+        // checked, since any reader that opens twice would do the same.
+        testlog::Cases released;
+        for (const wchar_t* ext : {L"m4a", L"mp4", L"caf", L"mka", L"aac", L"ogg", L"opus", L"flac", L"wav", L"mp3",
+                                   L"wv", L"ape", L"mpc", L"tta", L"ac3", L"eac3", L"voc", L"adx", L"g722", L"gsm",
+                                   L"dfpwm", L"8svx", L"wma", L"dsf"}) {
+            const std::wstring path = scratch + L"\\empty-handle." + ext;
+            if (!Ready(WriteTestBytes(path, ""), L"an empty file is prepared")) break;
+            std::wstring ignored;
+            OpenDecoder(path, 48000, ignored);
+            HANDLE h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+            released.Add(h != INVALID_HANDLE_VALUE, std::wstring(L".") + ext);
+            if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+            DeleteFileW(path.c_str());
+        }
+        Check(released.Passed(), L"DECODER an empty file is closed again after a failed open%ls", released.failed.c_str());
     }
     testlog::Cases failures;
     failures.Add(TestFlacFixed(scratch), L"FLAC truncated at a frame boundary");
@@ -732,6 +915,24 @@ void TestNativeCodecs(const std::wstring& root, const std::wstring& scratch) {
     Check(IgnoresWavPackCorrection(hybrid) && IgnoresWavPackCorrection(hybrid + L"|2") &&
               !IgnoresWavPackCorrection(plain),
           L"WAVPACK a .wvc beside a track is noticed, so the player can say it plays the lossy part");
+    {
+        // One stereo hybrid block whose flags (512) ask for per-channel slow levels but which has no
+        // hybrid-profile item (6). The second read of that missing item once wrapped its bounds check
+        // and dereferenced a null pointer, ending the player when the track played.
+        std::string block = "wvpk";
+        auto le = [&](uint32_t v, unsigned bytes) { for (unsigned i = 0; i < bytes; ++i) block += (char)(v >> 8 * i); };
+        le(46 - 8, 4); le(0x410, 2); block += '\0'; block += '\0';
+        le(1, 4); le(0, 4); le(1, 4);                        // total samples, block index, block samples
+        le(1 | 8 | 512 | 2048 | 4096 | 9u << 23, 4); le(0, 4);  // 16-bit, hybrid, 44.1 kHz, one block; CRC
+        block += '\x05'; block += '\x06'; block.append(12, '\0');  // the entropy medians, all zero
+        const std::wstring path = scratch + L"\\hybrid-no-profile.wv";
+        if (Ready(WriteTestBytes(path, block), L"a hybrid WavPack block without its profile is prepared")) {
+            auto d = OpenWavPackDecoder(path);
+            float out[2 * 4] = {};
+            Check(d && !d->Read(out, 4) && d->Failed(),
+                  L"WAVPACK a hybrid block missing its profile reads as damaged instead of crashing");
+        }
+    }
     // Trim(): a container-level discard and the codec's own priming are tracked separately, so
     // explicit leading audio is not lost when the codec consumes its delay. At 48 kHz, 2 ms of
     // explicit discard is 96 frames; 48000 - 96 = 47904 remain.
@@ -743,7 +944,7 @@ void TestNativeCodecs(const std::wstring& root, const std::wstring& scratch) {
                    L"container priming: codec priming is consumed once while explicit discard remains");
     // exactDuration is false for the lossy codecs (WMA, AC-3, E-AC-3) whose decoder cannot report
     // the exact sample count, so their length is only checked against the eight-second source.
-    batch.Next(L"all 13 native codecs open without a fallback, give finite samples matching their duration, "
+    batch.Next(L"every native codec opens without a fallback, gives finite samples matching its duration, "
                L"seek exactly, refuse edge reads and seek early exactly");
     struct Fixture {
         const wchar_t* file;
@@ -756,7 +957,9 @@ void TestNativeCodecs(const std::wstring& root, const std::wstring& scratch) {
                                 {L"media\\sine.opus",OpenOpusDecoder},{L"media\\sine.wma",OpenWmaDecoder,false},
                                 {L"native\\sine.wv",OpenWavPackDecoder},{L"native\\sine.ac3",OpenAc3Decoder,false},
                                 {L"native\\sine.eac3",OpenEac3Decoder,false},{L"native\\sine.tta",OpenTtaDecoder},
-                                {L"native\\sine.mka",OpenMatroskaDecoder}};
+                                {L"native\\sine.mka",OpenMatroskaDecoder},{L"native\\sine.au",OpenPcmDecoder},
+                                {L"native\\sine.caf",OpenPcmDecoder},{L"native\\alac.caf",OpenAlacDecoder},
+                                {L"native\\sine.oga",OpenFlacDecoder},{L"native\\sine.voc",OpenVocDecoder}};
     testlog::Cases opened, lengths, seeks, edges;
     for (const auto& fixture : fixtures) {
         auto d = fixture.open(root+L"\\"+fixture.file);
@@ -797,7 +1000,7 @@ void TestNativeCodecs(const std::wstring& root, const std::wstring& scratch) {
             testlog::Check(earlySeek,L"native MP3 seeks before playback match the fully indexed stream exactly");
         }
     }
-    testlog::Check(opened.Passed(),L"all 11 native codecs open their fixture directly without a fallback%ls",opened.failed.c_str());
+    testlog::Check(opened.Passed(),L"every native codec opens its fixture directly without a fallback%ls",opened.failed.c_str());
     testlog::Check(lengths.Passed(),L"native codecs give finite samples matching their duration and the eight-second source%ls",
                    lengths.failed.c_str());
     testlog::Check(seeks.Passed(),L"native codec seeks restore the exact native output samples%ls",seeks.failed.c_str());

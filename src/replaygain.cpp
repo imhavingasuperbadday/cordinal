@@ -29,12 +29,14 @@
 //    album never means measuring the rest of it again.
 //  - Tracks are measured automatically in the background (each front end's sweep, using
 //    AutoMeasureTracks), the next ones to play first, so playback rarely meets a track without data.
+//  - The same decode detects tempo, so showing the BPM column fills it without a second pass.
 #include "replaygain.h"
 
 #include "background_cpu.h"
 #include "cue.h"
 #include "decoder.h"
 #include "peaks.h"
+#include "tempo.h"
 #include "track_set.h"
 
 #include <algorithm>
@@ -168,6 +170,13 @@ bool AlbumMember(TrackId id) {
 bool NeedsMeasuring(TrackId id) {
     const Track& t = g_lib[id];
     return t.Loaded() && (t.rgTrackGain == kNoGain || (!t.rgHigh && !(t.flags & Track::kRgScanned))) && AlbumMember(id);
+}
+
+// A track with no BPM tag and no detected value. The scan also computes tempo for every track it
+// decodes, so a column that asks for BPM can pull in tracks that ReplayGain already covered.
+bool NeedsTempo(TrackId id) {
+    const Track& t = g_lib[id];
+    return t.Loaded() && !t.bpm && !(t.flags & Track::kBpmDetected) && AlbumMember(id);
 }
 
 // Whether a saved album measurement still describes this album: every track it covers is still
@@ -326,14 +335,15 @@ AlbumRefresh RefreshAlbums(uint32_t& revision) {
     return result;
 }
 
-std::vector<TrackId> AutoMeasureTracks(const std::vector<TrackId>& upcoming, size_t limit) {
+std::vector<TrackId> AutoMeasureTracks(const std::vector<TrackId>& upcoming, size_t limit, bool includeTempo) {
     std::vector<TrackId> ids;
     if (!limit) return ids;
+    auto needed = [includeTempo](TrackId id) { return NeedsMeasuring(id) || (includeTempo && NeedsTempo(id)); };
     ids.reserve(std::min(limit, g_lib.Count()));
     std::set<AlbumId> soon;
     std::unordered_set<TrackId> selected;
     for (TrackId id : upcoming) {
-        if (id >= g_lib.Count() || !NeedsMeasuring(id) || !selected.insert(id).second) continue;
+        if (id >= g_lib.Count() || !needed(id) || !selected.insert(id).second) continue;
         ids.push_back(id);
         soon.insert(AlbumKeyOf(g_lib[id]));
         if (ids.size() == limit) return ids;
@@ -348,7 +358,7 @@ std::vector<TrackId> AutoMeasureTracks(const std::vector<TrackId>& upcoming, siz
     std::vector<Candidate> rest;
     rest.reserve(std::min(remaining, g_lib.Count()));
     for (TrackId id = 0; id < (TrackId)g_lib.Count(); ++id) {
-        if (!NeedsMeasuring(id) || selected.count(id)) continue;
+        if (!needed(id) || selected.count(id)) continue;
         AlbumId album = AlbumKeyOf(g_lib[id]);
         Candidate candidate{soon.count(album) == 0, album, id};
         if (rest.size() < remaining) {
@@ -390,7 +400,9 @@ RgResult Measure(const TrackPath& item, uint64_t fileSize, uint64_t fileTime, co
         LoudnessMeter meter(dec->Rate());
         TruePeak truePeak;
         PeakAccumulator peaks;
+        tempo::Detector tempo;
         peaks.Begin((uint64_t)(dec->Duration() * dec->Rate()), dec->Rate());
+        tempo.Begin(dec->Rate());
         bool complete = false;
         while (!cancel) {
             size_t n = dec->Read(buf.data(), 4096);
@@ -401,6 +413,7 @@ RgResult Measure(const TrackPath& item, uint64_t fileSize, uint64_t fileTime, co
             meter.Add(buf.data(), n);
             truePeak.Add(buf.data(), n);
             peaks.Add(buf.data(), n);
+            tempo.Add(buf.data(), n);
             if (budget) budget->Pace(cancel);
         }
         const double lufs = meter.Integrated();
@@ -411,7 +424,8 @@ RgResult Measure(const TrackPath& item, uint64_t fileSize, uint64_t fileTime, co
                 StorePeaks(item.Path(), fileSize, fileTime, 0, 0, wave);
             const double high = meter.HighLoudness();
             result = {item.id, (float)(kReplayGainReference - lufs), truePeak.FinalPeak(),
-                      std::isfinite(high) ? (float)std::max(0.0, high - lufs) : 0.0f, true};
+                      std::isfinite(high) ? (float)std::max(0.0, high - lufs) : 0.0f, true,
+                      (uint16_t)std::clamp(tempo.Bpm(), 0, 65535)};
         }
     }
     current.store(nullptr);
@@ -430,6 +444,12 @@ void Apply(const RgResult& r) {
     t.rgTrackPeak = EncodeReplayPeak(r.trackPeak);
     t.rgHigh = (uint8_t)std::clamp(1 + (int)std::lround(r.high * 4), 1, 255);
     t.flags |= Track::kRgScanned | Track::kRgTruePeak;
+    // A tag's BPM wins; otherwise keep what the audio says, including "no clear beat", so the
+    // background sweep doesn't decode the same track over and over.
+    if (!t.bpm || (t.flags & Track::kBpmDetected)) {
+        if (r.bpm) t.bpm = r.bpm;
+        t.flags |= Track::kBpmDetected;
+    }
 }
 
 size_t Clear(const std::vector<TrackId>& ids) {

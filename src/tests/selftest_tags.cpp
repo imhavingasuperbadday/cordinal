@@ -101,22 +101,39 @@ std::string Mp4Key(const char* key) {
 
 }  // namespace
 
+// Every container signature, cut off anywhere inside the first 12 bytes the reader probes. A 4-byte
+// "RIFF" or "FORM" once threw std::out_of_range from a form-type comparison, which ended the
+// player during a library scan.
 void TestShortTagHeaders(const std::wstring& scratch) {
     testlog::Cases shortFiles;
     const std::wstring path = scratch + L"\\short-header.mp3";
-    for (size_t size = 0; size < 12; ++size) {
-        if (!Ready(WriteTestBytes(path, std::string(size, '\0')), L"the short media header is prepared")) return;
-        TagData tags;
-        std::string image, lyrics;
-        std::vector<Chapter> chapters;
-        bool tagsOk = ReadTags(path, tags);
-        bool artOk = ReadEmbeddedArt(path, image);
-        bool lyricsOk = ReadLyrics(path, lyrics);
-        bool chaptersOk = ReadChapters(path, chapters);
-        shortFiles.Add(!tagsOk && !artOk && !lyricsOk && !chaptersOk,
-                       std::to_wstring(size) + L" bytes");
+    static const std::string_view kMagics[] = {
+        {"", 0}, {"RIFF", 4}, {"RF64", 4}, {"BW64", 4}, {"FORM", 4}, {"FORM\0\0\0\0AIFF", 12}, {"FORM\0\0\0\0" "8SVX", 12},
+        {"OggS", 4}, {"fLaC", 4}, {"caff", 4}, {".snd", 4}, {"dns.", 4}, {"DSD ", 4}, {"FRM8", 4},
+        {"MPCK", 4}, {"MP+\x07", 4}, {"ID3\x04", 4}, {"\x1A\x45\xDF\xA3", 4}, {"Creative Voice File\x1A", 20},
+        {"\0\0\0\0ftyp", 8},
+    };
+    for (std::string_view magic : kMagics) {
+        for (size_t size = 0; size < std::max<size_t>(magic.size() + 1, 12); ++size) {
+            std::string bytes(magic.substr(0, size));
+            bytes.resize(size, '\0');
+            if (!Ready(WriteTestBytes(path, bytes), L"the short media header is prepared")) return;
+            TagData tags;
+            std::string image, lyrics;
+            std::vector<Chapter> chapters;
+            int64_t loopStart = 0, loopEnd = 0;
+            bool tagsOk = ReadTags(path, tags);
+            bool artOk = ReadEmbeddedArt(path, image);
+            bool lyricsOk = ReadLyrics(path, lyrics);
+            bool chaptersOk = ReadChapters(path, chapters);
+            bool loopsOk = ReadLoopPoints(path, loopStart, loopEnd);
+            std::wstring name(magic.begin(), magic.begin() + std::min<size_t>(magic.size(), 4));
+            for (wchar_t& c : name) if (c < 32 || c > 126) c = L'.';
+            shortFiles.Add(!tagsOk && !artOk && !lyricsOk && !chaptersOk && !loopsOk,
+                           L"\"" + name + L"\" in " + std::to_wstring(size) + L" bytes");
+        }
     }
-    Check(shortFiles.Passed(), L"short media headers fail safely for tags, covers, lyrics and chapters%ls",
+    Check(shortFiles.Passed(), L"short media headers fail safely for tags, covers, lyrics, chapters and loops%ls",
           shortFiles.failed.c_str());
 }
 
@@ -154,6 +171,39 @@ void TestMp4Metadata(const std::wstring& scratch) {
     Ready(WriteTestBytes(truncated, ftyp), L"the truncated MP4 fixture is prepared");
     TagData cut;
     Check(!ReadTags(truncated, cut), L"a truncated MP4 is reported as unreadable, not as empty tags");
+}
+
+// An ID3v2 tag of up to 64 KiB is read whole and parsed in memory; a larger one (a big APIC) is streamed
+// frame by frame. Both must give the same text, the cover byte for byte, and the MPEG stream after them.
+void TestId3ReadPaths(const std::wstring& scratch) {
+    auto frame = [](const char* id, const std::string& body) {  // an ID3v2.3 frame: id, size, two flag bytes
+        return std::string(id, 4) + Be32((uint32_t)body.size()) + std::string(2, '\0') + body;
+    };
+    // MPEG-1 Layer III frames (128 kb/s, 44.1 kHz, 417 bytes each): each one's sync confirms the one before.
+    std::string audio;
+    for (int i = 0; i < 3; ++i) audio += std::string("\xFF\xFB\x90\x00", 4) + std::string(413, '\0');
+    testlog::Cases paths;
+    for (size_t coverBytes : {size_t(2000), size_t(150000)}) {
+        std::string cover = "\x89PNG";
+        for (size_t i = cover.size(); i < coverBytes; ++i) cover += (char)(i * 31 % 251);
+        std::string frames = frame("TIT2", std::string("\0Id3 title", 10)) +
+                             frame("TPE1", std::string("\0Id3 artist", 11)) + frame("TRCK", std::string("\0" "5/9", 4)) +
+                             frame("APIC", std::string("\0image/png\0\x03\0", 13) + cover);
+        frames.append(512, '\0');  // padding, as taggers leave it
+        const uint32_t n = (uint32_t)frames.size();
+        std::string tag = std::string("ID3\x03\0\0", 6);  // version 2.3, no flags, then the syncsafe size
+        for (int shift : {21, 14, 7, 0}) tag += (char)(n >> shift & 127);
+        const std::wstring path = scratch + L"\\id3-" + std::to_wstring(coverBytes) + L".mp3";
+        if (!Ready(WriteTestBytes(path, tag + frames + audio), L"the ID3 fixture is prepared")) return;
+        TagData t;
+        std::string image;
+        const bool ok = ReadTags(path, t) && ReadEmbeddedArt(path, image);
+        paths.Add(ok && t.title == "Id3 title" && t.artist == "Id3 artist" && t.track == 5 && t.trackTotal == 9 &&
+                      t.codec == Codec::MP3 && t.sampleRate == 44100 && image == cover,
+                  (coverBytes < 65536 ? L"a tag read whole" : L"a streamed tag"));
+    }
+    Check(paths.Passed(), L"ID3v2 reads the same tags and cover whether the tag is read whole or streamed%ls",
+          paths.failed.c_str());
 }
 
 // ReplayGain tags across FLAC/MP3/Ogg (+ Opus's native R128), then an export round trip on copies:
@@ -423,7 +473,7 @@ void TestCrashDump(const std::wstring& scratch) {
 void TestListenBrainz(const std::wstring& scratch) {
     using namespace listenbrainz;
     const std::string info = "\"media_player\":\"cordinal\",\"submission_client\":\"cordinal\","
-                             "\"submission_client_version\":\"0.1.10\"";
+                             "\"submission_client_version\":\"0.1.11\"";
 
     Listen a;
     a.listenedAt = 1700000000;

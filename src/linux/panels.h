@@ -1,6 +1,7 @@
 // The Linux window's larger dialogs, drawn over it like the folders and web server panels in ui.cpp:
-// the equalizer (Playback > Equalizer), the tag editor (Edit > Edit tags) and Preferences (File >
-// Preferences). One is open at a time, and while it is, it takes the mouse and keyboard.
+// the equalizer (Playback > Equalizer), the tag editor (Edit > Edit tags), Preferences (File >
+// Preferences) and the rest. One is open at a time, and while it is, it takes the mouse and keyboard.
+// panels.cpp dispatches to them; each lives in its own panel_*.cpp (panels_internal.h lists them).
 #pragma once
 #include "app.h"
 
@@ -24,7 +25,7 @@ enum FilePurpose : int {
 
 void OpenEqualizer();
 void OpenTagEditor(const std::vector<TrackId>& ids);
-// Edit > Make album (panels.cpp, as app_albummaker.cpp): the tracks given become one album.
+// Edit > Make album (panel_album.cpp, as app_albummaker.cpp): the tracks given become one album.
 void OpenAlbumMaker(const std::vector<TrackId>& ids);
 void OpenPreferences();
 int CheckPreferences();  // headless control geometry, state and keyboard checks; saves no images

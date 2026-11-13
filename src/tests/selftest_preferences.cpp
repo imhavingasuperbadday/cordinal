@@ -72,6 +72,18 @@ void TestWaveform(const std::wstring& scratch) {
     SendMessageW(g.seek, TBM_SETPOS, FALSE, 625);
     g.liveWaveform = true; WaveformTrackChanged(true); WaveformTick();
     bool live = LiveWaveformShown() && WaveformShown() && SendMessageW(g.seek, TBM_GETPOS, 0, 0) == 625;
+    if (const Tweak* frames = FindTweak("view.wave_60fps")) {
+        const bool savedFrames = g.wave60Fps;
+        SetTweak(*frames, 0);
+        bool fps = WaveformFrameMs() == 33;
+        SetTweak(*frames, 1);
+        fps = fps && g.wave60Fps && WaveformFrameMs() == 16;
+        SetTweak(*frames, 0);
+        fps = fps && !g.wave60Fps && WaveformFrameMs() == 33;
+        SetTweak(*frames, savedFrames ? 1 : 0);
+        batch.Next(L"the 60 frames a second row switches the live waveform timer between 30 and 60 fps");
+        Check(fps, L"Seek bar shows 60 frames a second at 16 ms and the default at 33 ms");
+    } else Check(false, L"View preferences includes 60 frames a second");
     if (const Tweak* display = FindTweak("view.seek_bar")) {
         const auto layout = g.layout;
         RECT window{}; GetWindowRect(g.hwnd, &window);
@@ -359,11 +371,11 @@ void TestWaveform(const std::wstring& scratch) {
                     g.seekStyle = painted;
                     g.waveReflection = shape == 0;
                     g.waveFullHeight = shape == 1;
-                    std::vector<uint32_t> plain, plainGdi, up, upGdi;
-                    bool ok = render(false, false, plain) && render(false, true, plainGdi) && render(true, false, up) &&
-                              render(true, true, upGdi) && plain == plainGdi && up == upGdi;
+                    std::vector<uint32_t> level, levelGdi, up, upGdi;
+                    bool ok = render(false, false, level) && render(false, true, levelGdi) && render(true, false, up) &&
+                              render(true, true, upGdi) && level == levelGdi && up == upGdi;
                     for (int x = 0; ok && x < 120; ++x)
-                        for (int y = 0; ok && y < 26; ++y) ok = up[x * 26 + y] == plain[y * 120 + x];
+                        for (int y = 0; ok && y < 26; ++y) ok = up[x * 26 + y] == level[y * 120 + x];
                     paths.Add(ok, L"look " + std::to_wstring(painted) + L" shape " + std::to_wstring(shape));
                 }
             }
@@ -766,8 +778,60 @@ void TestTweaks(const std::wstring& scratch) {
     const struct { const char* key; const wchar_t* ini; bool* value; } liveRows[] = {
         {"view.live_fountain", L"LiveFountain", &g.liveFountain},
         {"view.seek_glow", L"SeekGlow", &g.seekGlow},
-        {"view.pause_fade", L"PauseFade", &g.pauseFade}
+        {"view.pause_fade", L"PauseFade", &g.pauseFade},
+        {"view.list_wind", L"ListWind", &g.listWind}
     };
+    const Tweak* wind = FindTweak("view.list_wind");
+    Check(wind && wind->def == 0, L"Wind behind the track list starts off");
+    if (g.list) {
+        // The wind has to show beside narrow columns, where the rows' own drawing never reaches.
+        bool savedWind = g.listWind;
+        g.listWind = true;
+        HWND header = ListView_GetHeader(g.list);
+        std::vector<int> widths;
+        for (int i = 0, n = header ? Header_GetItemCount(header) : 0; i < n; ++i) {
+            widths.push_back(ListView_GetColumnWidth(g.list, i));
+            ListView_SetColumnWidth(g.list, i, S(16));
+        }
+        const float loud[3] = {0.2f, 0.1f, 0.05f}, quiet[3] = {0.02f, 0.01f, 0.005f};
+        for (int i = 0; i < 90; ++i) StepListWindForTest(i % 8 ? quiet : loud, 1.0f / 30);
+        // Only beside the rows: under the last one the list was already painted by hand.
+        int rows = ListView_GetItemCount(g.list);
+        RECT last{};
+        LONG rowsTop = 0, rowsEnd = 0;
+        if (rows > 0 && ListView_GetItemRect(g.list, 0, &last, LVIR_BOUNDS)) rowsTop = std::max(0L, last.top);
+        if (rows > 0 && ListView_GetItemRect(g.list, rows - 1, &last, LVIR_BOUNDS)) rowsEnd = last.bottom;
+        RECT client{};
+        GetClientRect(g.list, &client);
+        HDC dc = CreateCompatibleDC(nullptr);
+        BITMAPINFO info{};
+        info.bmiHeader = {sizeof(BITMAPINFOHEADER), client.right, -client.bottom, 1, 32, BI_RGB};
+        void* pixels = nullptr;
+        HBITMAP bitmap = client.right > 0 && client.bottom > 0 ? CreateDIBSection(dc, &info, DIB_RGB_COLORS, &pixels, nullptr, 0) : nullptr;
+        size_t windPixels = 0;
+        if (bitmap && pixels) {
+            HGDIOBJ old = SelectObject(dc, bitmap);
+            FillSolid(dc, client, WindowBg());  // a fresh bitmap is black, which a dark theme isn't
+            PaintListBlank(dc);
+            GdiFlush();
+            COLORREF bg = WindowBg();
+            uint32_t plain = (uint32_t)GetRValue(bg) << 16 | (uint32_t)GetGValue(bg) << 8 | GetBValue(bg);
+            LONG from = std::max(0L, ListColumnsRight());
+            for (LONG y = rowsTop; y < std::min(rowsEnd, client.bottom); ++y)
+                for (LONG x = from; x < client.right; ++x)
+                    windPixels += (((const uint32_t*)pixels)[y * client.right + x] & 0xFFFFFF) != plain;
+            SelectObject(dc, old);
+        }
+        if (bitmap) DeleteObject(bitmap);
+        DeleteDC(dc);
+        for (size_t i = 0; i < widths.size(); ++i) ListView_SetColumnWidth(g.list, (int)i, widths[i]);
+        g.listWind = false;
+        ListWindChanged();  // clears the streaks
+        g.listWind = savedWind;
+        batch.Next(L"the track list's wind shows beside narrow columns");
+        Check(rows > 0 && windPixels > 0, L"the track list's wind shows beside the columns (%d rows, %zu pixels)", rows,
+              windPixels);
+    }
     for (const auto& row : liveRows) {
         const Tweak* live = FindTweak(row.key);
         if (!live) { liveSettings.Add(false, FromUtf8(row.key)); continue; }
@@ -779,8 +843,8 @@ void TestTweaks(const std::wstring& scratch) {
         liveSettings.Add(enabled && !*row.value && IniRead(L"Window", row.ini, L"") == L"0", FromUtf8(row.key));
         SetTweak(*live, live->def);
     }
-    batch.Next(L"View preferences save and reload the live fountain and seek bar glow");
-    Check(liveSettings.Passed(), L"View preferences saves and reloads the live fountain and seek bar glow%ls",
+    batch.Next(L"View preferences save and reload the live fountain, seek bar glow and list wind");
+    Check(liveSettings.Passed(), L"View preferences saves and reloads the live fountain, seek bar glow and list wind%ls",
           liveSettings.failed.c_str());
     if (const Tweak* size = FindTweak("view.band_wave_size")) {
         SetTweak(*size, 3); g.bandWaveSize = 0; LoadPreferences();

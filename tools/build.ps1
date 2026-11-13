@@ -389,7 +389,12 @@ $stubObjects = Get-Objects $groups['stub'].ObjDir $groups['stub'].Sources
 $libraries = @('ucrt.lib', 'user32.lib', 'gdi32.lib', 'comctl32.lib', 'comdlg32.lib', 'shell32.lib',
     'shlwapi.lib', 'ole32.lib', 'oleaut32.lib', 'advapi32.lib', 'uxtheme.lib', 'dwmapi.lib',
     'windowscodecs.lib', 'd2d1.lib', 'dwrite.lib', 'runtimeobject.lib', 'shcore.lib', 'winhttp.lib',
-    'crypt32.lib', 'hid.lib', 'setupapi.lib', 'ws2_32.lib', 'bcrypt.lib', 'iphlpapi.lib')
+    'crypt32.lib', 'hid.lib', 'setupapi.lib', 'ws2_32.lib', 'bcrypt.lib', 'iphlpapi.lib', 'delayimp.lib')
+# DLLs that only some features use map on their first call instead of at startup: each one mapped
+# costs private pages and heap in every session, used or not. src/delayload.cpp loads them from
+# System32 only.
+$libraries += @('winhttp.dll', 'crypt32.dll', 'hid.dll', 'setupapi.dll', 'ws2_32.dll', 'bcrypt.dll',
+    'iphlpapi.dll', 'xmllite.dll') | ForEach-Object { "/DELAYLOAD:$_" }
 $appExe = 'build\unpacked\cordinal.exe'
 $testExe = 'build\unpacked\cordinal-test.exe'
 

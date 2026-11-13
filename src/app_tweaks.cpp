@@ -230,6 +230,11 @@ const Tweak kTweaks[] = {
      [](double v) { g.liveWaveform = v != 0; if (v != 0) g.fullLiveWaveform = v == 1; }, 0,
      [] { WaveformTrackChanged(true); WaveformTick(); if (g.seek) InvalidateRect(g.seek, nullptr, FALSE); },
      kSeekShowsNames},
+    {"view.wave_60fps", L"Window", L"Wave60Fps", L"60 frames a second",
+     L"Draws the live waveform and the seek bar's glow 60 times a second instead of the default 30, for "
+     L"smoother motion. Uses a little more CPU.", TweakType::Bool, 0, 1, 0,
+     [] { return (double)g.wave60Fps; }, [](double v) { g.wave60Fps = v != 0; }, 0,
+     [] { WaveformTick(); }},
     {"view.seek_glow", L"Window", L"SeekGlow", L"Seek bar glow",
      L"A soft halo of the seek bar's colours around it that pulses with the beat, brighter where the song is loud. "
      L"Every look, whole song or live.", TweakType::Bool, 0, 1, 1, [] { return (double)g.seekGlow; }, [](double v) { g.seekGlow = v != 0; },
@@ -244,6 +249,12 @@ const Tweak kTweaks[] = {
      L"Song seeking still works.", TweakType::Bool, 0, 1, 0,
      [] { return (double)g.liveFountain; }, [](double v) { g.liveFountain = v != 0; }, 0,
      [] { WaveformTrackChanged(true); WaveformTick(); }},
+    {"view.list_wind", L"Window", L"ListWind", L"Wind behind the track list",
+     L"Soft ribbons drift across the right of the track list while music plays, curling, swelling and "
+     L"gusting with it. Bass makes them wide and slow, treble short and quick. Off while Windows "
+     L"animations are turned off.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)g.listWind; }, [](double v) { g.listWind = v != 0; }, 0,
+     [] { ListWindChanged(); }},
     {"view.band_wave_size", L"Window", L"BandWaveSize", L"Waveform height in the top or bottom bar",
      L"Sets the waveform's height only in the normal top or bottom player bar. "
      L"Big, compact and side players keep their own sizes.", TweakType::Choice, 0, 5, 0,

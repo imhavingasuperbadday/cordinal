@@ -570,7 +570,11 @@ void Library::ApplyTags(TrackId id, const TagData& d) {
     t.trackTotal = (uint16_t)std::min<uint32_t>(d.trackTotal, 65535);
     t.disc = (uint8_t)std::min<uint32_t>(d.disc, 255);
     t.discTotal = (uint8_t)std::min<uint32_t>(d.discTotal, 255);
+    // A BPM detected from the audio survives re-reading tags that don't carry one.
+    const bool bpmDetected = previous.flags & Track::kBpmDetected;
     t.bpm = (uint16_t)std::min<uint32_t>(d.bpm, 65535);
+    if (t.bpm) t.flags &= (uint16_t)~Track::kBpmDetected;
+    else if (bpmDetected) t.bpm = previous.bpm;
     t.flags = (uint16_t)(d.compilation ? t.flags | Track::kCompilation : t.flags & ~Track::kCompilation);
     t.durationMs = std::isfinite(d.duration) ? (uint32_t)std::clamp(d.duration * 1000.0, 0.0, 4.0e9) : 0;
     t.sampleRate = d.sampleRate;
@@ -812,7 +816,8 @@ namespace {
 const wchar_t* const kAudioExt[] = {L"mp3", L"mp2", L"mp1", L"m4a", L"m4b", L"mp4", L"aac", L"adts", L"flac", L"fla", L"wav", L"wave",
                                     L"wma", L"asf", L"ogg", L"oga", L"opus", L"aif", L"aiff", L"aifc", L"ac3", L"eac3", L"ec3", L"ape", L"wv", L"mpc", L"mp+", L"mpp",
                                     L"mka", L"alac", L"spc", L"nsf", L"nsfe", L"gbs", L"vgm", L"vgz", L"gym", L"sid", L"cord",
-                                    L"dsf", L"dff", L"mod", L"s3m", L"xm", L"it", L"mid", L"midi", L"kar", L"rmi", L"tta"};
+                                    L"dsf", L"dff", L"mod", L"s3m", L"xm", L"it", L"mid", L"midi", L"kar", L"rmi", L"tta",
+                                    L"au", L"snd", L"caf", L"voc", L"8svx", L"svx", L"16sv", L"adx", L"g722", L"gsm", L"dfpwm"};
 
 // The songs in a ZIP: its audio members, each multi-song rip expanded into its songs.
 void CollectArchiveAudio(const std::wstring& zip, std::vector<std::wstring>& out) {

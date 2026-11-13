@@ -67,16 +67,20 @@ uint64_t SnapshotSignature(const Library& library, const std::vector<::Playlist>
     }
     return h;
 }
-LibraryBuilder::LibraryBuilder() : p_(std::make_unique<Impl>()) { Reset(); }
+LibraryBuilder::LibraryBuilder() : p_(std::make_unique<Impl>()) {}
 LibraryBuilder::~LibraryBuilder() = default;
 bool LibraryBuilder::Busy() const { return p_ && p_->result != nullptr; }
 void LibraryBuilder::Reset() {
-    auto next = std::make_unique<Impl>(); next->epoch = RandomHex(12);
+    auto next = std::make_unique<Impl>();
     next->revision = p_ ? p_->revision : 0; p_ = std::move(next);
 }
 std::shared_ptr<Snapshot> LibraryBuilder::Tick(const Library& library, const std::vector<::Playlist>& playlists,
                                              bool showOriginals) {
     auto& p = *p_;
+    // The epoch is drawn on the first pass, not in Reset: the player's builder exists from startup
+    // and is reset on library edits, and the random source's DLL would otherwise load in every
+    // session, web player or not.
+    if (p.epoch.empty()) p.epoch = RandomHex(12);
     if (p.epoch.empty()) return {};
     uint64_t now = ClockMs(), deadline = now + 3;
     if (!p.result) {

@@ -416,11 +416,14 @@ std::vector<File> Export(const LibraryArchive& data) {
     for (auto [day, points] : p.byDay) Row(days, {N(day), N(points)});
     Row(recent, {"time", "kind", "track_id", "centipoints"});
     for (const auto& e : p.recent) Row(recent, {Date(e.time), N((unsigned)e.kind), N(e.id), N(e.centi)});
-    for (auto pair : {File{L"playlists.csv", std::move(pls)}, File{L"playlist-items.csv", std::move(items)},
-                      File{L"views.csv", std::move(views)}, File{L"albums.csv", std::move(albums)},
-                      File{L"points.csv", std::move(state)}, File{L"points-days.csv", std::move(days)},
-                      File{L"points-recent.csv", std::move(recent)}})
-        files.push_back(std::move(pair));
+    // Moved straight in: iterating a braced list would copy every CSV out of its const elements.
+    files.push_back({L"playlists.csv", std::move(pls)});
+    files.push_back({L"playlist-items.csv", std::move(items)});
+    files.push_back({L"views.csv", std::move(views)});
+    files.push_back({L"albums.csv", std::move(albums)});
+    files.push_back({L"points.csv", std::move(state)});
+    files.push_back({L"points-days.csv", std::move(days)});
+    files.push_back({L"points-recent.csv", std::move(recent)});
     return files;
 }
 

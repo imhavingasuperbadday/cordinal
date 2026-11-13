@@ -6,6 +6,7 @@
 #include "audio_benchmark.h"
 #include "audio_file.h"
 #include "decoder.h"
+#include <algorithm>
 #include <cmath>
 #include <map>
 #include <vector>
@@ -32,6 +33,11 @@ public:
     bool OpenAdts(const std::wstring& path);
     bool OpenAsf(const std::wstring& path);
     bool OpenOggOpus(const std::wstring& path);
+    // FLAC in Ogg: one frame a packet, with the metadata blocks gathered into config as a native
+    // stream's header ("fLaC" and its blocks).
+    bool OpenOggFlac(const std::wstring& path);
+    // Apple CAF with a packet table (audio_caf.cpp); codec is the 'desc' format id, such as 'alac'.
+    bool OpenCaf(const std::wstring& path);
     bool OpenMatroska(const std::wstring& path,bool index=true);
     // MP4's media clock can differ from the codec's sample rate, which is known only after
     // reading its configuration. Convert its packet and edit times before playback.
@@ -46,8 +52,8 @@ public:
             // to TimestampScale. Reject discontinuities rather than hide a gap.
             const auto& first=timestamps.front();
             for (const auto& timestamp:timestamps) {
-                if (timestamp.first>=packets.size()) return false;
-                uint64_t frame=packets[timestamp.first].start;
+                if (timestamp.first>=Count()) return false;
+                uint64_t frame=At(timestamp.first).start;
                 if (codec==AudioVorbis && timestamp.first) frame+=consumedDelay;
                 double expected=first.second+frame*(1000000000.0/sampleRate);
                 if (std::abs(timestamp.second-expected)>timestampScale+2000000000.0/sampleRate) return false;
@@ -59,12 +65,66 @@ public:
         if (start>frames || skip>frames-start || end>frames-skip-start) return false;
         skip+=start;valid=frames-skip-end;return valid!=0;
     }
+    // Parsers fill `packets`; Pack() then replaces it with a compact copy for playback, since a
+    // 6-hour AAC file has nearly a million packets (30 MB at 32 bytes each). Packets come in groups
+    // of 256: a group whose packets follow one another in time with one length, sit a fixed gap
+    // apart in the file and are each under 64 KB keeps its first packet and a 16-bit size per
+    // packet (about 2 bytes a packet). Any other group keeps its packets whole. Count(), At() and
+    // Find() read either form, so a decoder that never packs still works.
+    size_t Count() const { return packets.empty()?count_:packets.size(); }
+    Packet At(size_t i) const {
+        if (!packets.empty()) return packets[i];
+        const Group& g=groups_[i/kGroup];
+        if (g.whole) return whole_[g.at+i%kGroup];
+        Packet p=g.first;
+        for (size_t k=1;k<=i%kGroup;++k) {
+            p.offset+=p.bytes+g.gap;p.start+=p.frames;p.bytes=sizes_[g.at+k];
+        }
+        return p;
+    }
+    // The last packet starting at or before `sample`, or 0.
+    size_t Find(uint64_t sample) const {
+        size_t low=0,high=Count();  // first packet starting after `sample` is in [low, high]
+        if (packets.empty() && count_) {
+            size_t g=0,n=groups_.size();  // binary search the groups, then walk the one found
+            while (g<n) { size_t m=(g+n)/2; if (groups_[m].first.start<=sample) g=m+1; else n=m; }
+            if (!g) return 0;
+            low=(g-1)*kGroup;high=std::min(count_,g*kGroup);
+        }
+        while (low<high) { size_t m=(low+high)/2; if (At(m).start<=sample) low=m+1; else high=m; }
+        return low?low-1:0;
+    }
+    void Pack() {
+        if (packets.empty()) return;
+        groups_.clear();sizes_.clear();whole_.clear();count_=packets.size();
+        for (size_t at=0;at<count_;at+=kGroup) {
+            const size_t n=std::min(kGroup,count_-at);
+            const Packet* p=packets.data()+at;
+            bool compact=n<2 || p[1].offset>=p[0].offset+p[0].bytes;
+            Group g{p[0],0,n>1 && compact?p[1].offset-p[0].offset-p[0].bytes:0,false};
+            for (size_t k=0;k<n && compact;++k)
+                compact=!p[k].pieces && !p[k].first && p[k].bytes<=0xFFFF && p[k].frames==p[0].frames &&
+                        (!k || (p[k].start==p[k-1].start+p[k-1].frames &&
+                                p[k].offset==p[k-1].offset+p[k-1].bytes+g.gap));
+            g.whole=!compact;
+            if (g.whole) { g.at=(uint32_t)whole_.size();whole_.insert(whole_.end(),p,p+n); }
+            else { g.at=(uint32_t)sizes_.size();for (size_t k=0;k<n;++k) sizes_.push_back((uint16_t)p[k].bytes); }
+            groups_.push_back(g);
+        }
+        std::vector<Packet>().swap(packets);
+        groups_.shrink_to_fit();sizes_.shrink_to_fit();whole_.shrink_to_fit();
+    }
+    // Bytes the packet index holds, for the memory checks.
+    size_t IndexBytes() const {
+        return packets.capacity()*sizeof(Packet)+groups_.capacity()*sizeof(Group)+
+               sizes_.capacity()*sizeof(uint16_t)+whole_.capacity()*sizeof(Packet);
+    }
     // Assemble a packet's bytes. Contiguous packets are viewed directly; packets
     // with a prefix or multiple segments (Matroska block groups in a lace) are
     // gathered into scratch_, so the returned pointer is valid only until the next
     // Data() call. Returns nullptr if a segment cannot be mapped.
     const uint8_t* Data(size_t packet) {
-        const auto& p=packets[packet];
+        const Packet p=At(packet);
         static constexpr uint8_t empty=0;
         if (!p.bytes) return &empty;
         if (!p.pieces && prefix.empty()) return file.View(p.offset,p.bytes);
@@ -97,6 +157,12 @@ public:
     uint64_t mp4EditDuration=0;
     bool matroska=false;
 private:
+    static constexpr size_t kGroup=256;
+    struct Group { Packet first; uint32_t at; uint64_t gap; bool whole; };  // at indexes sizes_ or whole_
+    std::vector<Group> groups_;
+    std::vector<uint16_t> sizes_;
+    std::vector<Packet> whole_;
+    size_t count_=0;
     std::vector<uint8_t> scratch_;
 };
 
@@ -111,9 +177,9 @@ public:
         size_t done = 0;
         while (done < count && pos_ < total_) {
             if (used_ == pcm_.size()/2) {
-                if (next_ == media_.packets.size()) { failed_=true;break; }
+                if (next_ == media_.Count()) { failed_=true;break; }
                 if (!previewing_) Remember(next_);
-                const auto& packet = media_.packets[next_];
+                const Packet packet = media_.At(next_);
                 const uint8_t* bytes = media_.Data(next_++);
                 if (!overwritePcm_) pcm_.clear();
                 used_ = 0;
@@ -140,11 +206,9 @@ public:
         previewing_ = false;
         pos_ = (uint64_t)std::min<double>((double)total_,std::max(0.0,std::floor(seconds*rate_)));
         uint64_t raw = media_.skip+pos_;
-        auto at = std::upper_bound(media_.packets.begin(),media_.packets.end(),raw,
-            [](uint64_t v,const Packet& p){ return v < p.start; });
-        next_ = at == media_.packets.begin() ? 0 : (size_t)(at-media_.packets.begin()-1);
+        next_ = media_.Find(raw);
         pcm_.clear(); used_ = 0;failed_=false;
-        if (pos_ == total_) { next_ = media_.packets.size();return true; }
+        if (pos_ == total_) { next_ = media_.Count();return true; }
         if (Preroll()==SIZE_MAX && !checkpoints_.empty()) {
             auto found=checkpoints_.upper_bound(next_);
             if (found!=checkpoints_.begin()) {
@@ -164,9 +228,7 @@ public:
         if (preroll == SIZE_MAX || !std::isfinite(seconds)) return false;
         pos_ = (uint64_t)std::min<double>((double)total_, std::max(0.0, std::floor(seconds * rate_)));
         const uint64_t raw = media_.skip + pos_;
-        auto at = std::upper_bound(media_.packets.begin(), media_.packets.end(), raw,
-            [](uint64_t v, const Packet& p) { return v < p.start; });
-        next_ = at == media_.packets.begin() ? 0 : (size_t)(at - media_.packets.begin() - 1);
+        next_ = media_.Find(raw);
         next_ -= std::min(next_, preroll);
         pcm_.clear(); used_ = 0; failed_ = false; previewing_ = true;
         Reset();
@@ -185,6 +247,7 @@ protected:
         rate_ = rate;
         if (!media_.NormalizeMp4(rate_) || !media_.Trim(rate_)) return false;
         if (!rate_ || media_.skip >= media_.frames) return false;
+        media_.Pack();
         total_ = media_.frames-media_.skip;
         if (media_.valid) total_ = std::min(total_,media_.valid);
         return Seek(0);
@@ -204,9 +267,9 @@ private:
     // that opts out of preroll (Preroll() == SIZE_MAX) is not checkpointed.
     void Remember(size_t packet) {
         if (Preroll()!=SIZE_MAX || checkpoints_.contains(packet)) return;
-        uint64_t frame=media_.packets[packet].start,interval=uint64_t(rate_)*checkpointSeconds_;
+        uint64_t frame=media_.At(packet).start,interval=uint64_t(rate_)*checkpointSeconds_;
         auto previous=checkpoints_.upper_bound(packet);
-        if (previous!=checkpoints_.begin() && frame-media_.packets[std::prev(previous)->first].start<interval) return;
+        if (previous!=checkpoints_.begin() && frame-media_.At(std::prev(previous)->first).start<interval) return;
         auto state=Capture();if (!state) return;
         checkpoints_.emplace(packet,std::move(state));
         if (checkpoints_.size()>128) {

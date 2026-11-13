@@ -7,6 +7,7 @@
 // Clips play on the sound-effects stream (sfx::PlayClip), never through the player: nothing here
 // changes play counts, skips, the queue or what plays next. The music is paused while a clip plays.
 #include "app.h"
+#include "textcase.h"
 
 namespace app {
 
@@ -92,14 +93,9 @@ std::vector<int> Distribution() {
 // ---------------------------------------------------------------------------
 // Helpers
 
-std::wstring Lower(std::wstring s) {
-    for (auto& c : s) c = (wchar_t)towlower(c);
-    return s;
-}
-
 // "Song (2011 Remaster)" and "Song [Live]" match "Song": what's in brackets is edition detail.
 std::wstring BareTitle(TrackId id) {
-    std::wstring t = Lower(g_lib.Str(g_lib[id].title)), out;
+    std::wstring t = textcase::Fold(g_lib.Str(g_lib[id].title)), out;
     int depth = 0;
     for (wchar_t c : t) {
         if (c == L'(' || c == L'[') ++depth;
@@ -109,7 +105,9 @@ std::wstring BareTitle(TrackId id) {
     size_t dash = out.find(L" - ");
     if (dash != std::wstring::npos && out.find(L"remaster", dash) != std::wstring::npos) out.resize(dash);
     while (!out.empty() && iswspace(out.back())) out.pop_back();
-    while (!out.empty() && iswspace(out.front())) out.erase(out.begin());
+    size_t lead = 0;
+    while (lead < out.size() && iswspace(out[lead])) ++lead;
+    out.erase(0, lead);
     return out;
 }
 
@@ -119,7 +117,7 @@ std::wstring ArtistOf(TrackId id) {
 }
 
 bool SameSong(TrackId a, TrackId b) {
-    return a == b || (BareTitle(a) == BareTitle(b) && Lower(ArtistOf(a)) == Lower(ArtistOf(b)));
+    return a == b || (BareTitle(a) == BareTitle(b) && textcase::Fold(ArtistOf(a)) == textcase::Fold(ArtistOf(b)));
 }
 
 std::wstring SongLabel(TrackId id) {
@@ -365,7 +363,7 @@ void SubmitGuess(TrackId id) {
 void UpdateSuggestions() {
     wchar_t buf[256];
     GetWindowTextW(q.guess, buf, 256);
-    std::wstring typed = Lower(buf);
+    std::wstring typed = textcase::Fold(buf);
     q.suggestions.clear();
     SendMessageW(q.suggest, LB_RESETCONTENT, 0, 0);
     std::vector<std::wstring> words;
@@ -384,9 +382,9 @@ void UpdateSuggestions() {
     for (TrackId id = 0; id < (TrackId)g_lib.Count() && found.size() < 400; ++id) {
         const Track& t = g_lib[id];
         if (!t.InLibrary() || !t.title) continue;
-        std::wstring title = Lower(g_lib.Str(t.title)), hay = title + L" " + Lower(ArtistOf(id));
+        std::wstring title = textcase::Fold(g_lib.Str(t.title)), hay = title + L" " + textcase::Fold(ArtistOf(id));
         bool all = std::all_of(words.begin(), words.end(), [&](const std::wstring& w) { return hay.find(w) != std::wstring::npos; });
-        if (!all || !seen.insert(BareTitle(id) + L"\x1F" + Lower(ArtistOf(id))).second) continue;
+        if (!all || !seen.insert(BareTitle(id) + L"\x1F" + textcase::Fold(ArtistOf(id))).second) continue;
         found.push_back({title.rfind(typed, 0) == 0 ? 0 : 1, id});
     }
     for (int rank = 0; rank < 2; ++rank)

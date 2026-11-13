@@ -227,9 +227,13 @@ void StartRgScan(const std::vector<TrackId>& ids, bool background) {
     TrackIdSet seen;
     for (TrackId id : ids) {
         if (id >= g_lib.Count() || !seen.insert(id)) continue;
-        if (!background && (g_lib[id].flags & Track::kRgScanFailed)) {
-            g_lib[id].flags &= (uint16_t)~Track::kRgScanFailed;
-            g.dirty = true;
+        if (!background) {
+            uint16_t retry = Track::kRgScanFailed;
+            if (!g_lib[id].bpm) retry |= Track::kBpmDetected;  // a manual scan tries a tempo again
+            if (g_lib[id].flags & retry) {
+                g_lib[id].flags &= (uint16_t)~retry;
+                g.dirty = true;
+            }
         }
         items.push_back(g_lib.SnapshotPath(id));
         sizeAndTime.emplace_back(g_lib[id].fileSize, g_lib[id].fileTime);
@@ -304,8 +308,8 @@ void ScanReplayGain(const std::vector<TrackId>& ids) {
     StartRgScan(ids, false);
 }
 
-std::vector<TrackId> AutoMeasureTracks(const std::vector<TrackId>& upcoming, size_t limit) {
-    return replaygain::AutoMeasureTracks(upcoming, limit);
+std::vector<TrackId> AutoMeasureTracks(const std::vector<TrackId>& upcoming, size_t limit, bool includeTempo) {
+    return replaygain::AutoMeasureTracks(upcoming, limit, includeTempo);
 }
 
 // Background measuring, called on every UI tick and when a track starts (`priority`). The
@@ -315,7 +319,13 @@ std::vector<TrackId> AutoMeasureTracks(const std::vector<TrackId>& upcoming, siz
 // when a track starts whose upcoming tracks it doesn't cover.
 void MaybeAutoMeasure(bool priority) {
     if (!BackgroundBusy()) RefreshAlbums();  // saved album measurements, once per library change
-    if (!g.rgOn || !g.rgAutoScan || (g.rgRunning && !g.rgAuto) || BackgroundBusy()) return;
+    // Tempo is only detected for libraries that show the BPM column: no other library pays for
+    // decoding tracks whose ReplayGain is already known.
+    const bool wantTempo = SubitemOf(kColBpm) >= 0;
+    auto wanted = [wantTempo](TrackId id) {
+        return replaygain::NeedsMeasuring(id) || (wantTempo && replaygain::NeedsTempo(id));
+    };
+    if ((!g.rgOn && !wantTempo) || !g.rgAutoScan || (g.rgRunning && !g.rgAuto) || BackgroundBusy()) return;
     if (g.rgRunning && !priority) return;
     const ULONGLONG now = GetTickCount64();
     if (!g.rgNextAuto) g.rgNextAuto = now + 8000;  // let startup settle first
@@ -324,14 +334,14 @@ void MaybeAutoMeasure(bool priority) {
     bool covered = true;
     bool needed = false;
     for (TrackId id : upcoming) {
-        if (id >= g_lib.Count() || !replaygain::NeedsMeasuring(id)) continue;
+        if (id >= g_lib.Count() || !wanted(id)) continue;
         covered &= g.rgRunIds.count(id) != 0;
         needed = true;
     }
     if (g.rgRunning && covered) return;
     if (!needed && now < g.rgNextAuto) return;
     g.rgNextAuto = now + 15000;  // when nothing is found: look again later
-    auto ids = AutoMeasureTracks(upcoming, kSweepTracks);
+    auto ids = AutoMeasureTracks(upcoming, kSweepTracks, wantTempo);
     if (ids.empty()) return;
     StartRgScan(ids, true);
 }
@@ -411,6 +421,9 @@ void FinishReplayGain(WPARAM wp, LPARAM lp) {
     if (!measured.empty()) {
         UpdateAlbumGains(measured);
         g.dirty = true;
+        ClearCellCache();  // a BPM cell filled by this batch must not keep its old text
+        InvalidateRect(g.list, nullptr, FALSE);
+        LibViewInvalidate();
         RefreshGains(!batch->background);
     }
     if (!batch->final || batch->generation != g.rgGen || !g.rgRunning) return;

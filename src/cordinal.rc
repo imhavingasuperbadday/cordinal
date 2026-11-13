@@ -34,8 +34,8 @@ IDR_SND_QUEEN_BITCRUSHLAUGH RCDATA "deltarune/snd_queen_bitcrushlaugh.flac"
 #endif
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 0,1,10,0
-PRODUCTVERSION 0,1,10,0
+FILEVERSION 0,1,11,0
+PRODUCTVERSION 0,1,11,0
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -46,9 +46,9 @@ BEGIN
             VALUE "CompanyName", "imhavingasuperbadday"
             VALUE "LegalCopyright", "Copyright (C) 2026 imhavingasuperbadday. GPL-3.0-or-later."
             VALUE "FileDescription", "cordinal music player"
-            VALUE "FileVersion", "0.1.10"
+            VALUE "FileVersion", "0.1.11"
             VALUE "ProductName", "cordinal"
-            VALUE "ProductVersion", "0.1.10"
+            VALUE "ProductVersion", "0.1.11"
             VALUE "OriginalFilename", "cordinal.exe"
         END
     END

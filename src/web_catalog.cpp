@@ -1,6 +1,7 @@
 // Browser views over an immutable library snapshot. Queries and grouping run on request workers.
 #include "web_internal.h"
 #include "library.h"
+#include "textcase.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -33,15 +34,10 @@ namespace {
 std::string Value(const Request& r, const char* key) {
     auto it = r.query.find(key); return it == r.query.end() ? "" : it->second;
 }
-std::wstring Fold(std::string_view value) {
-    std::wstring s = FromUtf8(value);
-    if (!s.empty()) LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, s.data(), (int)s.size(),
-                                  s.data(), (int)s.size(), nullptr, nullptr, 0);
-    return s;
-}
 bool Search(const Track& t, const std::vector<std::wstring>& words) {
     if (words.empty()) return true;
-    auto text = Fold(t.title + " " + t.artist + " " + t.albumArtist + " " + t.album + " " + t.genre + " " + t.date);
+    auto text = textcase::Invariant(
+        FromUtf8(t.title + " " + t.artist + " " + t.albumArtist + " " + t.album + " " + t.genre + " " + t.date));
     for (const auto& word : words) if (text.find(word) == text.npos) return false;
     return true;
 }
@@ -74,7 +70,7 @@ std::string Catalog(const Snapshot& s, const Request& r) {
         }
         return out + "]}";
     }
-    auto words = FilterWords(Fold(Value(r, "q")));
+    auto words = FilterWords(textcase::Invariant(FromUtf8(Value(r, "q"))));
     std::vector<const Track*> tracks;
     if (!playlist.empty()) {
         auto p = std::find_if(s.playlists.begin(), s.playlists.end(), [&](const auto& p) { return p.key == playlist; });
@@ -100,7 +96,7 @@ std::string Catalog(const Snapshot& s, const Request& r) {
                 for (size_t at = 0; at <= names.size();) {
                     size_t end = names.find(';', at); if (end == names.npos) end = names.size();
                     std::string name = names.substr(at, end - at);
-                    while (!name.empty() && name.front() == ' ') name.erase(name.begin());
+                    name.erase(0, std::min(name.size(), name.find_first_not_of(' ')));
                     while (!name.empty() && name.back() == ' ') name.pop_back();
                     groups[{name, "", ""}].push_back(t);
                     if (end == names.size()) break;

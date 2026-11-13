@@ -26,7 +26,8 @@ void ForgetAlbumDynamics(bool keepMeasurements = false);
 void ScanReplayGain(const std::vector<TrackId>& ids);
 void MaybeAutoMeasure(bool priority);
 // Bounded background batch: upcoming tracks first, then their albums and the library.
-std::vector<TrackId> AutoMeasureTracks(const std::vector<TrackId>& upcoming, size_t limit);
+std::vector<TrackId> AutoMeasureTracks(const std::vector<TrackId>& upcoming, size_t limit,
+                                       bool includeTempo = false);
 void CancelReplayGain();
 void ClearReplayGain(const std::vector<TrackId>& ids);
 void WriteReplayGainTags(const std::vector<TrackId>& ids);

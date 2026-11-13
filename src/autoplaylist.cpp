@@ -8,6 +8,7 @@
 #include "sort.h"
 #include "autoplaylist.h"
 #include "playlog.h"
+#include "textcase.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -54,12 +55,6 @@ int IndexOf(const char* const (&keys)[N], const std::string& k) {
     for (size_t i = 0; i < N; ++i)
         if (k == keys[i]) return (int)i;
     return -1;
-}
-
-std::wstring Lower(std::wstring s) {
-    if (!s.empty()) LCMapStringEx(LOCALE_NAME_USER_DEFAULT, LCMAP_LOWERCASE | LCMAP_LINGUISTIC_CASING, s.c_str(), (int)s.size(),
-                                  s.data(), (int)s.size(), nullptr, nullptr, 0);
-    return s;
 }
 
 double ParseNumber(const std::string& s) {
@@ -176,13 +171,13 @@ private:
 
     const std::wstring& Needle(const std::string& s) {
         auto [it, added] = needles_.emplace(s, std::wstring());
-        if (added) it->second = Lower(FromUtf8(s));
+        if (added) it->second = textcase::Linguistic(FromUtf8(s));
         return it->second;
     }
 
     const std::wstring& Str(StringPool::Handle h) {
         auto [it, added] = lower_.emplace(h, std::wstring());
-        if (added) it->second = Lower(library_.Str(h));
+        if (added) it->second = textcase::Linguistic(library_.Str(h));
         return it->second;
     }
 
@@ -210,7 +205,7 @@ private:
         switch (f) {
             case RuleField::Title: {
                 std::wstring title = t.title ? library_.Str(t.title) : StemOf(library_.Path(id));
-                return Lower(title);
+                return textcase::Linguistic(title);
             }
             case RuleField::Artist: return Str(t.artist);
             case RuleField::AlbumArtist: return Str(t.albumArtist ? t.albumArtist : t.artist);
@@ -220,8 +215,8 @@ private:
             case RuleField::Comment: return Str(t.comment);
             case RuleField::Grouping: return Str(t.grouping);
             case RuleField::Label: return Str(t.label);
-            case RuleField::Path: return Lower(library_.Path(id));
-            case RuleField::Codec: return Lower(CodecName(t.codec));
+            case RuleField::Path: return textcase::Linguistic(library_.Path(id));
+            case RuleField::Codec: return textcase::Linguistic(CodecName(t.codec));
             case RuleField::Any: {
                 std::wstring all = Text(RuleField::Title, id, t);
                 for (auto h : {t.artist, t.albumArtist, t.album, t.genre, t.composer, t.comment, t.grouping, t.label}) all += L"\n" + Str(h);

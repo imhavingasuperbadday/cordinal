@@ -29,6 +29,11 @@ bool FastCrcKernel();
 // 16 bytes whose CRC, continued over the rest of p, is the CRC of all n bytes. Returns the
 // bytes folded.
 size_t AudioCrc16FoldAvx2(const uint8_t* p, size_t n, uint8_t* folded);
+// TruePeak's interpolation (dsp.cpp) for a multiple of four frames: x is frame-major stereo with
+// the 23 frames before it readable, coeff the phase 1..3 coefficients as [3][24][4] (each in all
+// four lanes). Returns the larger of peak and every interpolated magnitude, each summed in the
+// scalar FIR's order with no fused multiply-add, so the result is bit-identical to the baseline.
+double TruePeakAvx2(const double* x, size_t frames, const double* coeff, double peak);
 // FFT roots are packed by stage: complex root (half+j) serves butterfly j. quad holds the
 // radix-4 passes' twiddles in pass order: t^2, t, t^3 for each four butterflies (Mdct::Init).
 // grouped: the first two stages are already done (AudioMdctFoldAvx2 with grouped).

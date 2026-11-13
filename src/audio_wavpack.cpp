@@ -115,7 +115,8 @@ struct Entropy {
         }
         if (!(flags&hybrid)) return true;
         data=meta.item[6];size_t at=0;
-        auto take=[&] { if (data.size()-at<2) { at=data.size()+1;return 0u; } unsigned v=U16(data.data()+at);at+=2;return v; };
+        // A short item sets `at` past the end, so compare without subtracting: size-at would wrap.
+        auto take=[&] { if (at+2>data.size()) { at=data.size()+1;return 0u; } unsigned v=U16(data.data()+at);at+=2;return v; };
         if (flags&512) for (unsigned c=0;c<count;++c) { unsigned v=take();if (v>8447) return false;ch[c].slow=Exponent(v); }
         for (unsigned c=0;c<count;++c) accumulator[c]=take()<<16;
         if (at<data.size()) for (unsigned c=0;c<count;++c) delta[c]=(uint32_t)SignedExponent((int16_t)take());

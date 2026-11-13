@@ -3,6 +3,7 @@
 #include "alternate_ui.h"
 #include "ui_internal.h"
 #include "apollo_images.inc"
+#include "textcase.h"
 #include <charconv>
 #include <set>
 #include <fstream>
@@ -93,10 +94,6 @@ struct ColorDialog {
 int Mode() {
     if (g.settings.size != ViewSize::Normal || InternetRadio().active) return 0;
     return kExtraThemes && g.settings.theme == ThemeMode::Foobar ? 1 : g.settings.theme == ThemeMode::Apollo ? 2 : 0;
-}
-std::wstring Lower(std::wstring text) {
-    for (auto& ch : text) ch = (wchar_t)towlower(ch);
-    return text;
 }
 int Integer(const std::map<std::string, std::string>& values, const char* key, int def, int low, int high) {
     auto it = values.find(key);
@@ -330,7 +327,8 @@ ApolloFileInfo ProbeApolloFile(const std::wstring& path, Codec codec) {
     ApolloFileInfo info;
     switch (codec) {
         case Codec::MP3: case Codec::MP2: case Codec::AAC: case Codec::WMA:
-        case Codec::Vorbis: case Codec::Opus: case Codec::AC3: case Codec::Musepack: info.bits = 16; break;
+        case Codec::Vorbis: case Codec::Opus: case Codec::AC3: case Codec::Musepack:
+        case Codec::ADX: case Codec::G722: case Codec::GSM: case Codec::DFPWM: case Codec::G726: info.bits = 16; break;
         default: break;
     }
     std::ifstream stream(ToUtf8(path), std::ios::binary);
@@ -419,7 +417,8 @@ bool AlternateField(TrackId id, const std::wstring& name, std::wstring& out) {
         int bits = cached.info.bits;
         if (!bits) switch (track.codec) {
             case Codec::MP3: case Codec::MP2: case Codec::AAC: case Codec::WMA:
-            case Codec::Vorbis: case Codec::Opus: case Codec::AC3: case Codec::Musepack: bits = 16; break;
+            case Codec::Vorbis: case Codec::Opus: case Codec::AC3: case Codec::Musepack:
+            case Codec::ADX: case Codec::G722: case Codec::GSM: case Codec::DFPWM: case Codec::G726: bits = 16; break;
             default: break;
         }
         std::wstring channels = track.channels == 1 ? L"mono" : track.channels == 2 ? L"stereo" :
@@ -439,7 +438,7 @@ std::vector<AlbumListNode> BuildAlbumList(const Library& library, int view, cons
     struct Builder { AlbumListNode node; std::vector<size_t> children; };
     std::vector<Builder> nodes(1);
     std::unordered_map<std::wstring, size_t> groups;
-    const auto filter = Lower(text);
+    const auto filter = textcase::Fold(text);
     auto group = [&](size_t parent, const std::wstring& name) {
         std::wstring key = std::to_wstring(parent) + L"|" + name;
         auto [it, fresh] = groups.emplace(key, nodes.size());
@@ -456,7 +455,7 @@ std::vector<AlbumListNode> BuildAlbumList(const Library& library, int view, cons
         std::wstring title = library.Str(track.title), artist = library.Str(track.albumArtist ? track.albumArtist : track.artist);
         const std::wstring album = library.Str(track.album), dir = library.Str(track.dir);
         if (title.empty()) title = library.Str(track.file);
-        if (!filter.empty() && Lower(title + L" " + artist + L" " + album + L" " + library.Path(id)).find(filter) == std::wstring::npos) continue;
+        if (!filter.empty() && textcase::Fold(title + L" " + artist + L" " + album + L" " + library.Path(id)).find(filter) == std::wstring::npos) continue;
         size_t parent = 0;
         if (view == 0) {
             int depth = 0;

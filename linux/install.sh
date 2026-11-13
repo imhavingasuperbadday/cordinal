@@ -11,7 +11,7 @@
 #
 # The published program is built on Debian 13, so it loads on Debian 13 and other
 # current glibc systems that ship the same library names (OpenSSL 3's libssl.so.3,
-# SDL3, PipeWire, libsystemd, fontconfig). Libraries come only from repositories
+# SDL3, PipeWire, fontconfig). Libraries come only from repositories
 # already configured on the machine. The script does not add a repository, does not
 # turn signature checks off, and does not upgrade the system.
 set -eu
@@ -64,7 +64,6 @@ distro_kind() {
     id=$1
     like=$2
     case "$id" in
-        artix) printf '%s\n' artix; return ;;
         steamos) printf '%s\n' steamos; return ;;
         nixos|guix) printf '%s\n' immutable; return ;;
         alpine) printf '%s\n' alpine; return ;;
@@ -97,25 +96,21 @@ pkg_for() {
         pacman:libSDL3.so.0) printf '%s\n' sdl3 ;;
         pacman:libSDL3_ttf.so.0) printf '%s\n' sdl3_ttf ;;
         pacman:libpipewire-0.3.so.0) printf '%s\n' pipewire ;;
-        pacman:libsystemd.so.0) printf '%s\n' systemd-libs ;;
         pacman:libfontconfig.so.1) printf '%s\n' fontconfig ;;
         pacman:libssl.so.3) printf '%s\n' openssl-3 ;;
         apt:libSDL3.so.0) printf '%s\n' libsdl3-0 ;;
         apt:libSDL3_ttf.so.0) printf '%s\n' libsdl3-ttf0 ;;
         apt:libpipewire-0.3.so.0) printf '%s\n' 'libpipewire-0.3-0|libpipewire-0.3-0t64' ;;
-        apt:libsystemd.so.0) printf '%s\n' libsystemd0 ;;
         apt:libfontconfig.so.1) printf '%s\n' 'libfontconfig1|libfontconfig1t64' ;;
         apt:libssl.so.3) printf '%s\n' 'libssl3|libssl3t64' ;;
         dnf:libSDL3.so.0) printf '%s\n' SDL3 ;;
         dnf:libSDL3_ttf.so.0) printf '%s\n' SDL3_ttf ;;
         dnf:libpipewire-0.3.so.0) printf '%s\n' pipewire-libs ;;
-        dnf:libsystemd.so.0) printf '%s\n' systemd-libs ;;
         dnf:libfontconfig.so.1) printf '%s\n' fontconfig ;;
         dnf:libssl.so.3) printf '%s\n' openssl-libs ;;
         zypper:libSDL3.so.0) printf '%s\n' libSDL3-0 ;;
         zypper:libSDL3_ttf.so.0) printf '%s\n' libSDL3_ttf0 ;;
         zypper:libpipewire-0.3.so.0) printf '%s\n' libpipewire-0_3-0 ;;
-        zypper:libsystemd.so.0) printf '%s\n' libsystemd0 ;;
         zypper:libfontconfig.so.1) printf '%s\n' libfontconfig1 ;;
         zypper:libssl.so.3) printf '%s\n' libopenssl3 ;;
         *) return 1 ;;
@@ -292,7 +287,7 @@ libs_help() {
     cat <<'EOF'
 cordinal needs these libraries from the distribution:
   libSDL3.so.0, libSDL3_ttf.so.0, libpipewire-0.3.so.0,
-  libsystemd.so.0, libfontconfig.so.1, libssl.so.3
+  libfontconfig.so.1, libssl.so.3
 Debian 13, Ubuntu 25.10 and newer, Fedora 42 and newer, openSUSE Tumbleweed,
 and Arch (openssl-3 alongside OpenSSL 4) publish them. Ubuntu 24.04 and
 Debian 12 do not publish SDL3. This installer does not add a repository.
@@ -303,12 +298,10 @@ refuse_special() {
     case "$KIND" in
         alpine)
             fail "Alpine uses musl. This build is linked against glibc and cannot run there." ;;
-        artix)
-            fail "Artix does not use systemd. If libsystemd.so.0 is already installed, re-run with --no-deps. This installer will not install systemd." ;;
         steamos)
             fail "SteamOS is read-only. This installer will not change it. Re-run with --no-deps only when the libraries are already installed." ;;
         immutable)
-            fail "On $OS_ID, add SDL3, SDL3_ttf, PipeWire, libsystemd, fontconfig and OpenSSL 3 to the system configuration, then re-run with --no-deps." ;;
+            fail "On $OS_ID, add SDL3, SDL3_ttf, PipeWire, fontconfig and OpenSSL 3 to the system configuration, then re-run with --no-deps." ;;
     esac
     if [ -e /run/ostree-booted ]; then
         fail "This system is immutable. Install the libraries with its own tool, then re-run with --no-deps. This installer will not change the deployment."
@@ -343,7 +336,7 @@ install_selected() {
 install_libs() {
     need_tool
     needed=""
-    for soname in libSDL3.so.0 libSDL3_ttf.so.0 libpipewire-0.3.so.0 libsystemd.so.0 libfontconfig.so.1 libssl.so.3; do
+    for soname in libSDL3.so.0 libSDL3_ttf.so.0 libpipewire-0.3.so.0 libfontconfig.so.1 libssl.so.3; do
         have_lib "$soname" || needed="$needed $soname"
     done
     font=""
@@ -509,7 +502,7 @@ self_test() {
     [ "$(distro_kind linuxmint "ubuntu debian")" = apt ] || fail "mint"
     [ "$(distro_kind arch "")" = pacman ] || fail "arch"
     [ "$(distro_kind endeavouros "arch")" = pacman ] || fail "endeavouros"
-    [ "$(distro_kind artix "arch")" = artix ] || fail "artix"
+    [ "$(distro_kind artix "arch")" = pacman ] || fail "artix"
     [ "$(distro_kind fedora "")" = dnf ] || fail "fedora"
     [ "$(distro_kind rocky "rhel centos fedora")" = dnf ] || fail "rocky"
     [ "$(distro_kind opensuse-tumbleweed "opensuse suse")" = zypper ] || fail "tumbleweed"
@@ -610,7 +603,7 @@ if [ "$dry" = 1 ]; then
     say "Distribution $OS_ID ($KIND)."
     if [ -n "$deps" ]; then
         planned=""
-        for soname in libSDL3.so.0 libSDL3_ttf.so.0 libpipewire-0.3.so.0 libsystemd.so.0 libfontconfig.so.1 libssl.so.3; do
+        for soname in libSDL3.so.0 libSDL3_ttf.so.0 libpipewire-0.3.so.0 libfontconfig.so.1 libssl.so.3; do
             if have_lib "$soname"; then
                 continue
             fi
@@ -634,7 +627,7 @@ fi
 if [ -n "$deps" ]; then
     if [ "$KIND" = unknown ]; then
         absent=""
-        for soname in libSDL3.so.0 libSDL3_ttf.so.0 libpipewire-0.3.so.0 libsystemd.so.0 libfontconfig.so.1 libssl.so.3; do
+        for soname in libSDL3.so.0 libSDL3_ttf.so.0 libpipewire-0.3.so.0 libfontconfig.so.1 libssl.so.3; do
             have_lib "$soname" || absent="$absent $soname"
         done
         if [ -n "$absent" ]; then

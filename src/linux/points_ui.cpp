@@ -1,7 +1,7 @@
 // cordinal points in the Linux window: the chip in the now-playing strip (rank, level, points and a thin
 // progress bar, with a "+N" rising when points arrive and a flash at a level-up) and the toast that
 // announces a level, as the Windows build's app_points.cpp and app_toast.cpp do. The rules and the ledger
-// live in points.cpp; the Points window and the year in review are panels (panels.cpp).
+// live in points.cpp; the Points window and the year in review are panels (panel_points.cpp).
 #include "draw.h"
 #include "panels.h"
 #include "points.h"

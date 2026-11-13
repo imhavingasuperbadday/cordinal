@@ -66,7 +66,7 @@ inline const Column kColumns[] = {
 };
 #undef CD_DISC_TRACK
 constexpr int kColumnCount = (int)(sizeof(kColumns) / sizeof(kColumns[0]));
-constexpr int kColRating = 8;
+constexpr int kColRating = 8, kColBpm = 23;  // kColBpm: the BPM entry above
 constexpr int kColCover = 25, kColTrackNo = 26, kColTitleArtist = 27;
 constexpr int kColApolloTitle = 28, kColApolloBitrate = 29, kColApolloRate = 30, kColApolloBits = 31, kColApolloSize = 32,
               kColApolloTag = 33;

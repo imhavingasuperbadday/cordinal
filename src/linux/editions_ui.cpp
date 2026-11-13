@@ -1,5 +1,5 @@
 // Linux album-edition manager and track comparison, a modeless overlay in the same style as the
-// other Linux panels. All edits go through album_editions.cpp; playback keeps running behind it.
+// other Linux panels. All edits go through album_editions_edit.cpp; playback keeps running behind it.
 #include "album_editions.h"
 #include "app.h"
 #include "draw.h"

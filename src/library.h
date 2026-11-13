@@ -147,6 +147,7 @@ struct Track {
         kRgAlbumMeasured = 4096,  // rgAlbumGain/Peak belong to a saved album measurement
         kOriginal = 8192,    // a file kept after its conversion to .cord; out of the library unless shown
         kSteamDuplicate = 16384, // excluded by a Steam import; a later format choice can include it again
+        kBpmDetected = 32768,    // bpm was measured from the audio (the file has no BPM tag)
     };
     bool Loaded() const { return flags & kLoaded; }
     bool Failed() const { return flags & kFailed; }

@@ -1,6 +1,6 @@
 // The Linux front end's window, split by responsibility: the state, types and declarations that
 // used to share one translation unit. The public surface stays in ui.h; this header is private to
-// the UI implementation files, including panels.cpp.
+// the UI implementation files, including panels.cpp and panel_*.cpp.
 #pragma once
 
 #include "ui.h"
@@ -457,6 +457,7 @@ void OpenWebServer();
 const Palette& CurrentPalette();
 void ApplyTheme();
 bool UiAnimating();
+bool ListWindAnimating();  // the track list's wind is moving or music is heard (ui_draw.cpp)
 void ShowMessage(const std::wstring& text);
 bool Confirm(const std::string& question, const char* title);
 void OnPlaylistFile(WPARAM kind, LPARAM value);

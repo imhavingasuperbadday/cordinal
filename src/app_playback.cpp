@@ -950,6 +950,7 @@ void UpdateStatus() {
         SetTextIfChanged(g.time, L"");
     }
     PlayingRowTick();
+    ListWindWake();
     const bool seekEnabled = active && dur > 0;
     if (!!IsWindowEnabled(g.seek) != seekEnabled) EnableWindow(g.seek, seekEnabled);
     WaveformTick();  // the waveform's color follows play/pause and the warnings

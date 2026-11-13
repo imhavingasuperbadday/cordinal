@@ -93,7 +93,7 @@ std::vector<std::pair<double, std::wstring>> ParseLyrics(const std::wstring& tex
             pos = close + 1;
         }
         std::wstring rest = line.substr(pos);
-        while (!rest.empty() && (rest.front() == L' ' || rest.front() == L'\t')) rest.erase(rest.begin());
+        rest.erase(0, std::min(rest.size(), rest.find_first_not_of(L" \t")));
         if (!stamps.empty())
             for (double t : stamps) timed.emplace_back(t, rest);
         else if (pos == 0)

@@ -1560,17 +1560,28 @@ bool Engine::WaveformPeaks(uint8_t* out, size_t buckets) const {
         d.waveMotion.Add(d.ring.data() + slot * 2, count, rate);
         d.wavePos += count;
     }
-    // CompandPeak is monotonic, so the loudest linear sample per bucket can be companded once
-    // instead of once per sample: the bytes are identical, without thousands of square roots.
-    std::array<float, 4096> linear;
-    std::fill_n(linear.begin(), buckets, 0.0f);
-    for (uint64_t at = std::max(first, oldest); at < end; ++at) {
-        size_t slot = (size_t)(at % d.cap) * 2;
-        float peak = std::max(std::fabs(d.ring[slot]), std::fabs(d.ring[slot + 1]));
-        size_t bucket = (size_t)((frames - (end - at)) * buckets / frames);
-        linear[bucket] = std::max(linear[bucket], peak);
+    // Frame `at` falls in bucket (at - base) * buckets / frames, so bucket b runs from frame
+    // base + ceil(b * frames / buckets) up to the next bucket's first. Walking each bucket's frames
+    // as contiguous runs of the ring keeps the 64-bit divisions out of the per-sample loop, which
+    // runs under the lock the audio thread writes through, up to sixty times a second. CompandPeak
+    // is monotonic, so each bucket's loudest linear sample is companded once: the same bytes.
+    const uint64_t start = std::max(first, oldest);
+    const int64_t base = (int64_t)end - (int64_t)frames;
+    const float* ring = d.ring.data();
+    for (size_t b = 0; b < buckets; ++b) {
+        const int64_t lo = base + (int64_t)((b * frames + buckets - 1) / buckets);
+        const int64_t hi = base + (int64_t)(((b + 1) * frames + buckets - 1) / buckets);
+        uint64_t at = (uint64_t)std::max(lo, (int64_t)start);
+        const uint64_t stop = (uint64_t)std::max(std::min(hi, (int64_t)end), (int64_t)at);
+        float peak = 0;
+        while (at < stop) {
+            size_t slot = (size_t)(at % d.cap), count = (size_t)std::min<uint64_t>(stop - at, d.cap - slot);
+            for (const float *s = ring + slot * 2, *e = s + count * 2; s != e; s += 2)
+                peak = std::max(peak, std::max(std::fabs(s[0]), std::fabs(s[1])));
+            at += count;
+        }
+        out[b] = CompandPeak(peak);
     }
-    for (size_t b = 0; b < buckets; ++b) out[b] = CompandPeak(linear[b]);
     d.waveMotion.Shape(out, buckets);
     return true;
 }

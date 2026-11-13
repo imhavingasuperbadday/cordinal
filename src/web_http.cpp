@@ -155,7 +155,8 @@ std::string Mime(const std::wstring& path, const std::string& codec) {
     if (ext == L"mp3") return "audio/mpeg";
     if (ext == L"flac" || ext == L"fla") return "audio/flac";
     if (ext == L"wav" || ext == L"wave") return "audio/wav";
-    if (ext == L"ogg" || ext == L"oga") return codec == "Opus" ? "audio/ogg; codecs=opus" : "audio/ogg; codecs=vorbis";
+    if (ext == L"ogg" || ext == L"oga")
+        return codec == "Opus" ? "audio/ogg; codecs=opus" : codec == "FLAC" ? "audio/ogg; codecs=flac" : "audio/ogg; codecs=vorbis";
     if (ext == L"opus") return "audio/ogg; codecs=opus";
     if (ext == L"m4a" || ext == L"m4b" || ext == L"mp4")
         return codec == "ALAC" ? "audio/mp4; codecs=alac" : "audio/mp4; codecs=mp4a.40.2";

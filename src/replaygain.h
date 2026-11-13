@@ -33,6 +33,7 @@ struct RgResult {
     float trackGain, trackPeak;
     float high;      // how far the loud parts sit above the integrated loudness, LU
     bool ok = true;  // false: the track could not be decoded
+    uint16_t bpm = 0;  // tempo detected while decoding, 0 when there is no clear beat
 };
 
 namespace replaygain {
@@ -49,6 +50,8 @@ double EqPeakDb(const EqSettings& eq, unsigned rate);
 bool AlbumMember(TrackId id);
 // A track the background measurer should pick up.
 bool NeedsMeasuring(TrackId id);
+// A track with no BPM tag and no detected tempo yet.
+bool NeedsTempo(TrackId id);
 bool MeasurementCovers(const AlbumMeasurement& saved, const std::vector<TrackId>& members);
 bool MeasurementMatches(const AlbumMeasurement& saved, const std::vector<TrackId>& members);
 
@@ -64,12 +67,14 @@ AlbumRefresh RefreshAlbums(uint32_t& revision);
 // Drops the per-album levelling cache (and, unless keepMeasurements, the saved measurements).
 void ForgetAlbumDynamics(bool keepMeasurements);
 // A bounded background batch: the upcoming tracks first, then their albums, then the library.
-std::vector<TrackId> AutoMeasureTracks(const std::vector<TrackId>& upcoming, size_t limit);
+// `includeTempo` also picks up tracks that only need their BPM filled in.
+std::vector<TrackId> AutoMeasureTracks(const std::vector<TrackId>& upcoming, size_t limit,
+                                       bool includeTempo = false);
 // Every available library track, independent of the current playlist, search, selection or scan flags.
 std::vector<TrackId> LibraryTracks();
 bool HasLibraryTracks();
 
-// Worker thread: measures one track (a CUE track: just its range) and stores its waveform peaks.
+// Worker thread: measures one track (a CUE track: just its range), its tempo and its waveform peaks.
 // `current` holds the open decoder so another thread can abort it; `budget` paces a background
 // run. A result with ok == false and `cancel` set means cut short, neither measured nor failed.
 RgResult Measure(const TrackPath& item, uint64_t fileSize, uint64_t fileTime, const std::atomic<bool>& cancel,

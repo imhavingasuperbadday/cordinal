@@ -324,7 +324,7 @@ void DrawAbout(const Palette& p) {
         SDL_RenderTexture(g.renderer, g_about.texture, nullptr, &dst);
     }
     float x = g_about.icon.R() + S(18), y = panel.y + S(18);
-    DrawText(Font::Title, "cordinal 0.1.10", x, y, p.text);
+    DrawText(Font::Title, "cordinal 0.1.11", x, y, p.text);
     y += S(34);
     for (const std::string& line : lines) {
         if (y + lineH > panel.B() - S(30)) break;
