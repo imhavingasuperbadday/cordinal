@@ -125,7 +125,7 @@ jobs:
           # messages and XKB keymaps, under ASan and UBSan for a minute, seeded with real keymaps.
           apt-get install -y --no-install-recommends clang libclang-rt-dev
           clang++ -std=c++20 -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all -Isrc/linux -Isrc \
-            src/tests/fuzz_platform.cpp src/linux/platform/x11_wire.cpp src/linux/platform/wayland_wire.cpp \
+            src/linux/platform/fuzz.cpp src/linux/platform/x11_wire.cpp src/linux/platform/wayland_wire.cpp \
             src/linux/platform/xkb_keymap.cpp src/linux/platform/keys.cpp -o fuzz-platform
           mkdir -p corpus
           for layout in us de fr ru gr; do

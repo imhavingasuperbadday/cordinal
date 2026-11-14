@@ -985,7 +985,15 @@ struct Index {
 };
 
 constexpr char kCacheMagic[8] = {'C', 'R', 'D', 'F', 'O', 'N', 'T', 'S'};
-constexpr uint32_t kCacheVersion = 2;
+constexpr uint32_t kCacheVersion = 3;  // 3: a checksum trails the index
+
+// FNV-1a over the index, stored after it: a damaged byte in a face's weight or coverage would otherwise
+// read as valid and change which font is chosen, so any damage rebuilds the index instead.
+uint64_t CacheSum(const char* p, size_t n) {
+    uint64_t h = 14695981039346656037ull;
+    for (size_t i = 0; i < n; ++i) h = (h ^ (uint8_t)p[i]) * 1099511628211ull;
+    return h;
+}
 
 uint32_t LangHash() {
     uint32_t h = 2166136261u;
@@ -1039,7 +1047,11 @@ std::string CachePath() {
 std::unordered_map<std::string, FileEntry> ReadCache(const std::string& path) {
     std::unordered_map<std::string, FileEntry> out;
     std::string b;
-    if (path.empty() || !ReadFile(path, &b, 256u << 20)) return out;
+    if (path.empty() || !ReadFile(path, &b, 256u << 20) || b.size() < 8) return out;
+    uint64_t sum;
+    memcpy(&sum, b.data() + b.size() - 8, 8);
+    b.resize(b.size() - 8);
+    if (sum != CacheSum(b.data(), b.size())) return out;
     Reader r{b};
     char magic[8];
     if (!r.Take(magic, 8) || memcmp(magic, kCacheMagic, 8) || r.U32() != kCacheVersion || r.U32() != kLangCount || r.U32() != LangHash())
@@ -1098,6 +1110,7 @@ void WriteCache(const std::string& path, const std::vector<FileEntry>& files) {
             for (const Range& x : f.coverage) w.U32(x.first), w.U32(x.last);
         }
     }
+    w.U64(CacheSum(w.b.data(), w.b.size()));
     std::string dir = DirOf(path);
     mkdir(DirOf(dir).c_str(), 0700);
     mkdir(dir.c_str(), 0700);

@@ -417,6 +417,7 @@ inline int Check(const char* dirArg) {
     WriteFile(fonts + "/CordinalTestSans-Bold.ttf", boldBytes);
     std::string good = ReadAll(cacheFile);
     int cacheBad = 0;
+    std::string badRounds;
     Rng rng{42};
     for (int round = 0; round < 40; ++round) {
         std::string damaged = good;
@@ -425,9 +426,25 @@ inline int Check(const char* dirArg) {
             for (int k = 0; k < 16; ++k) damaged[rng.Next() % damaged.size()] = (char)rng.Next();
         WriteFile(cacheFile, damaged);
         lx::fonts::Reload();
-        cacheBad += file("Cordinal Test Sans:weight=bold") != "CordinalTestSans-Bold.ttf#0" || file("Test Generic") != "CordinalTestMono.TTF#0";
+        if (file("Cordinal Test Sans:weight=bold") != "CordinalTestSans-Bold.ttf#0" || file("Test Generic") != "CordinalTestMono.TTF#0") {
+            ++cacheBad;
+            badRounds += " " + std::to_string(round);
+        }
     }
-    check(cacheBad == 0, "truncated and scrambled caches are dropped or read safely, and matching is unchanged");
+    check(cacheBad == 0, "truncated and scrambled caches are dropped or read safely, and matching is unchanged" +
+                             (cacheBad ? " (rounds" + badRounds + ")" : std::string()));
+    // One flipped bit anywhere, a face's weight or coverage included, rebuilds the index rather than
+    // changing a match.
+    int flipBad = 0;
+    for (int k = 0; k < 50 && !good.empty(); ++k) {
+        std::string damaged = good;
+        damaged[damaged.size() * k / 50] ^= 0x10;
+        WriteFile(cacheFile, damaged);
+        lx::fonts::Reload();
+        flipBad += file("Cordinal Test Sans:weight=bold") != "CordinalTestSans-Bold.ttf#0" ||
+                   file("Test Generic") != "CordinalTestMono.TTF#0" || lx::fonts::Info().parsed == 0;
+    }
+    check(flipBad == 0, "a cache with one flipped bit is rebuilt whole (" + std::to_string(flipBad) + " of 50 kept)");
 
     // Without a configuration: the built-in aliases and the usual directories.
     setenv("FONTCONFIG_FILE", (conf + "/missing.conf").c_str(), 1);
