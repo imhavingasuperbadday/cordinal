@@ -66,6 +66,7 @@ void LibViewBusyTick(bool any);
 void LibViewTheme();
 void LibViewDpiChanged();
 void LibViewReleaseGraphics();
+void LibViewTrimMemory();  // release GPU/D2D targets without stopping the thumb loader
 std::vector<TrackId> LibViewSelection();
 void LibViewPlaySelection();
 // Album-canvas edition helpers: selected album tiles in the current order, the group under the
@@ -123,6 +124,7 @@ void SelectGroup(int group, bool add);
 void DrawGroupRow(HDC dc, int row, RECT rc);
 void OnGroupArt();
 void StopGroupArt();
+void TrimGroupArt();  // drop covers without joining decode workers (compact / mini)
 size_t GroupArtBytes();
 void ReleaseGroupArt();
 bool HasBadge(int column, TrackId id);

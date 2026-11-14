@@ -391,4 +391,12 @@ void StopGroupArt() {
     ReleaseGroupArt();
 }
 
+// Compact / mini memory trim: drop decoded covers and pending jobs, but leave the decode workers
+// running. Stop() joins them and freezes the UI for however long the current JPEG decode takes.
+void TrimGroupArt() {
+    ReleaseGroupArt();
+    auto& c = Covers();
+    if (c.started) c.loader.SetReducedMemory(ReducedMemoryMode());
+}
+
 }  // namespace app

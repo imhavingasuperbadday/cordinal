@@ -116,7 +116,7 @@ void OnCommand(int id, int code, HWND ctl) {
             g.resumeToken = 0;
         }
         UpdateOrderButtons();
-        SavePreferences();
+        IniWrite(L"Player", L"ResumeOn", g.resumeOn ? L"1" : L"0");
         UpdateNowPlaying();
         return;
     }
@@ -145,14 +145,15 @@ void OnCommand(int id, int code, HWND ctl) {
     if (id >= IDM_REVERB_BASE && id < IDM_REVERB_BASE + (int)ReverbPreset::Count) {
         g.reverb.preset = (ReverbPreset)(id - IDM_REVERB_BASE);
         ApplyEffects();
-        SavePreferences();
+        IniWrite(L"Effects", L"Reverb", std::to_wstring((int)g.reverb.preset));
         return;
     }
     if (id >= IDM_REVERB_MIX_BASE && id < IDM_REVERB_MIX_BASE + (int)std::size(kReverbMixes)) {
         g.reverb.mix = kReverbMixes[id - IDM_REVERB_MIX_BASE];
         if (g.reverb.preset == ReverbPreset::Off) g.reverb.preset = ReverbPreset::Room;  // choosing an amount means wanting it
         ApplyEffects();
-        SavePreferences();
+        IniWrite(L"Effects", L"Reverb", std::to_wstring((int)g.reverb.preset));
+        IniWrite(L"Effects", L"ReverbAmount", F2S(g.reverb.mix));
         return;
     }
     if (id >= IDM_REPEAT_BASE && id < IDM_REPEAT_BASE + (int)Repeat::Count) {
@@ -180,7 +181,7 @@ void OnCommand(int id, int code, HWND ctl) {
     if (id >= IDM_THEME_BASE && id < IDM_THEME_BASE + (int)ThemeMode::Count && ThemeAvailable((ThemeMode)(id - IDM_THEME_BASE))) {
         g.themeMode = (ThemeMode)(id - IDM_THEME_BASE);
         ApplyTheme();
-        SavePreferences();
+        // Live theme is a session choice; Startup defaults (or Automatic saving) keeps it.
         return;
     }
     // Commands with no notification-specific state share one dispatch loop.
@@ -280,23 +281,33 @@ void OnCommand(int id, int code, HWND ctl) {
         {IDM_HEADPHONES, ShowHeadphones},
         {IDM_RG_ENABLE, [] {
              g.rgOn = !g.rgOn;
-             SavePreferences();
+             IniWrite(L"ReplayGain", L"Enabled", g.rgOn ? L"1" : L"0");
              RefreshGains();
              ShowMessage(g.rgOn ? L"ReplayGain on." : L"ReplayGain off.");
          }},
-        {IDM_RG_AUTO_SCAN, [] { g.rgAutoScan = !g.rgAutoScan; SavePreferences(); }},
-        {IDM_RG_ESTIMATE, [] { g.rgEstimate = !g.rgEstimate; SavePreferences(); }},
-        {IDM_LOUDNESS_COMP, [] { g.loudnessComp = !g.loudnessComp; ApplyEffects(); SavePreferences(); }},
+        {IDM_RG_AUTO_SCAN, [] {
+             g.rgAutoScan = !g.rgAutoScan;
+             IniWrite(L"ReplayGain", L"AutoMeasure", g.rgAutoScan ? L"1" : L"0");
+         }},
+        {IDM_RG_ESTIMATE, [] {
+             g.rgEstimate = !g.rgEstimate;
+             IniWrite(L"ReplayGain", L"EstimateUnmeasured", g.rgEstimate ? L"1" : L"0");
+         }},
+        {IDM_LOUDNESS_COMP, [] {
+             g.loudnessComp = !g.loudnessComp;
+             ApplyEffects();
+             IniWrite(L"Effects", L"LoudnessCompensation", g.loudnessComp ? L"1" : L"0");
+         }},
         {IDM_NIGHT_MODE, [] {
              g.nightMode = !g.nightMode;
              ApplyEffects();
-             SavePreferences();
+             IniWrite(L"Effects", L"NightMode", g.nightMode ? L"1" : L"0");
              ShowMessage(g.nightMode ? L"Night mode on: quiet parts are lifted and loud parts softened." : L"Night mode off.");
          }},
         {IDM_BITCRUSH, [] {
              g.bitcrush.enabled = !g.bitcrush.enabled;
              ApplyEffects();
-             SavePreferences();
+             IniWrite(L"Effects", L"Bitcrush", g.bitcrush.enabled ? L"1" : L"0");
              ShowMessage(g.bitcrush.enabled ? L"Bitcrush on. Its depth, rate and mix are in Preferences > Effects."
                                             : L"Bitcrush off.");
          }},
@@ -358,7 +369,7 @@ void OnCommand(int id, int code, HWND ctl) {
         case IDC_TIME:
             if (code == STN_CLICKED) {
                 g.timeRemaining = !g.timeRemaining;
-                SavePreferences();
+                IniWrite(L"Player", L"TimeRemaining", g.timeRemaining ? L"1" : L"0");
                 UpdateStatus();
             }
             break;
@@ -390,17 +401,17 @@ void OnCommand(int id, int code, HWND ctl) {
             break;
         case IDM_ALWAYS_ON_TOP:
             g.alwaysOnTop = !g.alwaysOnTop;
-            SavePreferences();
+            IniWrite(L"Window", L"AlwaysOnTop", g.alwaysOnTop ? L"1" : L"0");
             SetWindowPos(g.hwnd, g.alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
             break;
         case IDM_GROUP_ALBUMS:
             g.groupAlbums = !g.groupAlbums;
-            SavePreferences();
+            IniWrite(L"Window", L"GroupAlbums", g.groupAlbums ? L"1" : L"0");
             RefreshViewKeepingSelection();
             break;
         case IDM_SOUND_EFFECTS:
             g.soundEffects = !g.soundEffects;
-            SavePreferences();
+            IniWrite(L"Player", L"SoundEffects", g.soundEffects ? L"1" : L"0");
             PlaySfx(Sfx::Milestone);  // what-cheer!
             if (g.soundEffects && g.exclusive) ShowMessage(L"Sound effects stay silent while output is exclusive.");
             break;
@@ -416,7 +427,7 @@ void OnCommand(int id, int code, HWND ctl) {
         case IDM_OUTPUT_SHARED:
         case IDM_OUTPUT_EXCLUSIVE:
             g.exclusive = id == IDM_OUTPUT_EXCLUSIVE;
-            SavePreferences();
+            IniWrite(L"Player", L"Exclusive", g.exclusive ? L"1" : L"0");
             sfx::SetSuppressed(g.exclusive);  // lets go of the device before exclusive output asks for it
             g.engine.SetExclusive(g.exclusive);
             ShowMessage(g.exclusive ? L"Exclusive output: each track at its own rate, bit-perfect at 100% volume with EQ, "

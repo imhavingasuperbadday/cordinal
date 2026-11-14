@@ -8,7 +8,10 @@
 
 namespace app {
 
-namespace { uint64_t iniWriteFailures = 0; }
+namespace {
+uint64_t iniWriteFailures = 0;
+bool preferencesPending = false;
+}
 
 // Thin wrappers over the Win32 profile API, always targeting g.iniPath. Reads take a
 // default; IniWrite creates the section/key as needed. InitDataPaths() must have run. Values can
@@ -369,6 +372,8 @@ void SaveState() {
 
 // Save preferences as they change, without rewriting the library or capturing a session.
 void SavePreferences() {
+    preferencesPending = false;
+    if (g.hwnd) KillTimer(g.hwnd, kPrefsTimer);
     IniWrite(L"Suggestions", L"SavingModeChosen", g.preferenceSavingChosen ? L"1" : L"0");
     IniWrite(L"Window", L"DefaultSize", std::to_wstring((int)g.defaultSize));
     IniWrite(L"Window", L"DefaultMiniPlayer", g.defaultMiniPlayer ? L"1" : L"0");
@@ -382,6 +387,18 @@ void SavePreferences() {
     SaveTweaks();  // everything listed in the Tweaks registry (app_tweaks.cpp)
     SaveEq();
     SaveMainLayout();
+}
+
+// A full SavePreferences rewrites every tweak key through WritePrivateProfileStringW (~80 ms for a
+// typical profile here). Menu toggles and theme changes schedule that write for the next tick so
+// the click returns immediately; shutdown and explicit SavePreferences still flush now.
+void SavePreferencesSoon() {
+    preferencesPending = true;
+    if (g.hwnd) SetTimer(g.hwnd, kPrefsTimer, 50, nullptr);
+}
+
+void FlushPendingPreferences() {
+    if (preferencesPending) SavePreferences();
 }
 
 bool SaveBackupSettings(std::string& bytes) {

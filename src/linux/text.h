@@ -1,10 +1,10 @@
-// Text for the Linux front end through SDL3_ttf, with fallback fonts for scripts the main one lacks,
-// and a cache of shaped strings so a redraw reuses them. The UI font follows the theme the way the
-// Windows build's does (theme_palette.cpp): the system face at 9 pt, the theme's own face, or the
-// DELTARUNE pixel font built into the executable. Menus keep the system face in every theme, as
-// the Windows menu bar does.
+// Text for the Linux front end through its own text stack (textlayout.h), with fallback fonts for
+// scripts the main one lacks, and caches of shaped strings and glyph atlases so a redraw reuses
+// them. The UI font follows the theme the way the Windows build's does (theme_palette.cpp): the
+// system face at 9 pt, the theme's own face, or the DELTARUNE pixel font built into the
+// executable. Menus keep the system face in every theme, as the Windows menu bar does.
 #pragma once
-#include <SDL3/SDL.h>
+#include "platform/sdl_api.h"
 
 #include <string>
 #include <string_view>
@@ -15,7 +15,7 @@ namespace lx {
 
 // Normal and Bold are the UI font; Small is the same face for secondary dialog text; Title is the
 // dialogs' heading; Menu is the menu bar's and popup menus' system face.
-enum class Font { Normal, Bold, Small, Title, Menu, Count };
+enum class Font { Normal, Bold, Small, Title, Menu, Heading, Count };  // Heading: Preferences' page titles
 
 bool InitText(SDL_Renderer* renderer, float scale, const Theme& theme);  // again when either changes
 void ShutdownText();

@@ -268,7 +268,7 @@ bool ConvertCommand(int id) {
     }
     if (id >= IDM_CONVERT_MEMORY_BASE && id < IDM_CONVERT_MEMORY_BASE + (int)std::size(kConvertMemoryDays)) {
         g.convertMemory = (uint8_t)(id - IDM_CONVERT_MEMORY_BASE);
-        SavePreferences();
+        IniWrite(L"Convert", L"Memory", std::to_wstring(g.convertMemory));
         PruneConvertLogs(LogDir(), MemoryDays());
         g_canUndo = CanUndoConvert(LogDir());
         ShowMessage(L"Conversions can be undone for " + std::to_wstring(MemoryDays()) + (MemoryDays() == 1 ? L" day." : L" days."));
@@ -293,13 +293,13 @@ bool ConvertCommand(int id) {
             return true;
         case IDM_CONVERT_RECYCLE:
             g.convertRecycle = !g.convertRecycle;
-            SavePreferences();
+            IniWrite(L"Convert", L"Recycle", g.convertRecycle ? L"1" : L"0");
             ShowMessage(g.convertRecycle ? L"Converted originals will go to the Recycle Bin."
                                          : L"Converted originals will be kept where they are.");
             return true;
         case IDM_CONVERT_SHOW_ORIGINALS: {
             g.convertShowOriginals = !g.convertShowOriginals;
-            SavePreferences();
+            IniWrite(L"Convert", L"ShowOriginals", g.convertShowOriginals ? L"1" : L"0");
             std::vector<TrackId> reread;
             size_t count = 0;
             for (TrackId t = 0; t < (TrackId)g_lib.Count(); ++t)

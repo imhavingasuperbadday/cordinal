@@ -219,12 +219,45 @@ void DrawCoverFrame(HDC dc, const RECT& r) {
 
 void ThemeEqControls();
 
+namespace {
+Palette s_albumPal;         // the palette AlbumPalette turned toward the playing album, when it is in use
+double s_albumHue = -1;     // the hue it was turned toward (-1: the theme's own palette)
+int s_albumStrength = -1;   // and at which strength
+bool s_albumOnly = false;   // ApplyTheme for a new album colour alone: the layout and frame stay as they are
+
+// The hue the whole interface should take now: the player's (RefreshPlayerTint) with Album colours set
+// to the whole interface, else none. Only Light and Dark turn, so other themes want none: otherwise each
+// new album would re-apply their theme for nothing.
+double WantedAlbumHue() {
+    if (AlbumColourConfig().mode != AlbumColours::Interface) return -1;
+    const Palette& base = ThemePalette(g.themeMode);
+    return &base == &LightPalette() || &base == &DarkPalette() ? g.playerHue : -1;
+}
+}  // namespace
+
+bool AlbumPaletteStale() {
+    return WantedAlbumHue() != s_albumHue || (s_albumHue >= 0 && AlbumColourConfig().strength != s_albumStrength);
+}
+
+bool RefreshAlbumPalette() {
+    if (!AlbumPaletteStale()) return false;
+    const bool outer = s_albumOnly;  // ApplyTheme calls RefreshPlayerTint, which may come back here
+    s_albumOnly = true;
+    ApplyTheme();
+    s_albumOnly = outer;
+    return true;
+}
+
 // Resolves light/dark from the mode (System follows the OS setting) and repaints all
-// themed chrome from the active Palette. Safe to call before the main window exists:
+// themed chrome from the active Palette, turned toward the playing album's colour when Album
+// colours cover the whole interface. Safe to call before the main window exists:
 // it then only builds the brushes and menu theme, which is how startup applies the
 // theme before creating any window.
 void ApplyTheme() {
     g.pal = &ThemePalette(g.themeMode);
+    s_albumHue = WantedAlbumHue();
+    s_albumStrength = AlbumColourConfig().strength;
+    if (s_albumHue >= 0 && AlbumPalette(*g.pal, s_albumHue, s_albumPal)) g.pal = &s_albumPal;
     g.dark = g.pal->dark;
     ApplyMenuTheme(g.dark);
     for (HBRUSH* b : {&g.fieldBrush, &g.surfaceBrush})
@@ -266,12 +299,14 @@ void ApplyTheme() {
     SendMessageW(g.status, SB_SETBKCOLOR, 0, (LPARAM)SurfaceColor());
     SetWindowTheme(g.tabs, L"", L"");
     ApolloTheme();
-    // Player arrangements can change even when both themes use the system font.
-    if (fontsChanged || !g.startupTheme) Layout();
+    // Player arrangements can change even when both themes use the system font; an album's colour
+    // changes neither the arrangement nor the frame.
+    if (fontsChanged || (!g.startupTheme && !s_albumOnly)) Layout();
     // The first pass runs while the window is still hidden and about to paint from scratch, so
     // the frame recalculation, fountain wake and invalidations would only be repeated work.
     if (!g.startupTheme) {
-        SetWindowPos(g.hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+        if (!s_albumOnly)
+            SetWindowPos(g.hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
         WaveformTrackChanged(true);
         FountainWake();  // a theme change starts or stops the DELTARUNE-only effect immediately
         RedrawWindow(g.hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME);

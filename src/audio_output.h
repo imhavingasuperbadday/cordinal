@@ -1,5 +1,5 @@
-// WASAPI output following the Windows default device (on Linux: a PipeWire stream, see
-// linux/audio_pipewire.cpp). Renders interleaved stereo float.
+// WASAPI output following the Windows default device (on Linux: a PipeWire or PulseAudio stream,
+// see linux/audio_linux.cpp). Renders interleaved stereo float.
 //
 // Shared mode: through the Windows mixer at the device's mix rate (the engine resamples), in the
 // device's own stereo mix format when that is float or 16/24/32-bit PCM. Any other mix layout is
@@ -22,7 +22,7 @@
 enum class OutputMode { Shared, Exclusive };
 
 #ifndef _WIN32
-// An audio sink PipeWire offers, for choosing where cordinal plays.
+// An audio sink the sound server (PipeWire or PulseAudio) offers, for choosing where cordinal plays.
 struct OutputDevice {
     std::string node;         // node.name, what the stream is pointed at
     std::string description;  // what to show
@@ -88,7 +88,7 @@ public:
 #ifdef _WIN32
     ~AudioOutput() { Stop(); }
 #else
-    AudioOutput();  // out of line: PipewireState is complete only in audio_pipewire.cpp
+    AudioOutput();  // out of line: PipewireState is complete only in audio_linux.cpp
     ~AudioOutput();
 #endif
     bool Start(RenderFn render, ResetFn reset, std::wstring& error);
@@ -124,7 +124,7 @@ public:
     // The sink to play on: a PipeWire node name, or empty for the system's default (which the session
     // manager moves as the user changes it). Re-opens the stream.
     void SetDevice(const std::string& node);
-    // For the PipeWire stream's callback.
+    // For the sound stream's callbacks.
     size_t RenderInto(float* out, size_t frames, unsigned long long& sourcePos);
     void SetPlayed(unsigned long long pos) { played_ = pos; }
     void SetGraphRate(unsigned graphRate);

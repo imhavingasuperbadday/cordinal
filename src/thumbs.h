@@ -41,6 +41,8 @@ public:
     struct MemoryUsage { size_t pending, ready, readyBytes, workers; };
     MemoryUsage Memory() const;
     void DropPending();  // e.g. after the view jumped somewhere else
+    // Queue limits only: keeps workers running so compact/mini switches do not join a decode.
+    void SetReducedMemory(bool reduced);
     // Deletes the cached thumbnails of `key` at every size: its cover changed without its file
     // changing (a cover.jpg was saved next to it).
     void Forget(uint64_t key);

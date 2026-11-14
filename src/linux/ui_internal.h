@@ -258,9 +258,9 @@ extern AboutBox g_about;
 // Radio station icons by URL, kept for the life of the window.
 extern std::map<std::string, SDL_Texture*> g_radioArt;
 
-// The transport glyphs, in the thin line style of Segoe MDL2 Assets, `s` pixels tall at the center
-// of `r`.
-enum class Icon { Prev, Play, Pause, Next, Shuffle, Repeat, RepeatOne, Resume, Speaker };
+// The transport glyphs Windows draws from Segoe MDL2 Assets (and the speaker, from Segoe UI Symbol),
+// as Fluent UI System Icons at the Windows glyph size, centred in `r`.
+enum class Icon { Prev, Play, Pause, Next, Shuffle, Repeat, RepeatOne, Resume, Speaker, Mute };
 
 MenuItem Item(std::string label, int action, std::string shortcut = {}, bool checked = false, bool enabled = true);
 MenuItem Separator();

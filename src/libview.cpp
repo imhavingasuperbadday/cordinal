@@ -416,6 +416,22 @@ void LibViewReleaseGraphics() {
     v.dw.Reset(); v.d2d.Reset();
 }
 
+// Compact / mini: free the Direct2D target (GPU vs software changes with ReducedMemoryMode) and
+// drop pending thumbs, but keep the decode workers. A full Stop() would join them on the UI thread.
+void LibViewTrimMemory() {
+    if (v.loaderStarted) {
+        v.loader.DropPending();
+        v.loader.SetReducedMemory(ReducedMemoryMode());
+    }
+    DropBitmaps();
+    v.bitmaps.rehash(0);
+    ReleaseTarget();
+    v.ellipsis.Reset();
+    v.fTitle.Reset(); v.fText.Reset(); v.fSmall.Reset(); v.fNum.Reset(); v.fHeading.Reset(); v.fSection.Reset();
+    v.fBig.Reset(); v.fStars.Reset(); v.fGlyph.Reset();
+    v.dw.Reset(); v.d2d.Reset();
+}
+
 // kBusyTimer (app_badges.cpp): keeps a shown spinner turning, clears one that stopped, and looks
 // for newly busy tracks once a second (a full repaint each frame would cost too much for that).
 void LibViewBusyTick(bool any) {

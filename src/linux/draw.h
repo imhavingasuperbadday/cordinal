@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string_view>
 #include <vector>
 
 namespace lx {
@@ -75,5 +76,10 @@ bool DrawLiveFountain(const Rect& area, double progress, const Palette& p);  // 
 void DrawStartupReview(const Palette& p, float mouseX, float mouseY);
 bool StartupReviewMouseDown(float x, float y, int button);  // true when the card took the click
 bool StartupReviewOpen();
+
+// A Fluent UI System Icon ("play", "speaker_2", "dismiss", ...) `px` pixels square centred on (cx, cy),
+// where Windows draws a Segoe MDL2 Assets glyph of that pixel height (icons.cpp). False when unknown.
+bool DrawFluentIcon(std::string_view name, float cx, float cy, float px, uint32_t rgb, uint8_t alpha = 255);
+void ReleaseIconTextures();
 
 }  // namespace lx

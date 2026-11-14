@@ -151,13 +151,15 @@ void Insert(Node& target, Zone zone, int panel) {
     target.a = first ? std::move(fresh) : std::move(old);
     target.b = first ? std::move(old) : std::move(fresh);
 }
+// As app_big.cpp's TabRects and CloseBox: tabs from 4 px in, the label's width plus 46, 2 px apart,
+// 3 px below the header's top; the close box 6 px in from the tab's right.
 Rect TabRect(const Node& n, int index) {
-    float x = n.header.x;
-    for (int i = 0; i < index; ++i) x += TextWidth(Font::Normal, kNames[n.tabs[i]]) + S(44);
-    float w = TextWidth(Font::Normal, kNames[n.tabs[index]]) + S(44);
-    return {x, n.header.y, std::max(0.f, std::min(w, n.header.R() - x)), n.header.h};
+    float x = n.header.x + S(4);
+    for (int i = 0; i < index; ++i) x += TextWidth(Font::Normal, kNames[n.tabs[i]]) + S(46) + S(2);
+    float w = TextWidth(Font::Normal, kNames[n.tabs[index]]) + S(46);
+    return {x, n.header.y + S(3), std::max(0.f, std::min(w, n.header.R() - x)), std::max(0.f, n.header.h - S(3))};
 }
-Rect CloseRect(Rect r) { return {r.R() - S(24), r.y + S(4), S(20), std::max(0.f, r.h - S(8))}; }
+Rect CloseRect(Rect r) { return {r.R() - S(26), r.y + S(4), S(20), std::max(0.f, r.h - S(8))}; }
 void LayoutNode(Node& n, Rect rect) {
     n.rect = rect; n.header = n.splitter = {};
     if (n.Split()) {
@@ -265,20 +267,32 @@ void LayoutCompact(Rect area, Rect& library) {
 }
 void PaintNode(const Node& n, const Palette& p) {
     if (n.Split()) {
-        Fill(n.splitter, p.border); PaintNode(*n.a, p); PaintNode(*n.b, p); return;
+        PaintNode(*n.a, p);
+        PaintNode(*n.b, p);
+        // The splitter: a thin line in the middle of its gap, as on Windows.
+        Rect line = n.splitter;
+        if (n.vertical) line.y = std::floor(line.y + line.h / 2), line.h = 1;
+        else line.x = std::floor(line.x + line.w / 2), line.w = 1;
+        Fill(line, p.border);
+        return;
     }
-    Fill(n.header, p.surface);
-    Frame(n.header, p.border);
+    // The header is the window's own background with a rule under it; the tabs sit on it.
+    Fill(n.header, p.bg);
+    Fill({n.header.x, n.header.B() - 1, n.header.w, 1}, p.border);
     SDL_Rect clip{(int)n.header.x, (int)n.header.y, (int)n.header.w, (int)n.header.h};
     SDL_SetRenderClipRect(g.renderer, &clip);
     for (int i = 0; i < (int)n.tabs.size(); ++i) {
         Rect tab = TabRect(n, i);
         if (tab.w <= 0) continue;
-        bool active = i == n.active;
-        if (active) Fill(tab, p.select);
-        DrawText(Font::Normal, kNames[n.tabs[i]], tab.x + S(10), TextY(tab), active ? p.selectText : p.sub, tab.w - S(32));
+        // Windows: the active tab in the window's colour under an accent bar, in bold; the one under the
+        // mouse lit; the close glyph (MDL2 ChromeClose) on those two only.
+        const bool active = i == n.active, hot = g_popups.empty() && tab.In(g_mouseX, g_mouseY);
+        if (active || hot) Fill(tab, active ? p.bg : p.hover);
+        if (active) Fill({tab.x, tab.y, tab.w, S(2)}, p.accent);
+        DrawText(active ? Font::Bold : Font::Normal, kNames[n.tabs[i]], tab.x + S(12), TextY(tab), active ? p.text : p.sub, tab.w - S(40));
         Rect close = CloseRect(tab);
-        DrawText(Font::Normal, "×", close.x, TextY(close), active ? p.selectText : p.sub, close.w, 1);
+        if (hot && close.In(g_mouseX, g_mouseY)) Fill(close, p.select);
+        if (active || hot) DrawFluentIcon("dismiss", close.x + close.w / 2, close.y + close.h / 2, std::round(S(13) * 16 / 14), p.sub);
         if (B.keyboardFocus && n.tabs[i] == B.keyboardPanel) Frame(tab, p.accent);
     }
     SDL_SetRenderClipRect(g.renderer, nullptr);

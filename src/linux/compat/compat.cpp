@@ -913,7 +913,7 @@ HANDLE GetCurrentThread() { return (HANDLE)(intptr_t)-2; }
 
 BOOL SetThreadPriority(HANDLE, int priority) {
     // Linux threads have their own nice value. Lowering it needs no privileges; raising it is
-    // only attempted (the audio thread gets real-time scheduling from PipeWire instead).
+    // only attempted (the audio threads ask for real-time scheduling themselves, see linux/pw_native.cpp).
     int nice = priority == THREAD_MODE_BACKGROUND_BEGIN ? 10
                : priority == THREAD_MODE_BACKGROUND_END ? 0
                : priority <= THREAD_PRIORITY_LOWEST     ? 5

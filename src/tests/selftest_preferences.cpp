@@ -910,6 +910,43 @@ void TestTweaks(const std::wstring& scratch) {
                   IniRead(L"Window", L"WaveColor", L"") == L"0",
               L"waveform colour, its unplayed part and the mood waveform colours persist both ways and drive the colours");
     } else Check(false, L"View preferences includes Waveform colour, its unplayed part and Mood waveform colours");
+    // Album colours and their strength persist under [Window], defaulting to the player's background at Normal.
+    const Tweak* albumColors = FindTweak("view.album_colors");
+    const Tweak* albumStrength = FindTweak("view.album_color_strength");
+    if (albumColors && albumStrength) {
+        const bool defaults = albumColors->def == (float)AlbumColours::Player && albumStrength->def == 1;
+        SetTweak(*albumColors, (double)AlbumColours::Interface);
+        SetTweak(*albumStrength, 3);
+        AlbumColourConfig() = {};
+        LoadPreferences();
+        const bool kept = AlbumColourConfig().mode == AlbumColours::Interface && AlbumColourConfig().strength == 3 &&
+                          IniRead(L"Window", L"AlbumColors", L"") == L"2" &&
+                          IniRead(L"Window", L"AlbumColorStrength", L"") == L"3";
+        // A theme that keeps its own look (Apollo) takes no album hue, so a new album's colour doesn't
+        // re-apply it; Light does.
+        bool apolloStill = true, lightTurns = true;
+        if (ThemeAvailable(ThemeMode::Apollo)) {
+            const ThemeMode theme = g.themeMode;
+            const double hue = g.playerHue;
+            for (ThemeMode t : {ThemeMode::Apollo, ThemeMode::Light}) {
+                g.themeMode = t;
+                g.playerHue = 40;
+                ApplyTheme();
+                g.playerHue = 200;
+                (t == ThemeMode::Apollo ? apolloStill : lightTurns) = AlbumPaletteStale() == (t == ThemeMode::Light);
+            }
+            g.themeMode = theme;
+            g.playerHue = hue;
+            ApplyTheme();
+        }
+        SetTweak(*albumColors, (double)AlbumColours::Player);
+        SetTweak(*albumStrength, 1);
+        LoadPreferences();
+        Check(apolloStill && lightTurns, L"a new album's colour re-applies Light, but not a theme that keeps its own look");
+        Check(defaults && kept && AlbumColourConfig().mode == AlbumColours::Player && AlbumColourConfig().strength == 1 &&
+                  !AlbumPaletteStale() && P().from == nullptr,
+              L"album colours and their strength persist both ways, the player's background at Normal by default");
+    } else Check(false, L"View preferences includes Album colours and Album colour strength");
     if (const Tweak* reflection = FindTweak("view.wave_reflection")) {
         // Upper half, Mirrored and Full height, through WaveReflection (the older on/off key, so 0 and 1
         // mean what they always did) and WaveFullHeight beside it.
@@ -1385,6 +1422,52 @@ void TestThemes() {
     Check(panelLegible && panelTinted && AlbumPanelSurface(DarkPalette(), -1) == DarkPalette().surface2 &&
               AlbumPanelSurface(foobar, 0) == AlbumPanelSurface(foobar, 200),
           L"an open album's panel takes its cover's hue and keeps Light and Dark legible");
+    // Album colours: Off keeps the player and an open album's panel neutral; the strength scales their wash
+    // without costing legibility; the whole interface turns Light and Dark toward every hue at every
+    // strength and keeps every legibility rule; other themes, and a gray cover, keep the theme's palette.
+    {
+        const AlbumColourSettings saved = AlbumColourConfig();
+        auto apart = [](Rgb a, Rgb b) {
+            int d = 0;
+            for (int s : {16, 8, 0}) d += std::abs((int)(a >> s & 255) - (int)(b >> s & 255));
+            return d;
+        };
+        bool off = true, scaled = true, whole = true, readable = true;
+        for (const Palette* p : {&LightPalette(), &DarkPalette()}) {
+            AlbumColourConfig() = {AlbumColours::Off, 1};
+            off = off && PlayerSurface(*p, 120) == PlayerSurface(*p, -1) && AlbumPanelSurface(*p, 120) == AlbumPanelSurface(*p, -1);
+            for (double hue = 0; hue < 360; hue += 15) {
+                for (int strength = 0; strength < kAlbumStrengths; ++strength) {
+                    AlbumColourConfig() = {AlbumColours::Interface, strength};
+                    for (Rgb s : {PlayerSurface(*p, hue), AlbumPanelSurface(*p, hue)})
+                        readable = readable && Contrast(p->text, s) >= 7 && Contrast(p->sub, s) >= 4.5 &&
+                                   Contrast(p->accent, s) >= 3;
+                    Palette album = *p;
+                    if (!AlbumPalette(*p, hue, album) || !PaletteLegibility(album).empty() || album.from != p ||
+                        album.bg == p->bg || album.select == p->select || album.accent == p->accent) {
+                        whole = false;
+                        continue;
+                    }
+                    // Its own player and panel surfaces, and the row stripes, keep the text legible too.
+                    for (Rgb s : {PlayerSurface(album, hue), AlbumPanelSurface(album, (int)(hue + 120) % 360), RowStripe(album)})
+                        readable = readable && Contrast(album.text, s) >= 7 && Contrast(album.sub, s) >= 4.5;
+                }
+                AlbumColourConfig() = {AlbumColours::Player, 0};
+                const int subtle = apart(PlayerSurface(*p, hue), PlayerSurface(*p, -1));
+                AlbumColourConfig() = {AlbumColours::Player, 3};
+                scaled = scaled && apart(PlayerSurface(*p, hue), PlayerSurface(*p, -1)) > subtle;
+            }
+        }
+        Palette unused = foobar;
+        const bool refused = !AlbumPalette(foobar, 0, unused) && !AlbumPalette(DarkPalette(), -1, unused) &&
+                             unused.bg == foobar.bg;
+        AlbumColourConfig() = saved;
+        batch.Next(L"album colours: off, stronger or across the whole interface, Light and Dark stay legible");
+        Check(off && scaled && whole && readable && refused,
+              L"album colours: off (%d), stronger (%d) or across the whole interface (%d), Light and Dark stay legible (%d), "
+              L"other themes keep theirs (%d)",
+              off, scaled, whole, readable, refused);
+    }
     batch.Next(L"a release offers Light, Dark, Apollo and the system theme; a saved theme it lacks opens as Light or Dark");
     bool offered = true;
     for (ThemeMode t : {ThemeMode::System, ThemeMode::Light, ThemeMode::Dark, ThemeMode::Apollo})

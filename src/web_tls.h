@@ -1,8 +1,8 @@
 // HTTPS for the web server: TLS server sessions driven over buffers, the server's certificates with
 // their private key, and the ACME account key. On Windows (web_tls.cpp) SChannel and CNG: the key
 // lives in the user's CNG key store where SChannel can use it, and secur32.dll and ncrypt.dll load
-// only when the server first needs them. On Linux (linux/tls_openssl.cpp) OpenSSL: a key name is
-// the path of an owner-only file holding the key.
+// only when the server first needs them. On Linux (linux/tls_bearssl.cpp) the compiled-in BearSSL: a
+// key name is the path of an owner-only file holding the key.
 #pragma once
 #ifdef _WIN32
 #include <windows.h>
@@ -46,7 +46,7 @@ public:
 #ifdef _WIN32
     CredHandle* Credentials() { return &credentials_; }
 #else
-    void* Context() const { return context_; }  // the SSL_CTX
+    void* Context() const { return context_; }  // the key and chain as BearSSL takes them
 #endif
     uint64_t NotAfter() const { return notAfter_; }
     const std::vector<std::string>& Names() const { return names_; }
@@ -88,9 +88,7 @@ private:
     bool hasContext_ = false;
     unsigned header_ = 0, trailer_ = 0, maximum_ = 0;
 #else
-    void* ssl_ = nullptr;  // the SSL, reading and writing through memory BIOs
-    void* in_ = nullptr;
-    void* out_ = nullptr;
+    void* engine_ = nullptr;  // the BearSSL server engine with its record buffers
 #endif
 };
 

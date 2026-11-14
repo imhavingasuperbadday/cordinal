@@ -231,6 +231,16 @@ void ThumbLoader::DropPending() {
     cv_.notify_all();
 }
 
+void ThumbLoader::SetReducedMemory(bool reduced) {
+    std::lock_guard<std::mutex> lock(mx_);
+    pendingLimit_ = reduced ? 64 : 128;
+    readyLimit_ = reduced ? 1 : 2;
+    while (results_.size() > readyLimit_) {
+        active_.erase({results_.back()->key, results_.back()->size});
+        results_.pop_back();
+    }
+}
+
 // Worker loop. Newest job first (the visible rows). Decode order: disk cache, else embedded/sidecar
 // art, then cache it. Legacy ".none" markers are ignored: a miss can mean an unavailable file or
 // a cover that has not been added yet. Before queueing, it waits for room and re-checks the

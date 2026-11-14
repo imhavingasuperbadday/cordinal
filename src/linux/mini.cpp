@@ -6,7 +6,7 @@
 // window leaves the corners square.
 #include "draw.h"
 
-#include <SDL3/SDL.h>
+#include "platform/sdl_api.h"
 
 namespace lx {
 
@@ -88,6 +88,11 @@ void Arc(float cx, float cy, float r, double from, double to, float width, uint3
 }
 
 void Glyph(int part, SDL_FPoint c, float r, bool pause, uint32_t color) {
+    // Windows draws Segoe MDL2 Assets here (app_mini.cpp): 16 px, the play button's 20 px, its play
+    // triangle a little right of centre. The same outlines as the toolbar's, at 16/14 of those sizes.
+    const char* name = part == kPlay ? (pause ? "pause" : "play") : part == kPrev ? "previous" : "next";
+    const float px = std::round(S(part == kPlay ? 20 : 16) * 16 / 14);
+    if (DrawFluentIcon(name, c.x + (part == kPlay && !pause ? S(2) : 0), c.y, px, color)) return;
     const float h = r * 0.5f;
     if (part == kPlay && pause) {
         Fill({c.x - h * 0.8f, c.y - h, h * 0.6f, 2 * h}, color);

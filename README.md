@@ -9,7 +9,7 @@ One 1.8 MB program. No installer, no runtime, no codecs to add.
 
 <div align="center">
 
-Current release: **0.1.11** · `cordinal.exe`, 1,834,496 bytes<br>
+Current release: **0.1.12** · `cordinal.exe`, 1,844,736 bytes<br>
 **[Download](https://github.com/imhavingasuperbadday/cordinal/releases/latest)** ·
 [Getting started](#getting-started) · [Guide](#guide) · [Building](#building) ·
 [Issues](https://github.com/imhavingasuperbadday/cordinal/issues)
@@ -76,7 +76,7 @@ cordinal's own lossless `.cord`.
 
 ### Make it yours
 
-- Light, Dark, or follow Windows
+- Light, Dark, or follow Windows, coloured by the playing album's cover as much or as little as you like
 - Window sizes from Big mode down to a mini player, with dockable panels and layout presets
 - Columns, title formats, and a seek bar that can be a waveform or a moodbar
 - Packs: folders or `.cordpack` files that add columns, layouts, EQ presets and themes
@@ -296,6 +296,9 @@ panel and choose **Save lyrics to tags** (undoable) or **Save as .lrc file** (ne
 **View ▸ Artist info...** (or a track's right-click menu) shows the selected or playing track's
 artist with the opening of their English Wikipedia article and buttons for MusicBrainz, Wikipedia
 and the official site. It shows an artist only when exactly one MusicBrainz artist has that name.
+Below the article is their discography: their albums and EPs as MusicBrainz lists them, oldest
+first, with the ones already in your library marked **In library**. Tick **Only albums not in my
+library** to see what you're missing; double-click one (click on Linux) to open its MusicBrainz page.
 
 ### Scrobbling
 
@@ -382,6 +385,16 @@ while paused (the text colour if the waveform is amber or yellow), red when play
 shows each track's moodbar; tracks not seen before fill in while nothing else is being prepared, and
 a ReplayGain scan prepares them all.
 
+### Album colours
+
+**Preferences ▸ View ▸ Album colours** sets how much of the window takes the colour of
+the playing album's cover. **Player background** (the default) washes the player and an open
+album's panel with it. **Whole interface** turns everything toward it: the list, the panels, the
+borders, the selection, and the accent that marks what's playing. **Off** keeps every surface
+neutral. **Album colour strength** goes from Subtle to Bold. Text always stays readable: a colour
+that would cost it contrast is held back. Album colours apply to Light and Dark; other themes keep
+their own look.
+
 ### Layouts, packs and helpers
 
 **View ▸ Window size** offers Compact, Big mode plus and Big mode, down to the mini player
@@ -459,23 +472,50 @@ carries those.
 
 ## Linux (preview)
 
-A native Linux build shares the library, decoders, tags and engine with Windows. Its window is drawn
-through SDL3, sound goes through PipeWire, and media keys and the tray use D-Bus. It has the same
-features as Windows but is less tested than the Windows build. The published program is built on
-Debian 13 for 64-bit x86, and it uses that system's libraries: SDL3, SDL3_ttf, PipeWire,
-fontconfig and OpenSSL 3.
+A native Linux build shares the library, decoders, tags and engine with Windows. Its window opens on
+Wayland or X11, sound goes to PipeWire (or to PulseAudio where there is no PipeWire), and media keys
+and the tray use D-Bus. It has the same features as Windows but is less tested than the Windows
+build. The published program is built on Debian 13 for 64-bit x86 and needs no libraries from the
+distribution beyond glibc 2.36 or newer: the C++ runtime is linked in, and everything below is the
+program's own code. The window talks to the Wayland compositor or the X server over their protocols,
+without libSDL3, libwayland, libX11 or libxcb: xdg-shell windows with server-side decorations,
+fractional scaling, cursor shapes, the clipboard, drag and drop and text input on Wayland; MIT-SHM
+drawing, XKB keymaps, the clipboard, drag and drop and EWMH hints on X11. Keymaps are read by the
+program, without libxkbcommon, and it follows the desktop's scale (`Xft.dpi` and XSETTINGS on X11,
+the compositor's preferred scale on Wayland). Drawing is software, so no GPU driver is loaded. File
+dialogs use the desktop portal (with a simple built-in one when there is no portal), and links open
+through the portal or `xdg-open`. HTTPS is built in (BearSSL, compiled into the program, TLS 1.2) and trusts the system's root
+certificates, the `ca-certificates` package on most distributions. Fonts are found by the program
+itself: it indexes the TrueType and OpenType fonts in `/usr/share/fonts`, `/usr/local/share/fonts`,
+`~/.local/share/fonts`, `~/.fonts` and the directories fontconfig's configuration names, keeps the
+index in `$XDG_CACHE_HOME/cordinal` (`~/.cache/cordinal`), and follows that configuration's aliases
+the way fontconfig does, without the fontconfig library. Text is laid out and drawn by the program
+too, without SDL3_ttf, FreeType or HarfBuzz: TrueType and CFF outlines, color emoji, kerning,
+ligatures, Arabic and Hebrew right to left, and Indic and Thai shaping. Sound is sent by the
+program's own clients for PipeWire's and PulseAudio's protocols, without libpipewire or libpulse: it
+plays on the PipeWire server when one is running and otherwise on PulseAudio (`CORDINAL_AUDIO=pipewire`
+or `pulse` picks one). Exclusive output asks PipeWire to run at the track's rate; PulseAudio always
+mixes.
 
-On Debian 13 and newer, Ubuntu 25.10 and newer, Fedora 42 and newer, openSUSE Tumbleweed, and Arch
-and its derivatives, one command installs it. Libraries come from the repositories already configured
-on the machine. The download is checked against the release checksum before it is unpacked.
+The window is drawn to look like the Windows build: the same layout, colours and Preferences window
+(page list, search with a scope, switches, drop-downs and Reset buttons), and the transport, speaker
+and close icons from Microsoft's open Fluent UI System Icons where Windows uses Segoe MDL2 Assets. Text
+is in Segoe UI where it is installed, then Selawik (Microsoft's open stand-in for it), then the
+desktop's sans. On Wayland the window offers its icon through `xdg-toplevel-icon` where the compositor
+has it; elsewhere the application menu's icon shows, as `install.sh` installs it.
+
+On Debian 12 and newer, Ubuntu 24.04 and newer, Fedora, openSUSE, Arch and their derivatives, and
+other 64-bit x86 glibc systems, one command installs it. It installs no libraries; only when the
+system has no TrueType or OpenType font at all does it add one from the repositories already
+configured on the machine. The download is checked against the release checksum before it is unpacked.
 
 ```sh
 curl -fsSL https://github.com/imhavingasuperbadday/cordinal/releases/latest/download/install.sh | sh
 ```
 
 Run it again to update. Replace the final `sh` with `sh -s -- --uninstall` to remove it; your
-library and settings stay. `sh -s -- --dry-run` prints the package names and stops. Ubuntu 24.04 and
-Debian 12 do not publish SDL3, and Alpine's musl C library cannot run this build. To install a
+library and settings stay. `sh -s -- --dry-run` prints what it would do and stops. Systems older than glibc 2.36 (Ubuntu 22.04,
+Debian 11) cannot run the published build, and neither can Alpine's musl C library. To install a
 release you already unpacked, run `sh install.sh` in that directory.
 
 ## Building
@@ -491,8 +531,12 @@ pinned UPX packer and checking its hash. Releases use cordinal's own packer: `bu
 additionally needs [LLVM-MinGW](https://github.com/mstorsjo/llvm-mingw)'s `clang++` on `PATH` and
 Python 3.14 (see [cdpack/README.md](cdpack/README.md)). Every mode writes `build\cordinal.exe`.
 
-**Linux** needs CMake, a C++20 compiler, SDL3, SDL3_ttf, PipeWire, fontconfig and OpenSSL
-3:
+**Linux** needs CMake, a C compiler and a C++20 compiler, and no libraries: TLS comes from the
+BearSSL source in `src/third_party/bearssl`, and the window, input and drawing from
+`src/linux/platform`. `-DCORDINAL_PORTABLE=OFF` links the C++ runtime from the system instead of
+into the program. `-DCORDINAL_SELAWIK=ON` compiles in the Selawik font (SIL OFL 1.1, which the FSF
+counts as GPL-incompatible, so it is off by default) for the Windows look where Segoe UI and Selawik
+are not installed:
 
 ```sh
 cmake -S . -B build-linux && cmake --build build-linux

@@ -8,6 +8,7 @@
 #include "coverfetch.h"
 #include "coverupload.h"
 #include "customcover.h"
+#include "library.h"
 #include "metadata_fetch.h"
 #include "tags.h"
 #include "tagundo.h"
@@ -15,7 +16,9 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cwctype>
 #include <string>
 #include <vector>
@@ -539,10 +542,106 @@ inline Group CoverAddresses() {
     return g;
 }
 
+// Artist info's discography: MusicBrainz's release groups, sorted by year, and which of them the
+// library already has.
+inline Group Discography() {
+    Group g{"discography: an artist's albums and EPs, and the ones the library has"};
+    const char* page =
+        R"j({"release-group-count":250,"release-groups":[)j"
+        R"j({"id":"1b022e01-4da6-387b-8658-8678046e4cef","title":"Nevermind","primary-type":"Album","secondary-types":[],"first-release-date":"1991-09-24"},)j"
+        R"j({"id":"f1afec0b-26dd-3db5-9aa1-c91229a74a24","title":"Bleach","primary-type":"Album","first-release-date":"1989-06-15"},)j"
+        R"j({"id":"2e1b2a6c-3d4f-4c5d-8e9f-0a1b2c3d4e5f","title":"MTV Unplugged\tin New York","primary-type":"Album","secondary-types":["Live"],"first-release-date":"1994-11"},)j"
+        R"j({"id":"3e1b2a6c-3d4f-4c5d-8e9f-0a1b2c3d4e5f","title":"Hormoaning","primary-type":"EP","first-release-date":""},)j"
+        R"j({"id":"../../../etc/passwd/aaaaaaaaaaaaaaaaaaa","title":"Bad id","primary-type":"Album"},)j"
+        R"j({"id":"4e1b2a6c-3d4f-4c5d-8e9f-0a1b2c3d4e5f","title":"","primary-type":"Album"}]})j";
+    int total = 0;
+    auto groups = online::ParseReleaseGroups(page, &total);
+    g.Add(total == 250 && groups.size() == 4, "valid entries are kept, a bad id or an empty title is not, and the total is read");
+    g.Add(groups.size() == 4 && groups[0].type == "Album" && groups[0].year == 1991 && groups[2].type == "Live" &&
+              groups[2].year == 1994 && groups[2].title == "MTV Unplugged in New York" && groups[3].type == "EP" &&
+              groups[3].year == 0,
+          "a secondary type names the kind, an unknown date has no year, and control characters become spaces");
+    online::SortReleaseGroups(groups);
+    g.Add(groups.size() == 4 && groups[0].title == "Bleach" && groups[1].title == "Nevermind" && groups[3].title == "Hormoaning",
+          "earliest first, an unknown year last");
+    Library lib;
+    auto add = [&](const wchar_t* path, const char* artist, const char* albumArtist, const char* album) {
+        TrackId id = lib.Add(path);
+        lib[id].artist = lib.Intern(artist);
+        lib[id].albumArtist = lib.Intern(albumArtist);
+        lib[id].album = lib.Intern(album);
+    };
+    add(L"C:\\music\\a.flac", "Nirvana", "", "Nevermind (Deluxe Edition)");
+    add(L"C:\\music\\b.flac", "Nirvana", "", "Nevermind (Deluxe Edition)");
+    add(L"C:\\music\\c.flac", "Kurt Cobain", "NIRVANA", "Hormoaning");
+    add(L"C:\\music\\d.flac", "Nirvana UK", "", "Bleach");
+    add(L"C:\\music\\e.flac", "Nirvana", "", "");
+    auto owned = online::LibraryAlbumsBy(lib, "Nirvana");
+    g.Add(owned.size() == 2, "the library's albums by the artist or album artist, each once, and no namesake's");
+    online::MarkOwned(groups, owned);
+    g.Add(groups.size() == 4 && !groups[0].owned && groups[1].owned && !groups[2].owned && groups[3].owned,
+          "an edition note doesn't hide an owned album, and another artist's album of the same title isn't counted");
+    g.Add(!groups.empty() && groups[0].Url() == "https://musicbrainz.org/release-group/f1afec0b-26dd-3db5-9aa1-c91229a74a24",
+          "a release group opens its MusicBrainz page");
+    g.Add(online::ParseReleaseGroups("<html>", &total).empty() && total == 0 &&
+              online::ParseReleaseGroups(R"j({"release-groups":{}})j").empty() && online::LibraryAlbumsBy(lib, "").empty(),
+          "a malformed reply gives nothing; an empty artist owns nothing");
+
+    // Paging: 250 release groups over three pages. A page that fails leaves the list incomplete, so it
+    // is not cached as the whole discography.
+    auto pageOf = [](int offset, int count, int total) {
+        std::string body = "{\"release-group-count\":" + std::to_string(total) + ",\"release-groups\":[";
+        for (int i = 0; i < count; ++i) {
+            char id[40];
+            snprintf(id, sizeof id, "00000000-0000-0000-0000-%012d", offset + i);
+            body += std::string(i ? "," : "") + "{\"id\":\"" + id + "\",\"title\":\"T" + std::to_string(offset + i) +
+                    "\",\"primary-type\":\"Album\"}";
+        }
+        return body + "]}";
+    };
+    std::vector<online::ReleaseGroup> paged;
+    bool complete = false;
+    std::vector<int> asked;
+    bool reached = online::CollectReleaseGroups(
+        [&](int offset, std::string& body) {
+            asked.push_back(offset);
+            body = pageOf(offset, std::min(100, 250 - offset), 250);
+            return true;
+        },
+        paged, complete);
+    g.Add(reached && complete && paged.size() == 250 && asked == std::vector<int>{0, 100, 200},
+          "every page of a long discography is asked for once and the list is complete");
+    reached = online::CollectReleaseGroups(
+        [&](int offset, std::string& body) {
+            if (offset >= 100) return false;
+            body = pageOf(offset, 100, 250);
+            return true;
+        },
+        paged, complete);
+    g.Add(reached && !complete && paged.size() == 100, "a later page that fails leaves the list marked incomplete");
+    reached = online::CollectReleaseGroups([](int, std::string&) { return false; }, paged, complete);
+    g.Add(!reached && !complete && paged.empty(), "no page at all is not an answer");
+    reached = online::CollectReleaseGroups(
+        [&](int offset, std::string& body) {
+            body = pageOf(offset, 0, 0);
+            return true;
+        },
+        paged, complete);
+    g.Add(reached && complete && paged.empty(), "an artist with no albums is a complete, empty answer");
+    reached = online::CollectReleaseGroups(
+        [&](int offset, std::string& body) {
+            body = pageOf(offset, 100, 1000);
+            return true;
+        },
+        paged, complete);
+    g.Add(reached && complete && paged.size() == 300, "at most 300 are asked for");
+    return g;
+}
+
 inline std::vector<Group> All(const std::wstring& scratch) {
     return {Parsers(), Scoring(), Images(), TextImages(), FolderWrites(scratch), CustomCovers(scratch), CoverUpload(),
             Review(scratch),
-            Generations(), Lyrics(), LrcWrite(scratch), Artist(), CoverAddresses()};
+            Generations(), Lyrics(), LrcWrite(scratch), Artist(), Discography(), CoverAddresses()};
 }
 
 }  // namespace metadata_checks

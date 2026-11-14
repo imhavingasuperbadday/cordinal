@@ -193,13 +193,15 @@ bool StartTls(Connection& c, std::shared_ptr<TlsIdentity> identity) {
 bool Response(Connection& c, int status, const std::string& mime, uint64_t length,
               const std::string& extra = {}) {
     const char* reason = status == 200 ? "OK" : status == 206 ? "Partial Content" : status == 204 ? "No Content" :
-        status == 307 ? "Temporary Redirect" :
+        status == 304 ? "Not Modified" : status == 307 ? "Temporary Redirect" :
         status == 400 ? "Bad Request" : status == 401 ? "Unauthorized" : status == 403 ? "Forbidden" :
         status == 404 ? "Not Found" : status == 405 ? "Method Not Allowed" : status == 409 ? "Conflict" :
         status == 416 ? "Range Not Satisfiable" : status == 429 ? "Too Many Requests" : "Service Unavailable";
+    // Callers that set Cache-Control in `extra` replace the default; otherwise private data stays uncached.
+    const bool hasCache = extra.find("Cache-Control:") != std::string::npos;
     std::string header = "HTTP/1.1 " + std::to_string(status) + " " + reason + "\r\nContent-Type: " + mime +
         "\r\nContent-Length: " + std::to_string(length) +
-        "\r\nConnection: close\r\nCache-Control: no-store\r\n"
+        "\r\nConnection: close\r\n" + (hasCache ? "" : "Cache-Control: no-store\r\n") +
         "X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n"
         "Cross-Origin-Resource-Policy: same-origin\r\n"
         "Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
@@ -209,7 +211,35 @@ bool Response(Connection& c, int status, const std::string& mime, uint64_t lengt
 }
 void Body(Connection& c, const Request& r, int status, std::string_view bytes,
           const std::string& mime = "application/json; charset=utf-8", const std::string& extra = {}) {
-    if (Response(c, status, mime, bytes.size(), extra) && r.method != "HEAD") Send(c, bytes.data(), bytes.size());
+    if (Response(c, status, mime, bytes.size(), extra) && r.method != "HEAD" && status != 304)
+        Send(c, bytes.data(), bytes.size());
+}
+// Strong validators for shell assets and track-bound media the browser may keep privately.
+std::string WeakHash(std::string_view bytes) {
+    uint32_t hash = 2166136261u;
+    for (unsigned char c : bytes) { hash ^= c; hash *= 16777619u; }
+    char text[16];
+    snprintf(text, sizeof(text), "%08x", hash);
+    return text;
+}
+std::string QuotedEtag(std::string_view token) {
+    std::string out = "\"";
+    for (unsigned char c : token) {
+        if (c == '"' || c == '\\') out += '\\';
+        out += (char)c;
+    }
+    return out + '"';
+}
+bool NotModified(Connection& c, const Request& r, const std::string& etag, const std::string& cache) {
+    auto it = r.headers.find("if-none-match");
+    if (it == r.headers.end() || it->second != etag) return false;
+    Body(c, r, 304, "", "text/plain", "ETag: " + etag + "\r\n" + cache);
+    return true;
+}
+void CachedBody(Connection& c, const Request& r, std::string_view bytes, const std::string& mime,
+                const std::string& etag, const std::string& cache) {
+    if (NotModified(c, r, etag, cache)) return;
+    Body(c, r, 200, bytes, mime, "ETag: " + etag + "\r\n" + cache);
 }
 void Error(Connection& c, const Request& r, int status, std::string_view message) {
     Body(c, r, status, "{\"error\":" + Json(message) + '}');
@@ -424,6 +454,10 @@ struct Server::Impl {
     std::map<std::string, uint64_t> finished;
     std::vector<ListenEvent> listens;
     std::map<std::string, std::string> waveforms;
+    // Bound artwork kept for repeat album/now-playing requests in one browsing session.
+    struct ArtEntry { std::string mime, bytes, etag; };
+    std::map<std::string, ArtEntry> artwork;
+    size_t artworkBytes = 0;
     std::shared_ptr<const Snapshot> snapshot = std::make_shared<Snapshot>();
     std::shared_ptr<Snapshot> preparing;
     ThemeMode theme = ThemeMode::Light;
@@ -787,23 +821,41 @@ struct Server::Impl {
         }
         if (r.path == "/api/v1/themes" && r.method != "POST") {
             std::string data;
-            { std::lock_guard lock(mutex); data = Themes(theme, systemDark); }
-            Body(c, r, 200, data); return;
+            ThemeMode current; bool dark;
+            { std::lock_guard lock(mutex); current = theme; dark = systemDark; data = Themes(theme, systemDark); }
+            // Short private cache: the desktop theme can change, but revisits within a few seconds
+            // (and If-None-Match) should not re-download the whole catalog.
+            std::string etag = QuotedEtag(std::to_string((int)current) + (dark ? "-d" : "-l") + '-' + WeakHash(data));
+            CachedBody(c, r, data, "application/json; charset=utf-8", etag,
+                       "Cache-Control: private, max-age=5\r\n");
+            return;
         }
         if (r.method != "POST") {
-            if (r.path == "/") { Body(c, r, 200, Page(), "text/html; charset=utf-8"); return; }
-            if (r.path == "/app.js") { Body(c, r, 200, Script(), "text/javascript; charset=utf-8"); return; }
-            if (r.path == "/style.css") { Body(c, r, 200, Style(), "text/css; charset=utf-8"); return; }
+            // Shell assets change only when the player binary does; private short caching avoids
+            // re-downloading the page, script, theme font and icon on every visit.
+            constexpr const char* kShellCache = "Cache-Control: private, max-age=3600\r\n";
+            static const std::string pageEtag = QuotedEtag(WeakHash(Page()));
+            static const std::string scriptEtag = QuotedEtag(WeakHash(Script()));
+            static const std::string styleEtag = QuotedEtag(WeakHash(Style()));
+            auto shell = [&](std::string_view bytes, const std::string& mime, const std::string& etag) {
+                CachedBody(c, r, bytes, mime, etag, kShellCache);
+            };
+            if (r.path == "/") { shell(Page(), "text/html; charset=utf-8", pageEtag); return; }
+            if (r.path == "/app.js") { shell(Script(), "text/javascript; charset=utf-8", scriptEtag); return; }
+            if (r.path == "/style.css") { shell(Style(), "text/css; charset=utf-8", styleEtag); return; }
             // Browsers register it only over HTTPS; it keeps the page and kept music working offline.
+            // Must revalidate so a new cordinal build's worker replaces the old one promptly.
             if (r.path == "/sw.js") { Body(c, r, 200, ServiceWorker(), "text/javascript; charset=utf-8", "Cache-Control: no-cache\r\n"); return; }
             if (r.path == "/deltarune.ttf" && !config.font.empty()) {
-                Body(c, r, 200, config.font, "font/ttf"); return;
+                shell(config.font, "font/ttf", QuotedEtag(WeakHash(config.font))); return;
             }
-            if (r.path == "/icon.png" && !config.icon.empty()) { Body(c, r, 200, config.icon, "image/png"); return; }
+            if (r.path == "/icon.png" && !config.icon.empty()) {
+                shell(config.icon, "image/png", QuotedEtag(WeakHash(config.icon))); return;
+            }
             if (r.path == "/manifest.webmanifest") {
                 std::string data;
                 { std::lock_guard lock(mutex); data = Manifest(); }
-                Body(c, r, 200, data, "application/manifest+json"); return;
+                shell(data, "application/manifest+json", QuotedEtag(WeakHash(data))); return;
             }
         }
         if (r.path == "/api/v1/pair" && r.method == "POST") {
@@ -912,13 +964,41 @@ struct Server::Impl {
         if (r.method == "POST") { Error(c, r, 405, "This operation is read-only."); return; }
         if (r.path == "/api/v1/track") { Body(c, r, 200, TrackJson(*track)); return; }
         if (r.path == "/api/v1/art") {
-            std::string mime, image = Artwork(*track, mime);
-            if (image.empty()) Error(c, r, 404, "No artwork.");
-            else Body(c, r, 200, image, mime);
+            // Same album cover is requested for list cards, group headers, now-playing and
+            // Media Session; private caching plus a small in-memory copy stops repeat extraction.
+            constexpr const char* kArtCache = "Cache-Control: private, max-age=86400\r\n";
+            const std::string cacheKey = track->key + ':' + std::to_string(track->fileTime) + ':' +
+                std::to_string(track->fileSize);
+            ArtEntry entry;
+            {
+                std::lock_guard lock(mutex);
+                if (auto it = artwork.find(cacheKey); it != artwork.end()) entry = it->second;
+            }
+            if (entry.bytes.empty()) {
+                std::string mime;
+                entry.bytes = Artwork(*track, mime);
+                if (entry.bytes.empty()) { Error(c, r, 404, "No artwork."); return; }
+                entry.mime = std::move(mime);
+                entry.etag = QuotedEtag(cacheKey + '-' + std::to_string(entry.bytes.size()) + '-' +
+                                        WeakHash(entry.bytes));
+                std::lock_guard lock(mutex);
+                while (!artwork.empty() && (artwork.size() >= 24 || artworkBytes + entry.bytes.size() > 8u * 1024 * 1024)) {
+                    artworkBytes -= artwork.begin()->second.bytes.size();
+                    artwork.erase(artwork.begin());
+                }
+                artworkBytes += entry.bytes.size();
+                artwork[cacheKey] = entry;
+            }
+            if (NotModified(c, r, entry.etag, kArtCache)) return;
+            Body(c, r, 200, entry.bytes, entry.mime, "ETag: " + entry.etag + "\r\n" + kArtCache);
             return;
         }
         if (r.path == "/api/v1/peaks") {
             std::string cacheKey = track->key + ':' + std::to_string(track->fileTime) + ':' + std::to_string(track->fileSize);
+            const std::string etag = QuotedEtag("peaks-" + cacheKey);
+            constexpr const char* kPeakCache = "Cache-Control: private, max-age=86400\r\n";
+            // ETag follows the source file, so a matching validator skips decode work entirely.
+            if (NotModified(c, r, etag, kPeakCache)) return;
             std::string result;
             { std::lock_guard lock(mutex); auto it = waveforms.find(cacheKey); if (it != waveforms.end()) result = it->second; }
             if (result.empty()) {
@@ -930,7 +1010,7 @@ struct Server::Impl {
                 if (waveforms.size() >= 8) waveforms.erase(waveforms.begin());
                 waveforms[cacheKey] = result;
             }
-            Body(c, r, 200, result); return;
+            CachedBody(c, r, result, "application/json; charset=utf-8", etag, kPeakCache); return;
         }
         if (r.path != "/api/v1/audio") { Error(c, r, 404, "Unknown operation."); return; }
         if (streams.fetch_add(1) >= 4) { --streams; Error(c, r, 503, "Four streams are already active. Try again shortly."); return; }

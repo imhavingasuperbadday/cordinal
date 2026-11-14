@@ -94,6 +94,7 @@ constexpr UINT_PTR kSearchTimer = 3;
 constexpr UINT_PTR kUiTimer = 1;
 constexpr UINT_PTR kBusyTimer = 5;  // animates the busy spinners (app_badges.cpp)
 constexpr UINT_PTR kStripTimer = 2;  // the strip's controls show while the mouse is over it
+constexpr UINT_PTR kPrefsTimer = 6;  // coalesces settings.ini writes off the click path
 constexpr ULONG_PTR kCopyDataPaths = 0x43444650;    // 'CDFP': paths to add and play
 constexpr ULONG_PTR kCopyDataAddPaths = 0x43444641;  // 'CDFA': paths to add without playing
 constexpr ULONG_PTR kCopyDataCommand = 0x43444643;  // 'CDFC': a transport command

@@ -21,11 +21,11 @@ size_t ViewMemoryBudget(size_t normal) { return ReducedMemoryMode() ? normal / 2
 // Only disposable UI resources change with window size. Track ids, library data and the audio
 // buffers remain live, so playback and editors are unaffected. The next paint recreates what it needs.
 void UpdateViewMemory() {
-    ClearCellCache();
-    ShrinkCellCache();
+    ShrinkCellCache();  // Clear + return the buffers; a separate Clear was redundant
     ClearBrowserCaches();
-    StopGroupArt();
-    LibViewReleaseGraphics();
+    // Do not Stop() thumbnail workers here: joining a mid-decode cover freezes compact/mini switches.
+    TrimGroupArt();
+    LibViewTrimMemory();
 }
 
 namespace {

@@ -173,8 +173,69 @@ Rgb Blend(Rgb a, Rgb b, double t) {
     return out;
 }
 
-bool Tinted(const Palette& p) { return &p == &LightPalette() || &p == &DarkPalette(); }
+// Light and Dark, or a palette AlbumPalette turned from one of them.
+bool Tinted(const Palette& p) {
+    const Palette& root = p.from ? *p.from : p;
+    return &root == &LightPalette() || &root == &DarkPalette();
+}
+
+constexpr double kStrengthFactor[kAlbumStrengths] = {0.5, 1, 1.5, 2};
+double StrengthFactor() { return kStrengthFactor[std::clamp(AlbumColourConfig().strength, 0, kAlbumStrengths - 1)]; }
+
+// `base` washed `t` of the way toward `colour`, less when that much would cost body text, secondary
+// text, the accent or the playing colour their contrast on it; `base` itself when no wash keeps them.
+Rgb LegibleWash(const Palette& p, Rgb base, Rgb colour, double t) {
+    for (; t > 0.004; t *= 0.8) {
+        Rgb s = Blend(base, colour, std::min(t, 0.9));
+        if (Contrast(p.text, s) >= 7 && Contrast(p.sub, s) >= 4.5 && Contrast(p.accent, s) >= 3 &&
+            Contrast(p.playing, s) >= 3)
+            return s;
+    }
+    return base;
+}
+
+// `c` stepped toward white on a dark palette (black on a light one) until it reaches `need`:1 on both
+// grounds; marks and the playing colour must stand out on the list and on the selection.
+Rgb Readable(Rgb c, Rgb ground, Rgb selection, double need, bool dark) {
+    for (int i = 0; i < 24 && (Contrast(c, ground) < need || Contrast(c, selection) < 3); ++i)
+        c = Blend(c, dark ? 0xFFFFFF : 0x000000, 0.1);
+    return c;
+}
 }  // namespace
+
+AlbumColourSettings& AlbumColourConfig() {
+    static AlbumColourSettings settings;
+    return settings;
+}
+
+bool AlbumPalette(const Palette& base, double hue, Palette& out) {
+    if (hue < 0 || base.from || !Tinted(base)) return false;
+    const bool dark = base.dark;
+    // The ground colours wash toward a deep (dark) or pale (light) shade of the hue; the selection
+    // takes more of it, and the accent is the hue itself at full colour.
+    const Rgb wash = dark ? HsvColor(hue, 0.55, 0.42) : HsvColor(hue, 0.45, 0.92);
+    const Rgb selection = dark ? HsvColor(hue, 0.6, 0.4) : HsvColor(hue, 0.32, 0.95);
+    const Rgb accent = dark ? HsvColor(hue, 0.62, 0.98) : HsvColor(hue, 0.8, 0.7);
+    for (double k = StrengthFactor(); k > 0.1; k *= 0.75) {
+        auto tint = [&](Rgb c, double t) { return Blend(c, wash, std::min(0.9, t * k)); };
+        Palette p = base;
+        p.from = &base;
+        p.bg = tint(base.bg, 0.1);
+        p.surface = tint(base.surface, dark ? 0.12 : 0.14);
+        p.surface2 = tint(base.surface2, dark ? 0.12 : 0.1);
+        p.hover = tint(base.hover, dark ? 0.16 : 0.18);
+        p.border = tint(base.border, dark ? 0.2 : 0.22);
+        p.select = Blend(base.select, selection, std::min(0.9, 0.5 * k));
+        p.accent = Readable(accent, p.bg, p.select, 3.2, dark);
+        p.accent2 = Blend(p.accent, 0xFFFFFF, dark ? 0.25 : 0.2);
+        p.playing = Readable(dark ? Blend(accent, 0xFFFFFF, 0.15) : accent, p.bg, p.select, 3.2, dark);
+        if (PaletteLegibility(p).empty()) {
+            out = p;
+            return true;
+        }
+    }
+    return false;
+}
 
 // Twelve 30-degree hue bins, each pixel weighted by how vivid it is; the winning bin's mean hue,
 // when that bin holds enough color to read (a few percent of a fully vivid picture).
@@ -202,19 +263,25 @@ double CoverHue(const uint8_t* pixels, size_t count, bool bgr) {
     return std::fmod(std::atan2(sy[best], sx[best]) * 180 / 3.14159265358979 + 360, 360);
 }
 
+// An AlbumPalette is already washed with the album's hue, so its player only keeps the step from the chrome.
 Rgb PlayerSurface(const Palette& p, double hue) {
     if (!Tinted(p)) return p.surface;
     Rgb base = p.dark ? Blend(p.surface, p.text, 0.025) : p.surface;
-    if (hue < 0) return base;
-    return p.dark ? Blend(base, HsvColor(hue, 0.5, 0.45), 0.09) : Blend(base, HsvColor(hue, 0.4, 0.9), 0.12);
+    if (hue < 0 || p.from || AlbumColourConfig().mode == AlbumColours::Off) return base;
+    const double k = StrengthFactor();
+    return p.dark ? LegibleWash(p, base, HsvColor(hue, 0.5, 0.45), 0.09 * k)
+                  : LegibleWash(p, base, HsvColor(hue, 0.4, 0.9), 0.12 * k);
 }
 
 // Stronger than the player's wash, since the panel is the open album's own ground, but kept low enough
 // that body text, secondary text and the accent stay legible on every hue (a self-test checks).
 Rgb AlbumPanelSurface(const Palette& p, double hue) {
     if (!Tinted(p)) return Blend(p.surface2, p.accent, p.dark ? 0.16 : 0.10);
-    if (hue < 0) return p.dark ? p.surface2 : p.surface;
-    return p.dark ? Blend(p.surface2, HsvColor(hue, 0.6, 0.5), 0.16) : Blend(p.surface, HsvColor(hue, 0.4, 0.92), 0.22);
+    Rgb base = p.dark ? p.surface2 : p.surface;
+    if (hue < 0 || AlbumColourConfig().mode == AlbumColours::Off) return base;
+    const double k = StrengthFactor();
+    return p.dark ? LegibleWash(p, base, HsvColor(hue, 0.6, 0.5), 0.16 * k)
+                  : LegibleWash(p, base, HsvColor(hue, 0.4, 0.92), 0.22 * k);
 }
 
 Rgb RowStripe(const Palette& p) { return Tinted(p) ? Blend(p.bg, p.text, p.dark ? 0.022 : 0.02) : p.bg; }

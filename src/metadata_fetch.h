@@ -13,6 +13,8 @@
 #include <string_view>
 #include <vector>
 
+class Library;
+
 namespace online {
 
 // The header block every request sends: cordinal's real user agent and the JSON it accepts.
@@ -223,6 +225,37 @@ bool ParseWikipediaSummary(std::string_view json, std::string& extract, std::str
 // Blocking: runs on a worker. Search (or `mbid` when known), lookup, then the summary; cached for
 // 30 days (a miss for one). False when the artist couldn't be identified without doubt.
 bool FetchArtistInfo(const std::string& name, const std::string& mbid, Cancel& cancel, ArtistInfo& out);
+
+// The artist's discography as MusicBrainz lists it: their release groups of type Album or EP, so the
+// albums the library lacks can be told from the ones it has.
+struct ReleaseGroup {
+    std::string id;     // the release group's MusicBrainz id
+    std::string title;
+    std::string type;   // "Album", "EP", or the first secondary type ("Live", "Compilation", "Soundtrack"...)
+    int year = 0;       // of its first release; 0 when MusicBrainz doesn't know
+    bool owned = false;  // MarkOwned: the library has an album of this title by the artist
+    std::string Url() const { return "https://musicbrainz.org/release-group/" + id; }
+};
+// One page of MusicBrainz's release-group browse; `total` receives the artist's count of them.
+// Entries without a valid id or title are left out; a malformed reply yields none.
+std::vector<ReleaseGroup> ParseReleaseGroups(std::string_view json, int* total = nullptr);
+// Earliest first, those of unknown year last, then by title.
+void SortReleaseGroups(std::vector<ReleaseGroup>& groups);
+// Marks a release group owned when its title and one of `owned` (the library's album titles by the
+// artist) reduce alike under LooseTitle, so "Nevermind (Deluxe Edition)" counts as owning "Nevermind".
+void MarkOwned(std::vector<ReleaseGroup>& groups, const std::vector<std::string>& owned);
+// The titles of the library's albums by `artist` (a track's artist or album artist, compared as
+// LooseTitle compares), each once, for MarkOwned. UI thread: it reads the live library.
+std::vector<std::string> LibraryAlbumsBy(const ::Library& library, std::string_view artist);
+// Pages through an artist's release groups, 100 at a time up to 300: `page` fetches the one at `offset`,
+// false when it couldn't. `out` gets them sorted; `complete` says whether every page arrived. False when
+// none did.
+bool CollectReleaseGroups(const std::function<bool(int offset, std::string& body)>& page,
+                          std::vector<ReleaseGroup>& out, bool& complete);
+// Blocking: runs on a worker, after FetchArtistInfo found `mbid`. Up to 300 release groups, asked for
+// 100 at a time and sorted; cached for 30 days (a miss for one) once every page has arrived. True when
+// MusicBrainz answered, even listing none (`out` empty); false when it couldn't be asked or was cancelled.
+bool FetchDiscography(const std::string& mbid, Cancel& cancel, std::vector<ReleaseGroup>& out);
 
 // ---------------------------------------------------------------------------------------------
 // Settings shared by both front ends; each loads and saves them with its own preferences.

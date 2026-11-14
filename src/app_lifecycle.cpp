@@ -83,9 +83,11 @@ void StopAppWorkers(HWND hwnd) {
     g.headsets.Stop();
     StopBackgroundJobs();
     StopSteamDiscovery();
+    FlushPendingPreferences();
     KillTimer(hwnd, kUiTimer);
     KillTimer(hwnd, kBusyTimer);
     KillTimer(hwnd, kSearchTimer);
+    KillTimer(hwnd, kPrefsTimer);
     g.scanner.Stop();
     StopTagWriter();
     StopOrganizer();
@@ -161,6 +163,7 @@ void MainTick() {
     if (g.dirty && ++g.ticksSinceSave >= 80) {  // ~20 s
         SaveLibraryNow();
     }
+    FlushPendingPreferences();
     MaybeOfferPreferenceSuggestions();
 }
 

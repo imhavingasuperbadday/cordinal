@@ -1,5 +1,5 @@
 // Reaching home from outside (web_remote.h): WinHTTP requests on Windows (Linux has its own in
-// linux/tls_openssl.cpp), the router's UPnP port mappings, the internet address from the router or
+// linux/tls_bearssl.cpp), the router's UPnP port mappings, the internet address from the router or
 // STUN, and this computer's route to the internet.
 #ifdef _WIN32
 #include <winsock2.h>

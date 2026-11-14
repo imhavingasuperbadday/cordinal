@@ -668,6 +668,16 @@ void TestWeb(const std::wstring& scratch) {
     std::wstring path = scratch + L"\\web-audio.wav";
     auto original = WaveBytes(44100);
     Ready(WriteTestBytes(path, original), L"create the isolated server audio fixture");
+    // Tiny 1x1 PNG beside the fixture so folder artwork is available for cache checks.
+    static const unsigned char kCoverPng[] = {
+        0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A,0x00,0x00,0x00,0x0D,0x49,0x48,0x44,0x52,
+        0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x01,0x08,0x02,0x00,0x00,0x00,0x90,0x77,0x53,
+        0xDE,0x00,0x00,0x00,0x0C,0x49,0x44,0x41,0x54,0x08,0xD7,0x63,0xF8,0xCF,0xC0,0x00,
+        0x00,0x00,0x03,0x00,0x01,0x00,0x05,0xFE,0x02,0xFE,0x00,0x00,0x00,0x00,0x49,0x45,
+        0x4E,0x44,0xAE,0x42,0x60,0x82};
+    Ready(WriteTestBytes(scratch + L"\\cover.png",
+                         std::string(reinterpret_cast<const char*>(kCoverPng), sizeof(kCoverPng))),
+          L"create the isolated folder cover for artwork cache checks");
     auto track = TestTrack(path);
     {
         testlog::Group group(L"browser data saver");
@@ -855,8 +865,15 @@ void TestWeb(const std::wstring& scratch) {
               Request(port, L"/api/v1/audio?id=fixture-track&format=aac").status == 401,
               L"library metadata and audio require pairing");
         auto playerPage = Request(port, L"/");
-        Check(playerPage.status == 200 && Request(port, L"/app.js").status == 200,
+        auto appJs = Request(port, L"/app.js");
+        Check(playerPage.status == 200 && appJs.status == 200,
               L"the pairing interface is available without credentials");
+        batch.Next(L"the shell and theme list advertise private short-lived caches with validators");
+        Check(playerPage.headers.find("Cache-Control: private, max-age=3600") != std::string::npos &&
+              appJs.headers.find("Cache-Control: private, max-age=3600") != std::string::npos &&
+              playerPage.headers.find("ETag: ") != std::string::npos &&
+              appJs.headers.find("Cache-Control: no-store") == std::string::npos,
+              L"the player shell is privately cacheable for an hour with an ETag");
         size_t audioAt = playerPage.body.find("<audio ");
         auto audioTag = audioAt == std::string::npos ? std::string{} :
             playerPage.body.substr(audioAt, playerPage.body.find('>', audioAt) - audioAt);
@@ -865,8 +882,17 @@ void TestWeb(const std::wstring& scratch) {
               L"the page has one source-free audio element and tells the browser not to preload music");
         auto themes = Request(port, L"/api/v1/themes");
         Check(themes.status == 200 && themes.body.find("DELTARUNE") != themes.body.npos &&
-              themes.body.find("Midnight") != themes.body.npos && themes.body.find("Terminal") != themes.body.npos,
-              L"all native themes are available on every server");
+              themes.body.find("Midnight") != themes.body.npos && themes.body.find("Terminal") != themes.body.npos &&
+              themes.headers.find("Cache-Control: private, max-age=5") != std::string::npos &&
+              themes.headers.find("ETag: ") != std::string::npos,
+              L"all native themes are available on every server with a short private cache");
+        size_t etagAt = themes.headers.find("ETag: ");
+        std::string themeEtag = etagAt == std::string::npos ? "" :
+            themes.headers.substr(etagAt + 6, themes.headers.find("\r\n", etagAt) - (etagAt + 6));
+        auto themesAgain = Request(port, L"/api/v1/themes", nullptr, {},
+                                   L"If-None-Match: " + FromUtf8(themeEtag) + L"\r\n");
+        Check(!themeEtag.empty() && themesAgain.status == 304 && themesAgain.body.empty(),
+              L"unchanged themes answer 304 Not Modified without a body");
         batch.Next(L"explicit pairing creates a temporary code that a browser spends once, leaving one device");
         Check(server.Pair(), L"explicit desktop pairing creates a temporary code");
         auto paired = Request(port, L"/api/v1/pair", ("code=" + server.GetStatus().pairingCode + "&name=Test+phone").c_str());
@@ -968,9 +994,22 @@ void TestWeb(const std::wstring& scratch) {
               !listens[0].manual && server.TakeListens().empty(),
               L"progress counts once, excludes seek/pause and cannot replay a completed session");
         auto worker = Request(port, L"/sw.js");
-        Check(worker.status == 200 && worker.body.find("cordinal-kept") != std::string::npos && worker.body.find("206") != std::string::npos &&
-              worker.headers.find("Cache-Control: no-cache") != std::string::npos,
-              L"the service worker is served, uncached, and answers kept music by byte range");
+        Check(worker.status == 200 && worker.body.find("cordinal-kept") != std::string::npos &&
+              worker.body.find("cordinal-art") != std::string::npos && worker.body.find("206") != std::string::npos &&
+              worker.headers.find("Cache-Control: no-cache") != std::string::npos &&
+              worker.headers.find("Cache-Control: no-store") == std::string::npos,
+              L"the service worker is served, revalidates, caches artwork, and answers kept music by byte range");
+        batch.Next(L"folder artwork is privately cached with validators so repeat album covers are 304s");
+        auto art = Request(port, L"/api/v1/art?id=fixture-track", nullptr, cookie);
+        size_t artEtagAt = art.headers.find("ETag: ");
+        std::string artEtag = artEtagAt == std::string::npos ? "" :
+            art.headers.substr(artEtagAt + 6, art.headers.find("\r\n", artEtagAt) - (artEtagAt + 6));
+        auto artAgain = Request(port, L"/api/v1/art?id=fixture-track", nullptr, cookie,
+                                L"If-None-Match: " + FromUtf8(artEtag) + L"\r\n");
+        Check(art.status == 200 && art.body.size() == sizeof(kCoverPng) &&
+              art.headers.find("Cache-Control: private, max-age=86400") != std::string::npos &&
+              !artEtag.empty() && artAgain.status == 304 && artAgain.body.empty(),
+              L"artwork is privately cached for a day and unchanged covers answer 304");
         // Offline plays: only of a track this browser downloaded to keep, ending between then and now, once each.
         const uint64_t now = (uint64_t)std::time(nullptr);
         auto play = [&](char id, const std::string& key, uint64_t end, const char* seconds) {

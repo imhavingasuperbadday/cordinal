@@ -37,6 +37,10 @@ void RememberOutputEq(bool remember);
 bool SavedOutputProfiles();
 // User preferences can be saved independently of the library and playback session.
 void SavePreferences();
+// Marks preferences dirty and writes them on the next UI tick (or FlushPendingPreferences).
+// Use on the click/toggle path so a full settings.ini rewrite does not stall the UI thread.
+void SavePreferencesSoon();
+void FlushPendingPreferences();
 bool SaveBackupSettings(std::string& bytes);
 void LoadPreferences();
 void SaveState();

@@ -271,6 +271,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == kUiTimer) MainTick();
             else if (wp == kBusyTimer) BusyTick();
             else if (wp == kStripTimer) StripHoverTick();
+            else if (wp == kPrefsTimer) FlushPendingPreferences();
             return 0;
         case WM_ENGINE:
             OnEngineEvent((EngineEvent)wp, (unsigned long long)lp);

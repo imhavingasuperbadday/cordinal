@@ -6,6 +6,21 @@
 
 namespace app {
 
+namespace {
+int layoutHold = 0;
+bool layoutNeeded = false;
+}
+
+void HoldLayout() { ++layoutHold; }
+
+void ReleaseLayout() {
+    if (layoutHold > 0) --layoutHold;
+    if (!layoutHold && layoutNeeded) {
+        layoutNeeded = false;
+        Layout();
+    }
+}
+
 // Deferred move; a null handle is ignored and negative sizes clamp to zero. Every layout pass runs
 // inside a single Begin/EndDeferWindowPos batch so the controls move together without flicker.
 void Place(HDWP& dwp, HWND h, int x, int y, int w, int hgt) {
@@ -155,6 +170,11 @@ void StripHoverTick() {
 
 
 void Layout() {
+    if (layoutHold) {
+        layoutNeeded = true;
+        return;
+    }
+    layoutNeeded = false;
     FoobarSync();
     ApolloSync();
     RECT rc;

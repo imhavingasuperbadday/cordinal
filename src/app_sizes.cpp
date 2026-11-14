@@ -88,6 +88,9 @@ void ReplaceMenuBar(HMENU bar) {
 // exactly; entering it swaps in the stored compact rectangle (or a default based on the full one).
 void SetViewSize(ViewSize size) {
     if (size == g.size || size >= ViewSize::Count) return;
+    // Apply, SetWindowPlacement and MakeRoom each used to call Layout (directly or via WM_SIZE).
+    // Hold them to one pass so a mode switch does not restack the whole window three times.
+    HoldLayout();
     WINDOWPLACEMENT wp{sizeof(wp)};
     bool visible = IsWindowVisible(g.hwnd) != 0;
     if (size == ViewSize::Compact) {
@@ -111,7 +114,7 @@ void SetViewSize(ViewSize size) {
     }
     if (size == ViewSize::Big) MakeRoom(S(1120), S(780));
     else if (size == ViewSize::Spotlight) MakeRoom(S(760), S(640));
-    Layout();
+    ReleaseLayout();
     SaveViewSize();
 }
 

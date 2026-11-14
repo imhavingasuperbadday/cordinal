@@ -1,8 +1,8 @@
 // Linux regressions for Now Playing's album, the shared auto-playlist tab and Make album, as on
 // Windows (port_regressions.cpp, TestPortedUi): Now Playing lists only the playing song's album until
 // a search is typed, the auto-playlists share one tab that moving a tab steps past, and the album
-// maker opens over the window and closes without writing. Runs with --check-layout against playlists
-// and a library of its own; nothing is played or saved.
+// maker opens over the window and closes without writing, and Album colours turn the palette toward the
+// cover. Runs with --check-layout against playlists and a library of its own; nothing is played or saved.
 #ifndef _WIN32
 #include "../linux/panels.h"
 #include "../linux/ui_internal.h"
@@ -84,6 +84,33 @@ int CheckLinuxTabs() {
     const bool opened = PanelOpen();
     ClosePanel();
     check(opened && !PanelOpen() && !TagWriteBusy(), "Make album opens over the window, and Cancel writes nothing");
+
+    // Album colours (Preferences > View), as Windows' ApplyTheme: with the whole interface, the palette
+    // turns toward the shown cover's hue, more at a bolder strength; a gray cover or the player's
+    // background alone leave the theme's own palette.
+    {
+        const AlbumColourSettings savedColours = AlbumColourConfig();
+        const TrackId savedFor = g_coverFor;
+        const double savedHue = g_coverHue;
+        g.settings.theme = ThemeMode::Dark;
+        g.playing = g_coverFor = ids[0];
+        g_coverHue = 200;
+        AlbumColourConfig() = {AlbumColours::Interface, 0};
+        const Palette subtle = CurrentPalette();
+        AlbumColourConfig().strength = 3;
+        const Palette bold = CurrentPalette();
+        g_coverHue = -1;
+        const bool gray = &CurrentPalette() == &DarkPalette();
+        g_coverHue = 200;
+        AlbumColourConfig().mode = AlbumColours::Player;
+        const bool player = &CurrentPalette() == &DarkPalette();
+        check(subtle.from == &DarkPalette() && bold.from == &DarkPalette() && subtle.bg != DarkPalette().bg &&
+                  bold.bg != subtle.bg && PaletteLegibility(bold).empty() && gray && player,
+              "album colours turn the whole interface toward the cover, and leave it for a gray cover or the player alone");
+        AlbumColourConfig() = savedColours;
+        g_coverFor = savedFor;
+        g_coverHue = savedHue;
+    }
 
     g.playlists = savedPlaylists;
     g.active = std::min(savedActive, (int)g.playlists.size() - 1);

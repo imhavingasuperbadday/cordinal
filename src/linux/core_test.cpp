@@ -1,7 +1,7 @@
 // A command-line check of the portable core on Linux, without the UI:
 //   cordinal-core-test scan DIR               list the audio files under DIR with their tags
 //   cordinal-core-test decode FILE            decode FILE completely and report it
-//   cordinal-core-test play FILE [SECONDS]    play FILE through the engine and PipeWire
+//   cordinal-core-test play FILE [SECONDS]    play FILE through the engine and the sound server
 //   cordinal-core-test replaygain FILE...     measure the files' ReplayGain as one album
 //   cordinal-core-test tags FILE DIR          edit FILE's tags with an undo journal in DIR, then undo
 //   cordinal-core-test convert FILE DIR       convert FILE to .cord with its log in DIR, then undo the conversion
@@ -20,19 +20,37 @@
 //   cordinal-core-test playlists FILE         list a saved library.cdb: playlists, items, inbox and ratings
 //   cordinal-core-test listenbrainz DIR       queue a listen and keep a token in DIR, check a bogus token
 //   cordinal-core-test discord DIR            the Discord status against a fake Discord socket made in DIR
-//   cordinal-core-test devices                list the PipeWire output devices
+//   cordinal-core-test devices                list the output devices (PipeWire's, or PulseAudio's)
 //   cordinal-core-test helpers DIR            read, trust and run a helper made of two shell scripts
 //   cordinal-core-test sfx                    play a clip and an effect on the sound effect stream
 //   cordinal-core-test steam [cancel]         list discovered Steam soundtrack folders; "cancel" lists none
 //   cordinal-core-test away DIR               the away-from-home pieces: JSON, STUN, keys, certificates and HTTPS
+//   cordinal-core-test tls                    SHA-256, HLS's AES, and the DER, PEM and time readers, offline
+//   cordinal-core-test tls-hosts              HTTPS to real hosts: good certificates load, bad ones are refused
 //   cordinal-core-test web DIR CONTROL        serve DIR over HTTP; CONTROL gets the port and pairing code
+//   cordinal-core-test fonts DIR              the font index and matcher on fonts and a configuration made in DIR,
+//                                             and malformed fonts, configurations and caches
+//   cordinal-core-test fonts-match [FILE]     the installed fonts: patterns (FILE's lines) matched as fc-match does
+//   cordinal-core-test text DIR [FONT...]     the text stack on fonts made in DIR and the installed ones: outlines,
+//                                             coverage, kerning, ligatures, scripts, emoji, and malformed fonts
+//   cordinal-core-test bidi FILE              the bidi pass against Unicode's BidiCharacterTest.txt
+//   cordinal-core-test sound-pod              the SPA POD builder and reader on known values
+//   cordinal-core-test sound-fuzz [N [SEED]]  the PipeWire and PulseAudio message parsers on N mutated messages
+//   cordinal-core-test sound-pattern SECONDS [RATE [TARGET [STALL_MS]]]
+//                                             play a known pattern on a sound stream and check its timing
+//   cordinal-core-test sound-compare FILE [RATE [SECONDS [gaps]]]
+//                                             check that a float32 WAV capture holds that pattern bit for bit
+//                                             (with gaps: silences in the middle are allowed)
 #include "archive.h"
 #include "audio_output.h"
 #include "backup.h"
 #include "collection.h"
 #include "tests/discord_checks.h"
+#include "tests/fontmatch_checks.h"
+#include "tests/text_checks.h"
 #include "tests/wind_checks.h"
 #include "tests/metadata_checks.h"
+#include "tests/sound_checks.h"
 #include "tests/tag_suggest_checks.h"
 #include "convert.h"
 #include "decoder.h"
@@ -61,11 +79,10 @@
 
 #include <gpod/model.hpp>
 
-#include <openssl/core_names.h>
-#include <openssl/evp.h>
-#include <openssl/param_build.h>
-#include <openssl/pem.h>
-#include <openssl/x509v3.h>
+#include "linux/tls_der.h"
+#include "radio_hls.h"
+
+#include <bearssl.h>
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -779,7 +796,7 @@ int CheckSfx() {
     // Position -1 once it has finished; the stream may still be draining effects.
     bool ended = sfx::ClipPosition() < 0;
     if (!moved && !getenv("CORDINAL_E2E")) {  // the end-to-end run has a PipeWire server and needs the sound
-        printf("skip no sound effect stream (is PipeWire running?)\n");
+        printf("skip no sound effect stream (is PipeWire or PulseAudio running?)\n");
         sfx::Shutdown();
         return 0;
     }
@@ -794,7 +811,7 @@ int CheckSfx() {
     return failures;
 }
 
-// The output devices PipeWire offers (the Preferences > Output device list). The end-to-end run has a null
+// The output devices the sound server offers (the Preferences > Output device list). The end-to-end run has a null
 // sink and needs it listed.
 int ListDevices() {
     auto devices = ListOutputDevices();
@@ -858,9 +875,34 @@ int CheckHelpers(const char* dirArg) {
     return failures;
 }
 
+// ES256 (or the DER form) checked with BearSSL against an uncompressed P-256 point.
+bool VerifyEs256(std::string_view point, std::string_view data, std::string_view signature, bool raw) {
+    std::string hash = web::Sha256(data);
+    br_ec_public_key key{BR_EC_secp256r1, (unsigned char*)point.data(), point.size()};
+    auto verify = raw ? br_ecdsa_vrfy_raw_get_default() : br_ecdsa_vrfy_asn1_get_default();
+    return hash.size() == 32 && verify(br_ec_get_default(), hash.data(), hash.size(), &key, signature.data(), signature.size()) == 1;
+}
+std::string Unhex(std::string_view hex) {
+    std::string out;
+    for (size_t i = 0; i + 1 < hex.size(); i += 2) out += (char)std::stoi(std::string(hex.substr(i, 2)), nullptr, 16);
+    return out;
+}
+// A throwaway P-256 key made by OpenSSL 3.5 for these checks: PKCS#8 PEM (PEM_write_bio_PrivateKey),
+// the RFC 5915 DER that i2d_PrivateKey gave for it, and its public point.
+const char kOpenSslPem[] = "-----BEGIN PRIVATE KEY-----\n"
+    "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgSi6sHkEdUk00xkqd\n"
+    "bzftbZESlTj9WyQzH2iC1+x+lwKhRANCAASIRVaUuRGFZp+EPlCTj0WPZQeRWPUk\n"
+    "1GDW4LJmAMXlksJn4N9XoxTIuaRYOl1+Vzv5B44VRI8+2thQd2DPLDkP\n"
+    "-----END PRIVATE KEY-----\n";
+const char kOpenSslBlob[] = "307702010104204a2eac1e411d524d34c64a9d6f37ed6d91129538fd5b24331f6882d7ec7e9702a00a06082a8648ce3d030107"
+    "a1440342000488455694b91185669f843e50938f458f65079158f524d460d6e0b26600c5e592c267e0df57a314c8b9a4583a5d7e573bf9078e15448f3e"
+    "dad8507760cf2c390f";
+const char kOpenSslPoint[] = "0488455694b91185669f843e50938f458f65079158f524d460d6e0b26600c5e592c267e0df57a314c8b9a4583a5d7e573bf9078e"
+    "15448f3edad8507760cf2c390f";
+
 }  // namespace
 
-// The away-from-home pieces that are Linux's own (OpenSSL keys, certificates, TLS and HttpFetch), and the
+// The away-from-home pieces that are Linux's own (keys, certificates, TLS and HttpFetch, on BearSSL), and the
 // shared readers they feed. Keys and certificates are made in DIR; the check serves HTTPS on loopback.
 int CheckAway(const char* directory) {
     int failures = 0;
@@ -908,25 +950,29 @@ int CheckAway(const char* directory) {
             return out;
         };
         std::string point = "\x04" + decode(j.String("x")) + decode(j.String("y"));
-        OSSL_PARAM_BLD* build = OSSL_PARAM_BLD_new();
-        OSSL_PARAM_BLD_push_utf8_string(build, OSSL_PKEY_PARAM_GROUP_NAME, "P-256", 0);
-        OSSL_PARAM_BLD_push_octet_string(build, OSSL_PKEY_PARAM_PUB_KEY, point.data(), point.size());
-        OSSL_PARAM* params = OSSL_PARAM_BLD_to_param(build);
-        EVP_PKEY_CTX* make = EVP_PKEY_CTX_new_from_name(nullptr, "EC", nullptr);
-        EVP_PKEY* pub = nullptr;
-        if (point.size() == 65 && make && EVP_PKEY_fromdata_init(make) == 1) EVP_PKEY_fromdata(make, &pub, EVP_PKEY_PUBLIC_KEY, params);
-        ECDSA_SIG* sig = ECDSA_SIG_new();
-        ECDSA_SIG_set0(sig, BN_bin2bn((const unsigned char*)signature.data(), 32, nullptr),
-                       BN_bin2bn((const unsigned char*)signature.data() + 32, 32, nullptr));
-        unsigned char* der = nullptr;
-        int size = i2d_ECDSA_SIG(sig, &der);
-        EVP_MD_CTX* md = EVP_MD_CTX_new();
-        verified = pub && size > 0 && EVP_DigestVerifyInit(md, nullptr, EVP_sha256(), nullptr, pub) == 1 &&
-                   EVP_DigestVerify(md, der, (size_t)size, (const unsigned char*)"header.payload", 14) == 1;
-        EVP_MD_CTX_free(md); OPENSSL_free(der); ECDSA_SIG_free(sig); EVP_PKEY_free(pub); EVP_PKEY_CTX_free(make);
-        OSSL_PARAM_free(params); OSSL_PARAM_BLD_free(build);
+        verified = point.size() == 65 && signature.size() == 64 && VerifyEs256(point, "header.payload", signature, true) &&
+                   !VerifyEs256(point, "header.payloaD", signature, true);
     }
     check(verified, "an ES256 signature verifies with the account key's JWK");
+    // Keys OpenSSL wrote for releases up to 0.1.11: the account key's RFC 5915 blob and the server's
+    // PKCS#8 PEM. They load, sign as before, and the account key exports to the same bytes.
+    {
+        const std::string point = Unhex(kOpenSslPoint);
+        web::AccountKey old;
+        std::string oldBlob = Unhex(kOpenSslBlob);
+        bool imported = old.Import(oldBlob) && old.Export() == oldBlob;
+        std::string oldJwk = old.Jwk();
+        check(imported && oldJwk.find(web::Base64Url(point.substr(1, 32))) != std::string::npos &&
+              oldJwk.find(web::Base64Url(point.substr(33, 32))) != std::string::npos &&
+              VerifyEs256(point, "old", old.Sign("old"), true), "an account key saved by OpenSSL still loads and signs");
+        const std::wstring oldName = Wide(directory) + L"/old-key.bin";
+        std::string oldError;
+        bool saved = web::SaveRecords(oldName, kOpenSslPem);
+        std::string oldCsr = saved && web::EnsureTlsKey(oldName, oldError) ? web::CertificateRequest(oldName, {"music.example"}, oldError) : "";
+        std::string stored;
+        check(!oldCsr.empty() && oldCsr.find(point) != std::string::npos && web::ReadRecords(oldName, stored) && stored == kOpenSslPem,
+              "a server key saved by OpenSSL is read, not replaced");
+    }
 
     // The server's key, a certificate request for Let's Encrypt, and a certificate to serve.
     const std::wstring keyName = Wide(directory) + L"/web-key.bin";
@@ -938,42 +984,46 @@ int CheckAway(const char* directory) {
     std::string csr = web::CertificateRequest(keyName, {"203.0.113.7", "music.example"}, error);
     bool requestOk = false;
     {
-        const unsigned char* p = (const unsigned char*)csr.data();
-        X509_REQ* request = d2i_X509_REQ(nullptr, &p, (long)csr.size());
-        EVP_PKEY* pub = request ? X509_REQ_get0_pubkey(request) : nullptr;
-        STACK_OF(X509_EXTENSION)* extensions = request ? X509_REQ_get_extensions(request) : nullptr;
-        std::string names;
-        for (int i = 0; extensions && i < sk_X509_EXTENSION_num(extensions); ++i) {
-            BIO* text = BIO_new(BIO_s_mem());
-            X509V3_EXT_print(text, sk_X509_EXTENSION_value(extensions, i), 0, 0);
-            char* data = nullptr;
-            long n = BIO_get_mem_data(text, &data);
-            names.append(data, (size_t)n);
-            BIO_free(text);
+        // CertificationRequest: the signed body, the algorithm and the signature; the key is in the body.
+        std::string_view in = csr, request, body, whole, part;
+        uint8_t tag = 0;
+        std::string point;
+        if (web::der::Next(in, tag, request) && tag == 0x30 && in.empty() && web::der::Next(request, tag, body, &whole) && tag == 0x30) {
+            std::string_view fields = body, key;
+            web::der::Next(fields, tag, part);  // version
+            web::der::Next(fields, tag, part);  // subject
+            if (web::der::Next(fields, tag, key) && tag == 0x30 && key.size() > 65) point = std::string(key.substr(key.size() - 65));
+            std::string_view algorithm, bits;
+            if (web::der::Next(request, tag, algorithm) && web::der::Next(request, tag, bits) && tag == 0x03 && bits.size() > 1 &&
+                point.size() == 65 && point[0] == 4)
+                requestOk = VerifyEs256(point, whole, bits.substr(1), false) &&
+                            algorithm.find(std::string_view("\x2a\x86\x48\xce\x3d\x04\x03\x02", 8)) != algorithm.npos;
         }
-        requestOk = pub && X509_REQ_verify(request, pub) == 1 && names.find("IP Address:203.0.113.7") != std::string::npos &&
-                    names.find("DNS:music.example") != std::string::npos;
-        sk_X509_EXTENSION_pop_free(extensions, X509_EXTENSION_free);
-        X509_REQ_free(request);
+        // The names, as the subjectAltName's iPAddress and dNSName entries.
+        requestOk = requestOk && csr.find(std::string("\x87\x04\xcb\x00\x71\x07", 6)) != std::string::npos &&
+                    csr.find("\x82\x0dmusic.example") != std::string::npos;
     }
     check(requestOk, "the certificate request is signed by the server's key and names its addresses");
     std::string der = web::SelfSignedCertificate(keyName, {"127.0.0.1"}, 2);
     std::vector<std::string> names;
     uint64_t from = 0, until = 0;
-    std::string pem;
+    std::string pem = web::der::ToPem(der, "CERTIFICATE");
+    bool selfSigned = false;
     {
-        const unsigned char* p = (const unsigned char*)der.data();
-        X509* cert = d2i_X509(nullptr, &p, (long)der.size());
-        BIO* out = BIO_new(BIO_s_mem());
-        char* data = nullptr;
-        long n = cert && PEM_write_bio_X509(out, cert) ? BIO_get_mem_data(out, &data) : 0;
-        if (n > 0) pem.assign(data, (size_t)n);
-        BIO_free(out);
-        X509_free(cert);
+        std::string_view in = der, certificate, body, whole, algorithm, bits;
+        uint8_t tag = 0;
+        std::string csrPoint = csr.size() > 100 ? csr.substr(csr.find(std::string("\x03\x42\x00\x04", 4)) + 3, 65) : "";
+        if (web::der::Next(in, tag, certificate) && web::der::Next(certificate, tag, body, &whole) &&
+            web::der::Next(certificate, tag, algorithm) && web::der::Next(certificate, tag, bits) && tag == 0x03 && bits.size() > 1)
+            selfSigned = csrPoint.size() == 65 && whole.find(csrPoint) != whole.npos && VerifyEs256(csrPoint, whole, bits.substr(1), false);
     }
+    check(selfSigned, "the self-signed certificate carries the server's key and is signed by it");
     auto chain = web::PemCertificates(pem + pem);
     check(web::CertificateInfo(der, from, until, names) && names == std::vector<std::string>{"127.0.0.1"} && until > from &&
           until - from > 86400 && chain.size() == 2 && chain[0] == der, "certificates are read for their names, dates and PEM");
+    std::string later = web::SelfSignedCertificate(keyName, {"::1", "music.example"}, 9000);
+    check(web::CertificateInfo(later, from, until, names) && names == std::vector<std::string>{"::1", "music.example"} &&
+          until > 2524608000u && until - from > 9000ull * 86400 - 1, "a certificate past 2049 and an IPv6 name read back");
 
     // HTTPS on the server's own port, checked by HttpFetch against that certificate.
     auto identity = web::TlsIdentity::Create({der}, keyName, error);
@@ -999,11 +1049,109 @@ int CheckAway(const char* directory) {
     check(challenge.status == 200 && challenge.body == "tok-1.thumbprint", "the http-01 answer is served for Let's Encrypt");
     auto wrongName = web::HttpFetch(nullptr, "https://localhost:" + port + "/manifest.webmanifest", "GET", {}, {}, 3000);
     check(wrongName.status == 0, "a certificate that doesn't name the host is refused");
+    // A certificate for the same (trusted) key that names only a DNS name: an address must be named itself.
+    if (auto named = web::TlsIdentity::Create({web::SelfSignedCertificate(keyName, {"music.example"}, 2)}, keyName, error)) {
+        away.identity = named;
+        server.SetAway(away);
+        auto unnamed = web::HttpFetch(nullptr, "https://127.0.0.1:" + port + "/manifest.webmanifest", "GET", {}, {}, 3000);
+        check(unnamed.status == 0, "a certificate that doesn't name the address is refused");
+    } else {
+        check(false, "a certificate that doesn't name the address is refused");
+    }
     std::atomic<bool> cancel{true};
     auto t0 = std::chrono::steady_clock::now();
     auto cancelled = web::HttpFetch(&cancel, "http://192.0.2.1/", "GET", {}, {}, 10000);
     check(cancelled.status == 0 && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(2), "a cancelled request stops at once");
     server.Stop();
+    return failures;
+}
+
+// What the Linux HTTPS code computes and parses without a network: SHA-256 (FIPS 180-4 examples),
+// HLS's AES-128-CBC with its padding, and the DER time, Base64 and PEM readers.
+int CheckTls() {
+    int failures = 0;
+    auto check = [&](bool ok, const char* what) {
+        printf("%s %s\n", ok ? "ok  " : "FAIL", what);
+        failures += !ok;
+    };
+    auto hex = [](const std::string& bytes) {
+        std::string out;
+        for (unsigned char c : bytes) { out += "0123456789abcdef"[c >> 4]; out += "0123456789abcdef"[c & 15]; }
+        return out;
+    };
+    check(hex(web::Sha256("")) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" &&
+          hex(web::Sha256("abc")) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" &&
+          hex(web::Sha256("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")) ==
+              "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1" &&
+          hex(web::Sha256(std::string(1000000, 'a'))) == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0",
+          "SHA-256 gives the FIPS 180-4 digests");
+    // Ciphertexts from `openssl enc -aes-128-cbc` with this key and IV.
+    const std::string key = Unhex("000102030405060708090a0b0c0d0e0f");
+    const std::array<uint8_t, 16> iv = {15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0};
+    std::string one = Unhex("c0182a2290d25bff19fa4f5cea6073a1417a85330625760f9feb8b900c56a754");
+    std::string full = Unhex("ff14dbe405cc0ee24d0de41289f0fc987cf26840fae8a8fa2f8f3d800ddc0c54b2098ad5e09fd2d7b62ca16d78416f9e");
+    std::string bad = one;
+    bad[20] ^= 1;  // the last block's padding no longer checks out
+    std::string shortKey = key.substr(1), odd = one.substr(1), badKey = one;
+    check(radio::DecryptRadioAes(one, key, iv) && one == "cordinal decrypts HLS segments." &&
+          radio::DecryptRadioAes(full, key, iv) && full == "0123456789abcdef0123456789abcdef" &&
+          !radio::DecryptRadioAes(bad, key, iv) && !radio::DecryptRadioAes(badKey, shortKey, iv) && !radio::DecryptRadioAes(odd, key, iv),
+          "HLS segments decrypt with AES-128-CBC, and bad padding is refused");
+    uint64_t t = 0;
+    check(web::der::Time(0x17, "491231235959Z", t) && t == 2524607999u && web::der::Time(0x18, "20500101000000Z", t) && t == 2524608000u &&
+          web::der::Time(0x17, "240229120000Z", t) && t == 1709208000u && !web::der::Time(0x17, "230229120000Z", t) &&
+          !web::der::Time(0x17, "241301000000Z", t) && !web::der::Time(0x17, "2402291200Z", t) && !web::der::Time(0x17, "240229120000+0100", t) &&
+          web::der::Time(2524607999u)[0] == 0x17 && web::der::Time(2524608000u)[0] == 0x18,
+          "certificate times read and written on both sides of 2050");
+    std::string decoded;
+    check(web::der::FromBase64("TWFu", decoded) && decoded == "Man" && web::der::FromBase64("TW\r\nE=", decoded) && decoded == "Ma" &&
+          web::der::FromBase64("TQ==", decoded) && decoded == "M" && !web::der::FromBase64("TQ=", decoded) &&
+          !web::der::FromBase64("TQ==TQ==", decoded) && !web::der::FromBase64("T@==", decoded) && web::der::Base64("Ma") == "TWE=",
+          "Base64 is read strictly and written with padding");
+    std::string pem = "junk\r\n-----BEGIN CERTIFICATE-----\r\nTWFu\r\n-----END CERTIFICATE-----\r\n"
+                      "-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n" + web::der::ToPem("Ma", "CERTIFICATE");
+    check(web::PemCertificates(pem) == std::vector<std::string>{"Man", "Ma"} && web::der::Pem(pem, "PRIVATE KEY").empty(),
+          "PEM blocks are found, and one that doesn't decode is skipped");
+    std::string_view contents;
+    std::string_view loose("\x30\x81\x05hello", 8), truncated("\x30\x06hello", 7), longer("\x04\x82\x01\x00", 4);
+    uint8_t tag = 0;
+    check(!web::der::Next(loose, tag, contents) && !web::der::Next(truncated, tag, contents) && !web::der::Next(longer, tag, contents) &&
+          web::der::Element(0x04, std::string(300, 'x')).substr(0, 4) == std::string("\x04\x82\x01\x2c", 4),
+          "DER lengths are written in the shortest form and anything else is refused");
+    return failures;
+}
+
+// HTTPS against hosts on the internet: the services cordinal talks to must connect with their real
+// certificates, and badssl.com's broken ones must be refused. Needs a network; prints each result.
+int CheckTlsHosts() {
+    int failures = 0;
+    auto check = [&](bool ok, const std::string& what) {
+        printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str());
+        failures += !ok;
+    };
+    struct Case { std::string url; bool good; };
+    std::vector<Case> cases = {
+        {"https://musicbrainz.org/ws/2/release/?query=cordinal&limit=1&fmt=json", true},
+        {"https://api.deezer.com/search?q=cordinal&limit=1", true},
+        {"https://itunes.apple.com/search?term=cordinal&limit=1", true},
+        {"https://lrclib.net/api/search?q=cordinal", true},
+        {"https://ws.audioscrobbler.com/2.0/", true},
+        {"https://api.listenbrainz.org/1/validate-token", true},
+        {"https://acme-v02.api.letsencrypt.org/directory", true},
+        {"https://all.api.radio-browser.info/json/servers", true},
+        {"https://ecc256.badssl.com/", true},
+        {"https://rsa4096.badssl.com/", true},
+        {"https://1.1.1.1/", true},  // a certificate that names the address
+        {"https://expired.badssl.com/", false},
+        {"https://wrong.host.badssl.com/", false},
+        {"https://self-signed.badssl.com/", false},
+        {"https://untrusted-root.badssl.com/", false},
+    };
+    for (const Case& c : cases) {
+        auto reply = web::HttpFetch(nullptr, c.url, "GET", {}, "User-Agent: cordinal-core-test ( https://github.com/imhavingasuperbadday/cordinal )\r\n", 15000);
+        const bool connected = reply.status != 0;
+        check(connected == c.good, (c.good ? "connects: " : "refused:  ") + c.url + " (status " + std::to_string(reply.status) + ")");
+    }
     return failures;
 }
 
@@ -1051,6 +1199,8 @@ int CheckIpod(const char* root) {
 
 int main(int argc, char** argv) {
     if (argc >= 2 && !strcmp(argv[1], "weighted-shuffle")) return CheckWeightedShuffle();
+    if (argc >= 2 && !strcmp(argv[1], "tls")) return CheckTls();
+    if (argc >= 2 && !strcmp(argv[1], "tls-hosts")) return CheckTlsHosts();
     if (argc >= 2 && !strcmp(argv[1], "tagsuggest")) {  // tests/tag_suggest_checks.h, shared with the Windows self-test
         int failures = 0;
         for (const auto& group : tag_suggest_checks::All()) {
@@ -1084,7 +1234,20 @@ int main(int argc, char** argv) {
     if (argc >= 3 && !strcmp(argv[1], "helpers")) return CheckHelpers(argv[2]);
     if (argc >= 2 && !strcmp(argv[1], "devices")) return ListDevices();
     if (argc >= 2 && !strcmp(argv[1], "sfx")) return CheckSfx();
+    if (argc >= 2 && !strcmp(argv[1], "sound-pod")) return sound_checks::CheckPod();
+    if (argc >= 2 && !strcmp(argv[1], "sound-fuzz"))
+        return sound_checks::Fuzz(argc >= 3 ? atol(argv[2]) : 200000, argc >= 4 ? (unsigned)atol(argv[3]) : 1);
+    if (argc >= 3 && !strcmp(argv[1], "sound-pattern"))
+        return sound_checks::PlayPattern(atof(argv[2]), argc >= 4 ? (unsigned)atoi(argv[3]) : 48000,
+                                         argc >= 5 && *argv[4] ? argv[4] : nullptr, argc >= 6 ? atoi(argv[5]) : 0);
+    if (argc >= 3 && !strcmp(argv[1], "sound-compare"))
+        return sound_checks::ComparePattern(argv[2], argc >= 4 ? (unsigned)atoi(argv[3]) : 48000, argc >= 5 ? atof(argv[4]) : 1.0,
+                                             argc >= 6 && !strcmp(argv[5], "gaps"));
     if (argc >= 3 && !strcmp(argv[1], "away")) return CheckAway(argv[2]);
+    if (argc >= 3 && !strcmp(argv[1], "fonts")) return fontmatch_checks::Check(argv[2]);
+    if (argc >= 2 && !strcmp(argv[1], "fonts-match")) return fontmatch_checks::CheckInstalled(argc >= 3 ? argv[2] : nullptr);
+    if (argc >= 3 && !strcmp(argv[1], "text")) return text_checks::Check(argv[2], argc - 3, argv + 3);
+    if (argc >= 3 && !strcmp(argv[1], "bidi")) return text_checks::CheckBidi(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "listenbrainz")) return CheckListenBrainz(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "discord")) {  // tests/discord_checks.h, shared with the Windows self-test
         int failures = 0;
@@ -1099,6 +1262,6 @@ int main(int argc, char** argv) {
     if (argc >= 3 && !strcmp(argv[1], "decode")) return Decode(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "play")) return Play(argv[2], argc >= 4 ? atof(argv[3]) : 5);
     fprintf(stderr, "usage: cordinal-core-test scan DIR | decode FILE | play FILE [SECONDS] | replaygain FILE... | "
-                    "tags FILE DIR | convert FILE DIR | organize FILE ROOT | copy FILE DEST | collection DIR | ipod DIR | eq | resampler | waveform | helpers DIR | devices | sfx | listenbrainz DIR | weighted-shuffle | tagsuggest | chapters FILE | library FILE | history FILE | playlists FILE | steam [cancel] | away DIR | web DIR CONTROL\n");
+                    "tags FILE DIR | convert FILE DIR | organize FILE ROOT | copy FILE DEST | collection DIR | ipod DIR | eq | resampler | waveform | helpers DIR | devices | sfx | listenbrainz DIR | weighted-shuffle | tagsuggest | chapters FILE | library FILE | history FILE | playlists FILE | steam [cancel] | away DIR | tls | tls-hosts | web DIR CONTROL | fonts DIR | fonts-match [FILE] | text DIR [FONT...] | bidi FILE\n");
     return 2;
 }

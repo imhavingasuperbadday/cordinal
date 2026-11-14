@@ -26,7 +26,7 @@ namespace online {
 
 // The version is kept with the others in tools/check-updates.ps1.
 const char kRequestHeaders[] =
-    "User-Agent: cordinal/0.1.11 (https://github.com/imhavingasuperbadday/cordinal)\r\n"
+    "User-Agent: cordinal/0.1.12 (https://github.com/imhavingasuperbadday/cordinal)\r\n"
     "Accept: application/json\r\n";
 
 namespace {
@@ -59,7 +59,7 @@ int Int(const web::JsonValue& value) { return atoi(value.text.c_str()); }
 
 Cancel::Cancel() {
 #ifdef _WIN32
-    session_ = WinHttpOpen(L"cordinal/0.1.11 (https://github.com/imhavingasuperbadday/cordinal)",
+    session_ = WinHttpOpen(L"cordinal/0.1.12 (https://github.com/imhavingasuperbadday/cordinal)",
                            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
 #endif
 }
@@ -1235,6 +1235,165 @@ bool FetchArtistInfo(const std::string& name, const std::string& knownId, Cancel
     if (cancel.Stopped()) return false;
     CachePut(key, ArtistValue(info), true);
     out = std::move(info);
+    return true;
+}
+
+// --- discography ---------------------------------------------------------------------------------
+
+namespace {
+bool ValidMbid(const std::string& id) {
+    return id.size() == 36 && id.find_first_not_of("0123456789abcdef-") == std::string::npos;
+}
+
+// Tabs and line breaks would split the cached record; a title never needs them.
+std::string OneLine(std::string text) {
+    for (char& c : text)
+        if ((unsigned char)c < 0x20) c = ' ';
+    return text;
+}
+}  // namespace
+
+std::vector<ReleaseGroup> ParseReleaseGroups(std::string_view json, int* total) {
+    std::vector<ReleaseGroup> out;
+    if (total) *total = 0;
+    web::JsonValue root;
+    if (!web::ParseJson(json, root) || root.kind != web::JsonValue::Kind::Object) return out;
+    const web::JsonValue& groups = root["release-groups"];
+    if (groups.kind != web::JsonValue::Kind::Array) return out;
+    if (total) *total = std::max(0, Int(root["release-group-count"]));
+    for (const auto& item : groups.items) {
+        ReleaseGroup r;
+        r.id = item.String("id");
+        r.title = OneLine(item.String("title"));
+        if (!ValidMbid(r.id) || r.title.empty()) continue;
+        r.type = OneLine(item.String("primary-type"));
+        const web::JsonValue& secondary = item["secondary-types"];
+        if (secondary.kind == web::JsonValue::Kind::Array && !secondary.items.empty() && !secondary.items[0].text.empty())
+            r.type = OneLine(secondary.items[0].text);
+        if (r.type.empty()) r.type = "Album";
+        const std::string& date = item.String("first-release-date");
+        if (date.size() >= 4 && std::all_of(date.begin(), date.begin() + 4, [](char c) { return c >= '0' && c <= '9'; }))
+            r.year = atoi(date.substr(0, 4).c_str());
+        out.push_back(std::move(r));
+    }
+    return out;
+}
+
+void SortReleaseGroups(std::vector<ReleaseGroup>& groups) {
+    std::stable_sort(groups.begin(), groups.end(), [](const ReleaseGroup& a, const ReleaseGroup& b) {
+        int ya = a.year ? a.year : 99999, yb = b.year ? b.year : 99999;
+        return ya != yb ? ya < yb : Lower(a.title) < Lower(b.title);
+    });
+}
+
+void MarkOwned(std::vector<ReleaseGroup>& groups, const std::vector<std::string>& owned) {
+    std::vector<std::string> loose;
+    loose.reserve(owned.size());
+    for (const std::string& title : owned) loose.push_back(LooseTitle(title));
+    std::sort(loose.begin(), loose.end());
+    for (ReleaseGroup& r : groups) r.owned = std::binary_search(loose.begin(), loose.end(), LooseTitle(r.title));
+}
+
+std::vector<std::string> LibraryAlbumsBy(const ::Library& library, std::string_view artist) {
+    std::vector<std::string> out;
+    const std::string want = LooseTitle(artist);
+    if (want.empty()) return out;
+    // Names repeat across a library's tracks, so each string is reduced once.
+    std::map<StringPool::Handle, bool> byArtist;
+    std::map<StringPool::Handle, bool> albums;
+    auto matches = [&](StringPool::Handle h) {
+        if (!h) return false;
+        auto [it, added] = byArtist.try_emplace(h, false);
+        if (added) it->second = LooseTitle(library.View(h)) == want;
+        return it->second;
+    };
+    for (size_t i = 0; i < library.Count(); ++i) {
+        const Track& t = library[(TrackId)i];
+        if (t.album && (matches(t.artist) || matches(t.albumArtist)) && albums.try_emplace(t.album, true).second)
+            out.emplace_back(library.View(t.album));
+    }
+    return out;
+}
+
+bool CollectReleaseGroups(const std::function<bool(int offset, std::string& body)>& page,
+                          std::vector<ReleaseGroup>& out, bool& complete) {
+    out.clear();
+    complete = false;
+    bool reached = false;
+    for (int offset = 0, total = 1;;) {
+        if (offset >= total || offset >= 300) {
+            complete = true;
+            break;
+        }
+        std::string body;
+        if (!page(offset, body)) break;
+        reached = true;
+        std::vector<ReleaseGroup> groups = ParseReleaseGroups(body, &total);
+        if (groups.empty()) {
+            complete = true;  // past the last page, or none at all
+            break;
+        }
+        offset += 100;
+        for (ReleaseGroup& r : groups) out.push_back(std::move(r));
+    }
+    SortReleaseGroups(out);
+    return reached;
+}
+
+bool FetchDiscography(const std::string& mbid, Cancel& cancel, std::vector<ReleaseGroup>& out) {
+    if (!Config().artistInfo || !ValidMbid(mbid)) return false;
+    const std::string key = "discography\x1f" + mbid;
+    std::string cached;
+    bool cachedFound = false;
+    if (CacheGet(key, cached, cachedFound)) {
+        out.clear();
+        if (!cachedFound) return true;  // MusicBrainz lists none
+        // One release group a line: id, type, year and title, tab-separated.
+        size_t at = 0;
+        while (at < cached.size()) {
+            size_t end = cached.find('\n', at);
+            if (end == std::string::npos) end = cached.size();
+            std::string_view line(cached.data() + at, end - at);
+            size_t t1 = line.find('\t'), t2 = t1 == line.npos ? t1 : line.find('\t', t1 + 1),
+                   t3 = t2 == line.npos ? t2 : line.find('\t', t2 + 1);
+            if (t3 != line.npos) {
+                ReleaseGroup r;
+                r.id = std::string(line.substr(0, t1));
+                r.type = std::string(line.substr(t1 + 1, t2 - t1 - 1));
+                r.year = atoi(std::string(line.substr(t2 + 1, t3 - t2 - 1)).c_str());
+                r.title = std::string(line.substr(t3 + 1));
+                if (ValidMbid(r.id) && !r.title.empty()) out.push_back(std::move(r));
+            }
+            at = end + 1;
+        }
+        return true;
+    }
+    const auto deadline = Clock::now() + std::chrono::seconds(15);
+    std::vector<ReleaseGroup> groups;
+    bool complete = false;
+    const bool reached = CollectReleaseGroups(
+        [&](int offset, std::string& body) {
+            unsigned timeout = Remaining(deadline, 8000);
+            if (!timeout) return false;
+            Reply reply = Get("https://musicbrainz.org/ws/2/release-group?artist=" + mbid +
+                                  "&type=album%7Cep&limit=100&offset=" + std::to_string(offset) + "&fmt=json",
+                              cancel, timeout);
+            if (reply.status != 200) return false;
+            body = std::move(reply.body);
+            return true;
+        },
+        groups, complete);
+    if (cancel.Stopped() || !reached) return false;
+    // A later page that failed or ran out of time leaves a partial list: shown this once but not cached,
+    // so the next look asks again instead of keeping it short for 30 days.
+    if (complete && groups.empty()) CachePut(key, {}, false);
+    else if (complete) {
+        std::string value;
+        for (const ReleaseGroup& r : groups)
+            value += r.id + '\t' + r.type + '\t' + std::to_string(r.year) + '\t' + r.title + '\n';
+        CachePut(key, value, true);
+    }
+    out = std::move(groups);
     return true;
 }
 

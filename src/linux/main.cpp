@@ -20,7 +20,6 @@
 #include "text.h"
 #include "ui.h"
 
-#include <SDL3/SDL_main.h>
 
 #include <clocale>
 #include <cstring>
@@ -211,7 +210,7 @@ int Run(int argc, char** argv) {
         if (!full.empty()) paths.push_back(full);
     }
 
-    SDL_SetAppMetadata("cordinal", "0.1.11", "cordinal");
+    SDL_SetAppMetadata("cordinal", "0.1.12", "cordinal");
     SDL_SetHint(SDL_HINT_VIDEO_WAYLAND_PREFER_LIBDECOR, "1");
     if (parity) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
@@ -233,14 +232,8 @@ int Run(int argc, char** argv) {
         s.windowH = ui::kMenuBarHeight + (checkLayout ? ui::kLayoutHeight : 662);
         s.maximized = false;
     }
-    // The software renderer draws into SDL's window surface, so keep that surface native. SDL
-    // otherwise emulates it with an OpenGL texture, which pulls the GPU driver and its 16 workers
-    // into the process and sends every present through the GPU even when drawing is software.
-    // Hardware drawing owns its OpenGL context and never asks for the window surface. Wayland has
-    // no native surface at all: there the emulated one is the only way software drawing can work,
-    // and without it SDL_CreateRenderer fails with "Window framebuffer support not available".
-    const bool wayland = std::string_view(SDL_GetCurrentVideoDriver()) == "wayland";
-    if (!parity) SDL_SetHint(SDL_HINT_FRAMEBUFFER_ACCELERATION, wayland ? "1" : "0");
+    // Drawing is software (src/linux/platform/render.cpp) into shared memory the window system
+    // shows (MIT-SHM on X11, wl_shm on Wayland): no GPU driver is loaded into the process.
     g.window = SDL_CreateWindow("cordinal", s.windowW, s.windowH, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY |
                                                                      (s.maximized ? SDL_WINDOW_MAXIMIZED : 0));
     if (!g.window) {

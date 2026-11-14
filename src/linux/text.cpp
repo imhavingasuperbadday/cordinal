@@ -1,12 +1,15 @@
-// Theme fonts, private pack fonts and script fallbacks, with cached SDL_ttf text for redraws.
+// Theme fonts, private pack fonts and script fallbacks, laid out by the in-repo text stack
+// (textlayout.h) and drawn from glyph atlases through the SDL renderer.
 #include "text.h"
 
 #include "app.h"
+#include "fontmatch.h"
+#include "textlayout.h"
 #include "theme_palette.h"
 
-#include <SDL3_ttf/SDL_ttf.h>
-#include <fontconfig/fontconfig.h>
+#include "third_party/stb_image.h"
 
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
@@ -16,20 +19,39 @@ namespace {
 
 #include "web_font.inc"
 #include "app_icon.inc"
+#include "ui_fonts.inc"
 
-TTF_TextEngine* g_engine = nullptr;
-TTF_Font* g_fonts[(int)Font::Count] = {};
-std::vector<TTF_Font*> g_fallbacks;
-float g_lineHeight[(int)Font::Count] = {};
-bool g_usesPackFont[(int)Font::Count] = {};
+using TextFont = lx::Font;
+
+SDL_Renderer* g_renderer = nullptr;
+std::unique_ptr<type::Font> g_fonts[(int)TextFont::Count];
+std::vector<std::unique_ptr<type::Font>> g_fallbacks;
+float g_lineHeight[(int)TextFont::Count] = {};
+bool g_usesPackFont[(int)TextFont::Count] = {};
 
 struct MemoryFont {
-    std::string bytes;
+    type::FontData bytes;
     std::wstring family;
-    TTF_FontStyleFlags style;
+    bool bold, italic;
 };
 std::vector<MemoryFont> g_packFonts;
 
+// Glyph atlases: 1024-pixel ARGB pages filled row by row, white with coverage as alpha (tinted
+// when drawn) or a color glyph's own pixels, as SDL_ttf's renderer text engine kept them.
+constexpr int kPage = 1024;
+struct Page {
+    SDL_Texture* texture = nullptr;
+    int x = 0, y = 0, rowHeight = 0;
+};
+struct Slot {
+    int page = -1;
+    SDL_FRect src{};
+    bool color = false;
+};
+std::vector<Page> g_pages;
+std::unordered_map<uint64_t, Slot> g_slots;  // font id << 16 | glyph
+
+// Strings drawn recently, laid out once: the glyph quads of each.
 struct Key {
     int font;
     std::string text;
@@ -38,35 +60,90 @@ struct Key {
 struct KeyHash {
     size_t operator()(const Key& k) const { return std::hash<std::string>()(k.text) * 31 + (size_t)k.font; }
 };
-std::unordered_map<Key, TTF_Text*, KeyHash> g_cache;
+std::unordered_map<Key, std::vector<type::Font::Quad>, KeyHash> g_cache;
 
-// A font file for a fontconfig pattern ("sans-serif:weight=bold"), or "" if none matches.
-std::string FindFont(const char* pattern, std::string* family = nullptr) {
-    FcPattern* p = FcNameParse(reinterpret_cast<const FcChar8*>(pattern));
-    if (!p) return {};
-    FcConfigSubstitute(nullptr, p, FcMatchPattern);
-    FcDefaultSubstitute(p);
-    FcResult result;
-    FcPattern* match = FcFontMatch(nullptr, p, &result);
-    std::string file;
-    if (match) {
-        FcChar8* f = nullptr;
-        if (FcPatternGetString(match, FC_FILE, 0, &f) == FcResultMatch) file = reinterpret_cast<const char*>(f);
-        FcChar8* fam = nullptr;
-        if (family && FcPatternGetString(match, FC_FAMILY, 0, &fam) == FcResultMatch) *family = reinterpret_cast<const char*>(fam);
-        FcPatternDestroy(match);
-    }
-    FcPatternDestroy(p);
-    return file;
+// The face for a fontconfig-style pattern ("sans-serif:weight=bold"); false with no fonts installed.
+bool FindFont(const char* pattern, fonts::Match* match) { return fonts::FindFont(pattern, match); }
+
+// Font files mapped once while fonts are open, shared by every size drawn from them.
+std::unordered_map<std::string, type::FontData> g_files;
+type::FontData Mapped(const std::string& path) {
+    if (path.empty()) return nullptr;
+    auto& data = g_files[path];
+    if (!data) data = type::MapFile(path);
+    return data;
 }
 
-TTF_Text* Shaped(Font font, const std::string& text) {
+bool DecodePng(std::string_view png, int* w, int* h, std::vector<uint8_t>* rgba) {
+    int channels = 0;
+    unsigned char* pixels = stbi_load_from_memory((const unsigned char*)png.data(), (int)png.size(), w, h, &channels, 4);
+    if (!pixels) return false;
+    rgba->assign(pixels, pixels + (size_t)*w * *h * 4);
+    stbi_image_free(pixels);
+    return true;
+}
+
+void ClearAtlas() {
+    for (Page& p : g_pages)
+        if (p.texture) SDL_DestroyTexture(p.texture);
+    g_pages.clear();
+    g_slots.clear();
+}
+
+// The glyph's place in an atlas page, uploading it on first use; null for an empty glyph.
+const Slot* Place(const type::Font::Quad& q) {
+    uint64_t key = q.font->Id() << 16 | q.glyph;
+    if (auto it = g_slots.find(key); it != g_slots.end()) return it->second.page >= 0 ? &it->second : nullptr;
+    const type::GlyphImage& img = const_cast<type::Font*>(q.font)->Image(q.glyph);
+    Slot slot;
+    slot.color = img.color;
+    int w = img.width, h = img.rows;
+    if (w > 0 && h > 0 && w + 2 <= kPage && h + 2 <= kPage) {
+        Page* page = g_pages.empty() ? nullptr : &g_pages.back();
+        if (page && page->x + w + 1 > kPage) page->x = 1, page->y += page->rowHeight + 1, page->rowHeight = 0;
+        if (!page || page->y + h + 1 > kPage) {
+            if (g_pages.size() >= 8) {  // full: start over, the next frames upload what they draw
+                ClearAtlas();
+                ClearTextCache();
+            }
+            Page fresh;
+            fresh.texture = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, kPage, kPage);
+            if (!fresh.texture) return nullptr;
+            SDL_SetTextureBlendMode(fresh.texture, SDL_BLENDMODE_BLEND);
+            SDL_SetTextureScaleMode(fresh.texture, SDL_SCALEMODE_NEAREST);
+            std::vector<uint32_t> clear((size_t)kPage * kPage, 0x00FFFFFF);
+            SDL_UpdateTexture(fresh.texture, nullptr, clear.data(), kPage * 4);
+            fresh.x = fresh.y = 1;
+            g_pages.push_back(fresh);
+            page = &g_pages.back();
+        }
+        std::vector<uint32_t> pixels((size_t)w * h);
+        for (size_t i = 0; i < pixels.size(); ++i) {
+            if (img.color) {
+                const uint8_t* p = &img.pixels[i * 4];
+                pixels[i] = (uint32_t)p[3] << 24 | (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2];
+            } else {
+                pixels[i] = 0x00FFFFFFu | (uint32_t)img.pixels[i] << 24;
+            }
+        }
+        SDL_Rect dst{page->x, page->y, w, h};
+        SDL_UpdateTexture(page->texture, &dst, pixels.data(), w * 4);
+        slot.page = (int)g_pages.size() - 1;
+        slot.src = {(float)page->x, (float)page->y, (float)w, (float)h};
+        page->x += w + 1;
+        page->rowHeight = std::max(page->rowHeight, h);
+    }
+    auto& placed = g_slots[key] = slot;
+    return placed.page >= 0 ? &placed : nullptr;
+}
+
+const std::vector<type::Font::Quad>& Shaped(TextFont font, const std::string& text) {
     Key key{(int)font, text};
     if (auto it = g_cache.find(key); it != g_cache.end()) return it->second;
     if (g_cache.size() > 6000) ClearTextCache();
-    TTF_Text* t = TTF_CreateText(g_engine, g_fonts[(int)font], text.data(), text.size());
-    g_cache.emplace(std::move(key), t);
-    return t;
+    std::vector<type::Font::Quad> quads;
+    g_fonts[(int)font]->Quads(text, &quads);
+    return g_cache.emplace(std::move(key), std::move(quads)).first->second;
 }
 
 }  // namespace
@@ -101,7 +178,7 @@ std::string_view AppIcon(int size) {
 
 namespace {
 
-// A fontconfig pattern for a Windows face: the face itself if installed, then the nearest
+// A font pattern for a Windows face: the face itself if installed, then the nearest
 // metric-alike or generic family, so the theme keeps its character where the face is missing.
 std::string Family(const wchar_t* face) {
     std::string f = face ? Utf8(face) : "";
@@ -126,8 +203,8 @@ const MemoryFont* FindPackFont(const wchar_t* family, bool bold) {
     int score = 4;
     for (const auto& font : g_packFonts) {
         if (_wcsicmp(font.family.c_str(), family)) continue;
-        int next = ((font.style & TTF_STYLE_BOLD) != 0) != bold;
-        if (font.style & TTF_STYLE_ITALIC) next += 2;
+        int next = font.bold != bold;
+        if (font.italic) next += 2;
         if (next <= score) {  // the later enabled pack wins when both have the same face
             score = next;
             best = &font;
@@ -144,117 +221,132 @@ void ResetPackFonts() {
 }
 
 bool AddPackFont(const std::string& bytes) {
-    if (bytes.empty() || (!TTF_WasInit() && !TTF_Init())) return false;
-    TTF_Font* probe = TTF_OpenFontIO(SDL_IOFromConstMem(bytes.data(), bytes.size()), true, 12);
-    if (!probe) return false;
-    const char* family = TTF_GetFontFamilyName(probe);
-    bool valid = family && *family;
-    if (valid) g_packFonts.push_back({bytes, compat::Widen(family), TTF_GetFontStyle(probe)});
-    TTF_CloseFont(probe);
-    return valid;
+    if (bytes.empty()) return false;
+    type::FontData data = type::FromBytes(std::make_shared<const std::string>(bytes));
+    auto probe = type::Face::Load(data, 0);
+    if (!probe || probe->family.empty() || (!probe->Scalable() && !probe->HasColor())) return false;
+    g_packFonts.push_back({data, compat::Widen(probe->family.c_str()), probe->bold, probe->italic});
+    return true;
 }
 
 bool UsesPackFont(Font font) { return g_usesPackFont[(int)font]; }
 
 bool InitText(SDL_Renderer* renderer, float scale, const Theme& theme) {
     ShutdownText();
-    if (!TTF_WasInit() && !TTF_Init()) return false;
-    g_engine = TTF_CreateRendererTextEngine(renderer);
-    if (!g_engine) return false;
+    g_renderer = renderer;
+    type::SetPngDecoder(DecodePng);
     // Sizes in pixels at 96 DPI, as Windows: the message font is 9 pt (12 px), a theme face may set
     // its own size, and the pixel font is drawn at whole multiples of its size without smoothing.
     std::string system = Family(nullptr), face = Family(theme.font);
-    std::string regular = FindFont((face + ":weight=regular").c_str()), bold = FindFont((face + ":weight=bold").c_str());
-    std::string menu = FindFont((system + ":weight=regular").c_str());
-    if (bold.empty()) bold = regular;
+    fonts::Match regular, bold, menu;
+    bool found = FindFont((face + ":weight=regular").c_str(), &regular);
+    if (!FindFont((face + ":weight=bold").c_str(), &bold)) bold = regular;
+    FindFont((system + ":weight=regular").c_str(), &menu);
+    // The Windows UI face: Segoe UI or Selawik where installed, else the Selawik compiled in (a build
+    // with CORDINAL_SELAWIK), with the desktop's own face kept as the first fallback for the scripts
+    // Selawik lacks (it is Latin only).
+    auto windowsFace = [](const fonts::Match& m) { return m.family == "Segoe UI" || m.family == "Selawik"; };
+    constexpr bool kHaveSelawik = sizeof(kFont_selawk) > 1;  // CORDINAL_SELAWIK
+    const bool embedded = kHaveSelawik && !theme.font && !windowsFace(regular);
+    const bool embeddedMenu = kHaveSelawik && !windowsFace(menu);
+    auto selawik = [](bool heavy) {
+        static const type::FontData regularBytes = type::FromBytes(std::make_shared<const std::string>((const char*)kFont_selawk, sizeof(kFont_selawk)));
+        static const type::FontData boldBytes = type::FromBytes(std::make_shared<const std::string>((const char*)kFont_selawkb, sizeof(kFont_selawkb)));
+        return heavy ? boldBytes : regularBytes;
+    };
     float px = (theme.fontPx ? theme.fontPx : 12) * scale;
     bool pixel = theme.fontResource != 0;
     if (pixel) px = (float)(theme.fontPx * std::max(1, (int)std::lround(scale)));
     struct Spec {
         Font font;
-        const std::string* file;
+        const fonts::Match* file;
         float px;
         bool pixel;
     } specs[] = {{Font::Normal, &regular, px, pixel}, {Font::Bold, &bold, px, pixel}, {Font::Small, &regular, px, pixel},
-                 {Font::Title, &bold, std::round(15 * scale), false}, {Font::Menu, &menu, std::round(12 * scale), false}};
+                 {Font::Title, &bold, std::round(15 * scale), false}, {Font::Menu, &menu, std::round(12 * scale), false},
+                 // Preferences' page titles: the bold message font at 4/3 (app_tweaks.cpp, titleFont).
+                 {Font::Heading, &bold, std::round(16 * scale), false}};
     for (auto& s : specs) {
-        TTF_Font* f = nullptr;
-        bool heading = s.font == Font::Bold || s.font == Font::Title;
+        std::unique_ptr<type::Font> f;
+        bool heading = s.font == Font::Bold || s.font == Font::Title || s.font == Font::Heading;
         if (s.pixel) {
             size_t size = 0;
             const unsigned char* data = DeltaruneFont(&size);
-            f = TTF_OpenFontIO(SDL_IOFromConstMem(data, size), true, s.px);
+            f = type::Font::Open(type::FromBytes(std::make_shared<const std::string>((const char*)data, size)), 0, s.px);
         } else if (s.font != Font::Menu) {
             if (const MemoryFont* pack = FindPackFont(theme.font, heading)) {
-                f = TTF_OpenFontIO(SDL_IOFromConstMem(pack->bytes.data(), pack->bytes.size()), true, s.px);
+                f = type::Font::Open(pack->bytes, 0, s.px);
                 g_usesPackFont[(int)s.font] = f != nullptr;
-                if (f && heading) TTF_SetFontStyle(f, TTF_STYLE_BOLD);
+                if (f && heading) f->SetBold(true);
             }
         }
-        if (!f && !s.pixel) f = TTF_OpenFont(s.file->c_str(), s.px);
+        if (!f && !s.pixel && (s.font == Font::Menu ? embeddedMenu : embedded)) f = type::Font::Open(selawik(heading), 0, s.px);
+        // The face the matcher reported, including its index in a collection.
+        if (!f && !s.pixel && (found || !s.file->file.empty())) f = type::Font::Open(Mapped(s.file->file), s.file->index & 0xFFFF, s.px);
         if (!f) return false;
-        if (s.pixel && s.font == Font::Bold) TTF_SetFontStyle(f, TTF_STYLE_BOLD);
-        TTF_SetFontHinting(f, s.pixel ? TTF_HINTING_MONO : TTF_HINTING_LIGHT_SUBPIXEL);
-        g_fonts[(int)s.font] = f;
-        g_lineHeight[(int)s.font] = (float)TTF_GetFontHeight(f);
+        if (s.pixel && s.font == Font::Bold) f->SetBold(true);
+        f->SetHinting(s.pixel ? type::Font::Hinting::Mono : type::Font::Hinting::Light);
+        g_lineHeight[(int)s.font] = (float)f->Height();
+        g_fonts[(int)s.font] = std::move(f);
     }
-    // Scripts the main font lacks (CJK, Arabic, symbols...): fontconfig's choices for them.
-    std::vector<std::string> seen{regular, bold};  // fontconfig often answers several patterns with one file
+    // Scripts the main font lacks (CJK, Arabic, symbols...): the matcher's choices for them, as fontconfig's.
+    std::vector<std::pair<std::string, int>> seen;  // several patterns often give one face
+    if (!embedded) seen = {{regular.file, regular.index}, {bold.file, bold.index}};
+    // With Selawik in front, the desktop's face comes first after it: Cyrillic, Greek, Vietnamese...
+    auto addFallback = [&](const fonts::Match& match) {
+        std::pair<std::string, int> id{match.file, match.index};
+        if (match.file.empty() || std::find(seen.begin(), seen.end(), id) != seen.end()) return;
+        seen.push_back(id);
+        type::FontData data = Mapped(match.file);
+        if (!data) return;
+        for (int i = 0; i < (int)Font::Count; ++i) {
+            // Fallbacks keep the default (normal) hinting, as the SDL3_ttf fonts did: whole-pixel advances.
+            auto fb = type::Font::Open(data, match.index & 0xFFFF, g_fonts[i]->Size());
+            if (!fb) continue;
+            g_fonts[i]->AddFallback(fb.get());
+            g_fallbacks.push_back(std::move(fb));
+        }
+    };
+    if (embedded) addFallback(regular);
     for (const char* pattern : {"sans-serif:lang=ja", "sans-serif:lang=ko", "sans-serif:lang=zh-cn", "sans-serif:lang=ar",
                                 "sans-serif:lang=he", "sans-serif:lang=th", "sans-serif:lang=hi",
                                 "sans-serif:charset=2605", "sans-serif:charset=2606", "sans-serif:charset=26a1",
                                 "DejaVu Sans", "emoji"}) {
-        std::string file = FindFont(pattern);
-        if (file.empty() || std::find(seen.begin(), seen.end(), file) != seen.end()) continue;
-        seen.push_back(file);
-        for (int i = 0; i < (int)Font::Count; ++i) {
-            TTF_Font* fb = TTF_OpenFont(file.c_str(), TTF_GetFontSize(g_fonts[i]));
-            if (!fb) continue;
-            TTF_AddFallbackFont(g_fonts[i], fb);
-            g_fallbacks.push_back(fb);
-        }
+        fonts::Match match;
+        if (FindFont(pattern, &match)) addFallback(match);
     }
     return true;
 }
 
 bool UiSymbolsAvailable() {
-    for (Uint32 ch : {0x2605u, 0x2606u, 0x26a1u}) {
-        if (TTF_FontHasGlyph(g_fonts[(int)Font::Normal], ch)) continue;
-        if (std::none_of(g_fallbacks.begin(), g_fallbacks.end(), [ch](TTF_Font* f) { return TTF_FontHasGlyph(f, ch); }))
-            return false;
+    for (uint32_t ch : {0x2605u, 0x2606u, 0x26a1u}) {
+        if (g_fonts[(int)Font::Normal] && g_fonts[(int)Font::Normal]->HasGlyph(ch)) continue;
+        if (std::none_of(g_fallbacks.begin(), g_fallbacks.end(), [ch](const auto& f) { return f->HasGlyph(ch); })) return false;
     }
     return true;
 }
 
-void ClearTextCache() {
-    for (auto& [key, t] : g_cache) TTF_DestroyText(t);
-    g_cache.clear();
-}
+void ClearTextCache() { g_cache.clear(); }
 
 void ShutdownText() {
     ClearTextCache();
+    ClearAtlas();
     std::fill(std::begin(g_usesPackFont), std::end(g_usesPackFont), false);
-    for (auto& f : g_fonts) {
-        if (f) TTF_CloseFont(f);
-        f = nullptr;
-    }
-    for (TTF_Font* f : g_fallbacks) TTF_CloseFont(f);
+    for (auto& f : g_fonts) f.reset();
     g_fallbacks.clear();
-    if (g_engine) TTF_DestroyRendererTextEngine(g_engine);
-    g_engine = nullptr;
+    g_files.clear();
+    g_renderer = nullptr;
 }
 
 float LineHeight(Font font) { return g_lineHeight[(int)font]; }
 
 float TextWidth(Font font, const std::string& text) {
-    if (text.empty()) return 0;
-    int w = 0, h = 0;
-    TTF_GetStringSize(g_fonts[(int)font], text.data(), text.size(), &w, &h);
-    return (float)w;
+    if (text.empty() || !g_fonts[(int)font]) return 0;
+    return (float)g_fonts[(int)font]->Width(text);
 }
 
 float DrawText(Font font, const std::string& text, float x, float y, uint32_t rgb, float maxWidth, int align) {
-    if (text.empty() || !g_engine) return 0;
+    if (text.empty() || !g_renderer || !g_fonts[(int)font]) return 0;
     std::string shown = text;
     float w = TextWidth(font, shown);
     if (maxWidth > 0 && w > maxWidth) {
@@ -263,17 +355,48 @@ float DrawText(Font font, const std::string& text, float x, float y, uint32_t rg
         int fitWidth = 0;
         size_t fitLength = 0;
         if (room <= 0) return 0;
-        TTF_MeasureString(g_fonts[(int)font], text.data(), text.size(), (int)room, &fitWidth, &fitLength);
+        g_fonts[(int)font]->Measure(text, (int)room, &fitWidth, &fitLength);
         while (fitLength > 0 && (text[fitLength - 1] == ' ')) --fitLength;
         shown = text.substr(0, fitLength) + kEllipsis;
         w = TextWidth(font, shown);
     }
     if (maxWidth > 0 && align == 1) x += (maxWidth - w) / 2;
     if (maxWidth > 0 && align == 2) x += maxWidth - w;
-    TTF_Text* t = Shaped(font, shown);
-    if (!t) return 0;
-    TTF_SetTextColor(t, (rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF, 0xFF);
-    TTF_DrawRendererText(t, std::floor(x), std::floor(y));
+    // Copy the quads: placing a glyph can fill the atlas, which clears the string cache.
+    std::vector<type::Font::Quad> quads = Shaped(font, shown);
+    float ox = std::floor(x), oy = std::floor(y);
+    SDL_FColor tint{((rgb >> 16) & 0xFF) / 255.f, ((rgb >> 8) & 0xFF) / 255.f, (rgb & 0xFF) / 255.f, 1.f};
+    SDL_FColor white{1.f, 1.f, 1.f, 1.f};
+    // One batch per page and kind, in the order the glyphs come.
+    struct Batch {
+        int page;
+        bool color;
+        std::vector<SDL_Vertex> vertices;
+        std::vector<int> indices;
+    };
+    std::vector<Batch> batches;
+    for (const auto& q : quads) {
+        const Slot* slot = Place(q);
+        if (!slot) continue;
+        Batch* b = nullptr;
+        for (auto& existing : batches)
+            if (existing.page == slot->page && existing.color == slot->color) b = &existing;
+        if (!b) b = &batches.emplace_back(Batch{slot->page, slot->color, {}, {}});
+        float x0 = ox + q.x, y0 = oy + q.y, x1 = x0 + slot->src.w, y1 = y0 + slot->src.h;
+        float u0 = slot->src.x / kPage, v0 = slot->src.y / kPage, u1 = (slot->src.x + slot->src.w) / kPage,
+              v1 = (slot->src.y + slot->src.h) / kPage;
+        SDL_FColor c = slot->color ? white : tint;
+        int base = (int)b->vertices.size();
+        b->vertices.push_back({{x0, y0}, c, {u0, v0}});
+        b->vertices.push_back({{x1, y0}, c, {u1, v0}});
+        b->vertices.push_back({{x1, y1}, c, {u1, v1}});
+        b->vertices.push_back({{x0, y1}, c, {u0, v1}});
+        for (int k : {0, 1, 2, 0, 2, 3}) b->indices.push_back(base + k);
+    }
+    for (const auto& b : batches)
+        if (b.page < (int)g_pages.size())
+            SDL_RenderGeometry(g_renderer, g_pages[b.page].texture, b.vertices.data(), (int)b.vertices.size(), b.indices.data(),
+                               (int)b.indices.size());
     return w;
 }
 

@@ -26,6 +26,7 @@ enum class ThemeMode { System, Light, Dark, Deltarune, Foobar, Paper, Midnight, 
 struct Palette {
     bool dark;
     Rgb bg, surface, surface2, border, text, sub, faint, accent, accent2, hover, select, selectText, playing, error, amber, ok;
+    const Palette* from = nullptr;  // AlbumPalette: the built-in palette this one was turned from
 };
 
 const Palette& LightPalette();
@@ -53,6 +54,24 @@ Rgb PlayerSurface(const Palette& p, double hue);
 Rgb AlbumPanelSurface(const Palette& p, double hue);
 // Every other playlist row is drawn this much off the list's background, Light and Dark only.
 Rgb RowStripe(const Palette& p);
+
+// Album colours (Preferences > View): how much of the window takes the playing album's
+// colour, the hue CoverHue reads from its cover. Off leaves every surface neutral. Player (the default)
+// washes the docked player's background and an open album's panel, as cordinal always has. Interface
+// turns the whole palette toward it (AlbumPalette). The strength scales every wash, Subtle to Bold;
+// text keeps its contrast at all of them. Light and Dark only: other themes keep their own look.
+enum class AlbumColours : uint8_t { Off, Player, Interface };
+constexpr int kAlbumStrengths = 4;  // Subtle, Normal, Strong, Bold
+struct AlbumColourSettings {
+    AlbumColours mode = AlbumColours::Player;
+    int strength = 1;
+};
+AlbumColourSettings& AlbumColourConfig();  // UI thread only
+// `base` turned toward `hue` for AlbumColours::Interface: every surface, the borders, hover and the
+// selection washed with it, and the accent and playing colour taken from it. The wash backs off until
+// the result keeps every PaletteLegibility rule. False, leaving `out` alone, for a palette other than
+// Light or Dark, a gray cover (hue < 0), or when no wash would stay legible.
+bool AlbumPalette(const Palette& base, double hue, Palette& out);
 // The first legibility rule `p` breaks (PRINCIPLES.md, "Legible in every theme"), in words such as
 // "sub on bg is 3.9:1, needs 4.5:1", or empty when it keeps them all. Built-in and pack themes are
 // held to the same rules through this one function.

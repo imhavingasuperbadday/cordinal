@@ -1,6 +1,6 @@
 # Builds cordinal for Windows (build.bat cdpack, packed by cdpack/) and natively for Linux.
 # The Linux release is built on Debian 13 so one binary runs on other current glibc
-# distributions (OpenSSL 3, SDL3). Development containers stay on Arch. The installer is
+# distributions (SDL3; HTTPS is compiled in). Development containers stay on Arch. The installer is
 # checked on Debian and Arch. A GitHub release is published for a v* tag, or for a push to
 # main whose version (src/cordinal.rc) has no release yet.
 name: build
@@ -65,13 +65,73 @@ jobs:
       - name: Install build tools
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends build-essential ca-certificates cmake git pkg-config \
-            libsdl3-dev libsdl3-ttf-dev libpipewire-0.3-dev libfontconfig-dev libssl-dev
+          apt-get install -y --no-install-recommends build-essential ca-certificates cmake git pkg-config
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build
         run: |
           cmake -S . -B build-linux -DCMAKE_BUILD_TYPE=Release
           cmake --build build-linux -j"$(nproc)"
+      - name: Check HTTPS
+        run: |
+          build-linux/cordinal-core-test tls
+          away=$(mktemp -d) && build-linux/cordinal-core-test away "$away"
+          # BearSSL is compiled in; the program must not load the distribution's TLS library.
+          ! readelf -d build-linux/cordinal | grep -E 'libssl|libcrypto'
+      - name: Check fonts
+        run: |
+          fonts=$(mktemp -d) && build-linux/cordinal-core-test fonts "$fonts"
+          # Fonts are found and matched in-repo; the program must not load fontconfig.
+          ! readelf -d build-linux/cordinal | grep libfontconfig
+          ! ldd build-linux/cordinal | grep libfontconfig
+          # fc-match is the reference for the installed fonts' matches; it is installed only after the build.
+          apt-get install -y --no-install-recommends fontconfig fonts-dejavu-core fonts-noto-color-emoji
+          build-linux/cordinal-core-test fonts-match
+      - name: Check text
+        run: |
+          # Text is laid out and drawn in-repo; the program must not load SDL3_ttf, FreeType or HarfBuzz.
+          ! readelf -d build-linux/cordinal | grep -E 'libSDL3_ttf|libfreetype|libharfbuzz'
+          ! ldd build-linux/cordinal | grep -E 'libSDL3_ttf|libfreetype|libharfbuzz'
+          text=$(mktemp -d) && build-linux/cordinal-core-test text "$text"
+      - name: Check audio
+        run: |
+          # Sound goes through in-repo PipeWire and PulseAudio clients; the program must not link
+          # libpipewire, libpulse or libasound.
+          ! readelf -d build-linux/cordinal | grep -E 'libpipewire|libspa|libpulse|libasound'
+          ! ldd build-linux/cordinal | grep -E 'libpipewire|libspa|libpulse|libasound'
+          ! readelf -d build-linux/cordinal-core-test | grep -E 'libpipewire|libspa|libpulse|libasound'
+          ! ldd build-linux/cordinal-core-test | grep -E 'libpipewire|libspa|libpulse|libasound'
+          # Real servers to play to, installed only after the build: headless PipeWire with two null sinks.
+          apt-get install -y --no-install-recommends pipewire pipewire-bin pipewire-pulse wireplumber \
+            pulseaudio-utils dbus-daemon python3
+          tools/audio-check.sh build-linux/cordinal-core-test
+      - name: Check the platform layer
+        run: |
+          # Windows, input and drawing are in-repo (src/linux/platform); the program needs nothing
+          # beyond glibc: not SDL3, libX11/libxcb, libwayland or libxkbcommon, and not even libstdc++.
+          readelf -d build-linux/cordinal | grep NEEDED
+          ! readelf -d build-linux/cordinal | grep NEEDED | grep -vE '\[(libc|libm|ld-linux-x86-64)\.so'
+          ! ldd build-linux/cordinal | grep -E 'libSDL|libX11|libxcb|libwayland|libxkbcommon|libGL|libEGL|libvulkan|libstdc|not found'
+          # The newest glibc symbol it asks for: 2.36 (Debian 12), see src/linux/glibc_compat.cpp.
+          ! objdump -T build-linux/cordinal | grep -oE 'GLIBC_2\.[0-9]+' | sort -Vu | awk -F. '$2 > 36' | grep .
+          build-linux/cordinal --check-layout
+          # Real window systems, installed only after the build: Xvfb (with xfwm4) and headless sway.
+          apt-get install -y --no-install-recommends xvfb xfwm4 xdotool xclip x11-xserver-utils x11-utils \
+            sway wl-clipboard grim libxkbcommon-tools python3 python3-pil
+          cmake --build build-linux --target cordinal-platform-probe -j"$(nproc)"
+          tools/platform-gui-test.sh build-linux/cordinal-platform-probe all
+      - name: Fuzz the platform parsers
+        run: |
+          # X11 setup, framing, Xauthority, XSETTINGS, resources, Xcursor, URI lists, Wayland
+          # messages and XKB keymaps, under ASan and UBSan for a minute, seeded with real keymaps.
+          apt-get install -y --no-install-recommends clang libclang-rt-dev
+          clang++ -std=c++20 -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all -Isrc/linux -Isrc \
+            src/tests/fuzz_platform.cpp src/linux/platform/x11_wire.cpp src/linux/platform/wayland_wire.cpp \
+            src/linux/platform/xkb_keymap.cpp src/linux/platform/keys.cpp -o fuzz-platform
+          mkdir -p corpus
+          for layout in us de fr ru gr; do
+            { printf '\011'; xkbcli compile-keymap --layout "$layout"; } > "corpus/keymap-$layout"
+          done
+          ./fuzz-platform -max_len=131072 -max_total_time=60 -timeout=10 corpus
       - name: Package
         run: |
           sh linux/install.sh --self-test
@@ -97,7 +157,11 @@ jobs:
   linux-install-debian:
     needs: linux
     runs-on: ubuntu-24.04
-    container: debian:13
+    # The oldest systems the build runs on (glibc 2.36 and 2.39) and the one it is built on.
+    strategy:
+      matrix:
+        image: ['debian:12', 'ubuntu:24.04', 'debian:13']
+    container: ${{ matrix.image }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -116,6 +180,9 @@ jobs:
           su tester -c 'test -x ~/.local/bin/cordinal && test -f ~/.local/share/applications/cordinal.desktop'
           su tester -c 'grep -q "^Exec=/home/tester/.local/bin/cordinal %F$" ~/.local/share/applications/cordinal.desktop'
           su tester -c '! ldd ~/.local/bin/cordinal | grep "not found"'
+          # It runs here, not only loads: the layout checks (one starts a private D-Bus).
+          apt-get install -y --no-install-recommends dbus-daemon fonts-dejavu-core
+          su tester -c '~/.local/bin/cordinal --check-layout'
           su tester -c 'sh /home/tester/cordinal/install.sh --uninstall && test ! -e ~/.local/bin/cordinal'
   linux-install-arch:
     needs: linux

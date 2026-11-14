@@ -165,7 +165,7 @@ void DrawHeadphones(const Palette& p) {
         DrawText(Font::Normal, text, x, y, color, width);
         y += S(22);
     };
-    line(g_headset.name.empty() ? "No active PipeWire output device." : "Output: " + ToUtf8(g_headset.name), p.text);
+    line(g_headset.name.empty() ? "No active output device." : "Output: " + ToUtf8(g_headset.name), p.text);
     line(g_headset.model.empty() ? "Per-output sound profiles are available for every output." : ToUtf8(g_headset.model), p.sub);
     H.controls[0] = {x, y + S(4), width, S(28)};
     DrawButton(H.controls[0], std::string(g_profiles.Remembered() ? "[x] " : "[ ] ") +

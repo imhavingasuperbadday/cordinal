@@ -1,6 +1,6 @@
 // Sound effects in the Linux window: PlaySfx for the actions that otherwise happen silently, as the Windows
 // build's PlaySfx (app_playback.cpp) and DELTARUNE theme sounds (app_deltarune.cpp) do. The sounds are
-// synthesized (sfx.cpp) and played on their own PipeWire stream (sfx_pipewire.cpp); in the DELTARUNE theme
+// synthesized (sfx.cpp) and played on their own sound stream (sfx_linux.cpp); in the DELTARUNE theme
 // the game's own menu sounds, embedded as FLAC (game_sounds.inc, made by CMake from src/deltarune), stand
 // in for them and play as clips on the same stream. Robotic sounds crush them the way Queen's lines are
 // crushed, and speak status messages in her text blip.

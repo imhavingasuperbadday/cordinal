@@ -3,12 +3,11 @@
 #ifndef _WIN32
 #include "../linux/app.h"
 #include "../linux/dbus.h"
+#include "../linux/fontmatch.h"
 #include "../linux/text.h"
+#include "../linux/textlayout.h"
 #include "../linux/ui_internal.h"
 #include "packs.h"
-
-#include <SDL3_ttf/SDL_ttf.h>
-#include <fontconfig/fontconfig.h>
 
 #include <cstdio>
 #include <cstring>
@@ -30,27 +29,18 @@ struct FontFixture {
 
 FontFixture ReadFont(const char* pattern, bool bold) {
     FontFixture out;
-    FcPattern* request = FcNameParse((const FcChar8*)pattern);
-    if (!request) return out;
-    FcConfigSubstitute(nullptr, request, FcMatchPattern);
-    FcDefaultSubstitute(request);
-    FcResult result;
-    FcPattern* match = FcFontMatch(nullptr, request, &result);
-    FcChar8* file = nullptr;
-    if (match && FcPatternGetString(match, FC_FILE, 0, &file) == FcResultMatch) {
-        std::ifstream stream((const char*)file, std::ios::binary);
+    fonts::Match match;
+    if (fonts::FindFont(pattern, &match)) {
+        const char* file = match.file.c_str();
+        std::ifstream stream(file, std::ios::binary);
         out.bytes.assign(std::istreambuf_iterator<char>(stream), {});
-        if (TTF_Font* font = TTF_OpenFont((const char*)file, 12)) {
-            const char* family = TTF_GetFontFamilyName(font);
-            if (family) out.family = compat::Widen(family);
-            if (bold) TTF_SetFontStyle(font, TTF_STYLE_BOLD);
-            TTF_SetFontHinting(font, TTF_HINTING_LIGHT_SUBPIXEL);
-            TTF_GetStringSize(font, "Pack sample 123", 0, &out.width, nullptr);
-            TTF_CloseFont(font);
+        if (auto font = type::Font::Open(type::MapFile(file), match.index & 0xFFFF, 12)) {
+            out.family = compat::Widen(font->GetFace().family.c_str());
+            font->SetBold(bold);
+            font->SetHinting(type::Font::Hinting::Light);
+            out.width = font->Width("Pack sample 123");
         }
     }
-    if (match) FcPatternDestroy(match);
-    FcPatternDestroy(request);
     return out;
 }
 

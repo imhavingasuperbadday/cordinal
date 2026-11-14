@@ -217,6 +217,9 @@ void LoadSettings() {
     s.moodWaveColors = std::clamp(ToInt(v, "mood_wave_colors", 0), 0, (int)kMoodColorSchemes);
     s.waveColor = std::clamp(ToInt(v, "wave_color", 0), 0, kWaveColorChoices - 1);
     s.waveRestColor = std::clamp(ToInt(v, "wave_rest_color", 0), 0, kWaveRestChoices - 1);
+    AlbumColourConfig().mode =
+        (AlbumColours)std::clamp(ToInt(v, "album_colors", (int)AlbumColours::Player), 0, (int)AlbumColours::Interface);
+    AlbumColourConfig().strength = std::clamp(ToInt(v, "album_color_strength", 1), 0, kAlbumStrengths - 1);
     s.smoothSeek = ToInt(v, "smooth_seek", 0) != 0;
     s.smoothScroll = ToInt(v, "smooth_scroll", 0) != 0;
     s.waveReflection = ToInt(v, "wave_reflection", 1) != 0;
@@ -460,6 +463,8 @@ void SaveSettings() {
     text += "band_wave_size=" + std::to_string(s.bandWaveSize) + "\n";
     text += "mood_wave_colors=" + std::to_string(s.moodWaveColors) + "\nwave_color=" + std::to_string(s.waveColor) +
             "\nwave_rest_color=" + std::to_string(s.waveRestColor) + "\n";
+    text += "album_colors=" + std::to_string((int)AlbumColourConfig().mode) +
+            "\nalbum_color_strength=" + std::to_string(AlbumColourConfig().strength) + "\n";
     text += "seek_style=" + std::to_string(s.seekStyle) + "\nmood_colors=" + std::to_string(s.moodColors) +
             "\nsmooth_seek=" + std::to_string(s.smoothSeek) + "\nwave_reflection=" +
             std::to_string(s.waveReflection) + "\nwave_full_height=" + std::to_string(s.waveFullHeight) +

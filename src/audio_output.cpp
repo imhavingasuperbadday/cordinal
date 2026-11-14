@@ -243,7 +243,7 @@ void ConvertSamples(const float* in, size_t samples, SampleFormat fmt, void* out
     }
 }
 
-// The WASAPI output; the Linux build has its own (linux/audio_pipewire.cpp).
+// The WASAPI output; the Linux build has its own (linux/audio_linux.cpp).
 #ifdef _WIN32
 using Microsoft::WRL::ComPtr;
 

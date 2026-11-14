@@ -72,6 +72,10 @@ void LyricsTick();
 void LyricsTheme();
 std::vector<std::pair<double, std::wstring>> ParseLyrics(const std::wstring& text, bool& timed);
 void Layout();
+// Nested HoldLayout calls coalesce Layout into one pass when ReleaseLayout unwinds to zero
+// (SetViewSize: Apply, SetWindowPlacement and MakeRoom would otherwise each layout).
+void HoldLayout();
+void ReleaseLayout();
 // Customize layout (app_custom.cpp): the normal window's docked player, its parts and presets.
 void LoadMainLayout();
 void SaveMainLayout();

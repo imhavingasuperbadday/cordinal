@@ -186,7 +186,7 @@ void DrawDevice(const Palette& p) {
     }
     const bool missing = !g.settings.outputDevice.empty() &&
                          std::none_of(g_dev.devices.begin(), g_dev.devices.end(), [](const OutputDevice& d) { return d.node == g.settings.outputDevice; });
-    std::string note = g_dev.devices.empty() ? "No output devices were found (is PipeWire running?)."
+    std::string note = g_dev.devices.empty() ? "No output devices were found (is PipeWire or PulseAudio running?)."
                        : missing             ? "The chosen device (" + g.settings.outputDevice + ") isn't connected; the default plays instead."
                                              : "Exclusive output uses the chosen device too.";
     DrawText(Font::Small, note, x0, g_dev.list.B() + S(10), p.faint, w);

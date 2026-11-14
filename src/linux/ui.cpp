@@ -198,9 +198,32 @@ void UpdateWindowTitle() {
     if (next != title) SDL_SetWindowTitle(g.window, (title = next).c_str());
 }
 
-const Palette& CurrentPalette() {
+namespace {
+const Palette& ThemeBase() {
     if (g.settings.theme == ThemeMode::System) return SDL_GetSystemTheme() == SDL_SYSTEM_THEME_DARK ? DarkPalette() : LightPalette();
     return ThemePalette(g.settings.theme);
+}
+}  // namespace
+
+// With Album colours on the whole interface, the theme's palette turned toward the shown album's cover
+// (AlbumPalette), worked out again only when the theme, the hue or the strength changes.
+const Palette& CurrentPalette() {
+    const Palette& base = ThemeBase();
+    if (AlbumColourConfig().mode != AlbumColours::Interface) return base;
+    const TrackId shown = g.playing != kNone ? g.playing : g.settings.resumeOn ? g.resumeTrack : kNone;
+    const double hue = g_lib.Contains(shown) && g_coverFor == shown && !RadioPlaying() ? g_coverHue : -1;
+    static Palette album;
+    static const Palette* albumBase = nullptr;
+    static double albumHue = -1;
+    static int albumStrength = -1;
+    static bool albumOk = false;
+    if (&base != albumBase || hue != albumHue || AlbumColourConfig().strength != albumStrength) {
+        albumBase = &base;
+        albumHue = hue;
+        albumStrength = AlbumColourConfig().strength;
+        albumOk = AlbumPalette(base, hue, album);
+    }
+    return albumOk ? album : base;
 }
 
 void ApplyTheme() {
@@ -254,6 +277,7 @@ bool Confirm(const std::string& question, const char* title) {
 void InitUi() { UpdateInboxTab(); RebuildRows(); }
 
 void ShutdownUi() {
+    ReleaseIconTextures();
     for (auto& [key, texture] : g_radioArt) if (texture) SDL_DestroyTexture(texture);
     g_radioArt.clear();
     if (g_cover) SDL_DestroyTexture(g_cover);

@@ -48,8 +48,17 @@ std::string Plain(const wchar_t* label) {  // a Windows menu label without its m
 // from that font at 13, 17 or 21 pixels depending on the button height, so match those sizes and
 // the even stroke weight instead of drawing the same 12-pixel hairlines in every mode.
 void DrawIcon(Icon icon, const Rect& r, uint32_t rgb) {
-    float s = S(r.h >= S(46) ? 21 : r.h >= S(34) ? 17 : 13);
+    // The Windows glyph heights: the 13, 17 and 21 px icon fonts by button height (app_ui.cpp,
+    // CreateFonts), and the speaker in the 10 pt symbol font.
+    const bool speaker = icon == Icon::Speaker || icon == Icon::Mute;
+    float s = speaker ? std::round(10.0f * g.scale * 96 / 72) : S(r.h >= S(46) ? 21 : r.h >= S(34) ? 17 : 13);
     float cx = std::round(r.x + r.w / 2), cy = std::round(r.y + r.h / 2);
+    static constexpr const char* kFluent[] = {"previous", "play", "pause", "next", "arrow_shuffle", "arrow_repeat_all",
+                                              "arrow_repeat_1", "history", "speaker_2", "speaker_mute"};
+    // Fluent's designs keep a pixel of margin in 16 (a 14 px live area) where an MDL2 glyph fills its
+    // em, so they are drawn at 16/14 of the glyph size to come out as large.
+    if (DrawFluentIcon(kFluent[(int)icon], r.x + r.w / 2, r.y + r.h / 2, std::round(s * 16 / 14), rgb)) return;
+    // Without the outlines (never, as built): the earlier line drawings.
     float t = std::max(1.0f, std::round(s * 0.15f));
     auto line = [&](float x1, float y1, float x2, float y2) { ThickLine(x1, y1, x2, y2, t, rgb); };
     auto head = [&](float x, float y, float dx, float dy) {  // a filled head at (x, y), pointing (dx, dy)
@@ -136,7 +145,8 @@ void DrawIcon(Icon icon, const Rect& r, uint32_t rgb) {
             }
             break;
         }
-        case Icon::Speaker: {
+        case Icon::Speaker:
+        case Icon::Mute: {
             float sx = cx - s * 0.3f;
             Polygon({{sx - s * 0.2f, cy - s * 0.12f}, {sx, cy - s * 0.12f}, {sx + s * 0.22f, cy - s * 0.3f},
                      {sx + s * 0.22f, cy + s * 0.3f}, {sx, cy + s * 0.12f}, {sx - s * 0.2f, cy + s * 0.12f}}, rgb);
@@ -671,7 +681,7 @@ void DrawBand(const Palette& base) {
     }
     DrawLiveSeek(p);
     if (L.volume.w > 0) {
-        DrawIcon(Icon::Speaker, L.speaker, p.text);
+        DrawIcon(std::lround(g.settings.volume * 100) == 0 ? Icon::Mute : Icon::Speaker, L.speaker, p.text);
         bool volumeHot = g_popups.empty() && (L.volume.In(g_mouseX, g_mouseY) || g_drag == Drag::Volume);
         DrawSlider(L.volume, g.settings.volume, g.settings.softwareVolume, volumeHot && g.settings.softwareVolume, p);
     }

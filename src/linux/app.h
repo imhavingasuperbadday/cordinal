@@ -1,8 +1,10 @@
-// The native Linux front end: SDL3 window, everything drawn by cordinal itself (ui.cpp), on top
-// of the same core as the Windows build (library, tags, decoders, engine, scanner).
+// The native Linux front end: a window on Wayland or X11 through cordinal's own platform layer
+// (src/linux/platform/, which keeps SDL3's API so these call sites read as before), everything
+// drawn by cordinal itself (ui.cpp), on top of the same core as the Windows build (library, tags,
+// decoders, engine, scanner).
 //
 // Threads talk to the UI thread the way they do on Windows: PostMessageW (compat/windows.h)
-// queues the message and wakes SDL's event loop, which hands it to OnMessage.
+// queues the message and wakes the platform layer's event loop, which hands it to OnMessage.
 #pragma once
 #include "autoplaylist.h"
 #include "convert.h"
@@ -20,7 +22,7 @@
 #include "ui_spec.h"
 #include "web_server.h"
 
-#include <SDL3/SDL.h>
+#include "platform/sdl_api.h"
 
 #include <condition_variable>
 #include <deque>

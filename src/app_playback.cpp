@@ -1201,6 +1201,9 @@ std::wstring CoverTileName() {
 void RefreshPlayerTint() {
     g.playerHue = !g.art.Empty() ? CoverHue((const uint8_t*)g.art.pixels.data(), g.art.pixels.size(), true)
                                  : CoverTileHue(CoverTileName());
+    // With Album colours on the whole interface a new hue recolours everything; ApplyTheme then calls
+    // back here, with the palette current.
+    if (RefreshAlbumPalette()) return;
     Rgb surface = PlayerSurface(P(), g.playerHue);
     if (g.playerBrush && surface == g.playerSurface) return;
     if (g.playerBrush) DeleteObject(g.playerBrush);

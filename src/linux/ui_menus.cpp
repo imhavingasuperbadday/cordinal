@@ -184,7 +184,7 @@ std::vector<MenuItem> BarMenu(int m) {
                     Submenu("Speed (pitch follows)", RateItems(kSpeeds, std::size(kSpeeds), g.speed, kSpeed)),
                     Submenu("Tempo (pitch stays)", RateItems(kTempos, std::size(kTempos), g.tempo, kTempo)),
                     Separator(), Item("Equalizer...", kEqualizer, "Ctrl+E"),
-                    Submenu("Output", {Radio("Shared (through PipeWire)", kShared, 0, !g.settings.exclusive),
+                    Submenu("Output", {Radio("Shared (through the sound server)", kShared, 0, !g.settings.exclusive),
                                        Radio("Exclusive (bit-perfect)", kExclusive, 0, g.settings.exclusive)})};
         }
         case 3: {

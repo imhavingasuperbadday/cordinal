@@ -2,10 +2,14 @@
 #
 #   cmake -S . -B build-linux -DCMAKE_BUILD_TYPE=Release && cmake --build build-linux
 #
-# Needs SDL3, SDL3_ttf, PipeWire (libpipewire-0.3), fontconfig and OpenSSL 3 (the web server's HTTPS
-# away from home). D-Bus is spoken by the player's own client (src/linux/dbus.cpp), not a library.
+# Needs no libraries beyond glibc. Windows and input go over the Wayland and X11 protocols and
+# drawing is software, in src/linux/platform/ (SDL3's API, implemented in-repo). HTTPS is BearSSL,
+# compiled in from src/third_party/bearssl. Fonts are found and matched by the player's own index (src/linux/fontmatch.cpp),
+# text is shaped and drawn by its own text stack (src/linux/typeface.cpp, shaper.cpp, textlayout.cpp),
+# D-Bus is spoken by its own client (src/linux/dbus.cpp), and sound goes to PipeWire or PulseAudio
+# through their native protocols (src/linux/pw_native.cpp, pulse_native.cpp), not a library.
 cmake_minimum_required(VERSION 3.20)
-project(cordinal VERSION 0.1.11 LANGUAGES CXX)
+project(cordinal VERSION 0.1.12 LANGUAGES C CXX)
 
 if(WIN32)
     message(FATAL_ERROR "On Windows, build with build.bat")
@@ -17,13 +21,15 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
-pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
-find_package(SDL3 REQUIRED CONFIG)
-find_package(SDL3_ttf REQUIRED CONFIG)
 find_package(Threads REQUIRED)
-find_package(OpenSSL 3 REQUIRED)
+
+# BearSSL, the TLS and certificate checks behind every HTTPS connection (THIRD_PARTY.md). Built from
+# source so the program needs no TLS library from the distribution.
+file(GLOB_RECURSE BEARSSL CONFIGURE_DEPENDS src/third_party/bearssl/src/*.c)
+add_library(cordinal_bearssl STATIC ${BEARSSL})
+target_include_directories(cordinal_bearssl PUBLIC src/third_party/bearssl/inc PRIVATE src/third_party/bearssl/src)
+set_target_properties(cordinal_bearssl PROPERTIES C_STANDARD 99 C_EXTENSIONS ON)
+target_compile_options(cordinal_bearssl PRIVATE -w)
 
 # The same native decoders and emulators as Windows. Only the SIMD unit needs AVX2/FMA flags;
 # runtime dispatch keeps the rest of the player usable on baseline x64 machines.
@@ -41,11 +47,13 @@ add_library(cordinal_core STATIC
     src/discord.cpp src/library.cpp src/librarydb.cpp src/listenbrainz.cpp src/migration.cpp src/backup.cpp src/playlog.cpp src/points.cpp src/taste.cpp src/radio.cpp src/radio_browser.cpp src/radio_stream.cpp src/radio_hls.cpp src/scanner.cpp src/sfx.cpp src/sort.cpp src/steam.cpp
     src/headsets.cpp src/helpers.cpp src/streamfile.cpp src/tags.cpp src/tags_fields.cpp src/tags_flacogg.cpp src/tags_id3.cpp src/tags_mp4.cpp src/tags_riff.cpp src/tagwriter.cpp src/tagwriter_flacogg.cpp src/tagwriter_mp3mp4.cpp
     src/tagwriter_cord.cpp src/tagundo.cpp src/playlist_files.cpp src/playlist.cpp src/md5.cpp src/cord_encode.cpp src/cord_export.cpp
-    src/convert.cpp src/organize.cpp src/devicecopy.cpp src/collection.cpp src/linux/recycle.cpp
+    src/convert.cpp src/organize.cpp src/devicecopy.cpp src/collection.cpp src/linux/recycle.cpp src/linux/fontmatch.cpp
+    src/linux/typeface.cpp src/linux/raster.cpp src/linux/shaper.cpp src/linux/textlayout.cpp
     src/titleformat.cpp src/peaks.cpp src/tempo.cpp src/theme_palette.cpp src/replaygain.cpp src/eq_profile.cpp
     src/tag_suggest.cpp src/packs.cpp src/web_audio.cpp src/web_catalog.cpp src/web_http.cpp src/web_library.cpp src/web_server.cpp src/web_ui.cpp
-    src/web_aac.cpp src/web_acme.cpp src/web_reach.cpp src/web_remote.cpp src/qr.cpp src/linux/tls_openssl.cpp
-    ${AUDIO} ${CHIPS} ${ENCODE} ${IPOD} src/linux/compat/compat.cpp src/linux/audio_pipewire.cpp src/linux/sfx_pipewire.cpp)
+    src/web_aac.cpp src/web_acme.cpp src/web_reach.cpp src/web_remote.cpp src/qr.cpp src/linux/tls_bearssl.cpp src/linux/tls_der.cpp
+    ${AUDIO} ${CHIPS} ${ENCODE} ${IPOD} src/linux/compat/compat.cpp src/linux/audio_linux.cpp src/linux/sfx_linux.cpp
+    src/linux/sound_stream.cpp src/linux/spa_pod.cpp src/linux/pw_native.cpp src/linux/pulse_native.cpp)
 target_include_directories(cordinal_core PUBLIC src src/linux/compat src/ipod/gpod/include)
 target_compile_definitions(cordinal_core PUBLIC UNICODE _UNICODE NOMINMAX)
 # Releases ship Light, Dark and Apollo; ON compiles in the other themes and embeds their art (theme_palette.h).
@@ -55,7 +63,7 @@ if(CORDINAL_EXTRA_THEMES)
 endif()
 target_compile_definitions(cordinal_core PUBLIC "__forceinline=inline __attribute__((always_inline))")
 target_compile_options(cordinal_core PRIVATE -Wall -Wno-unused-parameter -Wno-sign-compare -Wno-unknown-pragmas)
-target_link_libraries(cordinal_core PUBLIC PkgConfig::PIPEWIRE Threads::Threads OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(cordinal_core PUBLIC Threads::Threads cordinal_bearssl)
 
 add_executable(cordinal-core-test src/linux/core_test.cpp)
 target_link_libraries(cordinal-core-test PRIVATE cordinal_core)
@@ -69,9 +77,11 @@ add_executable(cordinal
     src/linux/panel_tags.cpp src/linux/cord_export.cpp src/linux/convert_run.cpp src/linux/expand.cpp
     src/linux/organize_run.cpp src/linux/copy_run.cpp src/linux/collection_run.cpp src/linux/ipod_run.cpp src/linux/libview.cpp src/linux/libview_canvas.cpp src/linux/scrobble.cpp src/linux/sounds.cpp src/linux/points_ui.cpp src/linux/lyrics.cpp src/linux/mini.cpp src/linux/packs_ui.cpp src/linux/helpers_ui.cpp src/linux/preferences_ui.cpp src/linux/games.cpp src/linux/editions_ui.cpp src/linux/coverfetch_ui.cpp src/linux/artistinfo_ui.cpp
     src/linux/ui_model.cpp src/linux/ui_layout.cpp src/linux/ui_menus.cpp src/linux/ui_dialogs.cpp
-    src/linux/ui_draw.cpp src/linux/ui_input.cpp src/linux/ui_files.cpp src/linux/ui_checks.cpp src/linux/queue_ui.cpp
+    src/linux/ui_draw.cpp src/linux/icons.cpp src/linux/ui_input.cpp src/linux/ui_files.cpp src/linux/ui_checks.cpp src/linux/queue_ui.cpp
     src/tests/selftest_linux_packs.cpp src/tests/selftest_linux_headsets.cpp
     src/linux/headsets.cpp src/linux/headphones_ui.cpp src/linux/output_profiles.cpp
+    src/linux/platform/video.cpp src/linux/platform/render.cpp src/linux/platform/image_write.cpp src/linux/platform/keys.cpp
+    src/linux/platform/desktop.cpp src/linux/platform/overlay.cpp src/linux/platform/x11.cpp src/linux/platform/x11_wire.cpp src/linux/platform/xkb_keymap.cpp src/linux/platform/wayland_wire.cpp src/linux/platform/wayland.cpp
     src/linux/helper_feed.cpp src/tests/selftest_linux_helpers.cpp)
 target_sources(cordinal PRIVATE src/linux/migration.cpp src/linux/fountain.cpp src/linux/alternate_ui.cpp src/tests/selftest_linux_alternate.cpp)
 target_sources(cordinal PRIVATE src/linux/big_ui.cpp src/tests/selftest_linux_big.cpp src/tests/selftest_linux_queue.cpp)
@@ -82,6 +92,22 @@ target_sources(cordinal PRIVATE src/linux/big_ui.cpp src/tests/selftest_linux_bi
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/cordinal.ico" APP_ICON HEX)
 string(REGEX REPLACE "(..)" "0x\\1," APP_ICON "${APP_ICON}")
 file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/app_icon.inc" CONTENT "static const unsigned char kAppIcon[] = {${APP_ICON}};\n")
+# Selawik, Microsoft's open stand-in for Segoe UI, as the UI font where neither is installed, so the
+# window reads as the Windows build does. It is SIL OFL 1.1 (src/third_party/selawik/OFL.txt), which the
+# FSF counts as GPL-incompatible, so it is compiled in only when asked for; otherwise an installed
+# Segoe UI or Selawik is still preferred, then the desktop's sans.
+option(CORDINAL_SELAWIK "Compile in the Selawik UI font (SIL OFL 1.1) for the Windows look" OFF)
+set(UI_FONTS "")
+foreach(face selawk selawkb)
+    if(CORDINAL_SELAWIK)
+        file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/selawik/${face}.ttf" FACE_HEX HEX)
+        string(REGEX REPLACE "(..)" "0x\\1," FACE_HEX "${FACE_HEX}")
+    else()
+        set(FACE_HEX "0")  # one zero byte: no face
+    endif()
+    string(APPEND UI_FONTS "static const unsigned char kFont_${face}[] = {${FACE_HEX}};\n")
+endforeach()
+file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/ui_fonts.inc" CONTENT "${UI_FONTS}")
 # The Apollo theme's art is part of every build.
 set(APOLLO_IMAGES "")
 foreach(image toolbar rebar_capacala rebar_apollo rebar_letters rebar_notes)
@@ -125,9 +151,23 @@ else()
     endforeach()
     file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/fountain_images.inc" CONTENT "${FOUNTAIN_IMAGES}")
 endif()
-target_include_directories(cordinal PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+target_include_directories(cordinal PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" src/linux)
 target_compile_options(cordinal PRIVATE -Wall -Wno-unused-parameter -Wno-sign-compare -Wno-missing-field-initializers)
-target_link_libraries(cordinal PRIVATE cordinal_core SDL3::SDL3 SDL3_ttf::SDL3_ttf PkgConfig::FONTCONFIG)
+target_link_libraries(cordinal PRIVATE cordinal_core)
+
+# A portable program: the C++ runtime is linked in, and on x86-64 glibc the program asks only for
+# symbols glibc 2.36 has (src/linux/glibc_compat.cpp), so the build from Debian 13 runs on Debian 12
+# and Ubuntu 24.04 as well. Nothing else is linked: windows, sound, TLS, fonts and text are
+# all in-repo. CORDINAL_PORTABLE=OFF makes an ordinary build against this system's libraries.
+option(CORDINAL_PORTABLE "Link the C++ runtime statically and keep to older glibc symbols" ON)
+if(CORDINAL_PORTABLE)
+    target_sources(cordinal PRIVATE src/linux/glibc_compat.cpp)
+    target_link_options(cordinal PRIVATE -static-libstdc++ -static-libgcc)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+        target_compile_definitions(cordinal PRIVATE CORDINAL_GLIBC_COMPAT)
+        target_link_options(cordinal PRIVATE -Wl,--wrap=fmod -Wl,--wrap=hypotf)
+    endif()
+endif()
 
 install(TARGETS cordinal RUNTIME DESTINATION bin)
 install(FILES LICENSE DESTINATION share/licenses/cordinal)
@@ -135,3 +175,12 @@ install(FILES linux/cordinal.desktop DESTINATION share/applications)
 install(FILES docs/icon.png DESTINATION share/icons/hicolor/512x512/apps RENAME cordinal.png)
 
 target_sources(cordinal PRIVATE src/tests/selftest_linux_layout.cpp src/tests/selftest_linux_tabs.cpp)
+
+# The platform layer on its own: a window that prints its events, for tools/platform-gui-test.sh.
+add_executable(cordinal-platform-probe EXCLUDE_FROM_ALL src/linux/platform/probe.cpp
+    src/linux/platform/video.cpp src/linux/platform/render.cpp src/linux/platform/image_write.cpp src/linux/platform/keys.cpp
+    src/linux/platform/desktop.cpp src/linux/platform/overlay.cpp src/linux/platform/x11.cpp src/linux/platform/x11_wire.cpp
+    src/linux/platform/xkb_keymap.cpp src/linux/platform/wayland_wire.cpp src/linux/platform/wayland.cpp src/linux/dbus.cpp)
+target_include_directories(cordinal-platform-probe PRIVATE src/linux src)
+target_compile_options(cordinal-platform-probe PRIVATE -Wall -Wno-unused-parameter -Wno-sign-compare -Wno-missing-field-initializers)
+target_link_libraries(cordinal-platform-probe PRIVATE Threads::Threads)

@@ -3,17 +3,17 @@
 #   curl -fsSL https://github.com/imhavingasuperbadday/cordinal/releases/latest/download/install.sh | sh
 # Run it again to update. Options (after `sh -s --` when piped):
 #   --version X.Y.Z   a release other than the latest (must publish a checksum)
-#   --no-deps         do not install libraries; they must already be on the system
+#   --no-deps         do not install a font package when the system has no font
 #   --no-ffmpeg       accepted for older commands; every decoder is built in
 #   --dry-run         print what would be installed, then stop
 #   --uninstall       remove cordinal; the library and settings stay
 #   --self-test       check this script's own checks, then stop (used by CI)
 #
-# The published program is built on Debian 13, so it loads on Debian 13 and other
-# current glibc systems that ship the same library names (OpenSSL 3's libssl.so.3,
-# SDL3, PipeWire, fontconfig). Libraries come only from repositories
-# already configured on the machine. The script does not add a repository, does not
-# turn signature checks off, and does not upgrade the system.
+# The published program needs only glibc 2.36 or newer (Debian 12, Ubuntu 24.04 and anything
+# newer): windows (X11 and Wayland), drawing, HTTPS, font matching, text layout and the PipeWire
+# and PulseAudio clients are compiled in, and so is the C++ runtime. The one package it may install
+# is a font, from repositories already configured on the machine, when the system has none. The
+# script does not add a repository, does not turn signature checks off, and does not upgrade the system.
 set -eu
 
 REPO="imhavingasuperbadday/cordinal"
@@ -87,32 +87,17 @@ distro_kind() {
     esac
 }
 
-# Package names for one soname. Apt may need a second name from the t64 transition.
+# Shared libraries the program needs from the distribution, beyond glibc: none. SDL3, OpenSSL,
+# fontconfig, SDL3_ttf/FreeType/HarfBuzz, PipeWire/PulseAudio/ALSA and libX11/libwayland were each
+# replaced by code in the program. A library added here needs its package names in pkg_for.
+LIBS=""
+
+# Package names for one soname in LIBS. Apt may need a second name from the t64 transition.
 # Printed as one line: "primary" or "primary|alternate".
 pkg_for() {
     kind=$1
     soname=$2
     case "$kind:$soname" in
-        pacman:libSDL3.so.0) printf '%s\n' sdl3 ;;
-        pacman:libSDL3_ttf.so.0) printf '%s\n' sdl3_ttf ;;
-        pacman:libpipewire-0.3.so.0) printf '%s\n' pipewire ;;
-        pacman:libfontconfig.so.1) printf '%s\n' fontconfig ;;
-        pacman:libssl.so.3) printf '%s\n' openssl-3 ;;
-        apt:libSDL3.so.0) printf '%s\n' libsdl3-0 ;;
-        apt:libSDL3_ttf.so.0) printf '%s\n' libsdl3-ttf0 ;;
-        apt:libpipewire-0.3.so.0) printf '%s\n' 'libpipewire-0.3-0|libpipewire-0.3-0t64' ;;
-        apt:libfontconfig.so.1) printf '%s\n' 'libfontconfig1|libfontconfig1t64' ;;
-        apt:libssl.so.3) printf '%s\n' 'libssl3|libssl3t64' ;;
-        dnf:libSDL3.so.0) printf '%s\n' SDL3 ;;
-        dnf:libSDL3_ttf.so.0) printf '%s\n' SDL3_ttf ;;
-        dnf:libpipewire-0.3.so.0) printf '%s\n' pipewire-libs ;;
-        dnf:libfontconfig.so.1) printf '%s\n' fontconfig ;;
-        dnf:libssl.so.3) printf '%s\n' openssl-libs ;;
-        zypper:libSDL3.so.0) printf '%s\n' libSDL3-0 ;;
-        zypper:libSDL3_ttf.so.0) printf '%s\n' libSDL3_ttf0 ;;
-        zypper:libpipewire-0.3.so.0) printf '%s\n' libpipewire-0_3-0 ;;
-        zypper:libfontconfig.so.1) printf '%s\n' libfontconfig1 ;;
-        zypper:libssl.so.3) printf '%s\n' libopenssl3 ;;
         *) return 1 ;;
     esac
 }
@@ -147,8 +132,22 @@ have_lib() {
     "$bin" -p 2>/dev/null | grep -F "$1 " | grep -q 'x86-64'
 }
 
+# A TrueType or OpenType font where the player looks for one (src/linux/fontmatch.cpp).
 have_font() {
-    command -v fc-list >/dev/null 2>&1 && fc-list 2>/dev/null | grep -q .
+    data_home=${XDG_DATA_HOME:-${HOME:-/nonexistent}/.local/share}
+    set -- /usr/share/fonts /usr/local/share/fonts "$data_home/fonts" "${HOME:-/nonexistent}/.fonts"
+    old_ifs=$IFS
+    IFS=:
+    for data_dir in ${XDG_DATA_DIRS:-/usr/local/share:/usr/share}; do
+        set -- "$@" "$data_dir/fonts"
+    done
+    IFS=$old_ifs
+    for font_dir in "$@"; do
+        [ -d "$font_dir" ] || continue
+        found=$(find -L "$font_dir" -type f \( -iname '*.ttf' -o -iname '*.otf' -o -iname '*.ttc' -o -iname '*.otc' \) 2>/dev/null | head -n 1)
+        [ -n "$found" ] && return 0
+    done
+    return 1
 }
 
 glibc_loader() {
@@ -285,12 +284,10 @@ pick_pkg() {
 
 libs_help() {
     cat <<'EOF'
-cordinal needs these libraries from the distribution:
-  libSDL3.so.0, libSDL3_ttf.so.0, libpipewire-0.3.so.0,
-  libfontconfig.so.1, libssl.so.3
-Debian 13, Ubuntu 25.10 and newer, Fedora 42 and newer, openSUSE Tumbleweed,
-and Arch (openssl-3 alongside OpenSSL 4) publish them. Ubuntu 24.04 and
-Debian 12 do not publish SDL3. This installer does not add a repository.
+cordinal needs no libraries from the distribution beyond glibc 2.36 or newer on
+64-bit x86 (Debian 12, Ubuntu 24.04, Fedora 37 and newer systems), plus at least
+one TrueType or OpenType font. It runs on X11 and on Wayland. Alpine and other
+musl systems cannot run this build.
 EOF
 }
 
@@ -298,14 +295,15 @@ refuse_special() {
     case "$KIND" in
         alpine)
             fail "Alpine uses musl. This build is linked against glibc and cannot run there." ;;
-        steamos)
-            fail "SteamOS is read-only. This installer will not change it. Re-run with --no-deps only when the libraries are already installed." ;;
-        immutable)
-            fail "On $OS_ID, add SDL3, SDL3_ttf, PipeWire, fontconfig and OpenSSL 3 to the system configuration, then re-run with --no-deps." ;;
     esac
-    if [ -e /run/ostree-booted ]; then
-        fail "This system is immutable. Install the libraries with its own tool, then re-run with --no-deps. This installer will not change the deployment."
-    fi
+}
+
+# Systems this installer will not change (it only ever installs a font package on them).
+read_only_system() {
+    case "$KIND" in
+        steamos|immutable) return 0 ;;
+    esac
+    [ -e /run/ostree-booted ]
 }
 
 install_selected() {
@@ -334,15 +332,21 @@ install_selected() {
 }
 
 install_libs() {
-    need_tool
     needed=""
-    for soname in libSDL3.so.0 libSDL3_ttf.so.0 libpipewire-0.3.so.0 libfontconfig.so.1 libssl.so.3; do
+    for soname in $LIBS; do
         have_lib "$soname" || needed="$needed $soname"
     done
     font=""
     if ! have_font; then
         font=$(font_pkg "$KIND" || true)
     fi
+    if read_only_system; then
+        [ -z "$needed" ] || fail "$OS_ID is read-only and lacks$needed. Install it with the system's own tool, then re-run with --no-deps."
+        [ -z "$font" ] || say "This system has no font, and this installer will not change $OS_ID. Add a font with its own tool."
+        return 0
+    fi
+    [ -z "$needed" ] && [ -z "$font" ] && return 0
+    need_tool
     if [ "$KIND" = apt ] && { [ -n "$needed" ] || [ -n "$font" ]; }; then
         say "Updating package lists"
         as_root env DEBIAN_FRONTEND=noninteractive apt-get update ||
@@ -408,7 +412,7 @@ program_loads() {
         cat "$err" >&2
         grep "not found" "$out" >&2 || true
         if grep -q "GLIBC_" "$err"; then
-            say "This system's glibc is older than Debian 13, which is what the published build is made on."
+            say "This system's glibc is older than 2.36 (Debian 12), the oldest the published build runs on."
         fi
         libs_help >&2
         fail "cordinal cannot load here, so it was not installed over any copy already present."
@@ -510,10 +514,23 @@ self_test() {
     [ "$(distro_kind alpine "")" = alpine ] || fail "alpine"
     [ "$(distro_kind steamos "arch")" = steamos ] || fail "steamos"
     [ "$(distro_kind slackware "")" = unknown ] || fail "slackware"
-    [ "$(pkg_for pacman libssl.so.3)" = openssl-3 ] || fail "arch openssl"
-    [ "$(pkg_for apt libssl.so.3)" = "libssl3|libssl3t64" ] || fail "apt openssl"
-    [ "$(pkg_for dnf libSDL3.so.0)" = SDL3 ] || fail "dnf sdl"
-    [ "$(pkg_for zypper libpipewire-0.3.so.0)" = libpipewire-0_3-0 ] || fail "zypper pipewire"
+    [ -z "$LIBS" ] || fail "the program needs no distribution libraries"
+    for kind in apt pacman dnf zypper; do
+        for soname in libfontconfig.so.1 libssl.so.3 libSDL3_ttf.so.0 libpipewire-0.3.so.0 libpulse.so.0 libasound.so.2 \
+            libSDL3.so.0 libX11.so.6 libxcb.so.1 libwayland-client.so.0 libxkbcommon.so.0 libstdc++.so.6; do
+            pkg_for "$kind" "$soname" >/dev/null && fail "$soname is compiled in, not installed ($kind)"
+        done
+    done
+    [ "$(font_pkg apt)" = fonts-noto-core ] || fail "apt font"
+    [ "$(font_pkg zypper)" = noto-sans-fonts ] || fail "zypper font"
+    font_pkg alpine >/dev/null && fail "font package for alpine"
+    (KIND=steamos; read_only_system) || fail "steamos is read-only"
+    (KIND=immutable; read_only_system) || fail "nixos is read-only"
+    if [ ! -e /run/ostree-booted ]; then (KIND=apt; read_only_system) && fail "apt systems are not read-only"; fi
+    (KIND=alpine; refuse_special) 2>/dev/null && fail "alpine accepted"
+    (KIND=steamos; refuse_special) || fail "steamos refused"
+    libs_help | grep -q "glibc 2.36" || fail "libs_help names the glibc it needs"
+    libs_help | grep -q SDL3 && fail "libs_help still asks for SDL3"
     member_name_ok "cordinal/cordinal" || fail "member"
     member_name_ok "cordinal/../../etc/passwd" && fail "traversal accepted"
     member_name_ok "/etc/passwd" && fail "absolute member accepted"
@@ -559,6 +576,11 @@ self_test() {
     elif [ "$(uname -s)" = Linux ]; then
         fail "could not build the symlink archive fixture"
     fi
+    # The font check reads the directories the player scans, without fontconfig's tools.
+    mkdir -p "$work/home/.local/share/fonts/sub"
+    : > "$work/home/.local/share/fonts/sub/Face.TTF"
+    (HOME="$work/home"; unset XDG_DATA_HOME; XDG_DATA_DIRS="$work/none"; have_font) || fail "a font under ~/.local/share/fonts was missed"
+    (HOME="$work/none"; XDG_DATA_HOME="$work/none"; XDG_DATA_DIRS="$work/home/.local/share"; have_font) || fail "a font under XDG_DATA_DIRS was missed"
     printf 'self-test ok\n'
 }
 
@@ -585,10 +607,11 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-[ "$(id -u)" -eq 0 ] && fail "Run this as your user account. It installs into the home directory and uses sudo only for libraries."
+[ "$(id -u)" -eq 0 ] && fail "Run this as your user account. It installs into the home directory and uses sudo only for a font package."
 case "$HOME" in
     *'
-'*|*''*) fail "HOME contains a line break." ;;
+'*|*'
+'*) fail "HOME contains a line break." ;;
 esac
 [ "$(uname -m)" = x86_64 ] || fail "This Linux build is for 64-bit x86 (this machine is $(uname -m))."
 glibc_loader >/dev/null || fail "This system has no glibc dynamic linker for x86-64. Alpine and other musl systems cannot run this build."
@@ -603,7 +626,7 @@ if [ "$dry" = 1 ]; then
     say "Distribution $OS_ID ($KIND)."
     if [ -n "$deps" ]; then
         planned=""
-        for soname in libSDL3.so.0 libSDL3_ttf.so.0 libpipewire-0.3.so.0 libfontconfig.so.1 libssl.so.3; do
+        for soname in $LIBS; do
             if have_lib "$soname"; then
                 continue
             fi
@@ -612,13 +635,15 @@ if [ "$dry" = 1 ]; then
         if [ -n "$planned" ]; then
             say "Would install$planned"
         else
-            say "Libraries are already installed."
+            say "Needs no libraries beyond glibc."
         fi
         if ! have_font; then
-            say "Would install a font: $(font_pkg "$KIND" || printf '%s' none)"
+            if read_only_system; then say "No font found; would not change $OS_ID."
+            else say "Would install a font: $(font_pkg "$KIND" || printf '%s' none)"
+            fi
         fi
     else
-        say "Would not install libraries (--no-deps)."
+        say "Would not install a font package (--no-deps)."
     fi
     say "Would install the program to $BIN/cordinal"
     exit 0
@@ -627,13 +652,14 @@ fi
 if [ -n "$deps" ]; then
     if [ "$KIND" = unknown ]; then
         absent=""
-        for soname in libSDL3.so.0 libSDL3_ttf.so.0 libpipewire-0.3.so.0 libfontconfig.so.1 libssl.so.3; do
+        for soname in $LIBS; do
             have_lib "$soname" || absent="$absent $soname"
         done
         if [ -n "$absent" ]; then
             libs_help >&2
             fail "Missing$absent. Install them from the distribution, then re-run with --no-deps."
         fi
+        have_font || say "No TrueType or OpenType font was found. Install one from the distribution so text appears."
     else
         install_libs
     fi

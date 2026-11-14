@@ -50,6 +50,10 @@ const wchar_t* const kMoodWaveColorNames[] = {L"Same as moodbar", L"Theme", L"Vi
 const wchar_t* const kWaveColorNames[] = {L"Theme", L"Red", L"Orange", L"Yellow", L"Green", L"Teal",
                                           L"Blue", L"Purple", L"Pink", L"Grey"};
 const wchar_t* const kWaveRestNames[] = {L"Theme grey", L"Faded waveform colour"};
+const wchar_t* const kAlbumColourNames[] = {L"Off", L"Player background", L"Whole interface"};
+const wchar_t* const kAlbumStrengthNames[] = {L"Subtle", L"Normal", L"Strong", L"Bold"};
+static_assert(std::size(kAlbumColourNames) == (size_t)AlbumColours::Interface + 1 &&
+              std::size(kAlbumStrengthNames) == kAlbumStrengths);
 static_assert(std::size(kSeekBarNames) == kSeekStyles + 1 && std::size(kMoodColorNames) == kMoodColorSchemes &&
               std::size(kMoodWaveColorNames) == kMoodColorSchemes + 1 &&
               std::size(kWaveColorNames) == kWaveColorChoices && std::size(kWaveRestNames) == kWaveRestChoices);
@@ -260,6 +264,18 @@ const Tweak kTweaks[] = {
      L"Big, compact and side players keep their own sizes.", TweakType::Choice, 0, 5, 0,
      [] { return (double)g.bandWaveSize; }, [](double v) { g.bandWaveSize = (int)v; }, 0,
      [] { Layout(); WaveformTrackChanged(true); WaveformTick(); }, kBandWaveSizes},
+    {"view.album_colors", L"Window", L"AlbumColors", L"Album colours",
+     L"How much of the window takes the playing album's colour: none, the player's background and an open "
+     L"album's panel, or the whole interface, its accent and selection too. Light and Dark only; text stays readable.",
+     TweakType::Choice, 0, (float)AlbumColours::Interface, (float)AlbumColours::Player,
+     [] { return (double)AlbumColourConfig().mode; },
+     [](double v) { AlbumColourConfig().mode = (AlbumColours)std::clamp((int)v, 0, (int)AlbumColours::Interface); }, 0,
+     ApplyTheme, kAlbumColourNames},
+    {"view.album_color_strength", L"Window", L"AlbumColorStrength", L"Album colour strength",
+     L"How strongly the album's colour shows, from Subtle to Bold. A colour that would make text hard to read "
+     L"is held back.", TweakType::Choice, 0, kAlbumStrengths - 1, 1, [] { return (double)AlbumColourConfig().strength; },
+     [](double v) { AlbumColourConfig().strength = std::clamp((int)v, 0, kAlbumStrengths - 1); }, 0, ApplyTheme,
+     kAlbumStrengthNames},
     {"view.wave_color", L"Window", L"WaveColor", L"Waveform colour",
      L"The waveform's played colour, kept bright enough to read on the player. The moodbar's Theme, Vivid and "
      L"Single colour schemes turn from it too. Paused and warnings keep their own colours.",
@@ -438,7 +454,8 @@ const Tweak kTweaks[] = {
      TweakType::Bool, 0, 1, 0, [] { return (double)online::Config().lyrics[1]; },
      [](double v) { online::Config().lyrics[1] = v != 0; }, 0, LyricsSourcesChanged},
     {"online.artist_info", L"Online", L"ArtistInfo", L"Artist info from MusicBrainz and Wikipedia",
-     L"Sends the artist's name to musicbrainz.org, then asks wikidata.org and en.wikipedia.org for the article it names.",
+     L"Sends the artist's name to musicbrainz.org, which also lists their albums, then asks wikidata.org and "
+     L"en.wikipedia.org for the article it names.",
      TweakType::Bool, 0, 1, 0, [] { return (double)online::Config().artistInfo; },
      [](double v) { online::Config().artistInfo = v != 0; }, 0, OnlineSettingsChanged},
     {"library.explorer_menu", L"Explorer", L"FolderMenu", L"Play folders from Explorer",
@@ -678,7 +695,7 @@ const Heading kHeadings[] = {
     {"output.exclusive", L"Device"}, {"output.software_volume", L"Volume"},
     {"replaygain.enabled", L"Levelling"}, {"replaygain.auto_measure", L"Measuring"},
     {"effects.reverb", L"Reverb"}, {"effects.loudness_compensation", L"Volume shaping"}, {"effects.bitcrush", L"Bitcrush"},
-    {"view.seek_bar", L"Seek bar"}, {"view.wave_color", L"Colours"}, {"view.smooth_seek", L"Shape"},
+    {"view.seek_bar", L"Seek bar"}, {"view.album_colors", L"Colours"}, {"view.smooth_seek", L"Shape"},
     {"view.group_albums", L"Window"}, {"view.sound_effects", L"Sounds"}, {"view.wave_style", L"Dark Fountain"},
     {"view.apollo_analyzer", L"Apollo"}, {"view.foobar_view", L"Album List"},
     {"window.player_dock", L"Arrangement"}, {"window.transport", L"Parts shown"},
@@ -1481,21 +1498,6 @@ std::wstring TweakText(const Tweak& t, double value) {
     return t.choices ? t.choices[i] : kOffOn[i];
 }
 
-void SetTweak(const Tweak& t, double value) {
-    if (!std::isfinite(value)) return;
-    value = std::clamp(value, (double)t.min, (double)t.max);
-    if (t.type != TweakType::Float) value = std::round(value);
-    if (value == t.get()) return;
-    if (t.flags & kTweakRadio) OnCommand(t.command + (int)value, 0, nullptr);
-    else if (t.command) OnCommand(t.command, 0, nullptr);
-    else {
-        t.put(value);
-        if (t.apply) t.apply();
-        SavePreferences();
-    }
-    if (w.hwnd) RefreshValues();
-}
-
 // Reads each tweak as LoadPreferences always has: an integer is clamped into range, anything not a
 // finite number keeps the default.
 //
@@ -1528,6 +1530,46 @@ static void SeekBarKeys(bool save) {
         else if (k.number) *k.number = std::clamp(IniInt(L"Window", k.name, k.def), 0, kSeekStyles - 1);
         else *k.flag = IniInt(L"Window", k.name, k.def) != 0;
     }
+}
+
+// Writes only what this tweak owns. A full SavePreferences rewrites every registry row through
+// WritePrivateProfileStringW and freezes the Preferences UI (~80 ms measured for ~120 keys).
+static void PersistTweak(const Tweak& t) {
+    if (t.flags & kTweakOutside) return;
+    // Live layout, cover size and browser height stay session-only until Startup defaults; their
+    // apply paths (ApplyMainLayout / LibViewSetCoverSize) already refresh the window.
+    if (!strncmp(t.key, "window.", 7)) return;
+    if (!strcmp(t.key, "library.cover_size") || !strcmp(t.key, "library.browser_height")) return;
+    // Apollo and foobar2000 rows write their own sections inside put/apply.
+    if (!strncmp(t.key, "view.apollo_", 12) || !strcmp(t.key, "view.foobar_view")) return;
+    if (!strcmp(t.key, "view.seek_bar") || !strcmp(t.key, "view.seek_shows") ||
+        !strcmp(t.key, "view.wave_reflection")) {
+        SeekBarKeys(true);
+        return;
+    }
+    if (!TweakHasOwnIniRow(t)) return;
+    if (t.flags & kTweakLegacyLoad && (!strcmp(t.key, "playback.speed") || !strcmp(t.key, "playback.tempo") ||
+                                       !strcmp(t.key, "effects.reverb_mix_choice")))
+        return;
+    double v = t.get();
+    IniWrite(t.section, t.iniKey, t.type == TweakType::Float ? F2S((float)v) : std::to_wstring((int)v));
+}
+
+void SetTweak(const Tweak& t, double value) {
+    if (!std::isfinite(value)) return;
+    value = std::clamp(value, (double)t.min, (double)t.max);
+    if (t.type != TweakType::Float) value = std::round(value);
+    if (value == t.get()) return;
+    if (t.flags & kTweakRadio || t.command) {
+        OnCommand(t.flags & kTweakRadio ? t.command + (int)value : t.command, 0, nullptr);
+        // Menu-backed tweaks schedule a full save; flush so SetTweak stays synchronous for tests.
+        FlushPendingPreferences();
+    } else {
+        t.put(value);
+        if (t.apply) t.apply();
+        PersistTweak(t);
+    }
+    if (w.hwnd) RefreshValues();
 }
 
 void LoadTweaks() {

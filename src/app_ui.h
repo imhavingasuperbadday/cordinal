@@ -30,6 +30,11 @@ void ApplyTheme();
 // without art) and repaints it; also after a theme change. The player's controls paint on
 // ControlBg, everything else on the surface.
 void RefreshPlayerTint();
+// True when Album colours (theme_palette.h) would now give the whole interface another palette than
+// ApplyTheme last chose: the album's hue or the strength changed, or the setting did.
+bool AlbumPaletteStale();
+// Applies the theme again, keeping the layout and frame, when AlbumPaletteStale; true when it did.
+bool RefreshAlbumPalette();
 COLORREF ControlBg(HWND h);
 bool HandleDarkMenuBar(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& result);
 FieldLookup Lookup(TrackId id, bool withPlayback);

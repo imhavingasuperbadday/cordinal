@@ -146,15 +146,9 @@ int CaptureUi(const std::string& dir) {
         // Covers asked for by this frame arrive as messages; the caller pumps them (CapturePump).
         Draw();
         SDL_Surface* s = SDL_RenderReadPixels(g.renderer, nullptr);
-        // SDL_SavePNG arrived in SDL 3.4. The release is built on Debian 13's SDL 3.2, where a capture
-        // falls back to BMP; reference images are made in the Arch tools image, which has 3.4.
-#if SDL_VERSION_ATLEAST(3, 4, 0)
+        // PNG, written by the platform layer (src/linux/platform/image_write.cpp).
         std::string path = dir + "/" + name + ".png";
         if (!s || !SDL_SavePNG(s, path.c_str())) {
-#else
-        std::string path = dir + "/" + name + ".bmp";
-        if (!s || !SDL_SaveBMP(s, path.c_str())) {
-#endif
             fprintf(stderr, "capture: %s: %s\n", path.c_str(), SDL_GetError());
             ++failures;
         } else {

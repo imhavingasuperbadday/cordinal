@@ -4,7 +4,7 @@
 
 #include <string>
 
-#include <SDL3/SDL.h>
+#include "platform/sdl_api.h"
 
 namespace lx {
 
