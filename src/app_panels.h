@@ -8,6 +8,9 @@ namespace app {
 
 // Mini player (app_mini.cpp): a separate round window the main window hides behind.
 void ToggleMiniPlayer();
+void CloseMiniPlayer(bool showMain = true);
+void TrayMiniPlayer();  // the notification-area menu's item: keeps Lightweight mode on
+uint32_t MiniPlayerPixel(int x, int y);
 HWND MiniPlayerWindow();
 void MiniPlayerTick();
 // View sizes (app_sizes.cpp): step through the five window modes and their saved geometry.

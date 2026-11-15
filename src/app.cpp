@@ -125,6 +125,7 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int showCmd) {
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         if (PaletteDialogMessage(&msg)) continue;
+        if (KeyboardShortcutsDialogMessage(&msg)) continue;
         if (EditionDialogMessage(&msg)) continue;
         if (PreferencesDialogMessage(&msg)) continue;
         if (EqualizerDialogMessage(&msg)) continue;

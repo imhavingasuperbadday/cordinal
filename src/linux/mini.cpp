@@ -216,7 +216,7 @@ bool MiniEvent(const SDL_Event& e) {
                 g_seeking = true;
                 g_seekFrac = RingFraction(x, y);
             } else if (g_pressed == kNoPart) {
-                if (e.button.clicks >= 2) return LeaveMini(), true;
+                if (e.button.clicks >= 2) return LeaveLightweight(), LeaveMini(), true;
                 float gx = 0, gy = 0;
                 int wx = 0, wy = 0;
                 SDL_GetGlobalMouseState(&gx, &gy);
@@ -244,7 +244,10 @@ bool MiniEvent(const SDL_Event& e) {
             return true;
         case SDL_EVENT_KEY_DOWN: {
             const bool ctrl = e.key.mod & SDL_KMOD_CTRL, shift = e.key.mod & SDL_KMOD_SHIFT;
-            if (e.key.key == SDLK_ESCAPE || (ctrl && shift && e.key.key == SDLK_M) || (ctrl && e.key.key == SDLK_EQUALS)) LeaveMini();
+            if (e.key.key == SDLK_ESCAPE || (ctrl && shift && e.key.key == SDLK_M) || (ctrl && e.key.key == SDLK_EQUALS)) {
+                LeaveLightweight();  // in Lightweight mode, leaving the mini player is the way out of it
+                LeaveMini();
+            }
             else if (e.key.key == SDLK_SPACE) TogglePause();
             else if (ctrl && e.key.key == SDLK_Q) g.quit = true;
             else if (ctrl && e.key.key == SDLK_RIGHT) Next();

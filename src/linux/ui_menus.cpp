@@ -129,7 +129,8 @@ std::vector<MenuItem> BarMenu(int m) {
                     Item("Back up library and settings...",kBackup),Item("Restore backup...",kRestore),
                     Item("Import playback statistics...",kStatistics),Separator(),
                     Item("Web server...", kWebServer), Item("Scrobbling...", kListenBrainz),
-                    Item("Preferences...", kPreferences, "Ctrl+,"), Separator(), Item("Exit", kExit)};
+                    Item("Preferences...", kPreferences, "Ctrl+,"), Item("Keyboard shortcuts...", kKeyboard), Separator(),
+                    Item("Exit", kExit)};
             if (CollectionRunning()) items.insert(items.begin() + 8, Item(CollectionCancelText(), kCancelCollection));  // shown only while one runs
             return items;
         }
@@ -270,7 +271,7 @@ std::vector<MenuItem> BarMenu(int m) {
                         Radio("Big mode", kViewSize, 3, g.settings.size == ViewSize::Big)}), Submenu("Big mode panels", {Item("Library", kBigPanel, {}, BigPanelShown(0)),
                         Radio("Now playing", kBigPanel, 1, BigPanelShown(1)),
                         Radio("Up next", kBigPanel, 2, BigPanelShown(2)),
-                        Item("Reset panel layout", kBigReset)}), Item("Mini player", kMini, "Ctrl+Shift+M"), Item("Packs...", kPacks), Item("Helpers...", kHelpers), Item("Command palette...", kPalette, "Ctrl+Shift+P"), Separator(), Item("Group tracks by album", kGroupAlbums, {}, g.settings.groupAlbums),
+                        Item("Reset panel layout", kBigReset)}), Item("Mini player", kMini, "Ctrl+Shift+M"), Item("Lightweight mode", kLightweight, "Ctrl+Shift+L", g.lightweight), Item("Packs...", kPacks), Item("Helpers...", kHelpers), Item("Command palette...", kPalette, "Ctrl+Shift+P"), Separator(), Item("Group tracks by album", kGroupAlbums, {}, g.settings.groupAlbums),
                     Separator(), Item("Start on login", kStartOnLogin, {}, StartsOnLogin()), Separator(),
                     Submenu("Games and stats", {Item("Name That Track...", kNameThatTrack), Item("Which Came First...", kWhichCameFirst), Separator(),
                                                 Item("cordinal points...", kPoints), Item("Year in review...", kReview)})};
@@ -650,6 +651,13 @@ void RunAction(const MenuItem& item) {
         case kHelperTool: RunHelperTool((size_t)item.arg, SelectedTracks()); break;
         case kHelperCancel: CancelHelperTool(); break;
         case kMini: CloseMenus(); ClosePanel(); ToggleMini(); break;
+        case kLightweight: CloseMenus(); ClosePanel(); ToggleLightweight(); break;
+        case kPickSong: CloseMenus(); OpenSongPicker(); break;
+        case kVolumeUp: StepVolume(true); break;
+        case kVolumeDown: StepVolume(false); break;
+        case kSeekBack: if (g.playing != kNone) SeekTo(g.engine.Position() - 10); break;
+        case kSeekForward: if (g.playing != kNone) SeekTo(g.engine.Position() + 10); break;
+        case kKeyboard: CloseMenus(); OpenKeyboardShortcuts(); break;
         case kReview: OpenReview(); break;
         case kPlay: {
             auto sel = SelectedTracks();

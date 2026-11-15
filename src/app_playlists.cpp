@@ -365,6 +365,30 @@ void FollowNowPlayingAlbum() {
     else g.npAlbumTrack = want;
 }
 
+// Now Playing is about to list the playing album: a list playback started from (Top rated, say) holds
+// only some of its tracks, so the rest of the album joins it, right behind the playing track so it plays
+// next. Done once per album (npCompleted), or a track removed from the album would come straight back.
+// The stored and `live` positions are item indices, so they follow the insertion.
+static void CompleteNowPlayingAlbum(PlaylistPosition* live) {
+    TrackId playing = NowPlayingAlbumTrack();
+    if (playing == kNone) return;
+    if (g.npCompleted != kNone && g.npCompleted < g_lib.Count() && SameAlbum(g_lib[g.npCompleted], g_lib[playing])) return;
+    g.npCompleted = playing;
+    Playlist& pl = Active();
+    std::vector<uint32_t> mapping;
+    if (CompleteAlbumInList(pl.items, playing, PlayingIndex(g.playingToken, g.active), mapping) == 0) return;
+    RemapOccurrences(g.active, mapping);
+    auto remap = [&](uint32_t& i) { i = i < mapping.size() ? mapping[i] : i; };
+    for (PlaylistPosition* position : {&pl.position, live})
+        if (position) {
+            for (uint32_t& i : position->selected) remap(i);
+            remap(position->focus);
+            remap(position->top);
+        }
+    g.dirty = true;
+    RefreshNext();
+}
+
 // Rebuilds the visible rows for the active playlist and hands them to the list. Redraw is
 // suppressed so the view doesn't flash; when preserveSelection is set, the selection, focus and
 // scroll are remembered and restored around the rebuild.
@@ -376,6 +400,7 @@ void RebuildView(bool preserveSelection) {
     ClearCellCache();
     g.view.clear();
     RebuildViewItems(Active());
+    CompleteNowPlayingAlbum(preserveSelection ? &position : nullptr);
     g.viewRevision = g_lib.Revision();
     g.viewBuilt = GetTickCount64();
     auto& items = Active().items;
@@ -452,6 +477,9 @@ void SetSortArrow(int type, bool ascending) {
 void SortByColumn(int subitem) {
     int column = ColumnType(subitem);
     if (column <= 0) return;
+    // Capture the live position before the sort. Views restored their last saved position below,
+    // so a search box the user had cleared came back with the query saved earlier.
+    CapturePlaylistPosition();
     g.sortAscending = g.sortColumn == column ? !g.sortAscending : true;
     g.sortColumn = column;
     Playlist& pl = Active();
@@ -461,7 +489,6 @@ void SortByColumn(int subitem) {
         // A view keeps its sort and re-applies it whenever it is rebuilt.
         pl.builtRevision = 0;
     } else {
-        CapturePlaylistPosition();
         std::vector<uint32_t> mapping;
         std::vector<TrackId> before = pl.items;
         SortItems(pl.items, column, g.sortAscending, &mapping);

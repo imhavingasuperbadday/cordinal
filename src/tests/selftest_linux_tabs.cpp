@@ -11,6 +11,8 @@
 #include <cstdio>
 
 namespace lx {
+extern TrackId g_npCompleted;  // ui_model.cpp: the album Now Playing last gained in full
+
 int CheckLinuxTabs() {
     int failed = 0;
     auto check = [&](bool ok, const char* message) {
@@ -61,6 +63,32 @@ int CheckLinuxTabs() {
     RebuildRows();
     check(g.rows.size() == ids.size(), "with the preference off, Now Playing shows the whole list");
     g.settings.npAlbumOnly = true;
+
+    // A list playback started from (Top rated) held only one track of the album: Now Playing gains the
+    // rest of it, behind the playing track, once, so a removed track stays removed.
+    TrackId extra = g_lib.Add(L"/checks/np-album-extra.flac");
+    {
+        TagData tags;
+        tags.title = "Now playing album extra";
+        tags.album = "Pickaxe Songs";
+        tags.albumArtist = "Rook";
+        g_lib.ApplyTags(extra, tags);
+    }
+    for (TrackId id : ids) g_lib[id].flags |= Track::kInLibrary;  // the tracks the Library lists are the ones
+    g_lib[extra].flags |= Track::kInLibrary;                       // an album can gain
+    const int savedQueuePos = g.queuePos;
+    g.playlists[1].items = {ids[0]};
+    g_npCompleted = kNone;
+    g.playing = ids[0];
+    g.queuePos = 0;
+    RebuildRows();
+    check(g.rows == std::vector<TrackId>{ids[0], ids[1], ids[3], extra}, "Now Playing gains the rest of the playing album");
+    g.playlists[1].items.pop_back();
+    RebuildRows();
+    check(g.rows.size() == 3, "a track removed from the playing album does not come back with the next rebuild");
+    g.playlists[1].items = ids;
+    g.queuePos = savedQueuePos;
+    g_npCompleted = kNone;
 
     SetActiveTab(4);
     DoLayout();

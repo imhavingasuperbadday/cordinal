@@ -240,7 +240,7 @@ const Ops kExportOps{
 const Ops* const kOps[] = {
     nullptr, &kEqOps, &kHeadphonesOps, &kTagsOps, &kPrefsOps, &kRulesOps, &kOrganizeOps, &kCopyOps, &kListenBrainzOps,
     &kFormatOps, &kDeviceOps, &kPointsOps, &kReviewOps, &kPaletteOps, &kLayoutOps, &kPacksOps, &kHelpersOps, &kGamesOps,
-    &kEditionsOps, &kCoversOps, &kArtistOps, &kExportOps, &kAlbumOps,
+    &kEditionsOps, &kCoversOps, &kArtistOps, &kExportOps, &kAlbumOps, &kKeysOps,
 };
 static_assert(std::size(kOps) == (size_t)Kind::Count);
 

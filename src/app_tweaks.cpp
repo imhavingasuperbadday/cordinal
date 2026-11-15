@@ -21,6 +21,7 @@ const wchar_t* const kOffOn[] = {L"Off", L"On"};
 const wchar_t* const kLoopNames[] = {L"Ignore loop points", L"Play the loop once, then fade",
                                      L"Play the loop twice, then fade", L"Play the loop three times, then fade"};
 const wchar_t* const kReverbNames[] = {L"Off", L"Room", L"Hall", L"Plate"};
+const wchar_t* const kCoverFadeNames[] = {L"Off", L"Black and white JPEG", L"Colour JPEG"};  // coverfade::Style
 const wchar_t* const kBitcrushBitNames[] = {L"2 bits", L"3 bits", L"4 bits", L"5 bits", L"6 bits", L"7 bits",
                                             L"8 bits", L"9 bits", L"10 bits", L"11 bits", L"12 bits", L"13 bits",
                                             L"14 bits", L"15 bits", L"16 bits"};
@@ -73,6 +74,10 @@ const wchar_t* const kFoobarViewNames[] = {L"By folder structure", L"By artist/a
 const wchar_t* const kDockNames[] = {L"Top", L"Bottom", L"Left", L"Right"};
 const wchar_t* const kWaveSizeNames[] = {L"Slim", L"Medium", L"Tall"};
 const wchar_t* const kDiscordNames[] = {L"Off", L"Song", L"Album"};
+const wchar_t* const kLightweightShowsNames[] = {L"Nothing (the icon by the clock)", L"Mini player", L"Compact window"};
+const wchar_t* const kLightweightNumpadNames[] = {L"Off", L"With Num Lock off", L"Always"};
+static_assert(std::size(kLightweightShowsNames) == (size_t)LightweightShows::Compact + 1 &&
+              std::size(kLightweightNumpadNames) == (size_t)LightweightNumpad::Always + 1);
 static_assert(std::size(kSpeedNames) == std::size(kSpeeds) && std::size(kTempoNames) == std::size(kTempos) &&
               std::size(kReverbMixNames) == std::size(kReverbMixes) && std::size(kWaveStyleNames) == 3 &&
               std::size(kSkinNames) == 5 && std::size(kOpacityNames) == 5 && std::size(kFoobarViewNames) == 4 &&
@@ -259,6 +264,11 @@ const Tweak kTweaks[] = {
      L"animations are turned off.",
      TweakType::Bool, 0, 1, 0, [] { return (double)g.listWind; }, [](double v) { g.listWind = v != 0; }, 0,
      [] { ListWindChanged(); }},
+    {"view.cover_fade", L"Window", L"CoverFade", L"Cover change",
+     L"When the next song has a different cover, the cover crunches into a badly saved JPEG, all blocks and banding, and fades to an old black-and-white photograph (or a colour one), then the new cover opens out of the middle block by block. Songs from the same album keep their cover. Off while Windows animations are turned off.",
+     TweakType::Choice, 0, 2, 0, [] { return (double)g.coverFade; },
+     [](double v) { g.coverFade = std::clamp((int)v, 0, 2); }, 0,
+     [] { if (g.hwnd) InvalidateRect(g.hwnd, &g.artRect, FALSE); }, kCoverFadeNames},
     {"view.band_wave_size", L"Window", L"BandWaveSize", L"Waveform height in the top or bottom bar",
      L"Sets the waveform's height only in the normal top or bottom player bar. "
      L"Big, compact and side players keep their own sizes.", TweakType::Choice, 0, 5, 0,
@@ -316,8 +326,9 @@ const Tweak kTweaks[] = {
      L"The track list shows a header with the cover above each album's tracks.", TweakType::Bool, 0, 1, 1,
      [] { return (double)g.groupAlbums; }, [](double v) { g.groupAlbums = v != 0; }, IDM_GROUP_ALBUMS},
     {"view.now_playing_album", L"Window", L"NowPlayingAlbumOnly", L"Now Playing shows the playing album",
-     L"While a song with an album plays, the Now Playing tab lists just that album. Typing a search "
-     L"looks through the whole list again; songs without an album always show the whole list.",
+     L"While a song with an album plays, the Now Playing tab lists the whole of that album, adding any of its "
+     L"tracks the list lacks behind the playing song. Typing a search looks through the whole list again; "
+     L"songs without an album always show the whole list.",
      TweakType::Bool, 0, 1, 1, [] { return (double)g.npAlbumOnly; }, [](double v) { g.npAlbumOnly = v != 0; }, 0,
      [] { if (g.hwnd && !g.playlists.empty()) RebuildView(true); }},
     {"view.group_auto_tabs", L"Window", L"GroupAutoTabs", L"One tab for auto-playlists",
@@ -369,6 +380,27 @@ const Tweak kTweaks[] = {
      L"it settles, saved as you go, or only through Startup defaults.", TweakType::Choice, 0, 2, 0,
      [] { return (double)g.preferenceSaving; }, [](double v) { g.preferenceSaving = (PreferenceSaving)(int)v; },
      IDM_PREFERENCE_ASK, nullptr, kSavingNames, nullptr, kTweakRadio | kTweakLegacyLoad},
+    {"lightweight.shows", L"Lightweight", L"Shows", L"What stays on screen",
+     L"In Lightweight mode: nothing but the icon by the clock (left-click it to pick a song), the round mini player, "
+     L"or the compact window. Music and effects play on whichever it is.", TweakType::Choice, 0, 2, 0,
+     [] { return (double)g.lightweightShows; }, [](double v) { g.lightweightShows = std::clamp((int)v, 0, 2); }, 0,
+     LightweightPreferencesChanged, kLightweightShowsNames},
+    {"lightweight.numpad", L"Lightweight", L"Numpad", L"Numpad remote",
+     L"In Lightweight mode the numpad controls cordinal from any program: 5 pauses, 4 and 6 skip, 8 and 2 set the "
+     L"volume, 7 and 9 seek, 1 mutes, 3 shuffles, 0 picks a song and . brings the window back. With Num Lock "
+     L"off, turning Num Lock on gives the numpad back for typing numbers.", TweakType::Choice, 0, 2, 1,
+     [] { return (double)g.lightweightNumpad; }, [](double v) { g.lightweightNumpad = std::clamp((int)v, 0, 2); }, 0,
+     LightweightPreferencesChanged, kLightweightNumpadNames},
+    {"lightweight.pause_work", L"Lightweight", L"PauseWork", L"Pause background library work",
+     L"In Lightweight mode, ReplayGain measures only the songs about to play, not the rest of the library, and "
+     L"waveforms wait until a window shows them.", TweakType::Bool, 0, 1, 1,
+     [] { return (double)g.lightweightPause; }, [](double v) { g.lightweightPause = v != 0; }, 0,
+     LightweightPreferencesChanged},
+    {"lightweight.trim", L"Lightweight", L"TrimMemory", L"Give memory back to Windows",
+     L"A moment after Lightweight mode starts, memory cordinal no longer uses goes back to Windows, so Task Manager "
+     L"shows only what playing needs.", TweakType::Bool, 0, 1, 1,
+     [] { return (double)g.lightweightTrim; }, [](double v) { g.lightweightTrim = v != 0; }, 0,
+     LightweightPreferencesChanged},
     {"convert.recycle", L"Convert", L"Recycle", L"Send converted originals to the Recycle Bin",
      L"After converting to .cord, the original files go to the Recycle Bin instead of staying where they are.",
      TweakType::Bool, 0, 1, 1, [] { return (double)g.convertRecycle; }, [](double v) { g.convertRecycle = v != 0; },
@@ -669,7 +701,7 @@ const Page kPages[] = {
     {"effects.", L"Effects", L"Reverb, volume shaping and bitcrush, after the equalizer.", nullptr,
      {{IDM_EQUALIZER, L"&Equalizer..."}}},
     {"view.", L"View", L"The seek bar and its colours, and how the window behaves.", L"Look",
-     {{IDM_FORMAT, L"Title &formatting..."}}},
+     {{IDM_FORMAT, L"Title &formatting..."}, {IDM_KEYBOARD, L"&Keyboard shortcuts..."}}},
     {"window.", L"Layout", L"Where the player sits and which parts of the normal window show.", nullptr,
      {{IDM_STARTUP_DEFAULTS, L"&Startup defaults..."}}},
     {"library.", L"Library", L"New music, sizes in the library views, and Explorer and the web server.", L"Collection",
@@ -681,6 +713,10 @@ const Page kPages[] = {
      {{IDM_LISTENBRAINZ, L"&Scrobbling..."}}},
     {"startup.", L"Startup", L"How cordinal opens, and what it keeps for next time.", L"General",
      {{IDM_STARTUP_DEFAULTS, L"&Startup defaults..."}}},
+    {"lightweight.", L"Lightweight mode",
+     L"Music in the background on little memory and CPU (Ctrl+Shift+L). Win+Alt+Space picks a song from any "
+     L"program; Keyboard shortcuts changes it and the numpad's keys.",
+     nullptr, {{IDM_LIGHTWEIGHT, L"&Lightweight mode"}, {IDM_KEYBOARD, L"&Keyboard shortcuts..."}}},
 };
 constexpr int kLinks = (int)std::size(kPages[0].links);
 

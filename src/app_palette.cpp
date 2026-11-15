@@ -3,6 +3,12 @@
 // Preferences that have no menu item of their own. It reads the live menu bar, so a new menu item, a
 // plugin's included, appears here with no extra work. Enter or a double-click runs the command after
 // the palette has closed.
+//
+// The same window is the song picker (ShowQuickPick), Lightweight mode's way to choose music
+// without the main window: the transport, what plays next and the playlists, and as you type,
+// albums and songs from the library. Enter plays a song now and then carries on with what was
+// playing; Shift+Enter puts it next. With nothing typed, Space pauses or resumes and Left and Right
+// skip, so the picker is a remote too.
 #include "app.h"
 
 #include <cwctype>
@@ -14,14 +20,24 @@ namespace {
 struct Entry {
     std::wstring label, path, shortcut;
     int command = 0;   // a menu command, or
-    int tweak = -1;    // a Tweaks() index
+    int tweak = -1;    // a Tweaks() index, or in the song picker:
+    TrackId track = kNone;  // a song (with `album`, its whole album)
+    int playlist = -1;      // a playlist to play
+    int queued = -1;        // g.queue's index of an Up next song; -1 when it comes from the playlist
+    bool album = false;
     bool enabled = true, checked = false;
 };
 
 struct Palette {
     HWND hwnd = nullptr, edit = nullptr, list = nullptr;
     std::vector<Entry> entries;
+    bool songs = false;  // the song picker
+    bool raising = false;  // BringForward is handing it the front: activation flickers, it stays open
+    size_t fixed = 0;    // the picker's entries that are not search results
 } p;
+
+// A search lists this many at most: the picker is for choosing, the library view for browsing.
+constexpr size_t kMaxSongs = 60, kMaxAlbums = 6;
 
 // "&Add files...\tCtrl+O" -> "Add files..." and "Ctrl+O"; "&&" stays a literal ampersand.
 void SplitMenuText(const std::wstring& text, std::wstring& label, std::wstring& shortcut) {
@@ -66,6 +82,15 @@ void Collect() {
     auto inMenus = [](int command) {
         return std::any_of(p.entries.begin(), p.entries.end(), [&](const Entry& e) { return e.command == command; });
     };
+    // The commands only keys reach (Volume up, Play a song...: app_keys.cpp), under the menu they belong to.
+    for (const ExtraCommand& x : ExtraCommands()) {
+        if (inMenus(x.command)) continue;
+        Entry e;
+        e.label = x.label;
+        e.path = x.path;
+        e.command = x.command;
+        p.entries.push_back(std::move(e));
+    }
     // A tweak that is also a menu toggle is already listed; the rest show their current value.
     auto tweaks = Tweaks();
     for (int i = 0; i < (int)tweaks.size(); ++i) {
@@ -89,6 +114,114 @@ void Collect() {
     }
 }
 
+std::wstring SongTitle(TrackId id) {
+    std::wstring title = g_lib.Str(g_lib[id].title);
+    return title.empty() ? g_lib.Str(g_lib[id].file) : title;
+}
+
+std::wstring SongArtist(TrackId id) {
+    std::wstring artist = g_lib.Str(g_lib[id].artist);
+    return artist.empty() ? g_lib.Str(g_lib[id].albumArtist) : artist;
+}
+
+Entry SongEntry(TrackId id, const wchar_t* where) {
+    Entry e;
+    e.track = id;
+    e.label = SongTitle(id);
+    std::wstring artist = SongArtist(id);
+    e.path = !where ? artist : artist.empty() ? where : where + (L" \x203A " + artist);
+    e.shortcut = FormatDuration(g_lib[id].Duration());
+    return e;
+}
+
+// The picker's standing entries: the transport with what is playing, Up next, the playlists and
+// the way back to the full window. A search adds albums and songs after them (FindSongs).
+void CollectSongs() {
+    p.entries.clear();
+    const bool idle = g.playing == kNone && !RadioPlaying();
+    const bool paused = !idle && g.engine.Paused();
+    Entry play;
+    play.label = idle ? L"Play" : paused ? L"Resume" : L"Pause";
+    if (g.playing != kNone && g.playing < g_lib.Count()) {
+        play.path = SongTitle(g.playing);
+        if (std::wstring artist = SongArtist(g.playing); !artist.empty()) play.path += L" \x2014 " + artist;
+    }
+    play.shortcut = L"Space";
+    play.command = IDM_PLAY_PAUSE;
+    p.entries.push_back(play);
+    Entry next;
+    next.label = L"Next";
+    next.shortcut = L"\x2192";
+    next.command = IDM_NEXT;
+    next.enabled = !idle;
+    p.entries.push_back(next);
+    Entry previous = next;
+    previous.label = L"Previous";
+    previous.shortcut = L"\x2190";
+    previous.command = IDM_PREV;
+    p.entries.push_back(previous);
+    // Up next: the queue first, then the playing playlist's order.
+    std::vector<TrackId> upcoming = UpcomingTracks();
+    for (size_t i = 0; i < upcoming.size(); ++i) {
+        if (upcoming[i] >= g_lib.Count()) continue;
+        Entry e = SongEntry(upcoming[i], L"Up next");
+        e.queued = i < g.queue.size() && g.queue[i] == upcoming[i] ? (int)i : -1;
+        p.entries.push_back(std::move(e));
+    }
+    for (int i = 0; i < (int)g.playlists.size(); ++i) {
+        const Playlist& pl = g.playlists[i];
+        if (pl.items.empty() || pl.kind == PlaylistKind::Inbox) continue;
+        Entry e;
+        e.label = pl.name;
+        e.path = L"Playlist";
+        e.shortcut = std::to_wstring(pl.items.size()) + (pl.items.size() == 1 ? L" song" : L" songs");
+        e.playlist = i;
+        p.entries.push_back(std::move(e));
+    }
+    Entry shuffle;
+    shuffle.label = L"Shuffle";
+    shuffle.command = IDM_SHUFFLE;
+    shuffle.checked = g.shuffle == kShuffleTracks;
+    p.entries.push_back(shuffle);
+    Entry back;
+    back.label = g.lightweight ? L"Back to the full window" : L"Lightweight mode";
+    back.shortcut = g.lightweight ? GlobalKeyText(IDM_QUICK_PICK) : L"Ctrl+Shift+L";
+    back.command = IDM_LIGHTWEIGHT;
+    p.entries.push_back(back);
+    p.fixed = p.entries.size();
+}
+
+// Albums and songs in the library that hold every word typed, in library order. Nothing is kept
+// between keystrokes, so a search costs no memory once the picker closes.
+void FindSongs(const std::wstring& query) {
+    p.entries.resize(p.fixed);
+    std::vector<std::wstring> words = FilterWords(query);
+    if (words.empty()) return;
+    TrackMatcher matcher(g_lib, words);
+    std::vector<Entry> songs, albums;
+    std::vector<StringPool::Handle> albumsSeen;
+    for (TrackId id = 0; id < (TrackId)g_lib.Count() && songs.size() < kMaxSongs; ++id) {
+        const Track& t = g_lib[id];
+        if (!t.InLibrary() || !matcher.Matches(id)) continue;
+        songs.push_back(SongEntry(id, nullptr));
+        if (!t.album || albums.size() >= kMaxAlbums ||
+            std::find(albumsSeen.begin(), albumsSeen.end(), t.album) != albumsSeen.end())
+            continue;
+        albumsSeen.push_back(t.album);
+        Entry a;
+        a.track = id;
+        a.album = true;
+        a.label = g_lib.Str(t.album);
+        a.path = L"Album";
+        std::wstring artist = g_lib.Str(t.albumArtist);
+        if (artist.empty()) artist = g_lib.Str(t.artist);
+        if (!artist.empty()) a.path += L" \x203A " + artist;
+        albums.push_back(std::move(a));
+    }
+    for (auto* found : {&albums, &songs})
+        for (Entry& e : *found) p.entries.push_back(std::move(e));
+}
+
 // Lowercase, without mnemonics or dots ("..."), single spaces, and '>' for the palette's separator.
 std::wstring CommandKey(const std::wstring& s) {
     std::wstring out;
@@ -104,13 +237,19 @@ std::wstring CommandKey(const std::wstring& s) {
 }
 
 void Filter() {
+    const std::wstring query = WindowText(p.edit);
+    if (p.songs) FindSongs(query);
     std::vector<std::wstring> texts;
-    for (const Entry& e : p.entries) texts.push_back(e.label + L" " + e.path);
+    for (size_t i = 0, n = p.songs ? p.fixed : p.entries.size(); i < n; ++i)
+        texts.push_back(p.entries[i].label + L" " + p.entries[i].path);
     SendMessageW(p.list, WM_SETREDRAW, FALSE, 0);
     SendMessageW(p.list, LB_RESETCONTENT, 0, 0);
     // Commands that can't run right now (nothing selected, say) follow the ones that can.
-    std::vector<int> order = RankMatches(texts, WindowText(p.edit));
+    std::vector<int> order = RankMatches(texts, query);
     std::stable_partition(order.begin(), order.end(), [](int i) { return p.entries[i].enabled; });
+    // In the picker a search is for music: what the library found leads.
+    if (p.songs && !query.empty())
+        for (size_t i = p.entries.size(); i-- > p.fixed;) order.insert(order.begin(), (int)i);
     for (int i : order) {
         const Entry& e = p.entries[i];
         // The item text is what a screen reader announces.
@@ -128,14 +267,60 @@ void Close() {
     if (p.hwnd) DestroyWindow(p.hwnd);
 }
 
+// The picker after a transport key: rebuilt, so Pause reads Resume, with the same row selected.
+void RefreshSongs() {
+    int row = (int)SendMessageW(p.list, LB_GETCURSEL, 0, 0);
+    CollectSongs();
+    Filter();
+    if (row > 0) SendMessageW(p.list, LB_SETCURSEL, row, 0);
+}
+
+// Plays what was picked: a song now, then on with what was playing (`next` only puts it next); an
+// album or a playlist from its start, or a random place in shuffle.
+void PlayPicked(const Entry& e, bool next) {
+    if (e.playlist >= 0) {
+        if (e.playlist >= (int)g.playlists.size() || g.playlists[e.playlist].items.empty()) return;
+        const size_t count = g.playlists[e.playlist].items.size();
+        PlayTrack(e.playlist, g.shuffle == kShuffleTracks ? (int)(GetTickCount64() % count) : 0, true);
+        return;
+    }
+    if (e.track >= g_lib.Count()) return;
+    if (e.album) {
+        std::vector<TrackId> tracks = AlbumTracksOf({e.track});
+        if (next) QueueTracks(tracks, true);
+        else PlayList(tracks, 0);
+        return;
+    }
+    if (!next && e.queued >= 0 && e.queued < (int)g.queue.size() && g.queue[e.queued] == e.track) {
+        PlayQueued(e.queued);
+        return;
+    }
+    const bool playing = g.playing != kNone || RadioPlaying();
+    QueueTracks({e.track}, true);  // starts it at once when nothing is playing
+    if (!next && playing) Next();
+}
+
 // Closes first, so the command runs against the main window as if chosen from its menu.
-void Run() {
+void Run(bool next = false) {
     int row = (int)SendMessageW(p.list, LB_GETCURSEL, 0, 0);
     if (row < 0) return;
     Entry e = p.entries[(size_t)SendMessageW(p.list, LB_GETITEMDATA, row, 0)];
     if (!e.enabled) {
         MessageBeep(MB_OK);
         return;
+    }
+    if (p.songs) {
+        // The transport keeps the picker open: pause now, pick a song after.
+        if (e.command == IDM_PLAY_PAUSE || e.command == IDM_NEXT || e.command == IDM_PREV || e.command == IDM_SHUFFLE) {
+            OnCommand(e.command, 0, nullptr);
+            RefreshSongs();
+            return;
+        }
+        if (!e.command) {
+            Close();
+            PlayPicked(e, next);
+            return;
+        }
     }
     Close();
     if (e.command) {
@@ -168,11 +353,21 @@ LRESULT CALLBACK EditSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
             case VK_DOWN: Move(1); return 0;
             case VK_PRIOR: Move(-page); return 0;
             case VK_NEXT: Move(page); return 0;
-            case VK_RETURN: Run(); return 0;
+            case VK_RETURN: Run(GetKeyState(VK_SHIFT) < 0); return 0;
             case VK_ESCAPE: Close(); return 0;
+        }
+        // The picker with nothing typed is a remote: Space pauses, Left and Right skip.
+        if (p.songs && GetWindowTextLengthW(h) == 0 && GetKeyState(VK_CONTROL) >= 0 && GetKeyState(VK_MENU) >= 0) {
+            const int command = wp == VK_SPACE ? IDM_PLAY_PAUSE : wp == VK_LEFT ? IDM_PREV : wp == VK_RIGHT ? IDM_NEXT : 0;
+            if (command) {
+                OnCommand(command, 0, nullptr);
+                RefreshSongs();
+                return 0;
+            }
         }
     }
     if (msg == WM_CHAR && (wp == L'\r' || wp == 27)) return 0;  // no beep for the keys handled above
+    if (msg == WM_CHAR && wp == L' ' && p.songs && GetWindowTextLengthW(h) == 0) return 0;  // Space paused
     if (msg == WM_NCDESTROY) RemoveWindowSubclass(h, EditSubclass, 0);
     return DefSubclassProc(h, msg, wp, lp);
 }
@@ -222,13 +417,14 @@ LRESULT CALLBACK PaletteProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             p.edit = CreateWindowExW(0, WC_EDITW, L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0, h, nullptr,
                                      g.inst, nullptr);
             SendMessageW(p.edit, WM_SETFONT, (WPARAM)g.font, TRUE);
-            SendMessageW(p.edit, EM_SETCUEBANNER, TRUE, (LPARAM)L"Type a command or setting");
+            SendMessageW(p.edit, EM_SETCUEBANNER, TRUE,
+                         (LPARAM)(p.songs ? L"Type a song, album or artist (Space pauses)" : L"Type a command or setting"));
             SetWindowSubclass(p.edit, EditSubclass, 0, 0);
             SetWindowTheme(p.edit, g.dark ? L"DarkMode_CFD" : L"Explorer", nullptr);
             p.list = CreateWindowExW(0, WC_LISTBOXW, L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY |
                                      LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT,
                                      0, 0, 0, 0, h, nullptr, g.inst, nullptr);
-            SetWindowTextW(p.list, L"Commands");
+            SetWindowTextW(p.list, p.songs ? L"Songs" : L"Commands");
             ApplyControlTheme(p.list, g.dark);
             return 0;
         }
@@ -261,7 +457,7 @@ LRESULT CALLBACK PaletteProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             else if ((HWND)lp == p.list && HIWORD(wp) == LBN_SELCHANGE) SetFocus(p.edit);
             return 0;
         case WM_ACTIVATE:
-            if (LOWORD(wp) == WA_INACTIVE) PostMessageW(h, WM_CLOSE, 0, 0);  // clicking elsewhere dismisses it
+            if (LOWORD(wp) == WA_INACTIVE && !p.raising) PostMessageW(h, WM_CLOSE, 0, 0);  // clicking elsewhere dismisses it
             return 0;
         case WM_CLOSE:
             DestroyWindow(h);
@@ -350,6 +546,7 @@ bool PaletteDialogMessage(MSG* msg) {
 }
 
 void ShowCommandPalette() {
+    if (p.hwnd && p.songs) Close();
     if (p.hwnd) {
         SetFocus(p.edit);
         return;
@@ -368,6 +565,106 @@ void ShowCommandPalette() {
     ShowWindow(h, SW_SHOW);
     SetForegroundWindow(h);
     SetFocus(p.edit);
+}
+
+// Windows lets only the program being typed into bring another window to the front. A numpad key
+// the Lightweight mode hook kept never reached any window, so the picker borrows the front
+// window's input state for the moment it takes its place, as launchers do; without that it would
+// open behind the program in use and never get the keys.
+static void BringForward(HWND h) {
+    HWND front = GetForegroundWindow();
+    const DWORD frontThread = front ? GetWindowThreadProcessId(front, nullptr) : 0, me = GetCurrentThreadId();
+    p.raising = true;
+    const bool attached = frontThread && frontThread != me && AttachThreadInput(me, frontThread, TRUE);
+    SetForegroundWindow(h);
+    SetFocus(p.edit);
+    if (attached) AttachThreadInput(me, frontThread, FALSE);
+    p.raising = false;
+}
+
+// The song picker. Over the main window while it shows; otherwise a third of the way down the
+// screen the mouse is on, where a launcher appears, or by the clock when it was opened from the
+// notification-area icon.
+void ShowQuickPick(bool nearTray) {
+    if (p.hwnd && !p.songs) Close();
+    if (p.hwnd) {
+        BringForward(p.hwnd);
+        SetFocus(p.edit);
+        return;
+    }
+    RegisterAppClass(L"CordinalPalette", PaletteProc, CS_DROPSHADOW);
+    p.songs = true;
+    CollectSongs();
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    MONITORINFO mi{sizeof(mi)};
+    GetMonitorInfoW(MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST), &mi);
+    const RECT& work = mi.rcWork;
+    const int width = std::min(S(560), (int)(work.right - work.left) - S(16));
+    const int height = std::min(S(8) * 2 + S(26) + S(28) * 12 + 1, (int)(work.bottom - work.top) - S(16));
+    int x = work.left + (work.right - work.left - width) / 2, y = work.top + (work.bottom - work.top) / 3 - S(40);
+    if (nearTray) {
+        x = work.right - width - S(12);
+        y = work.bottom - height - S(12);
+    } else if (IsWindowVisible(g.hwnd) && !IsIconic(g.hwnd)) {
+        RECT owner;
+        GetWindowRect(g.hwnd, &owner);
+        x = owner.left + (owner.right - owner.left - width) / 2;
+        y = owner.top + S(64);
+    }
+    x = std::clamp(x, (int)work.left, std::max((int)work.left, (int)work.right - width));
+    y = std::clamp(y, (int)work.top, std::max((int)work.top, (int)work.bottom - height));
+    HWND h = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, L"CordinalPalette", L"Play a song",
+                             WS_POPUP | WS_CLIPCHILDREN, x, y, width, height, g.hwnd, nullptr, g.inst, nullptr);
+    if (!h) {
+        p = Palette{};
+        return;
+    }
+    Filter();
+    ShowWindow(h, SW_SHOWNA);  // BringForward activates it
+    BringForward(h);
+    SetFocus(p.edit);
+}
+
+bool PaletteOpen() { return p.hwnd != nullptr; }
+bool QuickPickOpen() { return p.hwnd && p.songs; }
+
+// Every command the palette lists that isn't a setting: the menu bar's and the extra ones.
+std::vector<MenuCommandInfo> AllMenuCommands() {
+    std::vector<Entry> saved = std::move(p.entries);  // the palette may be open
+    Collect();
+    std::vector<MenuCommandInfo> out;
+    for (const Entry& e : p.entries)
+        if (e.command && e.tweak < 0) out.push_back({e.label, e.path, e.command});
+    p.entries = std::move(saved);
+    return out;
+}
+
+// "Playback > Next" for IDM_NEXT, as bindings and packs name it; empty when nothing lists it.
+std::wstring CommandName(int command) {
+    for (const MenuCommandInfo& c : AllMenuCommands()) {
+        if (c.command != command) continue;
+        std::wstring path = c.path;
+        std::replace(path.begin(), path.end(), L'\x203A', L'>');
+        return path.empty() ? c.label : path + L" > " + c.label;
+    }
+    return {};
+}
+void ClosePalette() { Close(); }
+
+// For the self-test: the picker's rows as shown, label then path.
+std::vector<std::wstring> QuickPickRows() {
+    std::vector<std::wstring> rows;
+    if (!p.hwnd) return rows;
+    for (int i = 0, n = (int)SendMessageW(p.list, LB_GETCOUNT, 0, 0); i < n; ++i) {
+        const Entry& e = p.entries[(size_t)SendMessageW(p.list, LB_GETITEMDATA, i, 0)];
+        rows.push_back(e.label + L" | " + e.path);
+    }
+    return rows;
+}
+
+void SetQuickPickQuery(const std::wstring& query) {
+    if (p.edit) SetWindowTextW(p.edit, query.c_str());  // EN_CHANGE filters
 }
 
 }  // namespace app

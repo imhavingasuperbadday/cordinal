@@ -62,6 +62,24 @@ void TrayDpiChanged();
 bool StartWithWindows();
 void ToggleStartWithWindows();
 void ShowMainWindow();
+void TrayNotice(const std::wstring& title, const std::wstring& text);  // a notification from the icon
 const wchar_t* IconFace();  // Segoe MDL2 Assets, or Segoe Fluent Icons where only that is installed
+
+// Lightweight mode (app_lightweight.cpp): playing in the background with the window put away.
+enum class LightweightShows : uint8_t { Nothing, Mini, Compact };  // what stays on screen
+enum class LightweightNumpad : uint8_t { Off, NumLockOff, Always };
+void EnterLightweight();
+void LeaveLightweight(bool show = true);
+void ToggleLightweight();
+bool LightweightHidesWindow();  // on, with nothing or the mini player in the main window's place
+bool LightweightPausesWork();   // on, with background library work paused
+void LightweightWindowShown();
+void LightweightSizeChanged(ViewSize size);
+void LightweightPreferencesChanged();
+bool LightweightTimer(UINT_PTR id);
+void LightweightMiniChanged();  // the mini player opened or closed
+// The keymap numpad index (keymap.h) a key press is under a LightweightNumpad mode, -1 for none;
+// `extended` is the keyboard's flag that tells the arrow-key block from the numpad with Num Lock off.
+int NumpadKeyIndex(DWORD vk, bool extended, int mode);
 
 }  // namespace app

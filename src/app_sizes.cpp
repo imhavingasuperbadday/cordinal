@@ -33,6 +33,7 @@ RECT CompactRect(const RECT& full) {
 void Apply(ViewSize size) {
     bool reduced = ReducedMemoryMode();
     g.size = size;
+    LightweightSizeChanged(size);
     if (reduced != ReducedMemoryMode()) UpdateViewMemory();
     SyncMenuBar();
     // The strip's controls hide until the mouse is over it: watch for that.

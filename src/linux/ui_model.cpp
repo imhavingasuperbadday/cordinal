@@ -451,9 +451,29 @@ void FollowNowPlayingAlbum() {
     else g_npAlbumTrack = want;
 }
 
+TrackId g_npCompleted = kNone;  // the track whose album Now Playing last gained in full; a new snapshot clears it
+
+// Now Playing is about to list the playing album, but a list playback started from (Top rated, say) holds
+// only some of its tracks: the rest of the album joins it, right behind the playing track so it plays
+// next (as app_playlists.cpp on Windows). Once per album, so a removed track doesn't come straight back.
+static void CompleteNowPlayingAlbum() {
+    TrackId playing = NowPlayingAlbumTrack();
+    if (playing == kNone) return;
+    if (g_npCompleted != kNone && g_npCompleted < g_lib.Count() && SameAlbum(g_lib[g_npCompleted], g_lib[playing])) return;
+    g_npCompleted = playing;
+    Playlist& pl = Active();
+    std::vector<uint32_t> mapping;
+    if (CompleteAlbumInList(pl.items, playing, HeardIndex(), mapping) == 0) return;
+    std::vector<size_t> moved(mapping.begin(), mapping.end());
+    RemapNowPlaying(moved);
+    for (size_t& item : g.rowItems) item = item < moved.size() ? moved[item] : item;
+    g.libraryDirty = true;
+}
+
 void RebuildRows() {
     if (g.playlists.empty()) return;
     g.active = std::clamp(g.active, 0, (int)g.playlists.size() - 1);
+    CompleteNowPlayingAlbum();
     Playlist& pl = Active();
     std::vector<TrackId> source = PlaylistTracks(pl);
     if (pl.kind == PlaylistKind::Library && !AlternateMode()) FilterLibraryTracks(source);  // the column browser, before the search

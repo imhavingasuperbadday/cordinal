@@ -408,7 +408,8 @@ private:
 
 // Start as soon as playback is requested, before the engine announces the first audible sample.
 void PrepareWaveform(TrackId id) {
-    if (!g.waveform || g.liveWaveform) return;
+    // With Lightweight mode's window away nothing shows it; leaving asks again (WaveformTrackChanged).
+    if (!g.waveform || g.liveWaveform || LightweightHidesWindow()) return;
     Peaks peaks{};
     uint32_t request = 0;
     Request(id, peaks, request);
@@ -417,7 +418,7 @@ void PrepareWaveform(TrackId id) {
 // The engine already chose this track for its gapless hand-off, so its exact peaks can be ready
 // by the time it is heard without guessing from the playlist order.
 void PrefetchWaveform(TrackId id) {
-    if (!g.waveform || id == kNone || g.liveWaveform) { CancelPeakPrefetch(); return; }
+    if (!g.waveform || id == kNone || g.liveWaveform || LightweightHidesWindow()) { CancelPeakPrefetch(); return; }
     std::wstring path;
     double start, end;
     if (!PeakSource(id, path, start, end)) return;

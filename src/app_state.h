@@ -90,6 +90,7 @@ constexpr UINT WM_APP_STEAM = WM_APP + 69;         // lParam owns discovered sou
 constexpr UINT WM_APP_IPOD = WM_APP + 70;          // iPod scan (1), progress (0) or sync result (2); lParam owns it
 constexpr UINT WM_APP_COVERFETCH = WM_APP + 71;    // cover search results and progress (app_coverfetch.cpp)
 constexpr UINT WM_APP_COLLECTION = WM_APP + 72;    // collection export/import progress (0), or its result (1: lParam owns it)
+constexpr UINT WM_APP_KEYS = WM_APP + 73;          // a Lightweight mode numpad key: wParam = keymap numpad index, lParam = repeat
 constexpr UINT_PTR kSearchTimer = 3;
 constexpr UINT_PTR kUiTimer = 1;
 constexpr UINT_PTR kBusyTimer = 5;  // animates the busy spinners (app_badges.cpp)
@@ -154,7 +155,11 @@ enum : int {
     IDM_BACKUP, IDM_RESTORE_BACKUP, IDM_IMPORT_STATISTICS,
     IDM_CANCEL_BACKUP, IDM_OPEN_RADIO, IDM_WRITE_STATISTICS, IDM_RG_SCAN_ALL,
     IDM_DUPLICATE_PL = 4000, IDM_REOPEN_PL, IDM_MOVE_PL_LEFT, IDM_MOVE_PL_RIGHT, IDM_PLAYING_PL,
-    IDM_RELOAD_TAGS, IDM_CANCEL_IMPORT, IDM_WATCH_IMPORTED, IDM_CANCEL_STEAM, IDM_UNDO, IDM_REDO, IDM_QUEUE_SHOW, IDM_SELECT_PL_BASE = 4020,
+    IDM_RELOAD_TAGS, IDM_CANCEL_IMPORT, IDM_WATCH_IMPORTED, IDM_CANCEL_STEAM, IDM_UNDO, IDM_REDO, IDM_QUEUE_SHOW,
+    IDM_LIGHTWEIGHT, IDM_QUICK_PICK,  // Lightweight mode and its song picker (app_lightweight.cpp)
+    // Commands only keys and the palette reach, and the Keyboard shortcuts window (app_keys.cpp).
+    IDM_VOLUME_UP, IDM_VOLUME_DOWN, IDM_SEEK_BACK, IDM_SEEK_FORWARD, IDM_KEYBOARD,
+    IDM_SELECT_PL_BASE = 4020,
     // Album editions (album_editions.h): manual grouping, preferred choice and comparison.
     IDM_EDITION_GROUP = 4100, IDM_EDITION_MANAGER, IDM_EDITION_PREFERRED, IDM_EDITION_REMOVE,
     IDM_EDITION_SPLIT, IDM_EDITION_COMPARE, IDM_EDITION_VERSIONS, IDM_EDITION_ART, IDM_EDITION_CLEAR_ART,
@@ -359,6 +364,7 @@ struct App {
     bool waveFullHeight = true; // unmirrored, the waveforms still fill both halves, the lower as bright
     bool seekGlow = true;       // the seek bar's colours glow softly past its edges, every style and source alike
     bool pauseFade = true;      // the waveform fades to its paused colour and back instead of switching at once
+    int coverFade = 0;          // the cover's change to the next one: coverfade::Style, off by default (cover_fade.h)
     bool resumeOn = true;       // remember the stopped / last-playing track's position across restarts
     bool resumeInSong = false;  // reopen with that track loaded, paused where it stopped
     bool resumePlay = false;    // start a reopened track at once instead of waiting paused
@@ -391,6 +397,9 @@ struct App {
     // Now Playing lists only the playing track's album (when it has one), until a search is typed.
     bool npAlbumOnly = true;
     TrackId npAlbumTrack = kNone;  // the track whose album that list was narrowed to, kNone when it wasn't
+    // The track whose album Now Playing last gained in full (CompleteAlbumInList), so removing one of its
+    // rows isn't undone by the next rebuild. A new snapshot clears it.
+    TrackId npCompleted = kNone;
     // The auto-playlists share one tab (TabSlots); it shows the one last opened, by identity.
     bool groupAutoTabs = true;
     uint64_t autoTabShown = 0;
@@ -421,6 +430,12 @@ struct App {
     // The library view draws through the graphics card. Off draws in software, which avoids the
     // driver's memory and threads; Compact and the mini player always draw in software.
     bool gpuDrawing = false;
+    // Lightweight mode (app_lightweight.cpp): cordinal keeps playing with its window put away.
+    bool lightweight = false;
+    int lightweightShows = 0;      // LightweightShows: what stays on screen
+    bool lightweightTrim = true;   // give unused memory back to Windows on the way in
+    bool lightweightPause = true;  // pause background library work (ReplayGain sweep, waveforms)
+    int lightweightNumpad = 1;     // LightweightNumpad: the numpad as a remote
     // Converting to .cord: verified originals go to the Recycle Bin, or are kept and, unless shown,
     // left out of the library; conversions stay undoable for kConvertMemoryDays[convertMemory].
     bool convertRecycle = true, convertShowOriginals = false;

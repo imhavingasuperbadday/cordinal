@@ -160,7 +160,8 @@ void MainTick() {
     UpdateTray();
     PanelsTick();
     LyricsTick();
-    if (g.dirty && ++g.ticksSinceSave >= 80) {  // ~20 s
+    // ~20 s; Lightweight mode's hidden window ticks once a second, not four times.
+    if (g.dirty && (g.ticksSinceSave += LightweightHidesWindow() ? 4 : 1) >= 80) {
         SaveLibraryNow();
     }
     FlushPendingPreferences();

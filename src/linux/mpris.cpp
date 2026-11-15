@@ -52,6 +52,7 @@ struct Snapshot {
     double volume = 1;
     bool shuffle = false;
     Repeat repeat = Repeat::Off;
+    bool lightweight = false;  // Lightweight mode (lightweight.cpp)
     bool canNext = false, canPrevious = false;
     std::string output;
 };
@@ -203,7 +204,11 @@ constexpr dbus::Property kPlayerProperties[] = {
 constexpr dbus::Method kAppMethods[] = {{"Open", "as", "", OpenMethod}};
 
 // --- the tray icon (StatusNotifierItem) and its menu (dbusmenu) ------------------------------------------
-enum MenuId { kPlayPause = 1, kPrevious, kNext, kStop, kSep1, kShow, kSep2, kLogin, kSep3, kExit };
+enum MenuId {
+    kPlayPause = 1, kPrevious, kNext, kStop, kSep1, kShow, kSep2, kLogin, kSep3, kExit,
+    // After the first ten, so the ids a host already knows keep their meaning.
+    kPick, kShuffle, kLightweight, kSep4
+};
 
 struct MenuEntry {
     int id;
@@ -219,6 +224,10 @@ std::vector<MenuEntry> MenuEntries() {
             {kNext, "_Next", !idle},
             {kStop, "_Stop", !idle},
             {kSep1, "", true, true},
+            {kPick, "Play a s_ong..."},
+            {kShuffle, "S_huffle", true, false, true, s.shuffle},
+            {kSep4, "", true, true},
+            {kLightweight, "_Lightweight mode", true, false, true, s.lightweight},
             {kShow, "Show _cordinal"},
             {kSep2, "", true, true},
             {kLogin, "Start on _login", true, false, true, StartsOnLogin()},
@@ -241,7 +250,7 @@ void WriteMenuProps(Writer& w, const MenuEntry& e) {
     w.Close(a);
 }
 
-// The whole menu whatever the arguments ask for: it is one level of ten items.
+// The whole menu whatever the arguments ask for: it is one level of items.
 void MenuGetLayout(dbus::Call& c) {
     Writer& w = c.out;
     w.U(g_menuRevision);
@@ -282,6 +291,9 @@ void MenuClicked(int id, std::string_view event) {
         case kNext: Post(Remote::Next); break;
         case kStop: Post(Remote::Stop); break;
         case kShow: Post(Remote::Raise); break;
+        case kPick: Post(Remote::PickSong); break;
+        case kShuffle: Post(Remote::SetShuffle, !Snap().shuffle); break;
+        case kLightweight: Post(Remote::ToggleLightweight); break;
         case kLogin: Post(Remote::ToggleStartOnLogin); break;
         case kExit: Post(Remote::Quit); break;
         default: break;
@@ -343,7 +355,8 @@ void SniProperty(std::string_view p, Writer& w) {
 }
 
 void SniMethod(dbus::Call& c) {
-    if (c.msg.member == "Activate") Post(Remote::Raise);
+    // In Lightweight mode a click picks a song, as the Windows icon's does; otherwise it shows cordinal.
+    if (c.msg.member == "Activate") Post(Snap().lightweight ? Remote::PickSong : Remote::Raise);
     else if (c.msg.member == "SecondaryActivate") Post(Remote::PlayPause);
 }
 
@@ -574,6 +587,7 @@ void MprisChanged(bool seeked) {
     s.volume = g.settings.volume;
     s.shuffle = g.settings.shuffle;
     s.repeat = g.settings.repeat;
+    s.lightweight = g.lightweight;
     s.canNext = s.canPrevious = id != kNone;
     Engine::OutputInfo o = g.engine.Output();
     if (o.exclusive) {

@@ -35,6 +35,12 @@ void WriteReplayGainTags(const std::vector<TrackId>& ids);
 void WriteStatisticsTags(const std::vector<TrackId>& ids);
 void AddPaths(const std::vector<std::wstring>& inputs, bool playFirst);
 void LoadArtFor(TrackId id, bool refresh = false);
+// The cover's change to the next one (cover_fade.h), app_art.cpp. PaintArtFade draws the cover square `r`
+// while a change is under way (the outgoing cover until the next arrives, then the frames) and returns
+// true; otherwise it draws nothing. `tile` names the placeholder the change ends on when there is no art.
+bool PaintArtFade(HDC dc, const RECT& r, const std::wstring& tile);
+bool ArtFadeTimer(WPARAM id);  // WM_TIMER on g.hwnd: true when it was the change's frame timer
+bool ArtFadeActive();          // waiting for the next cover or running
 void AppendFiles(int playlist, const std::vector<std::wstring>& files, bool playFirst);
 void OnImportResult(LPARAM lp);
 bool NoteUnwatchedFolders(const std::vector<std::wstring>& folders);

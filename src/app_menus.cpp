@@ -69,6 +69,7 @@ HMENU BuildMenu() {
     AppendMenuW(file, MF_STRING, IDM_WEB_SERVER, L"&Web server...");
     AppendMenuW(file, MF_STRING, IDM_LISTENBRAINZ, L"Scrobbling...");
     AppendMenuW(file, MF_STRING, IDM_PREFERENCES, L"&Preferences...\tCtrl+,");
+    AppendMenuW(file, MF_STRING, IDM_KEYBOARD, L"&Keyboard shortcuts...");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, IDM_EXIT, L"E&xit");
 
@@ -228,6 +229,7 @@ HMENU BuildMenu() {
     AppendMenuW(panels, MF_STRING, IDM_PANELS_RESET, L"&Reset the layout");
     AppendMenuW(view, MF_POPUP, (UINT_PTR)panels, L"Big mode pa&nels");
     AppendMenuW(view, MF_STRING, IDM_MINI_PLAYER, L"&Mini player\tCtrl+Shift+M");
+    AppendMenuW(view, MF_STRING, IDM_LIGHTWEIGHT, L"Light&weight mode\tCtrl+Shift+L");
     AppendMenuW(view, MF_STRING, IDM_ALWAYS_ON_TOP, L"&Always on top");
     AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(view, MF_STRING, IDM_COMMAND_PALETTE, L"&Command palette...\tCtrl+Shift+P");
@@ -250,10 +252,10 @@ HMENU BuildMenu() {
     return bar;
 }
 
-// Built and installed once. Ctrl+= / Ctrl+- and their keypad and shifted variants all map to the
-// same size commands; Ctrl+R jumps straight to Repeat All (the command handler cycles onward).
-HACCEL BuildAccelerators() {
-    std::vector<ACCEL> keys = {
+// cordinal's own keys in its window. Ctrl+= / Ctrl+- and their keypad and shifted variants all map to
+// the same size commands; Ctrl+R jumps straight to Repeat All (the command handler cycles onward).
+std::vector<ACCEL> BuiltInAccelerators() {
+    return {
         {FCONTROL | FSHIFT | FVIRTKEY, 'R', IDM_OPEN_RADIO},
         {FCONTROL | FSHIFT | FVIRTKEY, 'T', IDM_REOPEN_PL},
         {FCONTROL | FSHIFT | FVIRTKEY, 'D', IDM_DUPLICATE_PL},
@@ -284,6 +286,7 @@ HACCEL BuildAccelerators() {
         {FCONTROL | FVIRTKEY, 'E', IDM_EQUALIZER},
         {FCONTROL | FVIRTKEY, 'M', IDM_MUTE},
         {FCONTROL | FSHIFT | FVIRTKEY, 'M', IDM_MINI_PLAYER},
+        {FCONTROL | FSHIFT | FVIRTKEY, 'L', IDM_LIGHTWEIGHT},
         {FCONTROL | FVIRTKEY, VK_OEM_MINUS, IDM_SMALLER},
         {FCONTROL | FVIRTKEY, VK_SUBTRACT, IDM_SMALLER},
         {FCONTROL | FVIRTKEY, VK_OEM_PLUS, IDM_LARGER},
@@ -302,8 +305,18 @@ HACCEL BuildAccelerators() {
         {FCONTROL | FVIRTKEY, VK_RIGHT, IDM_NEXT},
         {FCONTROL | FVIRTKEY, VK_LEFT, IDM_PREV},
     };
+}
+
+// Built at start and again when packs or your keys change: cordinal's keys, then the packs', then yours
+// (app_keys.cpp), each in front of the last so it wins. The keys from any program follow, and the menus
+// show your keys.
+HACCEL BuildAccelerators() {
+    std::vector<ACCEL> keys = BuiltInAccelerators();
     AppendPackAccelerators(keys);  // in front, so a pack's key wins
+    ApplyKeyChanges(keys);         // and yours win over both
     RegisterPackHotkeys();
+    RegisterGlobalKeys();
+    ApplyShortcutLabels(MainMenuBar());
     return CreateAcceleratorTableW(keys.data(), (int)keys.size());
 }
 
@@ -317,7 +330,7 @@ void UpdateMainMenu(HMENU m) {
         {IDM_RG_ENABLE, g.rgOn}, {IDM_STOP_AFTER, g.stopAfterCurrent}, {IDM_NIGHT_MODE, g.nightMode}, {IDM_BITCRUSH, g.bitcrush.enabled},
         {IDM_EQUALIZER, g.eq.enabled || g.eq.crossfeed}, {IDM_ALWAYS_ON_TOP, g.alwaysOnTop},
         {IDM_GROUP_ALBUMS, g.groupAlbums}, {IDM_LYRICS, LyricsPanelShown()},
-        {IDM_QUEUE_SHOW, QueueShown()},
+        {IDM_QUEUE_SHOW, QueueShown()}, {IDM_LIGHTWEIGHT, g.lightweight},
     };
     for (const auto& item : checks) CheckMenuItem(m, item.id, MF_BYCOMMAND | (item.checked ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuRadioItem(m, IDM_REVERB_BASE, IDM_REVERB_BASE + (int)ReverbPreset::Count - 1,

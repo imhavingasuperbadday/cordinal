@@ -2,9 +2,11 @@
 // window, covering the tabs, playback strip and background jobs, and ending with the recovered
 // tab/playback behaviour checks in port_regressions.cpp. No player instance or user state is used.
 #include "selftest_common.h"
+#include "cover_fade.h"
 #include "metadata_fetch.h"
 #include "radio.h"
 #include "soft_canvas.h"
+#include "tests/keymap_checks.h"
 
 #include <dwrite.h>
 #include <tlhelp32.h>
@@ -28,6 +30,44 @@ unsigned ProcessThreads() {
         threads += entry.th32OwnerProcessID == GetCurrentProcessId();
     CloseHandle(snapshot);
     return threads;
+}
+
+// The now playing cover's change to the next one (cover_fade.h): it starts as the outgoing cover exactly,
+// is a black-and-white photograph once drained (or keeps its colour in that style), opens the new cover from
+// the middle, and ends on it.
+void TestCoverFade() {
+    testlog::Batch batch(L"UI: the cover's black-and-white change to the next cover");
+    constexpr int side = 32;
+    std::vector<uint32_t> from(side * side), to(side * side, 0x2050E0), out(side * side);
+    for (size_t i = 0; i < from.size(); ++i) from[i] = 0xC03010 + (uint32_t)(i % 40);
+    Check(coverfade::Compose(from.data(), to.data(), 0, side, 0, out.data()) && out == from,
+              L"the first frame is the outgoing cover unchanged");
+    coverfade::Compose(from.data(), to.data(), 0, side, coverfade::kDrainMs + coverfade::kHoldMs / 2, out.data());
+    bool grey = true;
+    for (uint32_t px : out) grey = grey && (px >> 16 & 255) == (px >> 8 & 255) && (px >> 8 & 255) == (px & 255);
+    Check(grey, L"drained and held, the outgoing cover is black and white");
+    Check((out[0] & 255) < (out[side / 2 * side + side / 2] & 255), L"the photograph darkens toward its corners");
+    std::vector<uint32_t> tinted(side * side);
+    coverfade::Compose(from.data(), to.data(), 0, side, coverfade::kDrainMs + coverfade::kHoldMs / 2, tinted.data(), true);
+    const uint32_t middle = tinted[side / 2 * side + side / 2];
+    Check((middle >> 16 & 255) > (middle & 255), L"the colour style keeps the outgoing cover's colour");
+    // The iris opens block by block from the middle with a ragged edge: early on the corners are still the
+    // photograph, by halfway the middle is the new cover.
+    const int revealAt = coverfade::kDrainMs + coverfade::kHoldMs;
+    coverfade::Compose(from.data(), to.data(), 0, side, revealAt + coverfade::kRevealMs * 3 / 10, out.data());
+    const uint32_t corner = out[0];
+    coverfade::Compose(from.data(), to.data(), 0, side, revealAt + coverfade::kRevealMs / 2, out.data());
+    const uint32_t centre = out[side / 2 * side + side / 2];
+    Check((centre & 255) > 0xC0 && (corner >> 16 & 255) == (corner & 255),
+          L"the new cover opens from the middle while the corners are still the photograph");
+    Check(!coverfade::Compose(from.data(), to.data(), 0, side, coverfade::kTotalMs, out.data()) && out == to,
+              L"the change ends on the new cover exactly");
+    coverfade::Compose(from.data(), nullptr, 0x123456, side, coverfade::kTotalMs, out.data());
+    Check(out[5] == 0x123456, L"without a new cover the change ends on the fill");
+    std::vector<uint32_t> wide(4 * 2, 0x808080);
+    wide[1] = wide[2] = wide[5] = wide[6] = 0xFF0000;  // the middle two columns, which a centred crop keeps
+    auto square = coverfade::Square(wide.data(), 4, 2, 2);
+    Check(square.size() == 4 && square[0] == 0xFF0000 && square[3] == 0xFF0000, L"a wide cover is cropped to its centre");
 }
 
 // The library view's software canvas: frames reach the DC it is given, a resize keeps the bitmaps
@@ -721,6 +761,225 @@ void TestQueueEditor(const std::wstring& scratch) {
     batch.End();
 }
 
+// Lightweight mode (app_lightweight.cpp) and its song picker (app_palette.cpp): the numpad's keys
+// under each Num Lock choice, putting the window away and bringing it back as each preference says,
+// and finding music by typing. The keyboard hook and hotkey are held only while the mode is on.
+void TestLightweightMode() {
+    using namespace app;
+    testlog::Batch batch;
+    batch.Next(L"lightweight: the numpad is a remote with Num Lock off, and leaves the arrow keys alone");
+    const int off = (int)LightweightNumpad::Off, numLockOff = (int)LightweightNumpad::NumLockOff,
+              always = (int)LightweightNumpad::Always;
+    testlog::Cases keys;
+    struct KeyCase { DWORD vk; bool extended; int mode; int want; const wchar_t* name; };
+    const KeyCase cases[] = {
+        {VK_CLEAR, false, numLockOff, 5, L"5 with Num Lock off"},
+        {VK_LEFT, false, numLockOff, 4, L"4 with Num Lock off"},
+        {VK_INSERT, false, numLockOff, 0, L"0 with Num Lock off"},
+        {VK_DELETE, false, numLockOff, 10, L". with Num Lock off"},
+        {VK_LEFT, true, numLockOff, -1, L"the arrow block's Left is not the numpad's"},
+        {VK_DELETE, true, always, -1, L"the Delete key is not the numpad's ."},
+        {VK_NUMPAD5, false, numLockOff, -1, L"Num Lock on gives the digits back"},
+        {VK_ADD, false, numLockOff, -1, L"Num + types unless Preferences says Always"},
+        {VK_NUMPAD5, false, always, 5, L"Always takes the digits too"},
+        {VK_ADD, false, always, 11, L"Always takes Num + too"},
+        {VK_RETURN, true, always, 15, L"the numpad's Enter"},
+        {VK_RETURN, false, always, -1, L"the main Enter is never taken"},
+        {VK_CLEAR, false, off, -1, L"Off takes nothing"},
+        {'5', false, always, -1, L"the top row's 5 is never taken"},
+    };
+    for (const KeyCase& c : cases) keys.Add(NumpadKeyIndex(c.vk, c.extended, c.mode) == c.want, c.name);
+    // Unless changed, the keys do what Preferences says: 5 pauses, 0 picks a song, . brings the window back.
+    RegisterGlobalKeys();
+    const uint32_t bound = NumpadKeysBound();
+    keys.Add((bound & 0x7FF) == 0x7FF && !(bound & ~0x7FFu), L"the eleven Num Lock keys are bound, the rest type");
+    const std::pair<int, int> numpadCommands[] = {{5, IDM_PLAY_PAUSE}, {0, IDM_QUICK_PICK}, {10, IDM_LIGHTWEIGHT},
+                                                   {8, IDM_VOLUME_UP}};
+    const std::vector<keymap::Binding> global = EffectiveBindings(keymap::Scope::Global);
+    for (auto [index, command] : numpadCommands) {
+        const std::vector<keymap::Key> held = keymap::KeysOf(global, CommandName(command));
+        keys.Add(!held.empty() && held.front() == keymap::Key{0, keymap::NumpadName(index)}, keymap::NumpadName(index));
+    }
+    Check(keys.Passed(), L"lightweight: the numpad's keys map as Preferences describes%ls", keys.failed.c_str());
+
+    batch.Next(L"lightweight: Preferences has a page for it, with the defaults a background player wants");
+    const Tweak* shows = FindTweak("lightweight.shows");
+    const Tweak* numpad = FindTweak("lightweight.numpad");
+    const Tweak* pause = FindTweak("lightweight.pause_work");
+    const Tweak* trim = FindTweak("lightweight.trim");
+    Check(shows && numpad && pause && trim && shows->def == 0 && numpad->def == 1 && pause->def == 1 && trim->def == 1 &&
+              !wcscmp(TweakPage(*shows), L"Lightweight mode") && !wcscmp(TweakPage(*trim), L"Lightweight mode"),
+          L"lightweight: its four settings are on their own page, showing nothing and taking the numpad with Num Lock off");
+
+    // The picker finds music by any word, albums first, and lists the transport and playlists unasked.
+    batch.Next(L"lightweight: the song picker lists the transport, then finds albums and songs by their words");
+    TagData tags;
+    tags.title = "Zebra crossing";
+    tags.artist = "Picker artist";
+    tags.album = "Picker album";
+    TrackId zebra = g_lib.Add(L"C:\\ui-test\\lightweight-zebra.flac");
+    g_lib.ApplyTags(zebra, tags);
+    g_lib[zebra].flags |= Track::kInLibrary;
+    g_lib.Touch();
+    ShowQuickPick(false);
+    std::vector<std::wstring> standing = QuickPickRows();
+    SetQuickPickQuery(L"zebra");
+    std::vector<std::wstring> found = QuickPickRows();
+    SetQuickPickQuery(L"picker artist");
+    const size_t byArtist = QuickPickRows().size();
+    const bool open = PaletteOpen();
+    ClosePalette();
+    auto has = [](const std::vector<std::wstring>& rows, const wchar_t* text) {
+        return std::any_of(rows.begin(), rows.end(), [&](const std::wstring& r) { return r.starts_with(text); });
+    };
+    Check(open && has(standing, L"Play") && has(standing, L"Next") && has(standing, L"Lightweight mode") &&
+              found.size() == 2 && found[0] == L"Picker album | Album \x203A Picker artist" &&
+              found[1] == L"Zebra crossing | Picker artist" && byArtist == 2 && !PaletteOpen(),
+          L"lightweight: the picker lists the transport (%zu rows) and finds the album then the song (%zu found)",
+          standing.size(), found.size());
+
+    // Each choice of what stays on screen, from the normal window and back.
+    const ViewSize savedSize = g.size;
+    const int savedShows = g.lightweightShows, savedNumpad = g.lightweightNumpad;
+    const bool savedTrim = g.lightweightTrim;
+    g.lightweightTrim = false;  // the test process's memory is the harness's, not the player's
+    SetViewSize(ViewSize::Normal);
+    ShowWindow(g.hwnd, SW_SHOWNOACTIVATE);
+    batch.Next(L"lightweight: Nothing puts the window away and the way back brings it as it was");
+    g.lightweightShows = (int)LightweightShows::Nothing;
+    g.lightweightNumpad = numLockOff;  // starts and stops the hook's thread
+    EnterLightweight();
+    const bool hidden = g.lightweight && !IsWindowVisible(g.hwnd) && ReducedMemoryMode() && LightweightHidesWindow() &&
+                        LightweightPausesWork() && g.size == ViewSize::Normal;
+    LeaveLightweight();
+    Check(hidden && !g.lightweight && IsWindowVisible(g.hwnd) && !ReducedMemoryMode() && !LightweightPausesWork(),
+          L"lightweight: Nothing hides the window and reduces memory; leaving shows it and lifts both");
+
+    batch.Next(L"lightweight: Compact keeps a small window and gives the full size back");
+    g.lightweightShows = (int)LightweightShows::Compact;
+    g.lightweightNumpad = off;
+    EnterLightweight();
+    const bool compact = g.lightweight && g.size == ViewSize::Compact && IsWindowVisible(g.hwnd) &&
+                         !LightweightHidesWindow() && ReducedMemoryMode();
+    LeaveLightweight();
+    const bool restored = !g.lightweight && g.size == ViewSize::Normal;
+    EnterLightweight();
+    SetViewSize(ViewSize::Big);  // choosing a bigger size by hand ends the mode and keeps that size
+    const bool chosen = !g.lightweight && g.size == ViewSize::Big;
+    Check(compact && restored && chosen,
+          L"lightweight: Compact shrinks the window, leaving restores Normal, and a size chosen by hand ends it");
+
+    batch.Next(L"lightweight: the icon's Mini player item opens and closes it while the mode stays on");
+    SetViewSize(ViewSize::Normal);
+    g.lightweightShows = (int)LightweightShows::Nothing;
+    EnterLightweight();
+    TrayMiniPlayer();
+    const bool trayOpened = g.lightweight && MiniPlayerWindow() && !IsWindowVisible(g.hwnd);
+    TrayMiniPlayer();
+    const bool trayClosed = g.lightweight && !MiniPlayerWindow() && !IsWindowVisible(g.hwnd);
+    LeaveLightweight();
+    g.lightweightShows = (int)LightweightShows::Mini;
+    EnterLightweight();
+    const bool modeMini = g.lightweight && MiniPlayerWindow();
+    TrayMiniPlayer();  // the one the mode opened closes the same way
+    const bool modeMiniClosed = g.lightweight && !MiniPlayerWindow() && !IsWindowVisible(g.hwnd);
+    LeaveLightweight();
+    Check(trayOpened && trayClosed && modeMini && modeMiniClosed && !g.lightweight && IsWindowVisible(g.hwnd),
+          L"lightweight: the icon's Mini player opens it (%d), closes it with the mode still on (%d), and closes the "
+          L"mode's own mini player the same way (%d, %d)", trayOpened, trayClosed, modeMini, modeMiniClosed);
+
+    // The mini player draws its disc itself (app_mini.cpp): see-through corners, an opaque puck, and no
+    // threads of a graphics rasterizer, which Direct2D's software target started (a dozen on this machine).
+    batch.Next(L"mini player: drawn by hand, with clear corners, a solid disc and no new threads");
+    const unsigned threadsBefore = ProcessThreads();
+    ToggleMiniPlayer();
+    MiniPlayerTick();
+    const int d = S(196);
+    const uint32_t corner = MiniPlayerPixel(0, 0), middle = MiniPlayerPixel(d / 2, S(30)), ring = MiniPlayerPixel(d / 2, S(9));
+    const unsigned threadsAfter = ProcessThreads();
+    const bool drawn = MiniPlayerWindow() != nullptr;
+    ToggleMiniPlayer();
+    Check(drawn && corner == 0 && (middle >> 24) == 0xFF && (ring >> 24) == 0xFF && threadsAfter <= threadsBefore + 2,
+          L"mini player: corner %08X is clear, the disc %08X and the ring %08X are opaque, threads %u -> %u",
+          corner, middle, ring, threadsBefore, threadsAfter);
+
+    ShowWindow(g.hwnd, SW_HIDE);
+    KillTimer(g.hwnd, kUiTimer);
+    SetViewSize(savedSize);
+    g.lightweightShows = savedShows;
+    g.lightweightNumpad = savedNumpad;
+    g.lightweightTrim = savedTrim;
+    batch.End();
+}
+
+// Your own keys (app_keys.cpp, keymap.h): the shared rules, then a key given to a command and one of
+// cordinal's taken away, as the accelerator table, settings.ini and the menus show them, the window you
+// set them in, and Reset all.
+void TestKeyboardShortcuts() {
+    using namespace app;
+    testlog::Batch batch;
+    batch.Next(L"keys: the shared rules for naming, allowing and laying keys over cordinal's own");
+    testlog::Cases shared;
+    for (const auto& group : keymap_checks::All())
+        for (const std::string& failure : group.failures) shared.Add(false, FromUtf8(group.name + ": " + failure));
+    Check(shared.Passed(), L"keys: the shared key rules hold%ls", shared.failed.c_str());
+
+    HMENU bar = MainMenuBar() ? nullptr : BuildMenu();  // the test window is created without one
+    if (bar) SetMenu(g.hwnd, bar);
+    auto accelerator = [](BYTE mods, WORD key) {
+        int n = CopyAcceleratorTableW(g.accel, nullptr, 0);
+        std::vector<ACCEL> table(n);
+        CopyAcceleratorTableW(g.accel, table.data(), n);
+        for (const ACCEL& a : table)
+            if ((a.fVirt & ~FNOINVERT) == (mods | FVIRTKEY) && a.key == key) return (int)a.cmd;
+        return 0;
+    };
+    auto label = [](int command) {
+        wchar_t text[128]{};
+        GetMenuStringW(MainMenuBar(), command, text, (int)std::size(text), MF_BYCOMMAND);
+        const wchar_t* tab = wcschr(text, L'\t');
+        return std::wstring(tab ? tab + 1 : L"");
+    };
+    if (!g.accel) g.accel = BuildAccelerators();
+    const int ctrlH = accelerator(FCONTROL, 'H');
+    const std::wstring shuffleLabel = label(IDM_SHUFFLE);
+
+    batch.Next(L"keys: a key you set runs its command, one you clear stops, and both are saved");
+    keymap::Key ctrlShiftK, ctrlH_;
+    keymap::Parse(L"Ctrl+Shift+K", ctrlShiftK);
+    keymap::Parse(L"Ctrl+H", ctrlH_);
+    std::vector<keymap::Binding> changes;
+    keymap::Assign(changes, DefaultBindings(), keymap::Scope::Window, ctrlShiftK, L"Playback > Next");
+    keymap::Assign(changes, DefaultBindings(), keymap::Scope::Window, ctrlH_, L"");
+    SetKeyChanges(changes);
+    Check(ctrlH == IDC_SHUFFLE && shuffleLabel == L"Ctrl+H" && accelerator(FCONTROL | FSHIFT, 'K') == IDM_NEXT &&
+              !accelerator(FCONTROL, 'H') && IniRead(L"Keys", L"Ctrl+Shift+K", L"") == L"Playback > Next" &&
+              IniRead(L"Keys", L"Ctrl+H", L"(none)").empty(),
+          L"keys: Ctrl+Shift+K runs Next and Ctrl+H no longer shuffles, in the table and settings.ini (Ctrl+H was %d, "
+          L"label %ls; Ctrl+Shift+K runs %d, Ctrl+H %d; %zu changes; ini \"%ls\")",
+          ctrlH, shuffleLabel.c_str(), accelerator(FCONTROL | FSHIFT, 'K'), accelerator(FCONTROL, 'H'), KeyChanges().size(),
+          IniRead(L"Keys", L"Ctrl+Shift+K", L"").c_str());
+    Check(label(IDM_NEXT) == L"Ctrl+Shift+K" && label(IDM_SHUFFLE).empty(),
+          L"keys: the menus show the key you set and drop the one you cleared (Next: %ls, Shuffle: %ls)",
+          label(IDM_NEXT).c_str(), label(IDM_SHUFFLE).c_str());
+
+    batch.Next(L"keys: the window lists every command with its keys, and Reset all brings cordinal's back");
+    ShowKeyboardShortcuts();
+    HWND window = FindWindowW(L"CordinalKeys", nullptr);
+    HWND list = window ? FindWindowExW(window, nullptr, WC_LISTBOXW, nullptr) : nullptr;
+    const int rows = list ? (int)SendMessageW(list, LB_GETCOUNT, 0, 0) : 0;
+    HWND search = window ? FindWindowExW(window, nullptr, WC_EDITW, nullptr) : nullptr;
+    if (search) SetWindowTextW(search, L"volume up");
+    const int found = list ? (int)SendMessageW(list, LB_GETCOUNT, 0, 0) : 0;
+    if (window) DestroyWindow(window);
+    Check(rows > 80 && found == 1, L"keys: the window lists %d commands and finds Volume up by name (%d found)", rows, found);
+    SetKeyChanges({});
+    Check(accelerator(FCONTROL, 'H') == IDC_SHUFFLE && !accelerator(FCONTROL | FSHIFT, 'K') && label(IDM_SHUFFLE) == L"Ctrl+H" &&
+              IniRead(L"Keys", L"Ctrl+Shift+K", L"(none)") == L"(none)",
+          L"keys: Reset all puts back cordinal's own keys and empties settings.ini's [Keys]");
+    batch.End();
+}
+
 void TestUiControls(const std::wstring& scratch) {
     using namespace app;
     testlog::Batch batch;
@@ -840,6 +1099,7 @@ void TestUiControls(const std::wstring& scratch) {
     TestPlayerSliders();
     TestSoftCanvas();
     TestCellCache();
+    TestCoverFade();
     {
         SetWindowTextW(g.search, L"Track 1");
         FlushSearch();
@@ -1570,6 +1830,17 @@ void TestUiControls(const std::wstring& scratch) {
           L"UI: empty playlist explains how to add music");
     ActivatePlaylist(2);
     Check(EmptyViewText().find(L"rules") != std::wstring::npos, L"UI: empty auto-playlist explains its rules");
+    {
+        // A view sorts with the query that is in the search box now. It used to restore the position
+        // last captured for it, so a query already cleared came back on a column header click.
+        SetWindowTextW(g.search, L"mid"); FlushSearch();
+        CapturePlaylistPosition();  // captures the query the way switching tabs or saving does
+        SetWindowTextW(g.search, L""); FlushSearch();
+        SortByColumn(SubitemOf(2));  // clicking Title in an auto-playlist such as Recently added
+        batch.Next(L"UI: sorting a view keeps the search box's query, not one saved earlier");
+        Check(WindowText(g.search).empty() && g.filter.empty() && Active().position.search.empty(),
+              L"UI: sorting a view keeps the search box's query rather than the last one saved for it");
+    }
 
     // Keep a long, sorted playlist in place while visiting each Library view.
     g.playlists[1].items = {0, 1, 2};
@@ -1756,6 +2027,53 @@ void TestUiControls(const std::wstring& scratch) {
         Check(g.groups.size() == 1 && RowCount() == 5 && RowTrack(2) != kNone && ViewPosOfRow(4) == 2,
               L"UI: a Now Playing album groups under a header like the Library (groups=%zu rows=%d)", g.groups.size(),
               RowCount());
+        // Playing from a view replaces Now Playing's rows with that view's, in that view's order: its
+        // header arrow must follow the source, not keep the sort an earlier snapshot was given.
+        g.playlists[np].sortColumn = 2;
+        g.playlists[np].sortAscending = true;
+        const int oldLibrarySort = g.playlists[0].sortColumn;
+        const bool oldLibraryAscending = g.playlists[0].sortAscending;
+        g.playlists[0].sortColumn = 6;
+        g.playlists[0].sortAscending = false;
+        int snapshotIndex = 0;
+        int snapshotNp = SnapshotToNowPlaying(0, snapshotIndex);
+        Check(snapshotNp == np && g.playlists[np].sortColumn == 6 && !g.playlists[np].sortAscending &&
+                  g.sortColumn == 6 && !g.sortAscending,
+              L"UI: a Now Playing snapshot takes the sort of the view it came from (column %d)",
+              g.playlists[np].sortColumn);
+        g.playlists[0].sortColumn = -1;
+        snapshotIndex = 0;
+        SnapshotToNowPlaying(0, snapshotIndex);
+        Check(g.playlists[np].sortColumn == -1 && g.sortColumn == -1,
+              L"UI: a snapshot of an unsorted view leaves Now Playing without a sort arrow");
+        g.playlists[0].sortColumn = oldLibrarySort;
+        g.playlists[0].sortAscending = oldLibraryAscending;
+        // Now Playing shows the whole of the playing album, even when playback began from a list that held
+        // only one of its tracks (Top rated): the rest joins the list, once, right behind the playing track.
+        g.playlists[np].items = {1};
+        g.npCompleted = kNone;
+        g.playing = 1;
+        g.playingPl = np;
+        g.playingToken = 0;
+        RebuildView();
+        const auto& npItems = g.playlists[np].items;
+        size_t albumTracks = 0;
+        for (TrackId id = 0; id < (TrackId)g_lib.Count(); ++id)
+            if ((g_lib[id].flags & Track::kInLibrary) && SameAlbum(g_lib[id], g_lib[1])) ++albumTracks;
+        Check(g_lib[1].album && albumTracks >= 3 && npItems.size() == albumTracks && npItems[0] == 1 &&
+                  std::count(npItems.begin(), npItems.end(), (TrackId)0) == 1 &&
+                  std::count(npItems.begin(), npItems.end(), (TrackId)2) == 1 && g.view.size() == albumTracks,
+              L"UI: Now Playing gains the rest of the playing album, behind the playing track (items=%zu of %zu)",
+              npItems.size(), albumTracks);
+        g.playlists[np].items.pop_back();
+        RebuildView();
+        Check(g.playlists[np].items.size() == albumTracks - 1,
+              L"UI: a track removed from the playing album doesn't come back with the next rebuild");
+        g.playing = kNone;
+        g.playingPl = -1;
+        g.npCompleted = kNone;
+        g.playlists[np].items = {0, 1, 2};
+        RebuildView();
     }
     batch.End();
     TestQueueEditor(scratch);
@@ -1763,6 +2081,8 @@ void TestUiControls(const std::wstring& scratch) {
     TestReplayGainRestart(scratch);
     TestPersonalization(scratch);
     TestWebPreferences(scratch);
+    TestLightweightMode();
+    TestKeyboardShortcuts();
     batch.Next(L"UI: shutdown joins every application worker before destroying the test window");
     StopAppWorkers(g.hwnd);
     Check(!g.rgWorker.joinable() && !g.tagWorker.joinable() && !g.importWorker.joinable() && !g.artWorker.joinable(),

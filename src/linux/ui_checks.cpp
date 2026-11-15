@@ -9,6 +9,7 @@ namespace lx {
 int CheckWindowLayouts();
 int CheckLinuxPacks();  // src/tests/selftest_linux_packs.cpp
 int CheckLinuxQueue();  // src/tests/selftest_linux_queue.cpp
+int CheckLinuxLightweight();  // src/tests/selftest_linux_lightweight.cpp
 int CheckLinuxTabs();   // src/tests/selftest_linux_tabs.cpp
 
 int CheckLayout() {
@@ -109,7 +110,7 @@ int CheckLayout() {
         g.rows = savedRows;
         g_lib = std::move(saved);
     }
-    off += CheckWindowLayouts() + CheckPreferences() + CheckLinuxPacks() + CheckLinuxHeadsets() + CheckLinuxBig() + CheckLinuxHelperFeed() + CheckLinuxAlternateThemes() + CheckTagSuggestions() + CheckLinuxQueue() + CheckLinuxTabs();
+    off += CheckWindowLayouts() + CheckPreferences() + CheckLinuxPacks() + CheckLinuxHeadsets() + CheckLinuxBig() + CheckLinuxHelperFeed() + CheckLinuxAlternateThemes() + CheckTagSuggestions() + CheckLinuxQueue() + CheckLinuxTabs() + CheckLinuxLightweight();
     const bool software = SetGpuDrawing(false) && !g.settings.gpuDrawing &&
         std::string_view(SDL_GetRendererName(g.renderer)) == SDL_SOFTWARE_RENDERER &&
         UiSymbolsAvailable() && DrawText(Font::Normal, "Renderer restored", 0, 0, CurrentPalette().text) > 0;

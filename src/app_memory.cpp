@@ -10,7 +10,7 @@
 
 namespace app {
 
-bool ReducedMemoryMode() { return g.size == ViewSize::Compact || MiniPlayerWindow(); }
+bool ReducedMemoryMode() { return g.size == ViewSize::Compact || MiniPlayerWindow() || g.lightweight; }
 
 // A hardware target loads the GPU driver, which commits tens of MB and starts its own threads
 // (docs/memory.md). Software draws a full grid within a frame, so the GPU is only an option.

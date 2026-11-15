@@ -51,6 +51,7 @@
 #include "tests/wind_checks.h"
 #include "tests/metadata_checks.h"
 #include "tests/sound_checks.h"
+#include "tests/keymap_checks.h"
 #include "tests/tag_suggest_checks.h"
 #include "convert.h"
 #include "decoder.h"
@@ -1204,6 +1205,15 @@ int main(int argc, char** argv) {
     if (argc >= 2 && !strcmp(argv[1], "tagsuggest")) {  // tests/tag_suggest_checks.h, shared with the Windows self-test
         int failures = 0;
         for (const auto& group : tag_suggest_checks::All()) {
+            printf("%s %s\n", group.Passed() ? "ok  " : "FAIL", group.name.c_str());
+            for (const auto& failure : group.failures) printf("  %s\n", failure.c_str());
+            failures += !group.Passed();
+        }
+        return failures ? 1 : 0;
+    }
+    if (argc >= 2 && !strcmp(argv[1], "keymap")) {  // tests/keymap_checks.h, shared with the Windows self-test
+        int failures = 0;
+        for (const auto& group : keymap_checks::All()) {
             printf("%s %s\n", group.Passed() ? "ok  " : "FAIL", group.name.c_str());
             for (const auto& failure : group.failures) printf("  %s\n", failure.c_str());
             failures += !group.Passed();

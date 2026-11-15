@@ -298,6 +298,12 @@ inline bool SameAlbum(const Track& a, const Track& b) {
     if (a.albumArtist || b.albumArtist) return a.albumArtist == b.albumArtist;
     return a.dir == b.dir;
 }
+// Now Playing shows the whole of the playing track's album, but a list that playback started from (Top
+// rated, a search) holds only some of its tracks. This adds the rest of the album (SameAlbum with
+// `playing`: library or Inbox tracks whose files exist, in disc and track order) to `items`, right behind
+// slot `after` so they play next, or behind the album's last track in the list when `after` is -1 or out
+// of range. Returns how many were added; `oldToNew` then maps every old slot to its new one.
+size_t CompleteAlbumInList(std::vector<TrackId>& items, TrackId playing, int after, std::vector<uint32_t>& oldToNew);
 // The search box's "missing:<field>" terms (Library > Find missing information): a track matches
 // when that tag is empty, so the gaps can be listed and then filled in with Edit tags. "any" means
 // any of title, artist, album, year, genre or track number.

@@ -36,9 +36,12 @@ struct Pref {
 const char* const kRgModes[] = {"Album", "Track", "By playback order"};
 const char* const kOffOn[] = {"Off", "On"};
 const char* const kDiscordNames[] = {"Off", "Song", "Album"};
+const char* const kLightweightShowsNames[] = {"Nothing (the tray icon)", "Mini player", "Compact window"};
+const char* const kLightweightNumpadNames[] = {"Off", "With Num Lock off", "Always"};
 const char* const kLoopNames[] = {"Ignore loop points", "Play the loop once, then fade", "Play the loop twice, then fade",
                                   "Play the loop three times, then fade"};
 const char* const kReverbNames[] = {"Off", "Room", "Hall", "Plate"};
+const char* const kCoverFadeNames[] = {"Off", "Black and white JPEG", "Colour JPEG"};  // coverfade::Style
 const char* const kSavingNames[] = {"Ask before saving", "Save automatically", "Manual only (don't ask)"};
 const char* const kNewMusicNames[] = {"Add automatically", "Review in Inbox"};
 const char* const kBandWaveSizes[] = {"Use layout size", "Slim (26 px)", "Medium (44 px)", "Tall (72 px)",
@@ -224,6 +227,10 @@ const Pref kPrefs[] = {
      "Soft ribbons drift across the right of the track list while music plays, curling, swelling and "
      "gusting with it. Bass makes them wide and slow, treble short and quick.", PrefType::Bool, 0, 1, 0, 1,
      [] { return (double)Cfg().listWind; }, [](double v) { Cfg().listWind = v != 0; Saved(); }},
+    {"cover_fade", "View", "Cover change",
+     "When the next song has a different cover, the cover crunches into a badly saved JPEG, all blocks and banding, and fades to an old black-and-white photograph (or a colour one), then the new cover opens out of the middle block by block. Songs from the same album keep their cover.",
+     PrefType::Choice, 0, 2, 0, 1, [] { return (double)Cfg().coverFade; },
+     [](double v) { Cfg().coverFade = std::clamp((int)v, 0, 2); Saved(); }, kCoverFadeNames},
     {"band_wave_size", "View", "Waveform height in the top or bottom bar",
      "Sets the waveform's height in the normal player bar. Other player modes keep their own sizes.",
      PrefType::Choice, 0, 5, 0, 1, [] { return (double)Cfg().bandWaveSize; },
@@ -333,8 +340,9 @@ const Pref kPrefs[] = {
      PrefType::Bool, 0, 1, 1, 1, [] { return (double)Cfg().groupAlbums; },
      [](double v) { Cfg().groupAlbums = v != 0; RebuildRows(); Saved(); }},
     {"now_playing_album", "View", "Now Playing shows the playing album",
-     "While a song with an album plays, the Now Playing tab lists just that album. Typing a search looks through the "
-     "whole list again; songs without an album always show the whole list.",
+     "While a song with an album plays, the Now Playing tab lists the whole of that album, adding any of its tracks "
+     "the list lacks behind the playing song. Typing a search looks through the whole list again; songs without an "
+     "album always show the whole list.",
      PrefType::Bool, 0, 1, 1, 1, [] { return (double)Cfg().npAlbumOnly; },
      [](double v) { Cfg().npAlbumOnly = v != 0; RebuildRows(); Saved(); }},
     {"group_auto_tabs", "View", "One tab for auto-playlists",
@@ -371,6 +379,27 @@ const Pref kPrefs[] = {
      [](double v) { Cfg().roboticSounds = v != 0; Saved(); if (v != 0) MessageBlip(); }},
     {nullptr, "Startup", "Start on login", "Opens cordinal when you log in (an entry in ~/.config/autostart).", PrefType::Bool,
      0, 1, 0, 1, [] { return (double)StartsOnLogin(); }, [](double v) { if ((v != 0) != StartsOnLogin()) ToggleStartOnLogin(); }},
+    // Lightweight mode (lightweight.cpp), the Windows build's lightweight.* rows.
+    {"lightweight_shows", "Lightweight mode", "What stays on screen",
+     "In Lightweight mode: nothing but the tray icon (click it to pick a song), the round mini player, or the compact "
+     "window. Music and effects play on whichever it is.", PrefType::Choice, 0, 2, 0, 1,
+     [] { return (double)Cfg().lightweightShows; },
+     [](double v) { Cfg().lightweightShows = std::clamp((int)v, 0, 2); Saved(); LightweightPreferencesChanged(); },
+     kLightweightShowsNames},
+    {"lightweight_numpad", "Lightweight mode", "Numpad remote",
+     "In Lightweight mode the numpad controls cordinal from any program (the desktop may ask first): 5 pauses, 4 and 6 skip, 8 and 2 "
+     "set the volume, 7 and 9 seek, 1 mutes, 3 shuffles, 0 picks a song and . brings the window back. With Num Lock "
+     "off, turning Num Lock on gives the numpad back for typing numbers.", PrefType::Choice, 0, 2, 1, 1,
+     [] { return (double)Cfg().lightweightNumpad; },
+     [](double v) { Cfg().lightweightNumpad = std::clamp((int)v, 0, 2); Saved(); }, kLightweightNumpadNames},
+    {"lightweight_pause_work", "Lightweight mode", "Pause background library work",
+     "In Lightweight mode, ReplayGain measures only the songs about to play, not the rest of the library, and "
+     "waveforms wait until a window shows them.", PrefType::Bool, 0, 1, 1, 1, [] { return (double)Cfg().lightweightPause; },
+     [](double v) { Cfg().lightweightPause = v != 0; Saved(); }},
+    {"lightweight_trim", "Lightweight mode", "Give memory back to the system",
+     "When Lightweight mode starts, memory cordinal no longer uses goes back to the system, so it shows only what playing "
+     "needs.", PrefType::Bool, 0, 1, 1, 1, [] { return (double)Cfg().lightweightTrim; },
+     [](double v) { Cfg().lightweightTrim = v != 0; Saved(); }},
     {"inbox_enabled", "Library", "New music from library folders",
      "Add new music automatically, or review it in the Inbox first. Existing Inbox tracks stay there.",
      PrefType::Choice, 0, 1, 0, 1, [] { return (double)Cfg().inboxEnabled; },
@@ -437,6 +466,8 @@ const PrefPage kPrefPages[] = {
      {{"Fetch missing covers...", FetchMissingCovers, [] { return !CoverFetchBusy(); }}}},
     {"Scrobbling", "Listens sent to connected services, and your Discord status.", {{"Scrobbling...", OpenListenBrainz}}},
     {"Startup", "How cordinal opens, and what it keeps for next time.", {{"Startup defaults...", OpenStartupDefaults}}, "General"},
+    {"Lightweight mode", "Music in the background on little memory and CPU (Ctrl+Shift+L).",
+     {{"Lightweight mode", ToggleLightweight}}},
 };
 
 // Headings inside a page, each above the setting it names and the ones after it on that page.

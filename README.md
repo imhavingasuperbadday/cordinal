@@ -9,7 +9,7 @@ One 1.8 MB program. No installer, no runtime, no codecs to add.
 
 <div align="center">
 
-Current release: **0.1.12** · `cordinal.exe`, 1,847,296 bytes<br>
+Current release: **0.1.13** · `cordinal.exe`, 1,871,872 bytes<br>
 **[Download](https://github.com/imhavingasuperbadday/cordinal/releases/latest)** ·
 [Getting started](#getting-started) · [Guide](#guide) · [Building](#building) ·
 [Issues](https://github.com/imhavingasuperbadday/cordinal/issues)
@@ -78,6 +78,7 @@ cordinal's own lossless `.cord`.
 
 - Light, Dark, or follow Windows, coloured by the playing album's cover as much or as little as you like
 - Window sizes from Big mode down to a mini player, with dockable panels and layout presets
+- Lightweight mode: music in the background on little memory, with a song picker and a numpad remote
 - Columns, title formats, and a seek bar that can be a waveform or a moodbar
 - Packs: folders or `.cordpack` files that add columns, layouts, EQ presets and themes
 - Helpers: separate programs such as visualizers, running in their own windows
@@ -114,8 +115,18 @@ cordinal runs on Windows 10 and 11. For Linux, see [Linux](#linux-preview).
 | Ctrl+E | Equalizer |
 | Ctrl+L | Lyrics panel |
 | Ctrl+Shift+M | Mini player |
+| Ctrl+Shift+L | Lightweight mode: keep playing in the background with the window put away |
+| Win+Alt+Space | In Lightweight mode, from any program: pick a song |
 | Ctrl+Shift+P | Command palette |
 | Ctrl+, | Preferences |
+
+Every command can have keys of your own in **File ▸ Keyboard shortcuts**. Pick a command, press **Set
+in cordinal** or **Set from any program**, then press the key: a letter needs Ctrl or Alt so typing
+still works, while F-keys, media keys and the numpad can be used on their own. Keys from any program
+work while you are in another window (a numpad key on its own does so in Lightweight mode). A key
+another command had moves to the new one, **Clear** takes a command's keys away, and **Reset all**
+brings back cordinal's own. The menus show your keys, and they are kept in `settings.ini` under
+`[Keys]` and `[Global keys]` as `Ctrl+Shift+K=Playback > Next`.
 
 ## Guide
 
@@ -285,6 +296,12 @@ An album with disc art (`cd.png`, `cd2.png` for disc 2, `disc.png` or `vinyl.png
 its `Artwork` or `Scans` folder, as fanart.tv names them) shows the disc peeking out behind the
 cover.
 
+**Preferences ▸ View ▸ Cover change** (off by default) makes the player's cover crunch into a badly
+saved JPEG when the next song has a different cover: blocks, banding and grain, fading to an old
+black-and-white photograph (**Black and white JPEG**) or a crunched colour one (**Colour JPEG**).
+Then the new cover opens out of the middle, block by block. Songs from the same album keep their
+cover. With Windows' "Animation effects" turned off, the new cover simply appears.
+
 ### Lyrics and artist info
 
 The lyrics panel (**View ▸ Lyrics panel**, Ctrl+L) shows lyrics from the song's tags or a `.lrc`
@@ -394,6 +411,39 @@ borders, the selection, and the accent that marks what's playing. **Off** keeps 
 neutral. **Album colour strength** goes from Subtle to Bold. Text always stays readable: a colour
 that would cost it contrast is held back. Album colours apply to Light and Dark; other themes keep
 their own look.
+
+### Lightweight mode
+
+**View ▸ Lightweight mode** (Ctrl+Shift+L, or the icon by the clock) keeps cordinal playing in the
+background on as little memory and CPU as it can: the window goes away and its caches with it, while
+the music, the equalizer, reverb and every other effect carry on exactly as they were. Choose in
+**Preferences ▸ Lightweight mode** what stays on screen: nothing but the icon by the clock, the mini
+player, or the compact window. Background library work (measuring ReplayGain beyond the next songs,
+drawing waveforms) waits, and a moment later the memory cordinal no longer needs goes back to
+Windows.
+
+Without the window, music is still a key away, from any program:
+
+- **Win+Alt+Space** (or a click on the icon by the clock) opens a small song picker. Type a few
+  letters of a song, album or artist and press Enter: the song plays now, then what was playing
+  carries on. Shift+Enter puts it next instead. With nothing typed, Space pauses and Left and Right
+  skip, and the picker also lists Up next and your playlists. Press Win+Alt+Space again for the full
+  window.
+- **The numpad** is a remote: 5 pauses, 4 and 6 skip, 8 and 2 set the volume, 7 and 9 seek, 1 mutes,
+  3 shuffles, 0 opens the song picker and `.` brings the window back. It works while Num Lock is
+  off, so turning Num Lock on gives you the numbers back; Preferences can make it always on or off,
+  and with Always the numpad's + - * / and Enter can have commands too. Give any numpad key another
+  command in **File ▸ Keyboard shortcuts**: its keys "from any program" are the remote's.
+- **Right-click the icon by the clock** for the transport, Up next, your playlists, shuffle, repeat,
+  volume, reverb and night mode, and Lightweight mode itself. On Windows its **Mini player** item
+  opens and closes the mini player without ending Lightweight mode.
+
+Show cordinal, the numpad's `.`, Esc in the mini player or Ctrl+Shift+L brings everything back.
+cordinal's own keys from other programs (the numpad and Win+Alt+Space) are only taken while
+Lightweight mode is on; keys you set yourself from any program are held whenever cordinal runs. If
+another program already holds one, cordinal says so and the icon and numpad still work. On Linux the
+mode, the tray menu, the picker, the numpad and your keys work the same way, keys from any program
+going through the desktop's shortcut settings, which may ask you to allow them the first time.
 
 ### Layouts, packs and helpers
 

@@ -28,6 +28,15 @@ constexpr Budget kBudgets[] = {
     {L"tracks", L"2,000-track library, track list", 5.5},
     {L"albums", L"2,000-track library, album view with covers", 10.5},
     {L"playing", L"2,000-track library, album view, playing", 12.75},
+    // Lightweight mode (app_lightweight.cpp): the same, playing on with the window put away and the
+    // memory it no longer needs given back, measured with the playing scenario's player: 3.94 MB on
+    // November 15, 2026.
+    {L"lightweight", L"2,000-track library, playing in Lightweight mode", 4.5},
+    // The mini player (app_mini.cpp) opened over the playing album view, and the same opened from the
+    // notification-area menu while Lightweight mode is on, measured with the lightweight scenario's
+    // player: 7.59 and 4.75 MB on November 15, 2026 (10.90 and 8.09 MB while Direct2D drew it).
+    {L"mini", L"2,000-track library, playing in the mini player", 8.5},
+    {L"mini-lightweight", L"2,000-track library, playing in the mini player in Lightweight mode", 5.25},
 };
 
 // A packed build expands the whole native image into private memory, so every byte of program
@@ -92,12 +101,16 @@ HWND MainWindowOf(DWORD pid) {
     return search.found;
 }
 
+// A player that has just given its memory back (Lightweight mode) pages its code in again to answer, which
+// on a busy machine can outlast one wait; a second ask tells slow from silent.
 std::wstring RequestReport(HWND window, const std::wstring& path) {
     DeleteFileW(path.c_str());
     COPYDATASTRUCT data{kCopyDataMemoryReport, (DWORD)(path.size() * sizeof(wchar_t)), (void*)path.data()};
     DWORD_PTR result = 0;
-    if (!SendMessageTimeoutW(window, WM_COPYDATA, 0, (LPARAM)&data, SMTO_ABORTIFHUNG, 10000, &result) || !result)
-        return {};
+    bool answered = false;
+    for (int attempt = 0; attempt < 2 && !answered; ++attempt)
+        answered = SendMessageTimeoutW(window, WM_COPYDATA, 0, (LPARAM)&data, SMTO_ABORTIFHUNG, 10000, &result) && result;
+    if (!answered) return {};
     std::string text = ReadTestBytes(path);
     DeleteFileW(path.c_str());
     return FromUtf8(text);
@@ -181,9 +194,19 @@ std::vector<std::wstring> ModulesOf(DWORD pid) {
     return names;
 }
 
-// One scenario: a fresh copy of the prepared profile, the player started, settled, then asked.
+// What a scenario's player does after its own measurement, measuring again after each step: a
+// command posted to the main window, then a settle. Following on from another scenario's player
+// saves a start and a settle of its own.
+struct FollowOn {
+    UINT command;
+    DWORD wait;
+    Measured* into;
+};
+
+// One scenario: a fresh copy of the prepared profile, the player started, settled, then asked;
+// then each follow-on in turn. The mini scenario opens the mini player before its measurement.
 Measured Measure(const std::wstring& exe, const std::wstring& base, const std::wstring& scratch, const wchar_t* scenario,
-                 const std::wstring& desktop) {
+                 const std::wstring& desktop, const std::vector<FollowOn>& then = {}) {
     Measured result;
     const std::wstring profile = scratch + L"\\" + scenario;
     std::error_code error;
@@ -192,12 +215,14 @@ Measured Measure(const std::wstring& exe, const std::wstring& base, const std::w
     const bool empty = !wcscmp(scenario, L"empty");
     if (!empty && !CopyFileW((base + L"\\library.cdb").c_str(), (profile + L"\\library.cdb").c_str(), FALSE)) return result;
     // Muted, with no first-run reviews; the track list or the album view as the scenario asks.
+    // Lightweight mode shows only the notification-area icon, so the mini player is opened on its own.
     std::wstring ini = L"[Player]\r\nVolume=0\r\n[Library]\r\nView=";
     ini += !wcscmp(scenario, L"tracks") ? L"0" : L"2";
-    ini += L"\r\n[Suggestions]\r\nSavingModeChosen=1\r\n";
+    ini += L"\r\n[Suggestions]\r\nSavingModeChosen=1\r\n[Lightweight]\r\nShows=0\r\n";
     if (!WriteUtf16Ini(profile + L"\\settings.ini", ini)) return result;
     Player player;
-    const std::wstring args = !wcscmp(scenario, L"playing") ? QuoteArg(base + L"\\media\\album-0\\track-0.flac") : L"";
+    const bool playing = !wcscmp(scenario, L"playing") || !wcscmp(scenario, L"mini");
+    const std::wstring args = playing ? QuoteArg(base + L"\\media\\album-0\\track-0.flac") : L"";
     if (!Launch(player, exe, profile, args, desktop)) {
         Close(player);
         return result;
@@ -206,11 +231,23 @@ Measured Measure(const std::wstring& exe, const std::wstring& base, const std::w
     // within a few seconds; the second report is the steady state the budget is about.
     Sleep(6000);
     const std::wstring file = scratch + L"\\" + scenario + L"-report.txt";
-    RequestReport(player.window, file);
-    Sleep(2000);
-    result.report = RequestReport(player.window, file);
-    result.memory = Field(result.report, L"memory ") * kMiB;
-    result.modules = ModulesOf(player.process.dwProcessId);
+    auto measure = [&](Measured& into, DWORD settle) {
+        RequestReport(player.window, file);
+        Sleep(settle);
+        into.report = RequestReport(player.window, file);
+        into.memory = Field(into.report, L"memory ") * kMiB;
+        into.modules = ModulesOf(player.process.dwProcessId);
+    };
+    if (!wcscmp(scenario, L"mini")) {
+        PostMessageW(player.window, WM_COMMAND, app::IDM_MINI_PLAYER, 0);
+        Sleep(2000);
+    }
+    measure(result, 2000);
+    for (const FollowOn& step : then) {
+        PostMessageW(player.window, WM_COMMAND, step.command, 0);
+        Sleep(step.wait);
+        measure(*step.into, 1500);
+    }
     Close(player);
     return result;
 }
@@ -239,8 +276,22 @@ bool RunScenarios(const std::wstring& exe, const std::wstring& flac, const std::
     bool entered = false;
     std::thread worker([&] {
         if (!(entered = SetThreadDesktop(desktop))) return;
-        for (size_t i = 0; i < std::size(kBudgets); ++i)
-            results[i] = Measure(exe, base, scratch, kBudgets[i].scenario, name);
+        auto index = [](const wchar_t* scenario) {
+            return (size_t)(std::find_if(std::begin(kBudgets), std::end(kBudgets), [&](const Budget& b) {
+                return !wcscmp(b.scenario, scenario);
+            }) - std::begin(kBudgets));
+        };
+        // The playing player goes on into Lightweight mode (on, then past its trim two seconds in), then
+        // opens the mini player as the notification-area menu does.
+        const size_t lightweight = index(L"lightweight"), miniLightweight = index(L"mini-lightweight");
+        for (size_t i = 0; i < std::size(kBudgets); ++i) {
+            if (i == lightweight || i == miniLightweight) continue;  // measured by the playing scenario's player
+            std::vector<FollowOn> then;
+            if (!wcscmp(kBudgets[i].scenario, L"playing"))
+                then = {{app::IDM_LIGHTWEIGHT, 3000, &results[lightweight]},
+                        {app::IDM_MINI_PLAYER, 3000, &results[miniLightweight]}};
+            results[i] = Measure(exe, base, scratch, kBudgets[i].scenario, name, then);
+        }
     });
     worker.join();
     CloseDesktop(desktop);

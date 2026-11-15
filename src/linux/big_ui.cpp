@@ -591,6 +591,7 @@ std::string CompactPlacementText() {
 }
 void SetViewSize(ViewSize size) {
     if (size >= ViewSize::Count) return;
+    LightweightSizeChanged(size);
     if (MiniActive()) LeaveMini();
     if (size == g.settings.size) return;
     CancelPress();

@@ -140,15 +140,18 @@ void MaybeAutoMeasure(bool priority) {
     std::vector<TrackId> upcoming = UpcomingTracks();
     if (g.playing != kNone) upcoming.push_back(g.playing);
     bool covered = true, needed = false;
+    std::vector<TrackId> soon;  // the upcoming tracks that want measuring, each once
     for (TrackId id : upcoming) {
         if (id >= g_lib.Count() || !wanted(id)) continue;
         covered &= std::find(g.rgRunIds.begin(), g.rgRunIds.end(), id) != g.rgRunIds.end();
         needed = true;
+        if (std::find(soon.begin(), soon.end(), id) == soon.end()) soon.push_back(id);
     }
     if (g.rgRunning && covered) return;
-    if (!needed && now < g.rgNextAuto) return;
+    if (!needed && (now < g.rgNextAuto || LightweightPausesWork())) return;  // the library sweep waits
     g.rgNextAuto = now + 15000;  // when nothing is found: look again later
-    auto ids = replaygain::AutoMeasureTracks(upcoming, kSweepTracks, wantTempo);
+    // Lightweight mode measures the songs about to play and nothing past them.
+    auto ids = replaygain::AutoMeasureTracks(upcoming, LightweightPausesWork() ? soon.size() : kSweepTracks, wantTempo);
     if (!ids.empty()) Start(ids, true);
 }
 

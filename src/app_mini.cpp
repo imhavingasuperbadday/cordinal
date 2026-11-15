@@ -1,12 +1,14 @@
 // Mini player: a round window that stays on top. The cover fills the disc; a ring around it shows
 // how far the track has played (click or drag it to seek); previous / play / next sit across the
 // middle. The main window hides while it shows; Esc, Ctrl+= or a double-click brings it back.
-// Drag the window by the cover; the wheel sets the volume. Drawn with Direct2D into a layered
-// window, so the edge of the circle is smooth and the corners are see-through.
+// Drag the window by the cover; the wheel sets the volume.
+//
+// It is drawn by hand into the premultiplied bitmap of a layered window, so the edge of the circle
+// is smooth and the corners are see-through: every shape is a circle or a ring, whose antialiased
+// coverage is a distance, and the glyphs are GDI's, drawn white on black into a mask whose grey is
+// their coverage. Direct2D drew it once, but even its software target starts Direct3D's WARP
+// rasterizer, a dozen threads and about 3 MB for a 196-pixel disc (docs/memory.md, "Mini player").
 #include "app.h"
-
-#include <d2d1.h>
-#include <dwrite.h>
 
 namespace app {
 
@@ -21,19 +23,17 @@ struct Mini {
     int hot = -1;
     bool seeking = false;
     double seekFrac = 0;
-    // A 32-bit premultiplied bitmap the render target draws into; UpdateLayeredWindow shows it.
-    HDC mem = nullptr;
-    HBITMAP bmp = nullptr;
-    HGDIOBJ oldBmp = nullptr;
-    int bmpSize = 0;
-    ComPtr<ID2D1Factory> d2d;
-    ComPtr<IDWriteFactory> dw;
-    ComPtr<ID2D1DCRenderTarget> rt;
-    ComPtr<ID2D1SolidColorBrush> brush;
-    ComPtr<ID2D1StrokeStyle> roundCaps;
-    ComPtr<ID2D1Bitmap> cover;
-    uint64_t coverKey = 0;
-    ComPtr<IDWriteTextFormat> glyph, glyphBig, timeFont;
+    // The 32-bit premultiplied picture UpdateLayeredWindow shows, and a strip as wide, as tall as
+    // the largest label, the glyphs are drawn into first. Lightweight mode lets go of both between
+    // frames: the window keeps its own copy of the picture, and it is redrawn once a second.
+    HDC mem = nullptr, maskDc = nullptr;
+    HBITMAP bmp = nullptr, maskBmp = nullptr;
+    HGDIOBJ oldBmp = nullptr, oldMask = nullptr;
+    uint32_t* bits = nullptr;
+    const uint32_t* mask = nullptr;
+    int bmpSize = 0, maskHeight = 0;
+    HFONT glyph = nullptr, glyphBig = nullptr, timeFont = nullptr;
+    int fontSize = 0;  // the Diameter() the fonts were made for
 } m;
 
 // Geometry, in pixels from the window's top left.
@@ -41,7 +41,8 @@ int Diameter() { return S(196); }
 float Radius() { return Diameter() / 2.0f; }
 float RingRadius() { return Radius() - S(9); }   // the middle of the progress ring
 float DiscRadius() { return Radius() - S(17); }  // the cover inside it
-D2D1_POINT_2F PartCenter(int part) {
+struct Point { float x, y; };
+Point PartCenter(int part) {
     float c = Radius(), off = (float)S(54);
     return {part == kPrev ? c - off : part == kNext ? c + off : c, c};
 }
@@ -52,198 +53,245 @@ int PartAt(POINT pt) {
     if (d > Radius()) return -1;
     if (d >= DiscRadius() - S(2)) return kRing;
     for (int i = kPrev; i <= kNext; ++i) {
-        D2D1_POINT_2F c = PartCenter(i);
+        Point c = PartCenter(i);
         float px = pt.x + 0.5f - c.x, py = pt.y + 0.5f - c.y;
         if (px * px + py * py <= PartRadius(i) * PartRadius(i)) return i;
     }
     return -1;
 }
 
+constexpr double kTau = 2 * 3.14159265358979;
+
 // The ring's fraction under a point: 0 at twelve o'clock, growing clockwise. Dragging across the
 // top doesn't jump from the end to the start: it stops there.
 double RingFracAt(POINT pt, double previous) {
     double a = std::atan2(pt.x + 0.5 - Radius(), -(pt.y + 0.5 - Radius()));
-    double frac = (a < 0 ? a + 2 * 3.14159265358979 : a) / (2 * 3.14159265358979);
+    double frac = (a < 0 ? a + kTau : a) / kTau;
     if (previous > 0.75 && frac < 0.25) return 1.0;
     if (previous < 0.25 && frac > 0.75) return 0.0;
     return frac;
 }
 
-D2D1_COLOR_F Col(Rgb c, float a = 1) {
-    return D2D1::ColorF(((c >> 16) & 0xFF) / 255.f, ((c >> 8) & 0xFF) / 255.f, (c & 0xFF) / 255.f, a);
+// Antialiased coverage of a pixel whose centre is `inside` pixels within a shape's edge.
+float Cover(float inside) { return std::clamp(inside + 0.5f, 0.0f, 1.0f); }
+
+// Source-over of an opaque colour at `alpha` onto a premultiplied pixel.
+void Blend(uint32_t& px, Rgb c, float alpha) {
+    if (alpha <= 0) return;
+    const uint32_t a = (uint32_t)(alpha * 255 + 0.5f), keep = 255 - a;
+    auto mix = [&](int shift) {
+        return ((((c >> shift) & 0xFF) * a + ((px >> shift) & 0xFF) * keep + 127) / 255) << shift;
+    };
+    px = mix(0) | mix(8) | mix(16) | ((a * 255 + ((px >> 24) & 0xFF) * keep + 127) / 255) << 24;
 }
 
-void Fill(D2D1_POINT_2F c, float r, D2D1_COLOR_F color) {
-    m.brush->SetColor(color);
-    m.rt->FillEllipse(D2D1::Ellipse(c, r, r), m.brush.Get());
+// A circle filled over the whole picture, as cheap as the few dozen pixels its box holds.
+void FillCircle(Point c, float r, Rgb color, float alpha = 1) {
+    const int size = m.bmpSize;
+    const int x0 = std::max(0, (int)(c.x - r - 1)), x1 = std::min(size, (int)(c.x + r + 2));
+    const int y0 = std::max(0, (int)(c.y - r - 1)), y1 = std::min(size, (int)(c.y + r + 2));
+    for (int y = y0; y < y1; ++y)
+        for (int x = x0; x < x1; ++x) {
+            const float dx = x + 0.5f - c.x, dy = y + 0.5f - c.y;
+            Blend(m.bits[y * size + x], color, alpha * Cover(r - std::sqrt(dx * dx + dy * dy)));
+        }
 }
 
-void Text(const wchar_t* s, IDWriteTextFormat* f, D2D1_RECT_F r, D2D1_COLOR_F c) {
-    m.brush->SetColor(c);
-    m.rt->DrawTextW(s, (UINT32)wcslen(s), f, r, m.brush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+HFONT MakeFont(const wchar_t* face, int size, int weight) {
+    return CreateFontW(-size, 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                       CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, face);
 }
 
-ComPtr<IDWriteTextFormat> Format(const wchar_t* family, float size, DWRITE_FONT_WEIGHT weight) {
-    ComPtr<IDWriteTextFormat> f;
-    m.dw->CreateTextFormat(family, nullptr, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, L"", &f);
-    if (f) {
-        f->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-        f->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        f->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+// Glyphs in `box`, centred, in `color`: drawn white on black into the mask, whose grey level is the
+// glyph's coverage, then blended into the picture. GDI can't draw text onto a layered window's
+// see-through pixels itself: it leaves their alpha at zero.
+void Label(const wchar_t* text, HFONT font, RECT box, Rgb color, float alpha = 1) {
+    RECT bounds{0, 0, m.bmpSize, m.bmpSize};
+    if (!IntersectRect(&box, &box, &bounds)) return;
+    RECT strip{box.left, 0, box.right, std::min<LONG>(box.bottom - box.top, m.maskHeight)};
+    PatBlt(m.maskDc, strip.left, 0, strip.right - strip.left, strip.bottom, BLACKNESS);
+    HGDIOBJ old = SelectObject(m.maskDc, font);
+    DrawTextW(m.maskDc, text, -1, &strip, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(m.maskDc, old);
+    GdiFlush();
+    for (int y = 0; y < strip.bottom; ++y)
+        for (int x = strip.left; x < strip.right; ++x)
+            if (const uint32_t grey = (m.mask[y * m.bmpSize + x] >> 8) & 0xFF)
+                Blend(m.bits[(y + box.top) * m.bmpSize + x], color, alpha * grey / 255.0f);
+}
+
+RECT Box(float l, float t, float r, float b) {
+    return {(LONG)std::floor(l), (LONG)std::floor(t), (LONG)std::ceil(r), (LONG)std::ceil(b)};
+}
+
+void FreeFonts() {
+    for (HFONT* f : {&m.glyph, &m.glyphBig, &m.timeFont}) {
+        if (*f) DeleteObject(*f);
+        *f = nullptr;
     }
-    return f;
 }
 
-// Drops the device-dependent resources (they must be remade after D2DERR_RECREATE_TARGET); the
-// cover is dropped too, so it is re-uploaded from g.art on the next Draw.
-void DropDeviceResources() {
-    m.rt.Reset();
-    m.brush.Reset();
-    m.cover.Reset();
-    m.coverKey = 0;
+void FreeBitmaps() {
+    if (m.mem) {
+        SelectObject(m.mem, m.oldBmp);
+        DeleteObject(m.bmp);
+        DeleteDC(m.mem);
+    }
+    if (m.maskDc) {
+        SelectObject(m.maskDc, m.oldMask);
+        DeleteObject(m.maskBmp);
+        DeleteDC(m.maskDc);
+    }
+    m.mem = m.maskDc = nullptr;
+    m.bmp = m.maskBmp = nullptr;
+    m.bits = nullptr;
+    m.mask = nullptr;
+    m.bmpSize = 0;
 }
 
-// Makes the offscreen DIB and Direct2D target, reallocating them only when the size changes. All
-// drawing goes here first; Render then hands the bitmap to the layered window.
+// A 32-bit top-down DIB selected into a new memory DC.
+bool MakeDib(int width, int height, HDC& dc, HBITMAP& bmp, HGDIOBJ& old, void*& bits) {
+    BITMAPINFO bi{};
+    bi.bmiHeader = {sizeof(bi.bmiHeader), width, -height, 1, 32};
+    dc = CreateCompatibleDC(nullptr);
+    bmp = dc ? CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0) : nullptr;
+    if (!bmp) return false;
+    old = SelectObject(dc, bmp);
+    return true;
+}
+
+// Makes the picture and the mask when they are missing or the size changed (a new DPI), and the
+// fonts when the size changed.
 bool EnsureTarget(int size) {
-    if (!m.d2d && FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, m.d2d.GetAddressOf()))) return false;
-    if (!m.dw && FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
-                                            reinterpret_cast<IUnknown**>(m.dw.GetAddressOf()))))
+    if (m.fontSize != size) {
+        FreeFonts();
+        m.glyph = MakeFont(IconFace(), S(16), FW_NORMAL);
+        m.glyphBig = MakeFont(IconFace(), S(20), FW_NORMAL);
+        m.timeFont = MakeFont(L"Segoe UI", S(11), FW_SEMIBOLD);
+        m.fontSize = size;
+    }
+    if (m.bmpSize == size) return true;
+    FreeBitmaps();
+    const int strip = (int)PartRadius(kPlay) * 2;  // the play button's box, the tallest label
+    void *bits = nullptr, *mask = nullptr;
+    if (!MakeDib(size, size, m.mem, m.bmp, m.oldBmp, bits) ||
+        !MakeDib(size, strip, m.maskDc, m.maskBmp, m.oldMask, mask)) {
+        FreeBitmaps();  // bmpSize stays unset, so a later paint retries
         return false;
-    if (m.bmpSize != size) {
-        if (m.mem) {
-            SelectObject(m.mem, m.oldBmp);
-            DeleteObject(m.bmp);
-            DeleteDC(m.mem);
-        }
-        BITMAPINFO bi{};
-        bi.bmiHeader = {sizeof(bi.bmiHeader), size, -size, 1, 32};
-        void* bits = nullptr;
-        m.mem = CreateCompatibleDC(nullptr);
-        m.bmp = m.mem ? CreateDIBSection(m.mem, &bi, DIB_RGB_COLORS, &bits, nullptr, 0) : nullptr;
-        if (!m.bmp) {
-            // Leave bmpSize unset so a later paint retries the allocation.
-            if (m.mem) DeleteDC(m.mem);
-            m.mem = nullptr;
-            m.bmpSize = 0;
-            return false;
-        }
-        m.oldBmp = SelectObject(m.mem, m.bmp);
-        m.bmpSize = size;
-        m.glyph = Format(IconFace(), (float)S(16), DWRITE_FONT_WEIGHT_NORMAL);
-        m.glyphBig = Format(IconFace(), (float)S(20), DWRITE_FONT_WEIGHT_NORMAL);
-        m.timeFont = Format(L"Segoe UI", (float)S(11), DWRITE_FONT_WEIGHT_SEMI_BOLD);
     }
-    if (!m.bmp) return false;
-    if (!m.rt) {
-        // 96 DPI: one unit is one pixel, as everywhere else S() is used.
-        // Software rasterizing: a 196-pixel disc doesn't need the GPU, and this keeps Direct3D out of memory.
-        auto props = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE,
-                                                  D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96, 96);
-        if (FAILED(m.d2d->CreateDCRenderTarget(&props, m.rt.GetAddressOf()))) return false;
-        m.rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);  // ClearType needs an opaque background
-        m.rt->CreateSolidColorBrush(D2D1::ColorF(0), m.brush.GetAddressOf());
-    }
-    if (!m.roundCaps) {
-        auto sp = D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND);
-        m.d2d->CreateStrokeStyle(sp, nullptr, 0, m.roundCaps.GetAddressOf());
-    }
-    RECT bind{0, 0, size, size};
-    return SUCCEEDED(m.rt->BindDC(m.mem, &bind));
+    m.bits = (uint32_t*)bits;
+    m.mask = (const uint32_t*)mask;
+    m.bmpSize = size;
+    m.maskHeight = strip;
+    SetBkMode(m.maskDc, TRANSPARENT);
+    SetTextColor(m.maskDc, RGB(255, 255, 255));
+    return true;
 }
+
+// The cover under a disc pixel: g.art scaled to fill the disc's square (the short side fits, the
+// long one is cropped evenly), bilinear, darkened by 42% black so the buttons read on any picture.
+// Sampled as the disc is drawn, so no scaled copy is kept.
+struct CoverSampler {
+    const ArtImage& art;
+    float scale, ox, oy;
+    CoverSampler(const ArtImage& image, float discLeft, float side)
+        : art(image), scale(image.Empty() ? 1 : side / std::min(image.width, image.height)) {
+        ox = (art.width - side / scale) / 2 - discLeft / scale;
+        oy = (art.height - side / scale) / 2 - discLeft / scale;
+    }
+    uint32_t At(int x, int y) const {
+        return art.pixels[(size_t)std::clamp(y, 0, art.height - 1) * art.width + std::clamp(x, 0, art.width - 1)];
+    }
+    Rgb operator()(int px, int py) const {
+        const float sx = ox + (px + 0.5f) / scale - 0.5f, sy = oy + (py + 0.5f) / scale - 0.5f;
+        const int x = (int)std::floor(sx), y = (int)std::floor(sy);
+        const float fx = sx - x, fy = sy - y;
+        const uint32_t p00 = At(x, y), p10 = At(x + 1, y), p01 = At(x, y + 1), p11 = At(x + 1, y + 1);
+        uint32_t out = 0;
+        for (int shift = 0; shift < 24; shift += 8) {
+            auto ch = [&](uint32_t p) { return (float)((p >> shift) & 0xFF); };
+            const float top = ch(p00) + (ch(p10) - ch(p00)) * fx, bottom = ch(p01) + (ch(p11) - ch(p01)) * fx;
+            out |= (uint32_t)((top + (bottom - top) * fy) * 0.58f + 0.5f) << shift;
+        }
+        return out;
+    }
+};
 
 void Draw() {
     const Palette& p = P();
-    float R = Radius();
-    D2D1_POINT_2F c{R, R};
-    m.rt->Clear(D2D1::ColorF(0, 0, 0, 0));
+    const int size = m.bmpSize;
+    const float R = Radius(), rr = RingRadius(), dr = DiscRadius(), ringW = (float)S(5);
+    const Point c{R, R};
 
-    // The puck, its edge, and the ring's track.
-    Fill(c, R - 0.5f, Col(p.surface));
-    m.brush->SetColor(Col(p.border));
-    m.rt->DrawEllipse(D2D1::Ellipse(c, R - 1, R - 1), m.brush.Get(), 1);
-    float ringW = (float)S(5), rr = RingRadius();
-    m.brush->SetColor(Col(p.border));
-    m.rt->DrawEllipse(D2D1::Ellipse(c, rr, rr), m.brush.Get(), ringW);
+    const bool art = !g.art.Empty();
+    const CoverSampler cover(g.art, R - dr, 2 * dr);
 
-    // The cover, scaled to fill the disc, darkened so the buttons read on any picture.
-    float dr = DiscRadius();
-    uint64_t key = g.art.Empty() ? 0 : g.artFor + 1ull;  // g.art only changes along with artFor
-    if (key != m.coverKey) {
-        m.cover.Reset();
-        m.coverKey = key;
-        if (key) {
-            auto props = D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
-            m.rt->CreateBitmap(D2D1::SizeU(g.art.width, g.art.height), g.art.pixels.data(), g.art.width * 4, props,
-                               m.cover.GetAddressOf());
-        }
-    }
-    bool art = m.cover != nullptr;
-    if (art) {
-        ComPtr<ID2D1BitmapBrush> fill;
-        D2D1_SIZE_F bs = m.cover->GetSize();
-        float scale = 2 * dr / std::min(bs.width, bs.height);
-        auto brushProps = D2D1::BitmapBrushProperties(D2D1_EXTEND_MODE_CLAMP, D2D1_EXTEND_MODE_CLAMP,
-                                                      D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-        if (SUCCEEDED(m.rt->CreateBitmapBrush(m.cover.Get(), brushProps, fill.GetAddressOf()))) {
-            fill->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale) *
-                               D2D1::Matrix3x2F::Translation(c.x - bs.width * scale / 2, c.y - bs.height * scale / 2));
-            m.rt->FillEllipse(D2D1::Ellipse(c, dr, dr), fill.Get());
-        }
-        Fill(c, dr, D2D1::ColorF(0, 0, 0, 0.42f));
-    } else {
-        Fill(c, dr, Col(p.surface2));
-    }
-
-    // Progress: an accent arc from twelve o'clock, with a knob while pointing at it or dragging.
     double dur = CurrentDuration(), pos = m.seeking ? m.seekFrac * dur : g.engine.Position();
     double frac = dur > 0 && g.playing != kNone ? std::clamp(pos / dur, 0.0, 1.0) : 0;
     auto at = [&](double f) {
-        double a = f * 2 * 3.14159265358979;
-        return D2D1::Point2F(c.x + rr * (float)std::sin(a), c.y - rr * (float)std::cos(a));
+        const double a = f * kTau;
+        return Point{c.x + rr * (float)std::sin(a), c.y - rr * (float)std::cos(a)};
     };
-    m.brush->SetColor(Col(p.accent));
-    if (frac >= 0.9995) {
-        m.rt->DrawEllipse(D2D1::Ellipse(c, rr, rr), m.brush.Get(), ringW);
-    } else if (frac > 0.002) {
-        ComPtr<ID2D1PathGeometry> arc;
-        ComPtr<ID2D1GeometrySink> sink;
-        if (SUCCEEDED(m.d2d->CreatePathGeometry(arc.GetAddressOf())) && SUCCEEDED(arc->Open(sink.GetAddressOf()))) {
-            sink->BeginFigure(at(0), D2D1_FIGURE_BEGIN_HOLLOW);
-            sink->AddArc(D2D1::ArcSegment(at(frac), D2D1::SizeF(rr, rr), 0, D2D1_SWEEP_DIRECTION_CLOCKWISE,
-                                          frac > 0.5 ? D2D1_ARC_SIZE_LARGE : D2D1_ARC_SIZE_SMALL));
-            sink->EndFigure(D2D1_FIGURE_END_OPEN);
-            sink->Close();
-            m.rt->DrawGeometry(arc.Get(), m.brush.Get(), ringW, m.roundCaps.Get());
+    const Point arcStart = at(0), arcEnd = at(frac);
+    const float arcAngle = (float)(frac * kTau);
+
+    // The puck, its edge, the ring's track, the cover, and the progress arc from twelve o'clock with
+    // round ends: one pass over the picture.
+    for (int y = 0; y < size; ++y) {
+        uint32_t* row = m.bits + (size_t)y * size;
+        for (int x = 0; x < size; ++x) {
+            const float dx = x + 0.5f - c.x, dy = y + 0.5f - c.y, d = std::sqrt(dx * dx + dy * dy);
+            uint32_t px = 0;
+            if (d < R + 1) {
+                Blend(px, p.surface, Cover(R - 0.5f - d));
+                Blend(px, p.border, Cover(0.5f - std::fabs(d - (R - 1))));
+                Blend(px, p.border, Cover(ringW / 2 - std::fabs(d - rr)));
+                if (const float disc = Cover(dr - d); disc > 0) {
+                    Blend(px, art ? cover(x, y) : p.surface2, disc);
+                }
+                if (frac >= 0.9995) {
+                    Blend(px, p.accent, Cover(ringW / 2 - std::fabs(d - rr)));
+                } else if (frac > 0.002) {
+                    float a = std::atan2(dx, -dy);
+                    if (a < 0) a += (float)kTau;
+                    float dist = std::fabs(d - rr);
+                    if (a > arcAngle) {  // past the arc: the distance to its nearer end, for the round caps
+                        auto from = [&](Point e) { return std::hypot(x + 0.5f - e.x, y + 0.5f - e.y); };
+                        dist = std::min(from(arcStart), from(arcEnd));
+                    }
+                    Blend(px, p.accent, Cover(ringW / 2 - dist));
+                }
+            }
+            row[x] = px;
         }
     }
+    // A knob on the ring while pointing at it or dragging.
     if ((m.hot == kRing || m.seeking) && g.playing != kNone && dur > 0) {
-        Fill(at(frac), (float)S(7), Col(p.text));
-        Fill(at(frac), (float)S(5), Col(p.accent));
+        FillCircle(arcEnd, (float)S(7), p.text);
+        FillCircle(arcEnd, (float)S(5), p.accent);
     }
 
     // Previous / play / next. Play is the round accent button in the middle.
-    D2D1_COLOR_F ink = art ? D2D1::ColorF(1, 1, 1) : Col(p.text);
-    D2D1_COLOR_F hover = art ? D2D1::ColorF(1, 1, 1, 0.2f) : Col(p.hover);
+    const Rgb white = 0xFFFFFF, ink = art ? white : p.text;
     bool playing = g.playing != kNone && !g.engine.Paused();
     const wchar_t* glyphs[] = {L"\xE892", playing ? L"\xE769" : L"\xE768", L"\xE893"};
     for (int i = kPrev; i <= kNext; ++i) {
-        D2D1_POINT_2F pc = PartCenter(i);
+        Point pc = PartCenter(i);
         float r = PartRadius(i);
-        if (i == kPlay) Fill(pc, r, m.hot == kPlay ? Col(p.accent2) : Col(p.accent));
-        else if (m.hot == i) Fill(pc, r, hover);
-        D2D1_RECT_F box{pc.x - r, pc.y - r, pc.x + r, pc.y + r};
+        if (i == kPlay) FillCircle(pc, r, m.hot == kPlay ? p.accent2 : p.accent);
+        else if (m.hot == i && art) FillCircle(pc, r, white, 0.2f);
+        else if (m.hot == i) FillCircle(pc, r, p.hover);
+        RECT box = Box(pc.x - r, pc.y - r, pc.x + r, pc.y + r);
         // The play triangle looks centered a pixel to the right of the box's center.
-        if (i == kPlay && !playing) box.left += S(2), box.right += S(2);
-        Text(glyphs[i], i == kPlay ? m.glyphBig.Get() : m.glyph.Get(), box, i == kPlay ? D2D1::ColorF(1, 1, 1) : ink);
+        if (i == kPlay && !playing) OffsetRect(&box, S(2), 0);
+        Label(glyphs[i], i == kPlay ? m.glyphBig : m.glyph, box, i == kPlay ? white : ink);
     }
 
     // The time, under the buttons.
     if (g.playing != kNone) {
         std::wstring t = FormatDuration(pos) + L" / " + FormatDuration(dur);
         float y = c.y + PartRadius(kPlay) + S(6);
-        D2D1_COLOR_F sub = art ? D2D1::ColorF(1, 1, 1, 0.85f) : Col(p.sub);
-        Text(t.c_str(), m.timeFont.Get(), {c.x - dr, y, c.x + dr, y + S(18)}, sub);
+        Label(t.c_str(), m.timeFont, Box(c.x - dr, y, c.x + dr, y + S(18)), art ? white : p.sub, art ? 0.85f : 1);
     }
 }
 
@@ -252,21 +300,17 @@ void Render() {
     if (!m.hwnd) return;
     int size = Diameter();
     if (!EnsureTarget(size)) return;
-    m.rt->BeginDraw();
     Draw();
-    if (m.rt->EndDraw() == D2DERR_RECREATE_TARGET) DropDeviceResources();
     POINT src{0, 0};
     SIZE sz{size, size};
     BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
     UpdateLayeredWindow(m.hwnd, nullptr, nullptr, &sz, m.mem, &src, 0, &blend, ULW_ALPHA);
+    if (g.lightweight) FreeBitmaps();  // the window holds what it shows; the next second makes them again
 }
 
 void FreeTarget() {
-    if (m.mem) {
-        SelectObject(m.mem, m.oldBmp);
-        DeleteObject(m.bmp);
-        DeleteDC(m.mem);
-    }
+    FreeBitmaps();
+    FreeFonts();
     m = Mini{};
 }
 
@@ -396,12 +440,14 @@ LRESULT CALLBACK MiniProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 HWND MiniPlayerWindow() { return m.hwnd; }
 
 void ToggleMiniPlayer() {
+    // In Lightweight mode, closing the mini player (Esc, a double-click) is the way out of it. The
+    // mode closes the mini player it opened; one opened by hand closes below.
+    if (m.hwnd && LightweightHidesWindow()) {
+        LeaveLightweight();
+        if (!m.hwnd) return;
+    }
     if (m.hwnd) {
-        DetachStartupDefaultsFromMiniPlayer();
-        DestroyWindow(m.hwnd);
-        UpdateViewMemory();
-        ShowWindow(g.hwnd, IsIconic(g.hwnd) ? SW_RESTORE : SW_SHOW);
-        SetForegroundWindow(g.hwnd);
+        CloseMiniPlayer();
         return;
     }
     RegisterAppClass(kMiniClass, MiniProc, CS_DBLCLKS);
@@ -431,6 +477,33 @@ void ToggleMiniPlayer() {
     MiniPlayerTick();  // a layered window shows nothing until it's given its picture
     ShowWindow(m.hwnd, SW_SHOW);
     SetForegroundWindow(m.hwnd);
+    LightweightMiniChanged();
+}
+
+// The icon's menu turns the mini player on and off without ending Lightweight mode: closed from there,
+// the mode goes on with only the icon showing. (Esc or a double-click on the mini player itself still
+// ends it, as the way back to the window.)
+void TrayMiniPlayer() {
+    if (m.hwnd && LightweightHidesWindow()) CloseMiniPlayer(false);
+    else ToggleMiniPlayer();
+}
+
+// For the ui suite: a pixel of the picture last drawn (premultiplied 0xAARRGGBB), 0 when there is none.
+uint32_t MiniPlayerPixel(int x, int y) {
+    return m.bits && x >= 0 && y >= 0 && x < m.bmpSize && y < m.bmpSize ? m.bits[y * m.bmpSize + x] : 0;
+}
+
+// `showMain` false leaves the main window where it is: the notification-area menu closing the mini
+// player in Lightweight mode, which stays on with only the icon showing.
+void CloseMiniPlayer(bool showMain) {
+    if (!m.hwnd) return;
+    DetachStartupDefaultsFromMiniPlayer();
+    DestroyWindow(m.hwnd);
+    UpdateViewMemory();
+    LightweightMiniChanged();
+    if (!showMain) return;
+    ShowWindow(g.hwnd, IsIconic(g.hwnd) ? SW_RESTORE : SW_SHOW);
+    SetForegroundWindow(g.hwnd);
 }
 
 void MiniPlayerTick() {

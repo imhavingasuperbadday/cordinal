@@ -1,6 +1,7 @@
 // The Linux window's drawing: the shared shapes and glyphs, the menu bar and popups, and every window part.
 #include "alternate_ui.h"
 #include "big_ui.h"
+#include "cover_fade.h"
 #include "discart.h"
 #include "taste.h"
 #include "ui_internal.h"
@@ -625,6 +626,98 @@ void DrawSection(const Rect& r, double duration, const Palette& p) {
     Fill({last - std::max(1.0f, S(2)), r.y + S(2), std::max(1.0f, S(2)), r.h - S(4)}, p.accent);
 }
 
+namespace {
+// The change from one cover to the next (cover_fade.h), as app_art.cpp runs it on Windows: it begins when
+// the next cover arrives, so a track on the same album (the same picture) changes nothing, and until then
+// the outgoing cover stays up.
+struct CoverFadeState {
+    TrackId last = kNone;           // the cover the panel last wanted (kNone: none, as for radio)
+    std::vector<uint32_t> from;     // the outgoing cover, 0x00RRGGBB; empty when no change is wanted
+    int fromWidth = 0, fromHeight = 0;
+    bool waiting = false;
+    uint64_t start = 0;
+    int side = 0;
+    std::vector<uint32_t> fromSquare, toSquare, frame;
+    SDL_Texture* texture = nullptr;
+    int textureSide = 0;
+} s_coverFade;
+
+void EndCoverFade() {
+    SDL_Texture* texture = s_coverFade.texture;
+    const int textureSide = s_coverFade.textureSide;
+    const TrackId last = s_coverFade.last;
+    s_coverFade = CoverFadeState{};
+    s_coverFade.last = last;
+    s_coverFade.texture = texture;  // kept for the next change; ReleaseCoverFade frees it
+    s_coverFade.textureSide = textureSide;
+}
+
+// Draws the cover square while a change is under way and returns true; otherwise draws nothing.
+bool DrawCoverFade(TrackId want, const Palette& p) {
+    CoverFadeState& f = s_coverFade;
+    if (want != f.last) {
+        if (g.settings.coverFade == coverfade::kOff) f.from.clear();  // Preferences: Cover change
+        else if (f.last != kNone && g_coverFor == f.last && !g_coverPixels.empty()) {
+            f.from = g_coverPixels;
+            f.fromWidth = g_coverWidth;
+            f.fromHeight = g_coverHeight;
+            f.side = 0;
+        }
+        if (!f.from.empty()) {  // also when skipping on again before the next cover came
+            f.waiting = true;
+            f.toSquare.clear();
+            if (want == kNone) { f.waiting = false; f.start = SDL_GetTicks(); }  // nothing to wait for
+        }
+        f.last = want;
+    }
+    if (f.from.empty()) return false;
+    const bool arrived = want != kNone && g_coverFor == want;
+    if (f.waiting && arrived) {
+        if (g_coverWidth == f.fromWidth && g_coverHeight == f.fromHeight && g_coverPixels == f.from) {
+            EndCoverFade();
+            return false;
+        }
+        f.waiting = false;
+        f.start = SDL_GetTicks();
+    }
+    const int ms = f.waiting ? 0 : (int)std::min<uint64_t>(SDL_GetTicks() - f.start, coverfade::kTotalMs);
+    if (ms >= coverfade::kTotalMs) {
+        EndCoverFade();
+        return false;
+    }
+    const int side = (int)std::min(L.cover.w, L.cover.h);
+    if (side <= 0) return false;
+    if (f.side != side) {
+        f.fromSquare = coverfade::Square(f.from.data(), f.fromWidth, f.fromHeight, side);
+        f.toSquare.clear();
+        f.side = side;
+    }
+    if (f.toSquare.empty() && arrived && !g_coverPixels.empty())
+        f.toSquare = coverfade::Square(g_coverPixels.data(), g_coverWidth, g_coverHeight, side);
+    f.frame.resize((size_t)side * side);
+    coverfade::Compose(f.fromSquare.data(), f.toSquare.empty() ? nullptr : f.toSquare.data(), p.surface2, side, ms,
+                       f.frame.data(), g.settings.coverFade == coverfade::kColour);
+    if (f.texture && f.textureSide != side) { SDL_DestroyTexture(f.texture); f.texture = nullptr; }
+    if (!f.texture) {
+        f.texture = SDL_CreateTexture(g.renderer, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING, side, side);
+        if (!f.texture) return false;
+        f.textureSide = side;
+        SDL_SetTextureScaleMode(f.texture, SDL_SCALEMODE_LINEAR);
+    }
+    SDL_UpdateTexture(f.texture, nullptr, f.frame.data(), side * 4);
+    SDL_FRect dst{L.cover.x + (L.cover.w - side) / 2, L.cover.y + (L.cover.h - side) / 2, (float)side, (float)side};
+    SDL_RenderTexture(g.renderer, f.texture, nullptr, &dst);
+    return true;
+}
+}  // namespace
+
+bool CoverFading() { return !s_coverFade.from.empty(); }
+
+void ReleaseCoverFade() {
+    if (s_coverFade.texture) SDL_DestroyTexture(s_coverFade.texture);
+    s_coverFade = CoverFadeState{};
+}
+
 double TrackDuration() {
     double dur = g.playing != kNone ? g.engine.Duration() : 0;
     if (dur <= 0 && g.playing != kNone) dur = g_lib[g.playing].Duration();
@@ -690,7 +783,9 @@ void DrawBand(const Palette& base) {
     // The now playing line: the cover, the title in bold over the artist line.
     Fill(L.cover, p.surface2);
     TrackId shown = playing ? g.playing : g.settings.resumeOn ? g.resumeTrack : kNone;
-    if (!live && g_lib.Contains(shown) && g_cover && g_coverFor == shown) {
+    if (DrawCoverFade(!live && g_lib.Contains(shown) ? shown : kNone, p)) {
+        // the change to the next cover is under way
+    } else if (!live && g_lib.Contains(shown) && g_cover && g_coverFor == shown) {
         SDL_FRect dst{L.cover.x, L.cover.y, L.cover.w, L.cover.h};
         // Disc art peeks out from behind the cover, which moves left and shrinks to make room.
         if (int side = DiscCoverSide((int)L.cover.w); side && g_disc) {

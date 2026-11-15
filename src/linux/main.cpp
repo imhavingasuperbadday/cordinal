@@ -149,6 +149,10 @@ void OnRemote(Remote r, LPARAM value) {
         case Remote::Next: Next(); break;
         case Remote::Previous: Previous(); break;
         case Remote::Raise:
+            if (g.lightweight) {  // Show cordinal, or cordinal started again: the way out of Lightweight mode
+                LeaveLightweight();
+                break;
+            }
             SDL_RestoreWindow(g.window);
             SDL_RaiseWindow(g.window);
             break;
@@ -172,6 +176,8 @@ void OnRemote(Remote r, LPARAM value) {
             break;
         }
         case Remote::ToggleStartOnLogin: ToggleStartOnLogin(); break;
+        case Remote::ToggleLightweight: ToggleLightweight(); break;
+        case Remote::PickSong: OpenSongPickerFromTray(); break;
     }
 }
 
@@ -210,7 +216,7 @@ int Run(int argc, char** argv) {
         if (!full.empty()) paths.push_back(full);
     }
 
-    SDL_SetAppMetadata("cordinal", "0.1.12", "cordinal");
+    SDL_SetAppMetadata("cordinal", "0.1.13", "cordinal");
     SDL_SetHint(SDL_HINT_VIDEO_WAYLAND_PREFER_LIBDECOR, "1");
     if (parity) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
@@ -347,6 +353,7 @@ int Run(int argc, char** argv) {
     while (!g.quit) {
         // Wake for the clock while something plays (and the search box's caret blinks).
         int timeout = (g.playing != kNone || RadioPlaying()) && !IsPaused() ? 250 : g.searchFocused ? 530 : 2000;
+        if (LightweightHidesWindow()) timeout = std::max(timeout, 1000);  // no clock to show, nothing to draw
         if (InternetRadio().browser && InternetRadio().browser->Searching()) timeout = std::min(timeout, 250);
         if (HelperVisualizersRunning()) timeout = std::min(timeout, 16);
         if (CanvasScrollAnimating()) timeout = std::min(timeout, 16);
@@ -396,11 +403,14 @@ int Run(int argc, char** argv) {
         if (g.libraryDirty && now - g.lastSave > 5 * 60 * 1000) SaveLibraryFile(false);
         const bool seekOnly = SeekAnimationOnly();
         if (UiAnimating() && !seekOnly) g.redraw = true;
-        if (g.redraw) Render();
-        else if (seekOnly) RenderSeek();
+        if (!LightweightHidesWindow()) {  // a hidden window keeps its redraw for when it shows again
+            if (g.redraw) Render();
+            else if (seekOnly) RenderSeek();
+        }
     }
 
     // Window size and the rest, then the library (play counts, playlists).
+    LeaveLightweight(false);  // the size it chose goes back for next time
     LeaveMini();  // the window size to remember is the full window's
     SavePresentationWindow();
     SaveSettings();

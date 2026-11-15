@@ -310,12 +310,34 @@ void RefreshNext() {
     if (g.decodingToken && (g.decodingToken == g.playingToken || g.playingToken == 0)) AnswerNext(g.decodingToken);
 }
 
+// Replaces what Now Playing holds with a new playback snapshot. The rows arrive in the order of the
+// list they came from, so the header arrow follows that list's sort (`sortColumn` <= 0: none)
+// instead of the one a previous snapshot happened to have.
+static void SetNowPlayingItems(int np, std::vector<TrackId> items, int sortColumn, bool ascending) {
+    Playlist& pl = g.playlists[np];
+    pl.items = std::move(items);
+    pl.position = {};  // a new playback snapshot has its own navigation state
+    g.npCompleted = kNone;
+    pl.sortColumn = sortColumn > 0 ? sortColumn : -1;
+    pl.sortAscending = sortColumn > 0 ? ascending : true;
+    g.shuffleQueue.clear();
+    g.shuffleStarted = false;
+    g.dirty = true;
+    if (g.active != np) return;
+    g.sortColumn = pl.sortColumn;
+    g.sortAscending = pl.sortAscending;
+    SetSortArrow(g.sortColumn, g.sortAscending);
+    RebuildView();
+}
+
 // Playing from a view copies what it shows into Now Playing (created next to the Library tab),
 // so later changes to the view never change what plays next. Returns the Now Playing index
 // and moves `index` to the same track there.
 int SnapshotToNowPlaying(int pl, int& index) {
     std::vector<TrackId> items;
     const Playlist& src = g.playlists[pl];
+    const int sortColumn = src.sortColumn;  // read now: inserting Now Playing below may move `src`
+    const bool sortAscending = src.sortAscending;
     if (pl == g.active && !g.filter.empty()) {
         // What's on screen: the search narrows the snapshot too.
         TrackId id = src.items[index];
@@ -329,12 +351,7 @@ int SnapshotToNowPlaying(int pl, int& index) {
         np = 1;
         InsertPlaylist(np, Playlist{L"Now Playing", {}, PlaylistKind::NowPlaying});
     }
-    g.playlists[np].items = std::move(items);
-    g.playlists[np].position = {};
-    g.shuffleQueue.clear();
-    g.shuffleStarted = false;
-    g.dirty = true;
-    if (g.active == np) RebuildView();
+    SetNowPlayingItems(np, std::move(items), sortColumn, sortAscending);
     return np;
 }
 
@@ -523,12 +540,7 @@ void PlayList(const std::vector<TrackId>& items, int index, double start, bool p
         np = 1;
         InsertPlaylist(np, Playlist{L"Now Playing", {}, PlaylistKind::NowPlaying});
     }
-    g.playlists[np].items = items;
-    g.playlists[np].position = {};  // a new playback snapshot has its own navigation state
-    g.shuffleQueue.clear();
-    g.shuffleStarted = false;
-    g.dirty = true;
-    if (g.active == np) RebuildView();
+    SetNowPlayingItems(np, items, -1, true);
     PlayTrack(np, std::clamp(index, 0, (int)items.size() - 1), true, start, paused);
 }
 
@@ -1224,7 +1236,9 @@ void PaintArt(HDC dc) {
         DrawDiscArt(dc, {r.right - cover, top, r.right, top + cover}, g.disc);
         r = {r.left, top, r.left + cover, top + cover};
     }
-    if (!g.art.Empty()) {
+    if (PaintArtFade(dc, r, CoverTileName())) {
+        // the change to the next cover is under way
+    } else if (!g.art.Empty()) {
         DrawCoverArt(dc, r, g.art);
     } else {
         DrawCoverPlaceholder(dc, r, CoverTileName());
@@ -1247,7 +1261,8 @@ void TrackListening() {
         return;
     }
     double delta = pos - g.lastPos;
-    if (delta > 0 && delta < 1.5) g.listened += delta;  // seeks jump further and don't count
+    // Seeks jump further and don't count. Lightweight mode ticks once a second, not four times.
+    if (delta > 0 && delta < (LightweightHidesWindow() ? 3.5 : 1.5)) g.listened += delta;
     double duration = g.statTrack < g_lib.Count() ? g_lib[g.statTrack].Duration() : 0;
     ObservePlayback(g.statTrack, g.lastPos, pos, duration);
     g.lastPos = pos;

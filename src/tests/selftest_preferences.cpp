@@ -783,6 +783,16 @@ void TestTweaks(const std::wstring& scratch) {
     };
     const Tweak* wind = FindTweak("view.list_wind");
     Check(wind && wind->def == 0, L"Wind behind the track list starts off");
+    if (const Tweak* fade = FindTweak("view.cover_fade"); fade && fade->type == TweakType::Choice && fade->max == 2) {
+        const int saved = g.coverFade;
+        SetTweak(*fade, 2);
+        g.coverFade = 0;
+        LoadPreferences();
+        const bool kept = g.coverFade == 2;
+        SetTweak(*fade, saved);
+        Check(fade->def == 0 && kept && !wcscmp(fade->choices[1], L"Black and white JPEG"),
+              L"Cover change starts off, offers black and white and colour, and keeps the choice through a reload");
+    } else Check(false, L"Preferences includes Cover change with its three choices");
     if (g.list) {
         // The wind has to show beside narrow columns, where the rows' own drawing never reaches.
         bool savedWind = g.listWind;

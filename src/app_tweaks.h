@@ -66,6 +66,22 @@ void ShowCommandPalette();
 // ('&' and "..." need not be typed): its id, 0 for none, -1 when two commands share the name.
 int MenuCommandByName(const std::wstring& name);
 bool PaletteDialogMessage(MSG* msg);
+// The song picker (Lightweight mode's Win+Alt+Space, the numpad's 0, the notification-area icon):
+// the palette window searching the library. `nearTray` opens it by the clock.
+void ShowQuickPick(bool nearTray);
+bool PaletteOpen();  // the palette or the picker
+bool QuickPickOpen();
+// Every command of the menu bar and the extra ones keys reach (app_keys.cpp), as the palette lists
+// them: its label, its menu path ("Playback", "View \x203A Window size") and id.
+struct MenuCommandInfo {
+    std::wstring label, path;
+    int command;
+};
+std::vector<MenuCommandInfo> AllMenuCommands();
+std::wstring CommandName(int command);  // "Playback > Next"; empty when nothing lists it
+void ClosePalette();
+std::vector<std::wstring> QuickPickRows();  // self-test: "label | path" per shown row
+void SetQuickPickQuery(const std::wstring& query);
 // Indices of `texts` that contain every word of `query` (case-insensitively), best first: a text
 // that starts with the query, then one with a word starting with it, then the rest in their order.
 std::vector<int> RankMatches(const std::vector<std::wstring>& texts, const std::wstring& query);

@@ -122,7 +122,7 @@ enum Action {
     kFolders, kRescan, kAcceptInbox, kAcceptAllInbox, kExcludeLibrary, kDuplicateAudio, kCancelDuplicates,
     kSteam, kCancelSteam, kWebServer, kExportCord, kCancelExport, kConvert, kConvertUndo, kCancelConvert, kOrganize, kOrganizeUndo, kCopyTo, kCancelCopy,
     kIpodSync, kCancelIpodSync,
-    kTheme, kOpenRadio, kGroupAlbums, kStartOnLogin, kNameThatTrack, kWhichCameFirst, kPoints, kReview, kPalette, kLyrics, kLayout, kViewSize, kBigPanel, kBigReset, kMini, kPacks, kPackPlaylist, kHelpers, kHelperTool, kHelperCancel,
+    kTheme, kOpenRadio, kGroupAlbums, kStartOnLogin, kNameThatTrack, kWhichCameFirst, kPoints, kReview, kPalette, kLyrics, kLayout, kViewSize, kBigPanel, kBigReset, kMini, kLightweight, kPickSong, kVolumeUp, kVolumeDown, kSeekBack, kSeekForward, kKeyboard, kPacks, kPackPlaylist, kHelpers, kHelperTool, kHelperCancel,
     kAbout,
     kPlay, kPlayNext, kAddToQueue, kClearQueue, kAddToNowPlaying, kAddToPlaylist, kRemoveFromNowPlaying, kOpenFolder, kColumnToggle, kPackColumnSet,
     kSectionPlay, kSectionLoop, kSectionStart, kSectionEnd, kSectionClear,
@@ -241,6 +241,12 @@ extern SDL_Texture* g_cover;
 extern SDL_Texture* g_disc;
 extern TrackId g_coverFor, g_coverWanted;
 extern double g_coverHue;
+// g_cover's pixels as 0x00RRGGBB (empty without a cover), kept for the change to the next cover
+// (cover_fade.h), which DrawCoverFade in ui_draw.cpp runs as Windows' app_art.cpp does.
+extern std::vector<uint32_t> g_coverPixels;
+extern int g_coverWidth, g_coverHeight;
+bool CoverFading();       // a change is waiting for the next cover or running: frames keep coming
+void ReleaseCoverFade();  // drops the change and its texture, as the renderer goes
 extern uint32_t g_lastRebuild;
 extern size_t g_sourceCount;  // active tab's tracks before the search
 extern std::unordered_map<uint64_t, std::string> g_cells;  // formatted cells by track and column

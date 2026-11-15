@@ -17,6 +17,7 @@
 #include <charconv>
 #include <limits>
 #include <stdexcept>
+#include <unordered_set>
 
 Library g_lib;
 
@@ -685,6 +686,34 @@ std::vector<TrackId> AlbumTracksOf(const std::vector<TrackId>& ids) {
     for (TrackId id = 0; id < (TrackId)take.size(); ++id)
         if (take[id]) out.push_back(id);
     return out;
+}
+
+size_t CompleteAlbumInList(std::vector<TrackId>& items, TrackId playing, int after, std::vector<uint32_t>& oldToNew) {
+    oldToNew.resize(items.size());
+    for (size_t i = 0; i < items.size(); ++i) oldToNew[i] = (uint32_t)i;
+    if (playing >= g_lib.Count() || !g_lib[playing].album) return 0;
+    const Track& album = g_lib[playing];
+    std::unordered_set<TrackId> present(items.begin(), items.end());
+    std::vector<TrackId> missing;
+    for (TrackId id = 0; id < (TrackId)g_lib.Count(); ++id) {
+        const Track& t = g_lib[id];
+        if (!(t.flags & (Track::kInLibrary | Track::kInbox)) || (t.flags & Track::kMissing)) continue;
+        if (SameAlbum(t, album) && !present.count(id)) missing.push_back(id);
+    }
+    if (missing.empty()) return 0;
+    std::stable_sort(missing.begin(), missing.end(), [](TrackId a, TrackId b) {
+        const Track &x = g_lib[a], &y = g_lib[b];
+        if (x.disc != y.disc) return x.disc < y.disc;
+        return x.trackNo < y.trackNo;
+    });
+    size_t at = items.size();
+    if (after >= 0 && (size_t)after < items.size()) at = (size_t)after + 1;
+    else
+        for (size_t i = items.size(); i-- > 0;)
+            if (items[i] < g_lib.Count() && SameAlbum(g_lib[items[i]], album)) { at = i + 1; break; }
+    items.insert(items.begin() + (ptrdiff_t)at, missing.begin(), missing.end());
+    for (size_t i = at; i < oldToNew.size(); ++i) oldToNew[i] = (uint32_t)(i + missing.size());
+    return missing.size();
 }
 
 void ExcludeTracks(const std::vector<TrackId>& ids) {

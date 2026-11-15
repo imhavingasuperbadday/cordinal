@@ -698,6 +698,7 @@ void Key(const SDL_KeyboardEvent& e) {
         MenuKey(e.key);
         return;
     }
+    if (UserKeyDown(e)) return;  // your own keys (keys.cpp) come before cordinal's
     if ((mod & SDL_KMOD_CTRL) && (e.key == SDLK_MINUS || e.key == SDLK_EQUALS)) {
         int next = (int)g.settings.size + (e.key == SDLK_EQUALS ? 1 : -1);
         if (next < 0) ToggleMini(); else SetViewSize((ViewSize)std::clamp(next, 0, 3));
@@ -760,7 +761,10 @@ void Key(const SDL_KeyboardEvent& e) {
             case SDLK_T: if (shift) { ReopenPlaylist(); return; } break;
             case SDLK_PAGEUP: if (shift) { ReorderPlaylist(-1); return; } break;
             case SDLK_PAGEDOWN: if (shift) { ReorderPlaylist(1); return; } break;
-            case SDLK_L: ToggleLyrics(); return;
+            case SDLK_L:
+                if (shift) ToggleLightweight();
+                else ToggleLyrics();
+                return;
             case SDLK_P:
                 if (shift) { OpenPalette(); return; }
                 break;

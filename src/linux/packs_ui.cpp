@@ -471,6 +471,61 @@ void StartGlobalKeys() {
     SendShortcutRequest("CreateSession", "a{sv}", w, "create");
 }
 
+// A keymap key as the portal's trigger ("LOGO+ALT+space", the XDG shortcut spec's names); empty for
+// one it has no name for.
+std::string PortalTrigger(const keymap::Key& key) {
+    static const std::pair<const wchar_t*, const char*> kNames[] = {
+        {L"Space", "space"}, {L"Enter", "Return"}, {L"Tab", "Tab"}, {L"Esc", "Escape"}, {L"Backspace", "BackSpace"},
+        {L"Delete", "Delete"}, {L"Insert", "Insert"}, {L"Home", "Home"}, {L"End", "End"}, {L"Page Up", "Prior"},
+        {L"Page Down", "Next"}, {L"Up", "Up"}, {L"Down", "Down"}, {L"Left", "Left"}, {L"Right", "Right"},
+        {L"Pause", "Pause"}, {L"Equals", "equal"}, {L"Minus", "minus"}, {L"Comma", "comma"}, {L"Period", "period"},
+        {L"Slash", "slash"}, {L"Semicolon", "semicolon"}, {L"Quote", "apostrophe"}, {L"Backquote", "grave"},
+        {L"Left Bracket", "bracketleft"}, {L"Right Bracket", "bracketright"}, {L"Backslash", "backslash"},
+        {L"Play/Pause", "XF86AudioPlay"}, {L"Next Track", "XF86AudioNext"}, {L"Previous Track", "XF86AudioPrev"},
+        {L"Stop Media", "XF86AudioStop"}, {L"Volume Up", "XF86AudioRaiseVolume"},
+        {L"Volume Down", "XF86AudioLowerVolume"}, {L"Mute", "XF86AudioMute"},
+        {L"Num 0", "KP_0"}, {L"Num 1", "KP_1"}, {L"Num 2", "KP_2"}, {L"Num 3", "KP_3"}, {L"Num 4", "KP_4"},
+        {L"Num 5", "KP_5"}, {L"Num 6", "KP_6"}, {L"Num 7", "KP_7"}, {L"Num 8", "KP_8"}, {L"Num 9", "KP_9"},
+        {L"Num .", "KP_Decimal"}, {L"Num +", "KP_Add"}, {L"Num -", "KP_Subtract"}, {L"Num *", "KP_Multiply"},
+        {L"Num /", "KP_Divide"}, {L"Num Enter", "KP_Enter"}};
+    std::string name;
+    if (key.name.size() == 1) name = std::string(1, (char)towlower(key.name[0]));
+    else if (key.name[0] == L'F' && iswdigit(key.name[1])) name = compat::Narrow(key.name.c_str());
+    for (const auto& [ours, theirs] : kNames)
+        if (key.name == ours) name = theirs;
+    if (name.empty()) return {};
+    return std::string(key.mods & keymap::kCtrl ? "CTRL+" : "") + (key.mods & keymap::kAlt ? "ALT+" : "") +
+           (key.mods & keymap::kShift ? "SHIFT+" : "") + (key.mods & keymap::kWin ? "LOGO+" : "") + name;
+}
+
+}  // namespace
+
+// The portal triggers a numpad key is under a LightweightNumpad mode. With Num Lock off the numpad's
+// digits send the keys printed beside them (KP_Begin for 5, KP_Left for 4), which Num Lock on never
+// sends, so binding those names takes the numpad only while Num Lock is off, as the Windows hook does.
+// Always adds the digits' own names, and the operators and Enter, which are the same either way.
+std::vector<std::string> NumpadTriggers(int index, int mode) {
+    static const char* const kNumLockOff[11] = {"KP_Insert", "KP_End",   "KP_Down", "KP_Next", "KP_Left", "KP_Begin",
+                                                "KP_Right",  "KP_Home",  "KP_Up",   "KP_Prior", "KP_Delete"};
+    static const char* const kNumLockOn[keymap::kNumpadKeys] = {
+        "KP_0", "KP_1", "KP_2", "KP_3", "KP_4", "KP_5", "KP_6", "KP_7", "KP_8", "KP_9", "KP_Decimal",
+        "KP_Add", "KP_Subtract", "KP_Multiply", "KP_Divide", "KP_Enter"};
+    std::vector<std::string> triggers;
+    if (index < 0 || index >= keymap::kNumpadKeys || mode == (int)LightweightNumpad::Off) return triggers;
+    if (keymap::NumLockKey(index)) triggers.push_back(kNumLockOff[index]);
+    if (mode == (int)LightweightNumpad::Always) triggers.push_back(kNumLockOn[index]);
+    return triggers;
+}
+
+// "trigger=command" for each binding the portal is asked for, packs' and yours, for the layout check.
+std::vector<std::string> GlobalKeyTriggers() {
+    std::vector<std::string> out;
+    for (const auto& b : g_globalBindings) out.push_back(b.trigger + "=" + ToUtf8(b.command));
+    return out;
+}
+
+namespace {
+
 // The bindings of the packs that are on (a later pack wins a key), and what was wrong with the rest.
 void ApplyKeys() {
     StopPackGlobalKeys();
@@ -504,6 +559,26 @@ void ApplyKeys() {
             std::erase_if(g_globalBindings, [&](const auto& old) { return old.trigger == trigger; });
             g_globalBindings.push_back({p.get(), ColumnKey(p->pack, PackColumn{k.keys}), trigger, k.command});
         }
+    }
+    // Your keys from any program (keys.cpp) after the packs', so yours win: the ones you set always,
+    // cordinal's own (Win+Alt+Space) only in Lightweight mode, as on Windows. The numpad's bare keys are
+    // Lightweight mode's remote, bound only while it is on (NumpadTriggers).
+    for (const keymap::Binding& b : EffectiveKeyBindings(keymap::Scope::Global)) {
+        if (const int index = keymap::NumpadIndex(b.key); index >= 0) {
+            if (!g.lightweight) continue;
+            for (const std::string& trigger : NumpadTriggers(index, g.settings.lightweightNumpad)) {
+                std::erase_if(g_globalBindings, [&](const auto& old) { return old.trigger == trigger; });
+                g_globalBindings.push_back({nullptr, "numpad-" + trigger, trigger, b.command});
+            }
+            continue;
+        }
+        const bool yours = std::any_of(g.settings.keyChanges.begin(), g.settings.keyChanges.end(), [&](const keymap::Binding& c) {
+            return c.scope == keymap::Scope::Global && c.key == b.key;
+        });
+        std::string trigger = PortalTrigger(b.key);
+        if ((!yours && !g.lightweight) || trigger.empty()) continue;
+        std::erase_if(g_globalBindings, [&](const auto& old) { return old.trigger == trigger; });
+        g_globalBindings.push_back({nullptr, "key-" + trigger, trigger, b.command});
     }
     StartGlobalKeys();
 }
@@ -564,6 +639,8 @@ void ApplyAll() {
 }
 
 }  // namespace
+
+void ApplyGlobalKeys() { ApplyKeys(); }
 
 void StopPackGlobalKeys() {
     g_shortcutBus.reset();

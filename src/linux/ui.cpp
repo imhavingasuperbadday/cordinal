@@ -121,6 +121,8 @@ SDL_Texture* g_cover = nullptr;
 SDL_Texture* g_disc = nullptr;  // the cover's disc art, when its album has some
 TrackId g_coverFor = kNone, g_coverWanted = kNone;
 double g_coverHue = -1;  // the cover's hue (CoverHue), which the player's background takes on
+std::vector<uint32_t> g_coverPixels;
+int g_coverWidth = 0, g_coverHeight = 0;
 uint32_t g_lastRebuild = 0;
 size_t g_sourceCount = 0;  // active tab's tracks before the search
 std::unordered_map<uint64_t, std::string> g_cells;  // formatted cells by track and column
@@ -155,6 +157,14 @@ std::vector<PaletteCommand> MenuCommands() {
     std::vector<PaletteCommand> out;
     g_paletteItems.clear();
     for (int m : BarMenus()) FlattenMenu(BarMenu(m), Plain(ui::kMenuBar[m]), out);
+    // The commands only keys and the palette reach, under the menu they belong to, as on Windows
+    // (app_keys.cpp, ExtraCommands).
+    std::vector<MenuItem> extras(5);
+    const std::pair<const char*, int> names[] = {{"Play a song...", kPickSong}, {"Volume up", kVolumeUp},
+                                                 {"Volume down", kVolumeDown}, {"Seek back 10 seconds", kSeekBack},
+                                                 {"Seek forward 10 seconds", kSeekForward}};
+    for (size_t i = 0; i < extras.size(); ++i) extras[i].label = names[i].first, extras[i].action = names[i].second;
+    FlattenMenu(extras, "Playback", out);
     return out;
 }
 
@@ -239,7 +249,7 @@ bool UiAnimating() {
             !IsPaused() && L.seek.w > 0) || PauseFading() ||
            (MiniActive() && g.playing != kNone && !IsPaused()) || PointsChipAnimating() || LyricsAnimating() ||
            (FountainStyleShown() && FountainAppearance().motion && g.playing != kNone && !IsPaused()) ||
-           GamesAnimating() || ListWindAnimating() || ((g.settings.theme == ThemeMode::Foobar || g.settings.theme == ThemeMode::Apollo) &&
+           GamesAnimating() || ListWindAnimating() || CoverFading() || ((g.settings.theme == ThemeMode::Foobar || g.settings.theme == ThemeMode::Apollo) &&
            (g.playing != kNone ? !IsPaused() : g_visuals.Moving()));
 }
 
@@ -252,7 +262,7 @@ bool SeekAnimationOnly() {
           !IsPaused() && L.seek.w > 0)) return false;
     if (g_drag != Drag::None || g.searchFocused || !g_popups.empty() || g_folders.open || g_aboutOpen ||
         g_web.open || g_exclude.open || PanelOpen() || StartupReviewOpen() || MiniActive()) return false;
-    if (PointsChipAnimating() || LyricsAnimating() || GamesAnimating() || ListWindAnimating()) return false;
+    if (PointsChipAnimating() || LyricsAnimating() || GamesAnimating() || ListWindAnimating() || CoverFading()) return false;
     if (FountainStyleShown() && FountainAppearance().motion && g.playing != kNone && !IsPaused()) return false;
     return !((g.settings.theme == ThemeMode::Foobar || g.settings.theme == ThemeMode::Apollo) &&
              (g.playing != kNone ? !IsPaused() : g_visuals.Moving()));
@@ -283,6 +293,7 @@ void ShutdownUi() {
     if (g_cover) SDL_DestroyTexture(g_cover);
     if (g_disc) SDL_DestroyTexture(g_disc);
     g_cover = g_disc = nullptr;
+    ReleaseCoverFade();
     for (auto& [key, t] : g_thumbs)
         if (t.texture) SDL_DestroyTexture(t.texture);
     g_thumbs.clear();
@@ -350,7 +361,16 @@ void SetCover(CoverImage* image) {
     g_coverFor = image->id;
     g_coverHue = image->width > 0 ? CoverHue(image->rgba.data(), (size_t)image->width * image->height, false) : -1;
     MprisSetArt(image->id, image->file);
+    g_coverPixels.clear();
+    g_coverWidth = image->width > 0 ? image->width : 0;
+    g_coverHeight = image->width > 0 ? image->height : 0;
     if (image->width > 0) {
+        const size_t n = (size_t)image->width * image->height;
+        g_coverPixels.resize(n);
+        for (size_t i = 0; i < n; ++i) {
+            const uint8_t* s = &image->rgba[i * 4];
+            g_coverPixels[i] = (uint32_t)s[0] << 16 | (uint32_t)s[1] << 8 | s[2];
+        }
         g_cover = SDL_CreateTexture(g.renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STATIC, image->width, image->height);
         if (g_cover) {
             SDL_UpdateTexture(g_cover, nullptr, image->rgba.data(), image->width * 4);
@@ -444,6 +464,7 @@ void HandleEvent(const SDL_Event& e) {
         case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: g_lastInput = SDL_GetTicks(); break;
         default: break;
     }
+    if (e.type == SDL_EVENT_KEY_DOWN && LightweightKey(e.key)) return;  // the numpad as a remote
     if (MiniActive() && MiniEvent(e)) return;
     switch (e.type) {
         case SDL_EVENT_MOUSE_BUTTON_DOWN: MouseDown(e.button); break;
@@ -488,7 +509,8 @@ void HandleEvent(const SDL_Event& e) {
 bool UiBusy() { return g_thumbsPending > 0 || (g_wave.track != kNone && g_wave.request); }
 
 void PrepareWaveform(TrackId id) {
-    if (!g.settings.waveform || g.settings.liveWaveform) return;
+    // With Lightweight mode's window hidden nothing draws it; the first draw after asks again.
+    if (!g.settings.waveform || g.settings.liveWaveform || LightweightHidesWindow()) return;
     Peaks peaks{};
     uint32_t request = 0;
     RequestPeaks(id, peaks, request);

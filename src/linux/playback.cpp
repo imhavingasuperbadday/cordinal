@@ -20,6 +20,8 @@
 
 namespace lx {
 
+extern TrackId g_npCompleted;  // ui_model.cpp: the album Now Playing last gained in full
+
 namespace {
 
 // What the engine holds under each token: the Now Playing index and track, and the quick loudness
@@ -699,7 +701,15 @@ void PlayRow(int row) {
     int np = EnsureNowPlayingTab();
     if (g.active != np) {
         // What is shown becomes Now Playing, so changing a filter mid-album doesn't change what plays.
+        const Playlist& source = g.playlists[g.active];
+        const bool sorted = source.sortColumn > 0;
+        const bool ascending = source.sortAscending;
+        const int column = sorted ? source.sortColumn : -1;
         g.playlists[np].items = g.rows;
+        g_npCompleted = kNone;
+        // The rows keep the order they had, so the header arrow shows that sort, not an earlier snapshot's.
+        g.playlists[np].sortColumn = column;
+        g.playlists[np].sortAscending = sorted ? ascending : true;
         g.libraryDirty = true;
         g.shuffleOrder.clear();
     }
@@ -712,6 +722,9 @@ void PlayTracks(const std::vector<TrackId>& tracks, int index) {
     if (tracks.empty()) return;
     int np = EnsureNowPlayingTab();
     g.playlists[np].items = tracks;
+    g_npCompleted = kNone;
+    g.playlists[np].sortColumn = -1;  // picks, in no column's order
+    g.playlists[np].sortAscending = true;
     g.libraryDirty = true;
     g.shuffleOrder.clear();
     if (g.active == np) RebuildRows();

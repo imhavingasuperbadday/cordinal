@@ -18,6 +18,7 @@
 #include "app_apollo.h"
 #include "app_web.h"
 #include "app_tweaks.h"
+#include "app_keys.h"
 #include "app_packs.h"
 #include "app_helpers.h"
 #include "app_radio.h"

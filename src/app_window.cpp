@@ -165,6 +165,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case WM_SHOWWINDOW:
             if (!wp) ReleaseGroupArt();
+            else LightweightWindowShown();
             break;
         case WM_SIZE:
             if (wp == SIZE_MINIMIZED && !g.closing) {
@@ -266,7 +267,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_HSCROLL: MainScroll(wp, lp); return 0;
         case WM_TIMER:
             if (wp == kWebTimer) { WebTick(); return 0; }
-            if (HelperTimer(wp)) return 0;
+            if (HelperTimer(wp) || ArtFadeTimer(wp) || LightweightTimer(wp)) return 0;
             if (wp == kSearchTimer) { FlushSearch(); return 0; }
             if (wp == kUiTimer) MainTick();
             else if (wp == kBusyTimer) BusyTick();
@@ -277,6 +278,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             OnEngineEvent((EngineEvent)wp, (unsigned long long)lp);
             return 0;
         case WM_APP_STARTUP: FinishStartup(hwnd); return 0;
+        case WM_APP_KEYS: NumpadKeyPressed((int)wp, lp != 0); return 0;
         case WM_APP_BACKUP: OnBackupMessage(lp); return 0;
         case WM_APP_COLLECTION: OnCollectionMessage(wp, lp); return 0;
         case WM_APP_HELPER: OnHelperMessage(wp, lp); return 0;
@@ -432,7 +434,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case 2: Next(); break;
                 case 3: Previous(); break;
                 case 4: Stop(); break;
-                default: PackHotkey((int)wp); break;  // a pack's global key (keys.ini [global keys])
+                default:
+                    if (!GlobalKeyHotkey((int)wp)) PackHotkey((int)wp);  // yours, else a pack's (keys.ini)
+                    break;
             }
             return 0;
         // Media keys delivered by the shell / keyboards (APPCOMMAND_*).
@@ -472,6 +476,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             // tag edit that waited for a playing file. Only then save, so the saved state
             // reflects the settled library and files. A failed save is kept or asked about
             // before the window goes. Credits the listen in progress before the engine stops.
+            LeaveLightweight(false);  // the size it chose goes back, so it is not saved as the startup size
             EndRename(true);
             FlushSearch();
             if (g.foldersWnd) DestroyWindow(g.foldersWnd);  // applies pending folder changes first

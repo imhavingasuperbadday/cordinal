@@ -10,6 +10,7 @@
 #include "convert.h"
 #include "devicecopy.h"
 #include "engine.h"
+#include "keymap.h"
 #include "library.h"
 #include "organize.h"
 #include "playlist_shuffle.h"
@@ -70,7 +71,7 @@ constexpr unsigned kConvertMemoryDays[] = {1, 3, 7, 49};
 // a std::vector<std::wstring>* for Open).
 enum class Remote : WPARAM {
     PlayPause = 1, Play, Pause, Stop, Next, Previous, Raise, Quit, Seek, SetPosition, SetVolume, SetShuffle, SetRepeat, Open,
-    ToggleStartOnLogin
+    ToggleStartOnLogin, ToggleLightweight, PickSong
 };
 enum class Repeat : int { Off, All, One };
 // The Library tab's views and the column browser's fields, as the Windows build's (app_state.h).
@@ -159,9 +160,17 @@ struct Settings {
     bool waveReflection = true;  // mirror the waveform below its center line, for the waveform and moodbar styles
     bool waveFullHeight = true;  // unmirrored, the waveforms still fill both halves, the lower as bright
     bool pauseFade = true;       // the waveform fades to its paused colour and back instead of switching at once
+    int coverFade = 0;           // the cover's change to the next one: coverfade::Style, off by default (cover_fade.h)
     bool seekGlow = true;        // the seek bar's colours glow softly past its edges, every style and source alike
     bool alwaysOnTop = false;
     bool gpuDrawing = false;     // draw through the graphics card; off keeps its driver out
+    // Lightweight mode (lightweight.cpp), as the Windows build's [Lightweight] keys: what stays on screen
+    // (LightweightShows), the numpad (LightweightNumpad), pausing library work and giving memory back.
+    int lightweightShows = 0, lightweightNumpad = 1;
+    bool lightweightPause = true, lightweightTrim = true;
+    // Your own keys (keys.cpp, keymap.h): the changes to cordinal's, as settings.ini's key_window.* and
+    // key_global.* lines (the Windows build's [Keys] and [Global keys]).
+    std::vector<keymap::Binding> keyChanges;
     // The games (games.cpp), as the Windows build's [Games] keys: Name That Track's rounds solved at each clip
     // length and then missed, and both games' current and best streaks.
     std::vector<int> nttGuesses;
@@ -263,6 +272,7 @@ struct App {
     SDL_Renderer* renderer = nullptr;
     float scale = 1;  // display scale (HiDPI)
     bool redraw = true, quit = false;
+    bool lightweight = false;  // Lightweight mode is on (lightweight.cpp)
 
     std::vector<Playlist> playlists;
     int active = 0;
@@ -548,6 +558,46 @@ void LeaveMini();
 bool MiniEvent(const SDL_Event& e);
 // The window's smallest size for its view size; leaving the mini player sets it again.
 void ApplyWindowMinimum();
+
+// Lightweight mode (lightweight.cpp, View > Lightweight mode, Ctrl+Shift+L), as the Windows build's
+// app_lightweight.cpp: playing in the background with the window put away.
+enum class LightweightShows : uint8_t { Nothing, Mini, Compact };
+enum class LightweightNumpad : uint8_t { Off, NumLockOff, Always };
+void EnterLightweight();
+void LeaveLightweight(bool show = true);
+void ToggleLightweight();
+bool LightweightHidesWindow();  // on, with nothing in the window's place (it is hidden, nothing draws)
+bool LightweightPausesWork();
+void LightweightSizeChanged(ViewSize size);
+void LightweightPreferencesChanged();
+bool LightweightKey(const SDL_KeyboardEvent& e);  // the numpad as a remote while the window has the keys
+void LightweightPickerClosed();  // the song picker closed: a window shown only for it goes away again
+// The song picker (panel_palette.cpp): the palette searching the library, as the Windows build's.
+void OpenSongPicker();
+
+// Your own keyboard shortcuts (keys.cpp, File > Keyboard shortcuts), as the Windows build's app_keys.cpp:
+// "in cordinal" keys run before cordinal's own, "from any program" keys go to the desktop's shortcut portal
+// (yours always, cordinal's own only in Lightweight mode), and the numpad's bare keys are Lightweight mode's.
+bool KeyFromEvent(const SDL_KeyboardEvent& e, keymap::Key& out);
+std::vector<keymap::Binding> DefaultKeyBindings();  // the menus' shortcuts and keymap::DefaultGlobal()
+std::vector<keymap::Binding> EffectiveKeyBindings(keymap::Scope scope);
+void SetKeyChanges(std::vector<keymap::Binding> changes);  // saves and applies them
+bool UserKeyDown(const SDL_KeyboardEvent& e);  // one of your keys in cordinal: runs it, or swallows a cleared one
+bool RunCommandNamed(const std::wstring& name);  // "Playback > Next" through the menus; false when none
+void ApplyGlobalKeys();  // the portal's bindings again, after your keys or Lightweight mode changed
+// packs_ui.cpp: the portal triggers for numpad key `index` under a LightweightNumpad mode, and every
+// binding the portal is asked for ("KP_Begin=Playback > Play / Pause"), for the layout check.
+std::vector<std::string> NumpadTriggers(int index, int mode);
+std::vector<std::string> GlobalKeyTriggers();
+void OpenKeyboardShortcuts();
+std::vector<std::string> KeyboardShortcutRows(const std::wstring& query);  // layout check: the open panel's rows
+bool NumpadCommand(int index, bool repeat);  // Lightweight mode's numpad key `index`: runs its command
+void StepVolume(bool up);  // up or down 5%, as the mini player's wheel does
+
+// The song picker's tray entry and its self-test hooks (panel_palette.cpp, lightweight.cpp).
+void OpenSongPickerFromTray();  // with the window shown just for it, when the mode hid it
+std::vector<std::string> SongPickerRows();  // self-test: "label | path" per shown row
+void SetSongPickerQuery(const std::wstring& query);
 
 // Helpers (helpers_ui.cpp, View > Helpers): separate programs that decode, tag or run on tracks.
 struct HelperRow {

@@ -190,6 +190,17 @@ void LoadSettings() {
     if (auto it = v.find("helpers_on"); it != v.end()) s.helpersOn = it->second;
     for (const auto& [key, value] : v)
         if (key.starts_with("helper_trust.")) s.helperTrust[key.substr(13)] = value;
+    s.keyChanges.clear();
+    for (const auto& [key, value] : v) {
+        const bool window = key.starts_with("key_window."), global = key.starts_with("key_global.");
+        keymap::Binding b;
+        b.scope = global ? keymap::Scope::Global : keymap::Scope::Window;
+        if (!(window || global) || !keymap::Parse(compat::Widen(key.substr(11).c_str()), b.key) ||
+            !keymap::Allowed(b.scope, b.key))
+            continue;
+        b.command = compat::Widen(value.c_str());
+        s.keyChanges.push_back(std::move(b));
+    }
     s.defaultLayout.dock = std::clamp(ToInt(v, "layout_dock", 0), 0, 3);
     s.defaultLayout.waveSize = std::clamp(ToInt(v, "layout_wave_size", 0), 0, 2);
     s.defaultLayout.waveOwnRow = ToInt(v, "layout_wave_row", 0) != 0;
@@ -226,8 +237,13 @@ void LoadSettings() {
     s.waveFullHeight = ToInt(v, "wave_full_height", 1) != 0;
     s.seekGlow = ToInt(v, "seek_glow", 1) != 0;
     s.pauseFade = ToInt(v, "pause_fade", 1) != 0;
+    s.coverFade = std::clamp(ToInt(v, "cover_fade", 0), 0, 2);
     s.alwaysOnTop = ToInt(v, "always_on_top", 0) != 0;
     s.gpuDrawing = ToInt(v, "gpu_drawing", 0) != 0;
+    s.lightweightShows = std::clamp(ToInt(v, "lightweight_shows", 0), 0, 2);
+    s.lightweightNumpad = std::clamp(ToInt(v, "lightweight_numpad", 1), 0, 2);
+    s.lightweightPause = ToInt(v, "lightweight_pause_work", 1) != 0;
+    s.lightweightTrim = ToInt(v, "lightweight_trim", 1) != 0;
     for (auto [key, target] : {std::pair{"format_title", &s.fmtTitle}, std::pair{"format_subtitle", &s.fmtSub},
                                std::pair{"format_status", &s.fmtStatus}, std::pair{"format_window", &s.fmtWindow}})
         if (auto it = v.find(key); it != v.end() && !it->second.empty()) *target = compat::Widen(it->second.c_str());
@@ -447,6 +463,9 @@ void SaveSettings() {
     text += "points_chip=" + std::to_string(s.defaultLayout.points) + "\n";
     text += "packs_on=" + s.packsOn + "\nhelpers_on=" + s.helpersOn + "\n";
     for (const auto& [id, record] : s.helperTrust) text += "helper_trust." + id + "=" + record + "\n";
+    for (const keymap::Binding& b : s.keyChanges)
+        text += std::string(b.scope == keymap::Scope::Global ? "key_global." : "key_window.") +
+                compat::Narrow(keymap::Text(b.key).c_str()) + "=" + compat::Narrow(b.command.c_str()) + "\n";
     text += "lyrics_panel=" + std::to_string(s.lyricsPanel) + "\n";
     text += "games_ntt_guesses=";
     for (size_t i = 0; i < s.nttGuesses.size(); ++i) text += (i ? "," : "") + std::to_string(s.nttGuesses[i]);
@@ -454,10 +473,14 @@ void SaveSettings() {
             "\ngames_wcf_streak=" + std::to_string(s.wcfStreak) + "\ngames_wcf_best=" + std::to_string(s.wcfBest) + "\n";
     text += "time_remaining=" + std::to_string(s.timeRemaining) + "\nalways_on_top=" + std::to_string(s.alwaysOnTop) + "\n";
     text += "gpu_drawing=" + std::to_string(s.gpuDrawing) + "\n";
+    text += "lightweight_shows=" + std::to_string(s.lightweightShows) + "\nlightweight_numpad=" +
+            std::to_string(s.lightweightNumpad) + "\nlightweight_pause_work=" + std::to_string(s.lightweightPause) +
+            "\nlightweight_trim=" + std::to_string(s.lightweightTrim) + "\n";
     text += "live_waveform=" + std::to_string(s.liveWaveform) + "\n";
     text += "waveform=" + std::to_string(s.waveform) + "\n";
     text += "live_fountain=" + std::to_string(s.liveFountain) + "\n";
     text += "list_wind=" + std::to_string(s.listWind) + "\n";
+    text += "cover_fade=" + std::to_string(s.coverFade) + "\n";
     text += "full_live_waveform=" + std::to_string(s.fullLiveWaveform) + "\n";
     text += "wave_60fps=" + std::to_string(s.wave60Fps) + "\n";
     text += "band_wave_size=" + std::to_string(s.bandWaveSize) + "\n";
