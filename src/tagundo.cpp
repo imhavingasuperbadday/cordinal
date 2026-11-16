@@ -28,8 +28,8 @@ constexpr size_t kKeepJournals = 10;
 constexpr size_t kHeaderBytes = 16;
 
 // Bit i of the mask: text field i, then numbers, then compilation and cover, then the
-// ReplayGain / R128 fields and the listening statistics.
-constexpr int kTextCount = 11, kNumCount = 5, kTailCount = 8;
+// ReplayGain / R128 fields, the listening statistics and the MusicBrainz ids.
+constexpr int kTextCount = 11, kNumCount = 5, kTailCount = 10;
 constexpr int kCompilationBit = kTextCount + kNumCount, kCoverBit = kCompilationBit + 1;
 constexpr int kTailBit = kCoverBit + 1;
 std::optional<std::string> TagEdit::* const kText[kTextCount] = {
@@ -39,7 +39,8 @@ std::optional<uint32_t> TagEdit::* const kNum[kNumCount] = {&TagEdit::track, &Ta
                                                            &TagEdit::discTotal, &TagEdit::bpm};
 std::optional<std::string> TagEdit::* const kTail[kTailCount] = {
     &TagEdit::rgTrackGain, &TagEdit::rgTrackPeak, &TagEdit::rgAlbumGain, &TagEdit::rgAlbumPeak,
-    &TagEdit::r128TrackGain, &TagEdit::r128AlbumGain, &TagEdit::rating, &TagEdit::playCount};
+    &TagEdit::r128TrackGain, &TagEdit::r128AlbumGain, &TagEdit::rating, &TagEdit::playCount,
+    &TagEdit::musicBrainzRelease, &TagEdit::musicBrainzReleaseGroup};
 
 void Put32(std::string& out, uint32_t v) {
     for (int i = 0; i < 4; ++i) out += (char)(v >> (8 * i));
@@ -219,6 +220,8 @@ bool CaptureTagUndo(const std::wstring& path, const TagEdit& edit, TagUndoFile& 
     if (edit.r128AlbumGain) out.old.r128AlbumGain = d.r128AlbumGain == INT32_MIN ? std::string() : std::to_string(d.r128AlbumGain);
     if (edit.rating) out.old.rating = d.rating;
     if (edit.playCount) out.old.playCount = d.playCount;
+    if (edit.musicBrainzRelease) out.old.musicBrainzRelease = d.musicBrainzRelease;
+    if (edit.musicBrainzReleaseGroup) out.old.musicBrainzReleaseGroup = d.musicBrainzReleaseGroup;
     return true;
 }
 

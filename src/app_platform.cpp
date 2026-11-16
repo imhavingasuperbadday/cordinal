@@ -723,25 +723,3 @@ bool OnPlatformMessage(UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 }  // namespace app
-
-namespace app {
-
-// Library > Find duplicate audio: tracks whose decoded audio is identical (FLAC's MD5), whatever
-// their tags or file names, side by side in a playlist.
-void FindDuplicateAudioPlaylist() {
-    auto groups = g_lib.FindDuplicateAudio();
-    if (groups.empty()) {
-        ShowMessage(L"No duplicate audio found. (cordinal recognizes identical audio in FLAC files.)");
-        return;
-    }
-    std::vector<TrackId> items;
-    for (auto& group : groups) items.insert(items.end(), group.begin(), group.end());
-    NewPlaylist(UniquePlaylistName(L"Duplicate audio"));
-    Active().items = std::move(items);
-    g.dirty = true;
-    RebuildView();
-    ShowMessage(std::to_wstring(groups.size()) + (groups.size() == 1 ? L" song is" : L" songs are") +
-                L" in the library more than once; the copies are listed together.");
-}
-
-}  // namespace app

@@ -38,11 +38,11 @@ void LoadLibrarySettings() {
         if (g.libraryFolders.size() == 1 && !music.empty() &&
             CompareStringOrdinal(g.libraryFolders[0].c_str(), -1, music.c_str(), -1, TRUE) == CSTR_EQUAL) {
             g.libraryFolders.clear();
-            WritePrivateProfileStringW(L"Library", L"Folders", L"", g.iniPath.c_str());
+            IniWrite(L"Library", L"Folders", L"");
             if (g.message.empty())
                 g.message = L"Stopped watching the Music folder automatically; add it again in Library folders to keep it.";
         }
-        WritePrivateProfileStringW(L"Library", L"FoldersChosen", L"1", g.iniPath.c_str());
+        IniWrite(L"Library", L"FoldersChosen", L"1");
     }
 }
 

@@ -8,6 +8,7 @@
 #include "archive.h"
 #include "cue.h"
 #include "helpers.h"
+#include "ui_spec.h"
 
 #include <shlwapi.h>
 
@@ -95,6 +96,19 @@ std::wstring FormatTotalDuration(double seconds) {
     wchar_t buf[64];
     swprintf_s(buf, L"%lldd %lld:%02lld:%02lld", t / 86400, (t / 3600) % 24, (t / 60) % 60, t % 60);
     return buf;
+}
+
+// A rate that is not a positive number counts as normal, so a bad value cannot blank the list.
+static bool NormalRate(double rate) { return !(rate > 0) || !std::isfinite(rate) || std::abs(rate - 1) < 1e-6; }
+
+double HeardSeconds(double seconds, double rate) { return NormalRate(rate) ? seconds : seconds / rate; }
+
+bool HeardCell(int column, const Track& t, double rate, std::wstring& out) {
+    if (NormalRate(rate) || (column != ui::kColDuration && column != ui::kColBpm)) return false;
+    out.clear();
+    if (column == ui::kColDuration && t.durationMs) out = FormatDuration(std::round(HeardSeconds(t.Duration(), rate)));
+    if (column == ui::kColBpm && t.bpm) out = std::to_wstring(std::lround(t.bpm * rate));
+    return true;
 }
 
 std::wstring FileNameOf(const std::wstring& path) {
@@ -498,19 +512,6 @@ std::wstring TrackPath::Path() const {
     return FromUtf8(full);
 }
 
-std::vector<std::vector<TrackId>> Library::FindDuplicateAudio() const {
-    // A flat (hash, id) list replaces the hash map of vectors: the same groups without a heap
-    // node and a separate vector per distinct hash. Sorting the pairs also keeps the ids of a
-    // group ascending; groups are sorted below, so the result matches the map's final order.
-    std::vector<std::pair<uint64_t, TrackId>> byHash;
-    for (TrackId id = 0; id < (TrackId)tracks_.size(); ++id) {
-        const Track& t = tracks_[id];
-        if (!t.audioHash || (t.flags & Track::kMissing) || !(t.flags & (Track::kInLibrary | Track::kInbox))) continue;
-        byHash.emplace_back(t.audioHash, id);
-    }
-    return GroupDuplicateAudio(std::move(byHash));
-}
-
 std::vector<std::vector<TrackId>> GroupDuplicateAudio(std::vector<std::pair<uint64_t, TrackId>> byHash) {
     SortObjects(byHash.begin(), byHash.end());
     std::vector<std::vector<TrackId>> groups;
@@ -552,7 +553,13 @@ void Library::ApplyTags(TrackId id, const TagData& d) {
         std::replace(clean.begin(), clean.end(), '\0', ' ');
         return Intern(clean);
     };
-    t.audioHash = d.audioHash;
+    // A hash measured from the audio (any format without a stored MD5) survives re-reading the
+    // tags of the same audio: a tag edit rewrites the file but not its sound. A different codec or
+    // length means the file was replaced, so the old hash no longer describes it.
+    const double seconds = std::isfinite(d.duration) ? d.duration * 1000.0 : 0.0;
+    const bool sameAudio = (previous.flags & Track::kLoaded) && previous.codec == d.codec &&
+                           std::abs((double)previous.durationMs - seconds) <= 10.0;
+    t.audioHash = d.audioHash ? d.audioHash : sameAudio ? previous.audioHash : 0;
     t.title = tag(d.title);
     t.artist = tag(d.artist);
     t.album = tag(d.album);

@@ -1,7 +1,9 @@
 // DSP checks of the self test (see selftest.cpp): loudness (EBU Tech 3341), true peak, the peak
-// limiter, the ReplayGain model, the effects after the EQ (reverb, tempo, smart volume) and waveform peaks.
+// limiter, the ReplayGain model, the effects after the EQ (reverb, tempo, smart volume), the
+// surround upmixer and waveform peaks.
 #include "selftest_common.h"
 #include "tempo.h"
+#include "upmix.h"
 #include "wind_checks.h"
 
 #include <winioctl.h>
@@ -1804,6 +1806,108 @@ void TestPeaks(const std::wstring& scratch) {
 }
 
 // Reverb, tempo, loudness compensation and night mode (dsp.h), alone and through the production renderer.
+// Stereo to surround: the layouts devices describe, and the matrix keeping the fronts untouched while
+// the center and subwoofer take what both sides share and the surrounds what differs.
+void TestUpmix() {
+    testlog::Batch batch;
+    constexpr unsigned rate = 48000;
+    constexpr double pi = 3.14159265358979;
+    const SpeakerLayout five = LayoutFromMask(0x3F, 6), sevenDefault = LayoutFromMask(0, 8);
+    Check(five.count == 6 && five.at[2] == Speaker::Center && five.at[3] == Speaker::Lfe &&
+              five.at[4] == Speaker::BackLeft && five.Upmixes() && LayoutLabel(five) == "5.1",
+          L"Upmix: 5.1 mask layout");
+    Check(sevenDefault.count == 8 && sevenDefault.Has(Speaker::SideLeft) && LayoutLabel(sevenDefault) == "7.1",
+          L"Upmix: a maskless 8-channel format takes Windows' 7.1 layout");
+    Check(!LayoutFromMask(0x3, 2).Upmixes() && !LayoutFromNames({"MONO"}).Upmixes() &&
+              !LayoutFromNames({"FC", "LFE", "RL", "RR"}).Upmixes() && LayoutFromMask(0, 12).count == 0,
+          L"Upmix: stereo, mono, frontless and oversized layouts are left alone");
+    const SpeakerLayout named = LayoutFromNames({"FL", "FR", "FC", "LFE", "RL", "RR", "SL", "SR"});
+    Check(named == sevenDefault && LayoutFromNames({"FL", "FR", "AUX0"}).at[2] == Speaker::Other,
+          L"Upmix: PipeWire channel names match Windows' 7.1 order; unknown names are Other");
+    testlog::Cases pulse;
+    for (uint8_t i = 0; i < (uint8_t)Speaker::Other; ++i)
+        pulse.Add(std::string(PulsePositionName(PulsePosition((Speaker)i))) == SpeakerName((Speaker)i),
+                  std::to_wstring(i));
+    Check(pulse.count == 0, L"Upmix: PulseAudio positions round-trip%ls", pulse.failed.c_str());
+
+    auto upmix = [&](const SpeakerLayout& layout, const std::vector<float>& stereo) {
+        Upmixer u;
+        u.Configure(layout, rate);
+        std::vector<float> out(stereo.size() / 2 * layout.count);
+        for (size_t at = 0; at < stereo.size() / 2; at += 333) {
+            size_t n = std::min<size_t>(333, stereo.size() / 2 - at);
+            u.Process(stereo.data() + at * 2, n, out.data() + at * layout.count);
+        }
+        return out;
+    };
+    auto rms = [](const std::vector<float>& pcm, size_t channels, size_t c, size_t from) {
+        double sum = 0;
+        size_t frames = pcm.size() / channels;
+        for (size_t f = from; f < frames; ++f) sum += (double)pcm[f * channels + c] * pcm[f * channels + c];
+        return std::sqrt(sum / std::max<size_t>(1, frames - from));
+    };
+    auto tone = [&](double hz, float left, float right) {
+        std::vector<float> pcm(rate / 2 * 2);
+        for (size_t i = 0; i < pcm.size() / 2; ++i) {
+            float v = (float)std::sin(2 * pi * hz * i / rate);
+            pcm[i * 2] = left * v;
+            pcm[i * 2 + 1] = right * v;
+        }
+        return pcm;
+    };
+
+    // Independent full-scale noise: the fronts come through bit for bit and nothing exceeds full scale.
+    std::vector<float> noise(rate * 2);
+    uint32_t seed = 99;
+    for (float& v : noise) {
+        seed = seed * 1664525 + 1013904223;
+        v = (seed >> 8) / 8388608.0f - 1.0f;
+    }
+    for (const SpeakerLayout& layout : {five, sevenDefault}) {
+        std::vector<float> out = upmix(layout, noise);
+        bool exact = true, bounded = true;
+        for (size_t f = 0; f < noise.size() / 2; ++f) {
+            exact &= out[f * layout.count] == noise[f * 2] && out[f * layout.count + 1] == noise[f * 2 + 1];
+            for (size_t c = 0; c < layout.count; ++c) bounded &= std::fabs(out[f * layout.count + c]) <= 1.0f;
+        }
+        Check(exact && bounded, L"Upmix: %hs fronts untouched and within full scale", LayoutLabel(layout).c_str());
+    }
+
+    // A centered (mono) 1 kHz tone: center at half level, nothing in the surrounds or subwoofer.
+    std::vector<float> mono = upmix(five, tone(1000, 0.8f, 0.8f));
+    Check(std::fabs(rms(mono, 6, 2, rate / 10) - 0.8 * 0.5 / std::sqrt(2.0)) < 0.01 && rms(mono, 6, 4, 0) == 0 &&
+              rms(mono, 6, 5, 0) == 0 && rms(mono, 6, 3, rate / 10) < 0.01,
+          L"Upmix: centered voice goes to the center, not the surrounds or subwoofer");
+    // Opposite polarity (pure difference): no center; surrounds opposite each other and 12 ms late.
+    std::vector<float> wide = upmix(five, tone(1000, 0.8f, -0.8f));
+    size_t onset = 0;
+    while (onset < wide.size() / 6 && std::fabs(wide[onset * 6 + 4]) < 1e-4f) ++onset;
+    bool opposite = true;
+    for (size_t f = 0; f < wide.size() / 6; ++f) opposite &= wide[f * 6 + 4] == -wide[f * 6 + 5];
+    const size_t delay = (size_t)(Upmixer::kSurroundDelayMs * rate / 1000);
+    Check(rms(wide, 6, 2, 0) == 0 && opposite && onset >= delay && onset <= delay + 4 &&
+              std::fabs(rms(wide, 6, 4, rate / 10) - 0.8 * Upmixer::kSurroundGain / std::sqrt(2.0)) < 0.03,
+          L"Upmix: the difference signal reaches the surrounds, opposed and delayed (onset %zu frames)", onset);
+    // The subwoofer takes the low end only.
+    std::vector<float> bass = upmix(five, tone(50, 0.8f, 0.8f)), treble = upmix(five, tone(2000, 0.8f, 0.8f));
+    Check(rms(bass, 6, 3, rate / 10) > 0.8 * Upmixer::kLfeGain / std::sqrt(2.0) * 0.8 && rms(treble, 6, 3, rate / 10) < 0.002,
+          L"Upmix: subwoofer passes 50 Hz and rejects 2 kHz");
+    // With side and back pairs, each carries the surround 3 dB lower.
+    std::vector<float> seven = upmix(sevenDefault, tone(1000, 0.8f, -0.8f));
+    double back = rms(seven, 8, 4, rate / 10), side = rms(seven, 8, 6, rate / 10);
+    Check(std::fabs(back - side) < 1e-6 && std::fabs(back - rms(wide, 6, 4, rate / 10) / std::sqrt(2.0)) < 0.01,
+          L"Upmix: 7.1 shares the surround between side and back pairs");
+    // Reset clears the delay line: silence after it stays silent.
+    Upmixer u;
+    u.Configure(five, rate);
+    std::vector<float> loud = tone(1000, 0.8f, -0.8f), out(loud.size() / 2 * 6);
+    u.Process(loud.data(), loud.size() / 2, out.data());
+    u.Reset();
+    std::vector<float> silence(2000, 0.0f), after(1000 * 6, 1.0f);
+    u.Process(silence.data(), 1000, after.data());
+    Check(std::all_of(after.begin(), after.end(), [](float v) { return v == 0; }), L"Upmix: Reset clears the delay line");
+}
+
 void TestEffects() {
     testlog::Batch batch;
     constexpr unsigned rate = 48000;

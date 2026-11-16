@@ -28,7 +28,7 @@ std::string_view Page() {
 <label id="qualitySetting" hidden>Streaming <select id="quality" title="Low data: 96 kb/s AAC. Balanced: 128 kb/s AAC. Original keeps the source quality. Saved for this browser."><option value="aac">Low data · about 45 MB/hour</option><option value="balanced">Balanced · about 60 MB/hour</option><option value="original">Original quality</option></select></label>
 <button id="awayLink" hidden>Listen away from home</button><button id="logout">Unpair this browser</button>
 <small id="offlineHint" hidden>Keeping music on this phone needs cordinal's secure (https) address.</small></div>
-<div id="crumb" hidden><button id="back">‹ Library</button><span id="location"></span><button id="keep" hidden>Keep on this phone</button></div></header>
+<div id="crumb" hidden><button id="back">‹ Library</button><span id="location"></span><button id="download" hidden title="Save these songs on this device as one ZIP, in their original files">Download</button><button id="keep" hidden>Keep on this phone</button></div></header>
 <div id="notice" role="status" aria-live="polite"></div><section id="browser" aria-label="Music library"><div id="rows"></div>
 <button id="more" hidden>Load more</button></section><footer id="summary"></footer></main>
 <dialog id="pairing"><form id="pairForm"><h1>Connect to cordinal</h1><p>On the computer, open <b>Web server...</b> and choose <b>Pair device</b>. Scan its code with the phone's camera, or enter the digits here.</p>
@@ -37,7 +37,7 @@ std::string_view Page() {
 <p id="pairError" role="alert"></p><button type="submit">Connect</button></form></dialog>
 <dialog id="actions"><strong id="actionTitle"></strong><button id="actionPlay">Play</button><button id="actionNext">Play next</button>
 <button id="actionAdd">Add to queue</button><button id="actionUp">Move up</button><button id="actionDown">Move down</button>
-<button id="actionRemove">Remove from queue</button><button id="actionClose">Close</button></dialog>
+<button id="actionRemove">Remove from queue</button><button id="actionDownload">Download to this device</button><button id="actionClose">Close</button></dialog>
 <audio id="audio" preload="none" playsinline></audio></body></html>)html";
 }
 std::string_view Style() {
@@ -61,7 +61,7 @@ input[type=range]{padding:0;accent-color:var(--accent);border:0}button svg{width
 .navigation{display:flex;align-items:center;gap:5px;min-height:36px}#tabs{display:flex;flex:1;overflow-x:auto;scrollbar-width:thin;min-width:75px}#tabs button{white-space:nowrap;padding:8px;min-height:36px}
 #tabs button[aria-current=page]{color:var(--accent);font-weight:700}#search{width:34%;max-width:250px;height:27px}#options{height:36px;width:30px;flex:none;font-size:21px}
 #settings{display:flex;flex-wrap:wrap;gap:12px;padding:8px 0;border-top:1px solid var(--border)}#settings label{display:flex;align-items:center;gap:8px}#settings button{padding:6px}
-#crumb{display:flex;align-items:center;gap:8px;border-top:1px solid var(--border);min-height:32px;color:var(--sub)}#back{min-height:32px;padding:4px 8px}#keep{margin-left:auto;flex:none;min-height:32px;padding:4px 8px;color:var(--accent)}#location{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#crumb{display:flex;align-items:center;gap:8px;border-top:1px solid var(--border);min-height:32px;color:var(--sub)}#back{min-height:32px;padding:4px 8px}#keep,#download{flex:none;min-height:32px;padding:4px 8px;color:var(--accent)}#location{margin-right:auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #notice{flex:none;color:var(--amber);padding:0 8px;background:var(--surface);line-height:1.5}#notice:not(:empty){padding-top:5px;padding-bottom:5px}
 #browser{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-color:var(--border) var(--bg)}.columns{position:sticky;top:0;z-index:1;background:var(--bg);border-bottom:1px solid var(--border);color:var(--sub)}
 .row,.columns{display:grid;grid-template-columns:20px 28px minmax(0,1fr) minmax(70px,24%) 42px;align-items:center;gap:6px;min-height:30px;padding:0 8px}
@@ -171,8 +171,14 @@ if(state.tab==='recent'||state.tab==='kept')return;const query=currentQuery();al
 const at=state.index,active=state.current;state.queue=list.slice();state.index=list[at]?.id===active.id?at:Math.max(0,list.findIndex(n=>n.id===active.id));resetDeck();}).catch(e=>message(e.message));}
 state.queueTicket=0;
 function showActions(t,index){state.action=t;state.actionIndex=index;state.actionQueue=state.tab==='queue';$('actionTitle').textContent=t.title;
-for(const id of ['actionUp','actionDown','actionRemove'])$(id).hidden=!state.actionQueue;$('actions').showModal();}
+for(const id of ['actionUp','actionDown','actionRemove'])$(id).hidden=!state.actionQueue;$('actionDownload').hidden=state.offline||t.file===false;$('actions').showModal();}
 $('actionClose').onclick=()=>$('actions').close();
+$('actionDownload').onclick=()=>{const t=state.action;$('actions').close();download('/api/v1/download?id='+encodeURIComponent(t.id),t.title);};
+// Saves the original file (or an album's or playlist's files in one ZIP) through the browser's own
+// download, into the phone's Downloads. A HEAD first turns a refusal into a message, not a saved error.
+async function download(url,label){message('Preparing '+label+'…');let r;try{r=await fetch(url,{method:'HEAD',credentials:'same-origin'});}catch(e){message('cordinal could not be reached.');return;}
+if(!r.ok){message(r.status===409?label+' has no file of its own to download, or it changed. Refresh and try again.':r.status===503?'Four streams are already active. Try again shortly.':'This download is unavailable. Refresh the library and try again.');return;}
+const a=document.createElement('a');a.href=url;a.download='';document.body.append(a);a.click();a.remove();message('Downloading '+label+' ('+(Number(r.headers.get('Content-Length'))/1e6).toFixed(1)+' MB). Your browser saves it in Downloads.');}
 $('actionPlay').onclick=()=>{const t=state.action;$('actions').close();playBrowse(t,state.actionIndex);};
 $('actionNext').onclick=()=>{const at=Math.max(0,state.index+1);state.queue.splice(at,0,{...state.action});queueChanged();if(state.shuffle){state.deck=state.deck.filter(i=>i!==at);state.deck.unshift(at);}$('actions').close();message('Added to play next.');if(state.tab==='queue')loadView();};
 $('actionAdd').onclick=()=>{state.queue.push({...state.action});queueChanged();$('actions').close();message('Added to queue.');if(state.tab==='queue')loadView();};
@@ -306,7 +312,8 @@ async function loadKept(){if(!canKeep)return;try{const r=await(await keptCache()
 async function saveKept(){await(await keptCache()).put('/offline/index.json',new Response(JSON.stringify(kept),{headers:{'Content-Type':'application/json'}}));}
 function setId(){return state.tab==='kept'?state.keptSet:state.group==='album'?'album:'+[state.artist,state.album,state.date].join('\u0001'):'playlist:'+state.tab;}
 function keepable(){return canKeep&&(state.tab==='kept'?!!state.keptSet:state.group==='album'||(!state.group&&!['library','queue','recent'].includes(state.tab)));}
-function crumb(){const list=!state.group&&keepable();$('crumb').hidden=!state.group&&!list;$('back').hidden=!state.group;
+function downloadable(){return !state.offline&&state.tab!=='kept'&&(!!state.group||!['library','queue','recent'].includes(state.tab));}
+function crumb(){const list=!state.group&&(keepable()||downloadable());$('download').hidden=!downloadable();$('crumb').hidden=!state.group&&!list;$('back').hidden=!state.group;
 $('location').textContent=state.tab==='kept'?(kept.sets[state.keptSet]?.name||''):list?($('tabs').querySelector('[aria-current=page]')?.textContent||''):
 state.album||state.artist||(state.group==='album'?'Unknown album':'Unknown artist');
 $('keep').hidden=!keepable();$('keep').textContent=kept.sets[setId()]?'Kept on this phone · Remove':'Keep on this phone';}
@@ -319,6 +326,7 @@ function keepFormat(t){return state.dataSaver?{format:'aac',bitrate:128}:t.origi
 async function removeKept(id){delete kept.sets[id];const used=new Set(Object.values(kept.sets).flatMap(s=>s.ids)),c=await keptCache();
 for(const t of Object.keys(kept.tracks))if(!used.has(t)){await c.delete('/offline/audio/'+t);await c.delete('/offline/art/'+t);delete kept.tracks[t];}
 await saveKept();if(state.tab==='kept'){state.keptSet='';state.group='';}}
+$('download').onclick=()=>{const name=$('location').textContent||'cordinal';download('/api/v1/download?'+new URLSearchParams({...currentQuery(),name}),name);};
 $('keep').onclick=async()=>{if(keeping)return;const id=setId(),name=$('location').textContent;
 if(kept.sets[id]){await removeKept(id);message('Removed from this phone.');loadView();return;}
 keeping=true;$('keep').disabled=true;const ids=[];let skipped=0;

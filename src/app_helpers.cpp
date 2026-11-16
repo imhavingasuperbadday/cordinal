@@ -79,12 +79,7 @@ std::wstring EscapeAmp(const std::wstring& text) {
 
 std::wstring TrustKey(const Helper& h) { return L"Trust." + h.id; }
 
-// A trust record outgrows IniRead's 2047 characters for a helper with many libraries.
-std::wstring ReadTrust(const Helper& h) {
-    std::wstring record(1 << 16, L'\0');
-    record.resize(GetPrivateProfileStringW(L"Helpers", TrustKey(h).c_str(), L"", record.data(), (DWORD)record.size(), g.iniPath.c_str()));
-    return record;
-}
+std::wstring ReadTrust(const Helper& h) { return IniRead(L"Helpers", TrustKey(h).c_str(), L""); }
 
 void SaveOn() {
     std::wstring ids;

@@ -588,6 +588,69 @@ void TestTabOverflow() {
     RefreshTabs();
 }
 
+// settings.ini is read and edited in memory (app_ini.cpp): lookups must match the Win32 profile API that
+// wrote every profile so far, the saved file must read back through that API, and a full preferences
+// save must not touch the disk on the clicking thread (it took about a second through the API).
+void TestSettingsFile(const std::wstring& scratch) {
+    using namespace app;
+    testlog::Group group(L"settings file");
+    testlog::Batch batch;
+    const std::wstring original = g.iniPath, profile = scratch + L"\\settings-file.ini";
+    IniFlush();
+    // An older profile as the profile API and hand editing leave it: ANSI, odd spacing and case,
+    // quotes, a duplicate key and section, comments and blank lines.
+    Ready(WriteTestBytes(profile, "; kept\r\n[Player]\r\n  Volume = 40 \r\nvolume=99\r\nName=\"quoted\"\r\n"
+                                  "Hex=0x1F\r\nNegative=-7\r\nEmpty=\r\nJunk=12ab\r\n\r\n[Other]\r\nA=1\r\n"
+                                  "[player]\r\nVolume=5\r\n"),
+          L"settings file fixture");
+    g.iniPath = profile;
+    batch.Next(L"lookups follow the profile API");
+    Check(IniInt(L"player", L"VOLUME", 0) == 40 && IniRead(L"Player", L"Name", L"") == L"quoted" &&
+              IniInt(L"Player", L"Hex", 0) == 31 && IniInt(L"Player", L"Negative", 0) == -7 &&
+              IniInt(L"Player", L"Empty", 3) == 3 && IniInt(L"Player", L"Junk", 0) == 12 &&
+              IniRead(L"Player", L"Missing", L"fallback ") == L"fallback" && IniInt(L"Nowhere", L"A", 8) == 8,
+          L"names ignore case, the first duplicate wins, values are trimmed and unquoted, numbers parse as before");
+
+    batch.Next(L"a full preferences save stays off the disk until the save");
+    LARGE_INTEGER frequency, start, end;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&start);
+    for (int round = 0; round < 5; ++round) SavePreferences();
+    QueryPerformanceCounter(&end);
+    const double ms = 1000.0 * (end.QuadPart - start.QuadPart) / frequency.QuadPart / 5;
+    IniWrite(L"Player", L"Volume", L"41");
+    IniWrite(L"New section", L"Key", L"a value with = and spaces");
+    IniDelete(L"Player", L"Junk");
+    IniReplaceSection(L"Keys", {{L"Ctrl+1", L"Play"}, {L"Ctrl+2", L"Stop"}});
+    IniDelete(L"Other", nullptr);
+    Check(ms < 15, L"a full SavePreferences takes %.2f ms, under 15 ms", ms);
+    Check(IniFlush(), L"the edits are saved on request");
+
+    batch.Next(L"the saved file reads back through the profile API");
+    wchar_t buf[256];
+    auto api = [&](const wchar_t* section, const wchar_t* key) {
+        GetPrivateProfileStringW(section, key, L"<none>", buf, (DWORD)std::size(buf), profile.c_str());
+        return std::wstring(buf);
+    };
+    const std::string bytes = ReadTestBytes(profile);
+    Check(bytes.compare(0, 2, "\xFF\xFE") == 0 && api(L"Player", L"Volume") == L"41" &&
+              api(L"New section", L"Key") == L"a value with = and spaces" && api(L"Player", L"Junk") == L"<none>" &&
+              api(L"Keys", L"Ctrl+2") == L"Stop" && api(L"Other", L"A") == L"<none>" &&
+              api(L"Player", L"Name") == L"quoted" && bytes.find("k\0e\0p\0t\0", 0, 8) != std::string::npos,
+          L"the file is UTF-16, keeps comments, and the profile API reads every edit");
+    const auto keys = IniEntries(L"Keys");
+    Check(keys.size() == 2 && keys[1].first == L"Ctrl+2" && keys[1].second == L"Stop",
+          L"a replaced section lists its entries in order");
+
+    batch.Next(L"a change made elsewhere is read again");
+    WritePrivateProfileStringW(L"Player", L"Volume", L"12", profile.c_str());
+    IniRefresh();
+    Check(IniInt(L"Player", L"Volume", 0) == 12, L"IniRefresh picks up a change another program made");
+    batch.End();
+    g.iniPath = original;
+    IniRead(L"Player", L"Volume", L"");  // back to the original profile
+}
+
 void TestPreferenceSavingModes(const std::wstring& scratch) {
     using namespace app;
     testlog::Group group(L"preference saving modes");
@@ -648,13 +711,15 @@ void TestPreferenceSavingModes(const std::wstring& scratch) {
           L"invalid saving policies fall back to asking without assuming consent");
     SetFileAttributesW(profile.c_str(), FILE_ATTRIBUTE_READONLY);
     g.message.clear();
-    bool refused = !IniWrite(L"Player", L"Volume", L"12") && g.message.find(L"Couldn't save settings") != std::wstring::npos;
+    IniWrite(L"Player", L"Volume", L"12");
+    bool refused = !IniFlush() && g.message.find(L"Couldn't save settings") != std::wstring::npos;
     g.message.clear();
     IniWrite(L"Player", L"Shuffle", L"1");
+    refused = refused && !IniFlush() && !IniWrite(L"Player", L"Shuffle", L"2");
     batch.Next(L"a failed settings write is reported once and writes recover once the file is writable");
     Check(refused && g.message.empty(), L"a failed settings write is reported once, not once per key");
     SetFileAttributesW(profile.c_str(), FILE_ATTRIBUTE_NORMAL);
-    Check(IniWrite(L"Player", L"Volume", L"12"), L"settings writes succeed again once the file is writable");
+    Check(IniFlush() && IniWrite(L"Player", L"Volume", L"13"), L"settings writes succeed again once the file is writable");
     SetViewSize(originalSize);
     g.iniPath = original;
     reload();
@@ -683,14 +748,21 @@ void TestTweaks(const std::wstring& scratch) {
     }
     batch.Next(L"tweak keys are unique and sane, every row has a default and an empty profile loads them all");
     Check(unique && sane && Tweaks().size() >= 20, L"tweak keys are unique and every row has a default in range and help");
-    // The session-rate rows (speed, tempo) start where the engine does: normal.
+    // Speed and tempo are remembered: an empty profile starts normal, and a chosen rate comes back.
     bool rates = false;
     if (const Tweak* speed = FindTweak("playback.speed"))
         if (const Tweak* tempo = FindTweak("playback.tempo")) {
-            g.speed = 1.5;
-            g.tempo = 1.25;
+            const bool normal = g.speed == 1 && g.tempo == 1 && !TweakChanged(*speed) && !TweakChanged(*tempo);
+            SetTweak(*speed, 5);  // 1.25x
+            SetTweak(*tempo, 4);  // 1.25x
+            const bool changed = std::fabs(g.speed - 1.25) < 1e-9 && std::fabs(g.tempo - 1.25) < 1e-9;
+            g.speed = g.tempo = 1;
             LoadPreferences();
-            rates = g.speed == 1 && g.tempo == 1 && !TweakChanged(*speed) && !TweakChanged(*tempo);
+            const bool remembered = std::fabs(g.speed - 1.25) < 1e-9 && std::fabs(g.tempo - 1.25) < 1e-9;
+            SetTweak(*speed, speed->def);
+            SetTweak(*tempo, tempo->def);
+            LoadPreferences();
+            rates = normal && changed && remembered && g.speed == 1 && g.tempo == 1;
         }
     std::wstring changedRows;
     for (const Tweak& t : Tweaks())
@@ -880,6 +952,29 @@ void TestTweaks(const std::wstring& scratch) {
               L"crossfade, volume curve, cordinal's own volume control and cover spacing persist, and the slider "
               L"rests while the system has the volume");
     } else Check(false, L"Preferences includes crossfade, the volume curve and control, and cover spacing");
+    // Output is one choice of three under the key it always had: shared and exclusive keep their old
+    // values, so a profile from before ASIO opens as it was, and ASIO is the new 2.
+    if (const Tweak* output = FindTweak("output.exclusive")) {
+        const bool threeWay = output->type == TweakType::Choice && output->max == 2 && output->def == 0 &&
+                              output->choices && !wcscmp(output->choices[2], L"ASIO") &&
+                              !wcscmp(TweakPage(*output), L"Output");
+        SetTweak(*output, 2);
+        const bool applied = g.output == 2;
+        g.output = 0;
+        LoadPreferences();
+        const bool asio = applied && g.output == 2 && IniRead(L"Player", L"Exclusive", L"") == L"2";
+        IniWrite(L"Player", L"Exclusive", L"1");
+        g.output = 0;
+        LoadPreferences();
+        const bool older = g.output == 1;
+        SetTweak(*output, output->def);
+        bool linked = false;
+        for (const PreferenceLink& link : PreferenceLinks())
+            linked |= link.command == IDM_ASIO_DRIVERS && !wcscmp(link.page, L"Output");
+        Check(threeWay && asio && older && linked && g.output == 0 && IniRead(L"Player", L"Exclusive", L"") == L"0",
+              L"output is Shared, Exclusive or ASIO, persists, reads an older exclusive profile, and the Output page "
+              L"links the ASIO driver picker");
+    } else Check(false, L"Preferences includes the output choice");
     const Tweak* colors = FindTweak("view.mood_colors");
     const Tweak* smooth = FindTweak("view.smooth_seek");
     if (colors && smooth) {
@@ -1010,7 +1105,7 @@ void TestTweaks(const std::wstring& scratch) {
             const bool sizes = g.coverSize == 220 && g.browserHeight == 240 && g.defaultCoverSize == 160 &&
                                g.defaultBrowserHeight == 150;
             SetTweak(*speed, 5);
-            const bool rate = std::fabs(g.speed - 1.25) < 1e-9 && IniRead(L"Player", L"Speed", L"").empty();
+            const bool rate = std::fabs(g.speed - 1.25) < 1e-9 && IniRead(L"Player", L"Speed", L"") == L"1.25";
             SetTweak(*apollo, 0);
             SetTweak(*apolloFade, 4);
             const bool apolloKeys = IniInt(L"Apollo", L"Analyzer", -1) == 0 && IniInt(L"Apollo", L"RebarOpacity", -1) == 100;
@@ -1092,7 +1187,7 @@ void TestTweaks(const std::wstring& scratch) {
     IniWrite(L"Player", L"Loops", L"9");
     IniWrite(L"ReplayGain", L"KeepLoud", L"5");
     IniWrite(L"ReplayGain", L"Preamp", L"nan");
-    WritePrivateProfileStringW(L"ReplayGain", L"Enabled", nullptr, g.iniPath.c_str());
+    IniDelete(L"ReplayGain", L"Enabled");
     IniWrite(L"ReplayGain", L"Mode", L"0");
     LoadPreferences();
     batch.Next(L"out-of-range and invalid values are clamped or ignored, and old profiles still load their mode");
@@ -1175,8 +1270,13 @@ void TestTweaks(const std::wstring& scratch) {
             if (WindowText(c) == text) return true;
         return false;
     };
+    // Rows out of view get their windows a few at a time after the window shows (app_tweaks.cpp).
+    auto filled = [&](int n) {
+        Pump(5000, [&] { return settingsShown() == n; });
+        return settingsShown() == n;
+    };
     batch.Next(L"Preferences opens on the asked setting, lists every tweak and searches across all pages");
-    Check(sheet && pages && settingsShown() == effects && GetFocus() && GetDlgCtrlID(GetFocus()) == 1000 + night &&
+    Check(sheet && pages && filled(effects) && GetFocus() && GetDlgCtrlID(GetFocus()) == 1000 + night &&
               hasText(L"Volume shaping") && hasText(L"Bitcrush"),
           L"Preferences opens on the asked-for setting's page, under its headings, with that setting's control focused");
     HWND nightSwitch = sheet ? GetDlgItem(sheet, 1000 + night) : nullptr, nightReset = sheet ? GetDlgItem(sheet, 3000 + night) : nullptr;
@@ -1188,7 +1288,11 @@ void TestTweaks(const std::wstring& scratch) {
           L"a setting's switch changes it at once and shows its reset, which puts the default back and hides again");
     if (pages) choosePage(0);
     const auto shownTweaks = std::count_if(Tweaks().begin(), Tweaks().end(), TweakShown);
-    Check(settingsShown() == (int)shownTweaks && hasText(L"Playback") && hasText(L"Online"),
+    const int atOnce = settingsShown();
+    Check(atOnce > 0 && atOnce < (int)shownTweaks,
+          L"All settings makes the rows in view at once (%d of %d) and leaves the rest for later", atOnce,
+          (int)shownTweaks);
+    Check(filled((int)shownTweaks) && hasText(L"Playback") && hasText(L"Online"),
           L"All settings lists every tweak this build has, under each page's name");
     if (pages) choosePage(1);
     if (search) SetWindowTextW(search, L"night");
@@ -1323,8 +1427,11 @@ void TestTweaks(const std::wstring& scratch) {
     Check(Holds(menus, IDM_RG_SCAN_ALL) && inPreferences(IDM_RG_SCAN_ALL) &&
           inPreferences(IDM_RG_SCAN_SEL) && inPreferences(IDM_RG_SCAN_PL),
           L"ReplayGain scanning is reachable from both Playback and Preferences");
-    bool moved = !Holds(menus, IDM_OUTPUT_EXCLUSIVE) && !Holds(menus, IDM_PREFERENCE_MANUAL);
-    for (int id : {IDM_SKIP_SHUFFLE, IDM_RESUME, IDM_OUTPUT_SHARED, IDM_LOOPS_BASE, IDM_RG_AUTO_SCAN, IDM_RG_ESTIMATE,
+    // Output is a Preferences row of its own (it applies through SetOutput), with the ASIO driver picker
+    // linked beside it; none of its commands is in a menu.
+    bool moved = !Holds(menus, IDM_OUTPUT_SHARED) && !Holds(menus, IDM_OUTPUT_EXCLUSIVE) && !Holds(menus, IDM_OUTPUT_ASIO) &&
+                 !Holds(menus, IDM_PREFERENCE_MANUAL) && FindTweak("output.exclusive");
+    for (int id : {IDM_SKIP_SHUFFLE, IDM_RESUME, IDM_ASIO_DRIVERS, IDM_LOOPS_BASE, IDM_RG_AUTO_SCAN, IDM_RG_ESTIMATE,
                    IDM_LOUDNESS_COMP, IDM_SOUND_EFFECTS, IDM_TASKBAR_PROGRESS, IDM_START_WITH_WINDOWS, IDM_THEME_ROBOTIC,
                    IDM_PREFERENCE_ASK, IDM_STARTUP_DEFAULTS, IDM_FORMAT, IDM_CONVERT_RECYCLE, IDM_CONVERT_SHOW_ORIGINALS,
                    IDM_CONVERT_MEMORY_BASE})
@@ -1602,11 +1709,10 @@ void TestPersonalization(const std::wstring& scratch) {
     g.panes[1].field = BrowseField::Folder;
     SaveBrowserSettings();
     ToggleColumn(kColRating);
-    ListView_SetColumnWidth(g.list, SubitemOf(2), S(333));
-    std::vector<int> order(g.columns.size());
-    for (int i = 0; i < (int)order.size(); ++i) order[i] = (int)order.size() - 1 - i;
-    ListView_SetColumnOrderArray(g.list, (int)order.size(), order.data());
-    SendMessageW(g.header, WM_LBUTTONUP, 0, MAKELPARAM(-1, -1));
+    // Artist narrower and Title moved to the end, as header drags leave them.
+    SetColumnWidth96(3, 133);
+    MoveColumnTo(SubitemOf(2), (int)g.columns.size());
+    const std::vector<int> order = g.columns;
     g.eq.enabled = true;
     g.eq.preamp = -2.5f;
     g.eq.gains[2] = 4.5f;
@@ -1825,13 +1931,11 @@ void TestPersonalization(const std::wstring& scratch) {
     Check(g.volumePercent == 0 && g.lastAudibleVolume == 37, L"a muted restart retains the previous audible volume");
     ToggleMute();
     Check(g.volumePercent == 37, L"unmuting after a restart restores the chosen volume");
-    std::vector<int> restoredOrder(g.columns.size());
-    ListView_GetColumnOrderArray(g.list, (int)restoredOrder.size(), restoredOrder.data());
     batch.Next(L"library view, browser fields/height and column visibility/width/order survive reloading");
     Check(g.libMode == LibraryMode::Tracks && !g.browserVisible && g.browserHeight == 213 &&
               g.panes[0].field == BrowseField::Composer && g.panes[1].field == BrowseField::Folder &&
               SubitemOf(kColRating) < 0 &&
-              ListView_GetColumnWidth(g.list, SubitemOf(2)) == S(333) && restoredOrder == order,
+              ListView_GetColumnWidth(g.list, SubitemOf(3)) == S(133) && g.columns == order && g.columns.back() == 2,
           L"library view, browser fields/height and column visibility/width/order survive reloading");
     RestoreWindowPlacement(SW_HIDE);
     batch.Next(L"the saved compact size and reduced memory policy are restored without a new suggestion");
@@ -1854,6 +1958,7 @@ void TestPersonalization(const std::wstring& scratch) {
     Check(approved.Passed(), L"each approved startup size survives temporary size changes and profile reloads%ls",
           approved.failed.c_str());
     batch.End();
+    TestSettingsFile(scratch);
     TestPreferenceSavingModes(scratch);
     TestTweaks(scratch);
 

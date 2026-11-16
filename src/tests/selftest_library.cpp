@@ -1,6 +1,7 @@
 // Library checks of the self test (see selftest.cpp): title formatting, the library.cdb save/load
 // file, the play log, cordinal points and auto-playlist rules. RunSelfTest calls each one inside
 // its own testlog group, in the order the groups appear in the log.
+#include "rediscover.h"
 #include "selftest_common.h"
 
 #include "sections.h"
@@ -130,6 +131,42 @@ void TestSearch() {
         for (const MissingField& field : kMissingFields)
             cases.Add(MissingTagTerm(gaps, ids[0], field.term) >= 0, field.term);
         Check(cases.Passed(), L"SEARCH missing:<field> finds tracks with that tag empty%ls", cases.failed.c_str());
+    }
+    batch.Next(L"REDISCOVER offers well-played songs and albums once their own gap has passed");
+    {
+        Library lib;
+        const uint32_t now = 400u * 86400, day = 86400;
+        auto add = [&](const std::wstring& path, const char* album, uint32_t plays, uint32_t daysAgo) {
+            TrackId id = lib.Add(path);
+            TagData tags;
+            tags.title = "t";
+            tags.artist = "Band";
+            tags.album = album;
+            lib.ApplyTags(id, tags);
+            lib[id].playCount = plays;
+            lib[id].lastPlayed = plays ? now - daysAgo * day : 0;
+            return id;
+        };
+        // An album played through 20 times per track, last heard 120 days ago: its gap is 67 days.
+        std::vector<TrackId> album;
+        for (int i = 0; i < 4; ++i) album.push_back(add(L"C:\\Re\\A\\" + std::to_wstring(i) + L".flac", "Old Favourite", 20, 120 + i));
+        TrackId loved = add(L"C:\\Re\\loved.flac", "", 100, 40);    // 100 plays: missed after 30 days
+        TrackId light = add(L"C:\\Re\\light.flac", "", 3, 100);     // 3 plays: not before 173 days
+        TrackId recent = add(L"C:\\Re\\recent.flac", "", 50, 10);   // played lately
+        TrackId skipped = add(L"C:\\Re\\skipped.flac", "", 10, 300);
+        lib[skipped].skipCount = 30;
+        auto found = FindRediscoveries(lib, now, 3, 4);
+        bool albumFirst = !found.empty() && found[0].album && found[0].tracks.size() == 4;
+        bool lovedListed = std::ranges::any_of(found, [&](const Rediscovery& r) { return !r.album && r.tracks[0] == loved; });
+        bool othersLeft = std::ranges::none_of(found, [&](const Rediscovery& r) {
+            return !r.album && (r.tracks[0] == light || r.tracks[0] == recent || r.tracks[0] == skipped ||
+                                std::ranges::find(album, r.tracks[0]) != album.end());
+        });
+        auto hidden = FindRediscoveries(lib, now, 3, 4, [&](TrackId id) { return id == loved || id == album[0]; });
+        bool hides = std::ranges::none_of(hidden, [&](const Rediscovery& r) { return r.album || r.tracks[0] == loved; });
+        Check(albumFirst && lovedListed && othersLeft && hides && found.size() == 2 &&
+                  RediscoverGapDays(100) == 30 && RediscoverGapDays(1) == 300 && RediscoverGapDays(10000) == 14,
+              L"REDISCOVER offers well-played songs and albums once their own gap has passed");
     }
     batch.Next(L"ALBUM tracks of a selection cover the whole album, across disc folders, without crossing albums");
     {

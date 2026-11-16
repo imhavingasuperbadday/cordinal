@@ -675,13 +675,8 @@ void ApplyAlternateLayout() {
         L.visuals[0] = a.analyzer ? Rect{vx, top + S(32), each, S(21)} : Rect{};
         if (a.analyzer) vx += each;
         L.visuals[1] = a.scope ? Rect{vx, top + S(32), each, S(21)} : Rect{};
+        // Apollo's Title takes the room the other columns leave, as every list's stretch column does.
         ListGeometry({S(4), L.player.B() + S(4), W - S(8), std::max(0.f, bottom - L.player.B() - S(8))});
-        auto& widths = ActiveColumnWidths();
-        float other = 0;
-        for (int type : ActiveColumnTypes()) if (type != ui::kColApolloTitle) {
-            const auto column = ColumnAt(type); other += S(widths[type] > 0 ? widths[type] : column.width);
-        }
-        widths[ui::kColApolloTitle] = std::max(80, (int)((L.rows.w - other) / g.scale));
     }
 }
 bool DrawAlternate(const Palette& p) {

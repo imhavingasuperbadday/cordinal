@@ -6,6 +6,7 @@
 #include "text.h"
 
 #include <ctime>
+#include <unistd.h>
 
 namespace lx {
 namespace {
@@ -32,6 +33,19 @@ void AcceptListens() {
         TrackId id = g_lib.Find(e.path);
         if (g_lib.Contains(id)) RecordListening(id, e.seconds, e.manual, (uint32_t)std::min<uint64_t>(e.time, UINT32_MAX));
     }
+}
+// Sharing with network players: its lasting id is made the first time it is needed.
+web::Share ShareSettings() {
+    web::Share s;
+    s.on = g.settings.webShare;
+    if (s.on && g.settings.webShareId.empty()) {
+        g.settings.webShareId = web::NewShareId();
+        SaveSettings();
+    }
+    s.udn = g.settings.webShareId;
+    char host[256] = "";
+    s.name = "cordinal" + (!gethostname(host, sizeof(host) - 1) && *host ? " (" + std::string(host) + ")" : std::string());
+    return s;
 }
 void StartRemote() {
     web::RemoteConfig config;
@@ -65,6 +79,7 @@ void StartWeb() {
         at = end + 1;
     }
     config.notify = [] { PostMessageW(nullptr, WM_APP_WEB, 0, 0); };
+    config.share = ShareSettings();
     running = server.Start(config);
     builder.Reset();
     if (!running) ShowMessage(compat::Widen(server.GetStatus().error.c_str()));
@@ -113,6 +128,23 @@ void SetWebAway(bool on) {
     else if (!running) { StartWeb(); if (running) PairWeb(); }
     else if (!remote.Running()) StartRemote();
     g.redraw = true;
+}
+void SetWebShare(bool on) {
+    g.settings.webShare = on;
+    SaveSettings();
+    server.SetShare(ShareSettings());
+    // Sharing needs the server: turning it on starts it, as Listen away from home does.
+    if (on && !running) StartWeb();
+    g.redraw = true;
+}
+std::string WebShareText() {
+    if (!g.settings.webShare)
+        return "Off. Turn this on so players on this network (foobar2000, VLC, Kodi, a TV) can browse and play your "
+               "library. They don't pair, so anyone on this network can.";
+    if (!running) return "On. Start the server to share.";
+    auto s = server.GetStatus();
+    return "On as \"" + ShareSettings().name + "\": players on this network can browse and play your library." +
+           (s.shareError.empty() ? "" : " " + s.shareError);
 }
 void RetryWebAway() {
     if (!remote.Running()) return;

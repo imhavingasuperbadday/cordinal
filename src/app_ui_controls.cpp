@@ -52,14 +52,13 @@ LRESULT CALLBACK SearchSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
 }
 
 // Flat list header in both themes: the list's own background so header and rows read as one
-// surface, quiet labels, short faint dividers (enough to find a column edge) and the sort arrow.
+// surface, quiet labels, short faint dividers (enough to find a column edge) and the sort arrow. The
+// track list's header takes its own mouse (app_columns.cpp ColumnHeaderInput): the native one's
+// resizing and drag-reordering never run, so they cannot leave a column of no width or lose a move.
 LRESULT CALLBACK HeaderSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
-    if (h == g.header && (msg == WM_LBUTTONUP || msg == WM_LBUTTONDBLCLK)) {
-        // Let the header finish resizing/reordering before capturing the resulting columns.
-        LRESULT result = DefSubclassProc(h, msg, wp, lp);
-        SaveColumns();
-        if (FoobarMode()) RefreshViewKeepingSelection();  // the cover column's width sets the groups' heights
-        return result;
+    if (h == g.header) {
+        LRESULT result = 0;
+        if (ColumnHeaderInput(h, msg, lp, result)) return result;
     }
     if (msg == WM_RBUTTONUP) {
         // A list view keeps its header's right-click to itself, so no WM_CONTEXTMENU ever reached the
@@ -97,6 +96,9 @@ LRESULT CALLBACK HeaderSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
             item.pszText = text;
             item.cchTextMax = (int)std::size(text);
             Header_GetItem(h, i, &item);
+            // The column under the mouse, pressed or being moved, when it sorts or moves at all.
+            if (h == g.header && i == ColumnHeaderHot() && ColumnHeaderLive(i) && !foobar)
+                FillSolid(dc, {r.left, r.top, r.right, r.bottom - 1}, Ref(P().hover));
             // Column divider.
             FillSolid(dc, {r.right - 1, r.top + (foobar ? 0 : S(6)), r.right, r.bottom - (foobar ? 0 : S(6))}, divider);
             UINT fmt = item.fmt & (HDF_LEFT | HDF_CENTER | HDF_RIGHT);
@@ -134,6 +136,9 @@ LRESULT CALLBACK HeaderSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
             }
         }
         FillSolid(dc, {rc.left, rc.bottom - 1, rc.right, rc.bottom}, Ref(P().border));
+        // Where a column being dragged would land.
+        if (int drop = h == g.header ? ColumnHeaderDropX() : -1; drop >= 0)
+            FillSolid(dc, {std::max(0, drop - S(1)), rc.top, drop + S(1), rc.bottom}, Ref(P().accent));
         SelectObject(dc, old);
         EndPaint(h, &ps);
         return 0;

@@ -64,7 +64,7 @@ void DiscordTick() {
         now.path = g_lib.Path(g.playing);  // the track's custom cover, when it has one
         now.position = g.engine.Position();
         now.duration = g.engine.Duration() > 0 ? g.engine.Duration() : t.Duration();
-        now.rate = g.speed * g.tempo;
+        now.rate = g.settings.speed * g.settings.tempo;
     }
     discord::Update(now);
 }

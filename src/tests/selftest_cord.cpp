@@ -9,6 +9,7 @@
 #include "tags.h"
 #include "tagwriter.h"
 #include "native_audio.h"
+#include "encode/flac_encoder.h"
 
 #include <limits>
 #include <tuple>
@@ -560,6 +561,53 @@ void TestCordConversion(const std::wstring& root, const std::wstring& scratch) {
         }
     }
     Check(formats.Passed(), L"exports preserve lossless precision and tags across rates, channels, transients and final blocks%ls", formats.failed.c_str());
+
+    batch.Next(L"the built-in FLAC encoder decodes back exactly at every depth, channel count and block "
+               L"length, codes matching channels as side, and predicts tones in a fraction of their size");
+
+    // The stream as the encoder alone makes it: STREAMINFO (the last metadata block), then frames.
+    auto encodeFlac = [](const std::wstring& path, const std::vector<int32_t>& samples, unsigned channels,
+                         unsigned bits, unsigned rate) {
+        MemoryPcm pcm(samples, channels, bits, 0, rate);
+        cordinal::encode::FlacEncoder encoder(rate, channels, bits);
+        std::string body;
+        std::vector<int32_t> block(cordinal::encode::FlacEncoder::kBlockFrames * channels);
+        while (const size_t n = pcm.Read(block.data(), cordinal::encode::FlacEncoder::kBlockFrames))
+            encoder.Frame(block.data(), n, body);
+        const bool sized = samples.empty() || (encoder.MinFrameBytes() && encoder.MinFrameBytes() <= encoder.MaxFrameBytes());
+        const std::string file = std::string("fLaC\x80\0\0\x22", 8) +
+                                 cordinal::encode::FlacStreamInfo(rate, channels, bits, samples.size() / channels, encoder.MinFrameBytes(),
+                                                                  encoder.MaxFrameBytes(), pcm.Digest()) + body;
+        WriteTestBytes(path, file);
+        const Exact back = ReadAll(path);
+        return std::pair{sized && back.opened && !back.damaged && back.samples == samples && back.digest == pcm.Digest() &&
+                             back.format.bits == bits && back.format.channels == channels && back.format.rate == rate,
+                         file};
+    };
+    testlog::Cases flac;
+    for (const auto [bits, channels, frames, rate] : {std::tuple{16u, 2u, 50000u, 44100u}, {24u, 2u, 12289u, 96000u},
+          {32u, 2u, 9000u, 44100u}, {31u, 2u, 9000u, 48000u}, {12u, 1u, 4096u, 8000u}, {20u, 5u, 9000u, 22050u},
+          {4u, 2u, 300u, 11025u}, {8u, 2u, 17u, 44100u}, {16u, 1u, 1u, 44100u}, {16u, 8u, 4097u, 705600u}}) {
+        const std::wstring name = std::to_wstring(bits) + L"-" + std::to_wstring(channels) + L"-" + std::to_wstring(frames);
+        flac.Add(encodeFlac(dir + L"\\encoder-" + name + L".flac", Signal(bits, channels, frames, 7), channels, bits, rate).first, name);
+    }
+    // Identical channels: the second is all zeros as side, so every frame uses a side mode (8..10).
+    std::vector<int32_t> twin = Signal(16, 1, 20000, 3), twins(twin.size() * 2);
+    for (size_t i = 0; i < twin.size(); ++i) twins[2 * i] = twins[2 * i + 1] = twin[i];
+    const auto [twinsOk, twinsFile] = encodeFlac(dir + L"\\encoder-twins.flac", twins, 2, 16, 44100);
+    flac.Add(twinsOk && twinsFile.size() > 45 && ((uint8_t)twinsFile[45] >> 4) >= 8, L"side mode");
+    // Three steady tones with one step of dither: under 4.5 bits a sample, which reference flac
+    // missed at -5 and -8 (4.9 and 4.7) when this was written.
+    std::vector<int32_t> tones(44100 * 2);
+    for (size_t i = 0; i < tones.size(); ++i) {
+        const double t = (double)(i / 2) / 44100;
+        tones[i] = (int32_t)std::lround(9000 * std::sin(2 * 3.14159265358979 * 440 * t) + 6000 * std::sin(2 * 3.14159265358979 * 1234.5 * t + (i & 1)) +
+                                        3000 * std::sin(2 * 3.14159265358979 * 5021 * t)) + (int32_t)((uint32_t)(i * 2654435761u) >> 31);
+    }
+    const auto [tonesOk, tonesFile] = encodeFlac(dir + L"\\encoder-tones.flac", tones, 2, 16, 44100);
+    flac.Add(tonesOk && tonesFile.size() < tones.size() * 9 / 16,
+             L"tones in " + std::to_wstring(tonesFile.size()) + L" of " + std::to_wstring(tones.size() * 2) + L" bytes");
+    Check(flac.Passed(), L"the built-in FLAC encoder decodes back exactly and compresses%ls", flac.failed.c_str());
 
     batch.Next(L"WAV, MP3 and AAC copies keep tags, lyrics and covers, decode completely and never "
                L"overwrite files");

@@ -49,10 +49,15 @@ unpacked (median of five starts on this machine). Format 2 and the IAT build mea
   decoded 2.75 of 3.30 MB because resident code is scattered over the section; choosing pages by
   function, and suspending the other threads across the copy so a page is never read half-written,
   is what made it pay.
+- **Hot code linked first (November 16, 2026).** The profile now lists exactly the functions that
+  ran (0.69 of 3.66 MiB, traced with breakpoints, not resident pages), and cordinal's cdpack build
+  links them first. Of 938 `.text` pages, 618 stay cold in ten 256 KiB blocks; `program` while
+  playing fell from 4.42 to 2.58 MB, and the player grew 17 KB.
 
-What stays private is the rest of the image: `.text` 1.84 MB, `.rdata` 0.71, `.pdata` 0.20, `.rsrc`
-0.15, `.data` 0.10. The native player keeps 1.5 to 1.8 MB of `.text` and 0.3 MB of `.rdata`
-resident.
+What stays private is the rest of the image: about 1.25 MB of `.text`, `.rdata` 0.71, `.pdata`
+0.20, `.rsrc` 0.15, `.data` 0.10. Next: the hot code still covers 319 pages for 0.69 MiB, because
+the linker orders each of its internal groups of `.text$mn` on its own; and `.rdata` could follow
+the same profile.
 
 ## 2. Windows 10 and other machines
 

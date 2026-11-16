@@ -26,8 +26,10 @@ struct Budget {
 constexpr Budget kBudgets[] = {
     {L"empty", L"first start: no library, album view", 6.0},
     {L"tracks", L"2,000-track library, track list", 5.5},
-    {L"albums", L"2,000-track library, album view with covers", 10.5},
-    {L"playing", L"2,000-track library, album view, playing", 12.75},
+    // The album view idle and playing: 7.91 to 7.98 and 10.20 to 10.23 MB on November 16, 2026, once the
+    // idle canvas trims WARP's working memory (soft_canvas.cpp); about 9.4 and 11.6 MB before.
+    {L"albums", L"2,000-track library, album view with covers", 8.75},
+    {L"playing", L"2,000-track library, album view, playing", 11.25},
     // Lightweight mode (app_lightweight.cpp): the same, playing on with the window put away and the
     // memory it no longer needs given back, measured with the playing scenario's player: 3.94 MB on
     // November 15, 2026.
@@ -42,7 +44,9 @@ constexpr Budget kBudgets[] = {
 // A packed build expands the whole native image into private memory, so every byte of program
 // adds a byte to every packed scenario above: a packed player's figure is the native one plus
 // about this much. The native image was 5.21 MiB when the budget was set.
-constexpr double kProgramBudget = 5.5;
+// Raised from 5.5 on November 16, 2026: the FLAC encoder, album tagging and duplicate finder landed
+// since, and the image measured 5.51 MB.
+constexpr double kProgramBudget = 5.75;
 
 // Where the budgets are heading: what the packed release player should show in Task Manager while
 // playing. docs/memory.md has the plan; the log reports the distance on every run.

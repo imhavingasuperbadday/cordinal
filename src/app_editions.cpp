@@ -226,7 +226,7 @@ LRESULT CALLBACK EditionProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                          LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_TABSTOP, kEditionList);
             g_edition.preferred = MakeControl(hwnd, 0, WC_BUTTONW, L"Set &preferred", BS_PUSHBUTTON | WS_TABSTOP,
                                               kEditionPreferred);
-            g_edition.compare = MakeControl(hwnd, 0, WC_BUTTONW, L"&Compare editions...", BS_PUSHBUTTON | WS_TABSTOP,
+            g_edition.compare = MakeControl(hwnd, 0, WC_BUTTONW, L"Co&mpare editions...", BS_PUSHBUTTON | WS_TABSTOP,
                                             kEditionCompare);
             g_edition.remove = MakeControl(hwnd, 0, WC_BUTTONW, L"&Remove from group...", BS_PUSHBUTTON | WS_TABSTOP,
                                            kEditionRemove);
@@ -715,9 +715,9 @@ void AppendEditionMenu(HMENU menu) {
     AppendMenuW(editions, MF_STRING, IDM_EDITION_SPLIT, L"&Split album group");
     AppendMenuW(editions, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(editions, MF_STRING, IDM_EDITION_ART, L"Use this edition's &cover for the group");
-    AppendMenuW(editions, MF_STRING, IDM_EDITION_CLEAR_ART, L"&Clear group cover choice");
+    AppendMenuW(editions, MF_STRING, IDM_EDITION_CLEAR_ART, L"C&lear group cover choice");
     AppendMenuW(editions, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(editions, MF_STRING, IDM_EDITION_COMPARE, L"&Compare editions...");
+    AppendMenuW(editions, MF_STRING, IDM_EDITION_COMPARE, L"Co&mpare editions...");
     AppendMenuW(editions, MF_STRING, IDM_EDITION_VERSIONS, L"Other &versions...");
     UpdateEditionMenu(editions);
     AppendMenuW(menu, MF_POPUP, (UINT_PTR)editions, L"Album &editions");

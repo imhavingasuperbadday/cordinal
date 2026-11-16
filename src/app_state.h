@@ -91,6 +91,7 @@ constexpr UINT WM_APP_IPOD = WM_APP + 70;          // iPod scan (1), progress (0
 constexpr UINT WM_APP_COVERFETCH = WM_APP + 71;    // cover search results and progress (app_coverfetch.cpp)
 constexpr UINT WM_APP_COLLECTION = WM_APP + 72;    // collection export/import progress (0), or its result (1: lParam owns it)
 constexpr UINT WM_APP_KEYS = WM_APP + 73;          // a Lightweight mode numpad key: wParam = keymap numpad index, lParam = repeat
+constexpr UINT WM_APP_SPEAKERS = WM_APP + 74;      // lParam owns the network speakers a search found
 constexpr UINT_PTR kSearchTimer = 3;
 constexpr UINT_PTR kUiTimer = 1;
 constexpr UINT_PTR kBusyTimer = 5;  // animates the busy spinners (app_badges.cpp)
@@ -164,7 +165,7 @@ enum : int {
     IDM_EDITION_GROUP = 4100, IDM_EDITION_MANAGER, IDM_EDITION_PREFERRED, IDM_EDITION_REMOVE,
     IDM_EDITION_SPLIT, IDM_EDITION_COMPARE, IDM_EDITION_VERSIONS, IDM_EDITION_ART, IDM_EDITION_CLEAR_ART,
     IDM_SHUFFLE = 3200, IDM_REPEAT_BASE = 3201,  // + Repeat
-    IDM_RESUME = 3205, IDM_SKIP_SHUFFLE, IDM_RADIO, IDM_HEADPHONES,
+    IDM_RESUME = 3205, IDM_SKIP_SHUFFLE, IDM_RADIO, IDM_HEADPHONES, IDM_SPOTS,
     IDM_REGION_LOOP = 3210, IDM_REGION_CLEAR, IDM_REGION_PLAYER_MENU,
     IDM_SHUFFLE_ALBUMS, IDM_TASTE,
     IDM_THEME_BASE = 3220,
@@ -215,12 +216,24 @@ enum : int {
     IDM_FIND_COVER = 4210, IDM_FETCH_COVERS, IDM_FETCH_COVERS_CANCEL, IDM_ARTIST_INFO, IDM_RESTORE_COVER,
     IDM_COVER_FILE, IDM_COVER_PASTE, IDM_EDIT_ALBUM_TAGS,  // the track menu's Cover submenu, Edit album tags
     IDM_MAKE_ALBUM,  // Edit > Make album (app_albummaker.cpp)
+    IDM_TAG_ALBUM_MB,  // Edit > Tag album from MusicBrainz (app_albumtag.cpp)
     // File > Export collection and Import collection (app_collection.cpp), and Cancel.
     IDM_EXPORT_COLLECTION = 4220, IDM_IMPORT_COLLECTION, IDM_COLLECTION_CANCEL,
     IDM_MISSING_BASE = 4230,  // + kMissingFields index: Library > Find missing information
+    IDM_PLAY_HISTORY = 4290,  // Playback > Play history (app_spots.cpp)
+    // ASIO output (app_playback.cpp): the third output after IDM_OUTPUT_SHARED and _EXCLUSIVE, the driver
+    // picker Preferences > Output links to, and the playing driver's own settings.
+    IDM_OUTPUT_ASIO = 4300, IDM_ASIO_DRIVERS, IDM_ASIO_PANEL,
+    IDM_ASIO_DRIVER_BASE = 4310,  // + installed driver index, up to kMaxAsioDrivers
+    // Network speakers (app_playback.cpp): the chooser Preferences > Output links to, playing on this
+    // computer again, searching again, and the speakers the last search found.
+    IDM_SPEAKERS = 4350, IDM_SPEAKER_HERE, IDM_SPEAKER_SEARCH,
+    IDM_SPEAKER_BASE = 4360,  // + found speaker index, up to kMaxSpeakers
 };
 constexpr int kMaxPacks = 64, kMaxPackThemes = 64, kMaxPackAutoPlaylists = 64, kMaxPackColumnSets = 30;
 constexpr int kMaxHelpers = 32, kMaxHelperVisualizers = 16, kMaxHelperTools = 40;
+constexpr int kMaxAsioDrivers = 32;
+constexpr int kMaxSpeakers = 32;
 // Column types run from the built-in columns on into the packs' (app_packs.cpp), each a command id.
 constexpr int kMaxColumnTypes = 100;
 static_assert(ui::kColumnCount < kMaxColumnTypes);
@@ -419,11 +432,18 @@ struct App {
     int resumePl = -1;
     double resumePos = 0;
     unsigned long long resumeToken = 0;  // the token Resume() started; it seeks once it plays
+    // Songs left partway, newest first, each with where it was left (app_spots.cpp). A song drops out
+    // once it plays to its end. spotLeft is the song just left on purpose, so its start doesn't count.
+    std::vector<std::pair<TrackId, double>> spots;
+    TrackId spotLeft = kNone;
     int shuffle = kShuffleOff;
     bool skipAwareShuffle = false, radio = false, taste = false;
     Repeat repeat = Repeat::Off;
     bool stopAfterCurrent = false, seeking = false, alwaysOnTop = false;
-    bool exclusive = false;  // WASAPI exclusive output wanted
+    uint8_t output = 0;      // the output wanted, an OutputMode: 0 shared, 1 WASAPI exclusive, 2 ASIO
+    std::wstring asioDriver; // ASIO output's driver by its registry name; empty is the first installed
+    std::string networkSpeaker;  // the network speaker playing instead of this computer (speakers::DeviceId), or empty
+    bool upmix = false;      // spread stereo over a surround device's speakers (shared output)
     bool soundEffects = false;
     bool taskbarProgress = true;
     bool showFocusBoxes = false;
@@ -519,7 +539,7 @@ struct App {
     float rgHeadphoneHeadroom = 0;  // explicit per-output reserve for EQ performed inside a headset
     float rgKeep = 0.4f;  // the share of a loud album's cut that is skipped, so loud songs stay louder
     bool rgEstimate = true;  // unmeasured tracks get a quick estimate from their first seconds
-    // Effects after the EQ. Speed and tempo last for the session; the rest are saved.
+    // Effects after the EQ. Speed and tempo are kept in [Player] as they change; the rest are saved.
     ReverbSettings reverb;
     BitcrushSettings bitcrush;
     double speed = 1, tempo = 1;

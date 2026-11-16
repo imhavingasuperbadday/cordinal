@@ -54,9 +54,9 @@ void CreateControls(HWND hwnd) {
     CreateRadio(hwnd);
 
     // Virtual list view: LVS_OWNERDATA means the app supplies every row (g.view) on demand. The
-    // header is subclassed for the sort arrows and drag feedback.
+    // header is subclassed: it paints itself and takes its own mouse (app_columns.cpp).
     g.list = make(0, WC_LISTVIEWW, L"", LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS | WS_TABSTOP, IDC_LIST);
-    ListView_SetExtendedListViewStyle(g.list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_HEADERDRAGDROP |
+    ListView_SetExtendedListViewStyle(g.list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER |
                                                   LVS_EX_LABELTIP);
     SetWindowSubclass(g.list, ListSubclass, 0, 0);
     g.header = ListView_GetHeader(g.list);
@@ -93,7 +93,7 @@ void CreateControls(HWND hwnd) {
     // The status bar has no child windows for its parts, so its tools are keyed by index
     // (100 + part) rather than by handle, unlike the window-keyed tools elsewhere.
     const wchar_t* statusTips[] = {L"ReplayGain: click to switch between off, track and album gain",
-                                   L"Equalizer: click to open it (Ctrl+E)", L"Output: click to switch between shared and exclusive"};
+                                   L"Equalizer: click to open it (Ctrl+E)", L"Output: click to step through shared, exclusive and ASIO"};
     for (int i = 0; i < 3; ++i) {
         TTTOOLINFOW ti{sizeof(ti)};
         ti.uFlags = TTF_SUBCLASS;

@@ -16,7 +16,7 @@ web::LibraryBuilder builder;
 struct WebWindow {
     HWND hwnd = nullptr, port = nullptr, automatic = nullptr, toggle = nullptr, status = nullptr,
         addresses = nullptr, pair = nullptr, code = nullptr, fixed = nullptr, devices = nullptr, revoke = nullptr,
-        away = nullptr, awayStatus = nullptr, qr = nullptr, qrCaption = nullptr;
+        away = nullptr, awayStatus = nullptr, qr = nullptr, qrCaption = nullptr, share = nullptr, shareStatus = nullptr;
     std::vector<std::string> deviceIds;
     std::vector<std::wstring> deviceRows;
     std::wstring last, notice;  // notice: the answer to the last action, kept past the status refresh
@@ -28,7 +28,30 @@ struct WebWindow {
 } window;
 uint16_t savedPort = 8787;
 std::string fixedCode;  // checked by web::CheckFixedCode before it is kept
-bool automatic = false, initialized = false, away = false;
+bool automatic = false, initialized = false, away = false, share = false;
+
+// Sharing with network players (web::Share): its switch and lasting id in settings.ini, and the
+// name players list it under.
+web::Share ShareSettings() {
+    web::Share s;
+    s.on = share;
+    s.udn = ToUtf8(IniRead(L"Web", L"ShareId", L""));
+    if (!s.udn.starts_with("uuid:") && share) {
+        s.udn = web::NewShareId();
+        IniWrite(L"Web", L"ShareId", FromUtf8(s.udn).c_str());
+    }
+    wchar_t computer[MAX_COMPUTERNAME_LENGTH + 1] = L"";
+    DWORD size = (DWORD)std::size(computer);
+    s.name = "cordinal" + (GetComputerNameW(computer, &size) && *computer ? " (" + ToUtf8(computer) + ")" : std::string());
+    return s;
+}
+std::wstring ShareText(const web::Status& s) {
+    if (!share) return L"Off. Turn this on so players on this network (foobar2000, VLC, Kodi, a TV) can browse and play "
+                       L"your library. They don't pair, so anyone on this network can.";
+    if (!s.running) return L"On. Start the server to share.";
+    return L"On as \"" + FromUtf8(ShareSettings().name) + L"\": players on this network can browse and play your library." +
+           (s.shareError.empty() ? L"" : L" " + FromUtf8(s.shareError));
+}
 
 constexpr wchar_t kAwayQuestion[] =
     L"Listen away from home?\n\n"
@@ -169,6 +192,8 @@ void Refresh() {
 
     SendMessageW(window.away, BM_SETCHECK, away ? BST_CHECKED : BST_UNCHECKED, 0);
     SetTextIfChanged(window.awayStatus, AwayText(s));
+    SendMessageW(window.share, BM_SETCHECK, share ? BST_CHECKED : BST_UNCHECKED, 0);
+    SetTextIfChanged(window.shareStatus, ShareText(s));
     EnableWindow(GetDlgItem(window.hwnd, 116), away && remote.Running());
     EnableWindow(GetDlgItem(window.hwnd, 117), !s.away.empty());
 
@@ -216,6 +241,7 @@ void Start() {
     HWND notify = g.hwnd;
     config.notify = [notify] { PostMessageW(notify, WM_APP_WEB, 0, 0); };
     config.font = FontBytes(); config.icon = IconBytes();
+    config.share = ShareSettings();
     // Names a reverse proxy on this computer answers to (Tailscale Serve, say), from settings.ini.
     std::string names = ToUtf8(IniRead(L"Web", L"Hosts", L""));
     for (size_t at = 0; at < names.size();) {
@@ -280,6 +306,8 @@ LRESULT CALLBACK Procedure(HWND h, UINT message, WPARAM wp, LPARAM lp) {
             window.qr = CreateWindowExW(0, L"CordinalWebCode", L"Pairing code to scan", WS_CHILD | WS_VISIBLE,
                 S(560), S(42), S(188), S(188), h, nullptr, g.inst, nullptr);
             window.qrCaption = Control(h, L"STATIC", L"", 0, 118, 560, 236, 188, 74);
+            window.share = Control(h, L"BUTTON", L"Share with network players", WS_TABSTOP | BS_AUTOCHECKBOX, 120, 560, 327, 188, 24);
+            window.shareStatus = Control(h, L"STATIC", L"", 0, 121, 560, 358, 188, 150);
             ApplyWindowTheme(h, P()); SetTimer(h, 1, 1000, nullptr); Refresh(); return 0;
         case WM_TIMER: Refresh(); return 0;
         case WM_COMMAND:
@@ -337,6 +365,13 @@ LRESULT CALLBACK Procedure(HWND h, UINT message, WPARAM wp, LPARAM lp) {
                     SetAway(on);
                     break;
                 }
+                case 120:
+                    share = SendMessageW(window.share, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                    IniWrite(L"Web", L"Share", share ? L"1" : L"0");
+                    server.SetShare(ShareSettings());
+                    // Sharing needs the server: turning it on starts it, as Listen away from home does.
+                    if (share && !server.GetStatus().running) Start();
+                    break;
                 case 116: remote.Retry(); window.notice = L"Checking again."; break;
                 case 117: CopyText(FromUtf8(server.GetStatus().away)); break;
                 case IDCANCEL: DestroyWindow(h); return 0;
@@ -370,6 +405,7 @@ void InitWebServer() {
     std::string code;
     fixedCode = web::CheckFixedCode(ToUtf8(IniRead(L"Web", L"Code", L"")), code) ? std::string{} : code;
     away = IniInt(L"Web", L"Away", 0) == 1 && IniInt(L"Web", L"AwayAgreed", 0) == 1;
+    share = IniInt(L"Web", L"Share", 0) == 1;
     server.SetFixedCode(fixedCode);
     server.LoadDevices(g.dataDir + L"\\web-devices.bin");
     if (automatic) Start();

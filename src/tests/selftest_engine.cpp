@@ -1,6 +1,7 @@
 // Headless engine checks of the self test (see selftest.cpp): gapless switching, seek and pause,
 // sample conversion, exclusive output and the 12 ms fade, under a hidden window and muted.
 #include "selftest_common.h"
+#include "asio.h"
 #include "audio_live.h"
 #include <bit>
 #include <cfenv>
@@ -258,6 +259,173 @@ void TestSampleConversion() {
               kExclusiveFormats[1] == SampleFormat::Int24In32 && kExclusiveFormats[2] == SampleFormat::Int24 &&
               kExclusiveFormats[3] == SampleFormat::Float32 && kExclusiveFormats[4] == SampleFormat::Int16,
           L"OUTPUT exclusive format order is 32-bit, 24-in-32, packed 24, float, then 16-bit");
+}
+
+// ASIO output's driver listing and sample conversion, which need no driver: registry entries parse
+// strictly, and every sample type the host writes holds exactly the integers the decoders read.
+void TestAsioConversion() {
+    testlog::Batch batch;
+    batch.Next(L"ASIO driver entries: a CLSID parses exactly, malformed ones and ProgIDs are refused");
+    CLSID id{};
+    const bool parsed = ParseClsid(L" {188135E1-7171-3434-854f-01A3C71F3DF9} ", id) && id.Data1 == 0x188135E1 &&
+                        id.Data2 == 0x7171 && id.Data3 == 0x3434 && id.Data4[0] == 0x85 && id.Data4[1] == 0x4F &&
+                        id.Data4[2] == 0x01 && id.Data4[3] == 0xA3 && id.Data4[7] == 0xF9;
+    Check(parsed, L"ASIO a braced CLSID with surrounding spaces and mixed case parses field by field");
+    testlog::Cases bad;
+    for (const wchar_t* text : {L"", L"188135E1-7171-3434-854F-01A3C71F3DF9", L"{188135E1-7171-3434-854F-01A3C71F3DF}",
+                                L"{188135E1x7171-3434-854F-01A3C71F3DF9}", L"{188135G1-7171-3434-854F-01A3C71F3DF9}",
+                                L"{188135E1-7171-3434-854F-01A3C71F3DF9}x", L"ASIO4ALL.Driver"}) {
+        CLSID ignored{};
+        bad.Add(!ParseClsid(text, ignored), text);
+    }
+    Check(bad.Passed(), L"ASIO malformed CLSIDs are refused%ls", bad.failed.c_str());
+    AsioDriverInfo info;
+    const bool named = ParseAsioDriver(L"Some Card ASIO", L"{00000000-0000-0000-0000-000000000001}", L"", info) &&
+                       info.name == L"Some Card ASIO" && info.description == L"Some Card ASIO" && info.clsid.Data4[7] == 1;
+    AsioDriverInfo none;
+    Check(named && !ParseAsioDriver(L"", L"{00000000-0000-0000-0000-000000000001}", L"x", none) &&
+              !ParseAsioDriver(L"Card", L"", L"x", none),
+          L"ASIO an entry needs a name and a CLSID; the description falls back to the name");
+    // Whatever is installed lists sorted, each with a name.
+    const std::vector<AsioDriverInfo> drivers = ListAsioDrivers();
+    bool listed = true;
+    for (size_t i = 0; i < drivers.size(); ++i)
+        listed &= !drivers[i].name.empty() && (i == 0 || _wcsicmp(drivers[i - 1].name.c_str(), drivers[i].name.c_str()) <= 0);
+    Check(listed, L"ASIO installed drivers list sorted by name (%zu found)", drivers.size());
+
+    batch.Next(L"ASIO sample types: each writes one channel of the stereo render exactly");
+    // Left is a ramp of exact 16-bit values, right its negation, so a wrong channel shows.
+    constexpr size_t kFrames = 64;
+    std::vector<float> stereo(kFrames * 2);
+    for (size_t i = 0; i < kFrames; ++i) {
+        const int v = (int)(i * 1021 % 65536) - 32768;
+        stereo[i * 2] = v / 32768.0f;
+        stereo[i * 2 + 1] = -v / 32768.0f;
+    }
+    std::vector<float> scratch(kFrames);
+    std::vector<uint8_t> out(kFrames * 8);
+    testlog::Cases types;
+    // The value at its wide: the right channel's +1.0 (from -32768) saturates to the largest step.
+    auto expected = [&](size_t i, unsigned ch, int bits) {
+        const int v = (int)(i * 1021 % 65536) - 32768;
+        return (int32_t)std::min<int64_t>((int64_t)(ch ? -v : v) << (bits - 16), (int64_t(1) << (bits - 1)) - 1);
+    };
+    for (unsigned ch : {0u, 1u}) {
+        const std::wstring side = ch ? L" right" : L" left";
+        WriteAsioChannel(stereo.data(), kFrames, 2, ch, asio::kInt16LSB, out.data(), scratch.data());
+        bool ok = true;
+        for (size_t i = 0; i < kFrames; ++i) ok &= ((const int16_t*)out.data())[i] == expected(i, ch, 16);
+        types.Add(ok, L"Int16LSB" + side);
+        WriteAsioChannel(stereo.data(), kFrames, 2, ch, asio::kInt32LSB16, out.data(), scratch.data());
+        ok = true;
+        for (size_t i = 0; i < kFrames; ++i) ok &= ((const int32_t*)out.data())[i] == expected(i, ch, 16);
+        types.Add(ok, L"Int32LSB16" + side);
+        WriteAsioChannel(stereo.data(), kFrames, 2, ch, asio::kInt32LSB24, out.data(), scratch.data());
+        ok = true;
+        for (size_t i = 0; i < kFrames; ++i) ok &= ((const int32_t*)out.data())[i] == expected(i, ch, 24);
+        types.Add(ok, L"Int32LSB24" + side);
+        WriteAsioChannel(stereo.data(), kFrames, 2, ch, asio::kInt24LSB, out.data(), scratch.data());
+        ok = true;
+        for (size_t i = 0; i < kFrames; ++i) {
+            const uint8_t* b = out.data() + i * 3;
+            ok &= ((int32_t)((uint32_t)b[0] << 8 | (uint32_t)b[1] << 16 | (uint32_t)b[2] << 24) >> 8) == expected(i, ch, 24);
+        }
+        types.Add(ok, L"Int24LSB" + side);
+        WriteAsioChannel(stereo.data(), kFrames, 2, ch, asio::kInt32LSB, out.data(), scratch.data());
+        ok = true;
+        for (size_t i = 0; i < kFrames; ++i) ok &= ((const int32_t*)out.data())[i] == expected(i, ch, 32);
+        types.Add(ok, L"Int32LSB" + side);
+        WriteAsioChannel(stereo.data(), kFrames, 2, ch, asio::kInt32LSB20, out.data(), scratch.data());
+        ok = true;
+        for (size_t i = 0; i < kFrames; ++i) ok &= ((const int32_t*)out.data())[i] == expected(i, ch, 20);
+        types.Add(ok, L"Int32LSB20" + side);
+        WriteAsioChannel(stereo.data(), kFrames, 2, ch, asio::kFloat32LSB, out.data(), scratch.data());
+        ok = true;
+        for (size_t i = 0; i < kFrames; ++i) ok &= ((const float*)out.data())[i] == stereo[i * 2 + ch];
+        types.Add(ok, L"Float32LSB" + side);
+        WriteAsioChannel(stereo.data(), kFrames, 2, ch, asio::kFloat64LSB, out.data(), scratch.data());
+        ok = true;
+        for (size_t i = 0; i < kFrames; ++i) ok &= ((const double*)out.data())[i] == (double)stereo[i * 2 + ch];
+        types.Add(ok, L"Float64LSB" + side);
+    }
+    Check(types.Passed(), L"ASIO every little-endian sample type holds the exact samples of its channel%ls", types.failed.c_str());
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float wild[2] = {nan, std::numeric_limits<float>::infinity()};
+    double wide[1] = {1};
+    WriteAsioChannel(wild, 1, 2, 0, asio::kFloat64LSB, wide, scratch.data());
+    Check(wide[0] == 0 && AsioTypeSupported(asio::kInt32LSB18) && !AsioTypeSupported(2 /* Int32MSB */) &&
+              !AsioTypeSupported(32 /* DSD */) && AsioSampleBits(asio::kInt32LSB24) == 24 &&
+              AsioSampleBytes(asio::kInt24LSB) == 3 && AsioTypeIsFloat(asio::kFloat64LSB),
+          L"ASIO a non-finite sample is silence; big-endian and DSD types are refused; widths are reported");
+}
+
+// ASIO output through the first installed driver, muted: it plays from the driver's buffer switch,
+// follows each track's rate, lets the driver go while paused and takes it back. Skipped when no ASIO
+// driver is installed, or the installed one can't play right now (another program holds it).
+void TestAsio(const std::wstring& root, HWND hwnd) {
+    testlog::Batch batch;
+    const std::vector<AsioDriverInfo> drivers = ListAsioDrivers();
+    if (drivers.empty()) {
+        testlog::Skip(L"ASIO output: no ASIO driver is installed");
+        return;
+    }
+    AudioOutput out;
+    std::atomic<unsigned long long> rendered{0};
+    AudioOutput::RenderFn silent = [&rendered](float* buffer, size_t frames, unsigned long long& pos) {
+        memset(buffer, 0, frames * 2 * sizeof(float));
+        pos += frames;
+        rendered += frames;
+        return frames;
+    };
+    out.SetAsioDriver(drivers.front().name);
+    out.SetMode(OutputMode::Asio);
+    std::wstring error;
+    if (!out.Start(silent, nullptr, error) || out.Mode() != OutputMode::Asio) {
+        testlog::Skip((L"ASIO output: " + drivers.front().name + L" can't play now: " +
+                       (error.empty() ? out.Problem() : error)).c_str());
+        return;
+    }
+    Pump(1500, [&] { return out.PlayedPosition() > 0; });
+    batch.Next(L"ASIO output plays from the driver's buffer switch and reports the driver and format");
+    Check(rendered.load() > 0 && out.PlayedPosition() > 0 && out.PlayedPosition() <= rendered.load() &&
+              !out.DeviceName().empty() && AsioTypeSupported(out.AsioType()) && out.HoldingDevice(),
+          L"ASIO %ls plays at %u Hz, %ls: rendered %llu frames, played %llu", out.DeviceName().c_str(), out.Rate(),
+          AsioTypeName(out.AsioType()), rendered.load(), out.PlayedPosition());
+    batch.Next(L"ASIO output follows the asked rate, or says why not");
+    const unsigned asked = out.Rate() == 44100 ? 48000 : 44100;
+    const unsigned got = out.RequestRate(asked);
+    Check(out.Mode() == OutputMode::Asio && (got == asked || out.Problem().find(std::to_wstring(asked)) != std::wstring::npos),
+          L"ASIO asked for %u Hz, runs at %u Hz%ls%ls", asked, got, out.Problem().empty() ? L"" : L": ",
+          out.Problem().c_str());
+    batch.Next(L"ASIO output lets the driver go while paused and takes it back on resume");
+    out.SetPaused(true);
+    Pump(4000, [&] { return !out.HoldingDevice(); });
+    const bool letGo = !out.HoldingDevice();
+    out.SetPaused(false);
+    Pump(3000, [&] { return out.HoldingDevice() && out.Mode() == OutputMode::Asio; });
+    const auto resumed = rendered.load();
+    Pump(1000, [&] { return rendered.load() > resumed; });
+    Check(letGo && out.HoldingDevice() && out.Mode() == OutputMode::Asio && rendered.load() > resumed,
+          L"ASIO a paused output unloads the driver and resuming plays through it again");
+    out.Stop();
+    Check(!out.HoldingDevice(), L"ASIO Stop unloads the driver");
+
+    // Through the engine: a 44.1 kHz FLAC plays through ASIO, and Output() says so.
+    Engine engine;
+    engine.Init(hwnd, error);
+    engine.SetVolume(0);
+    engine.SetOutputMode(OutputMode::Asio, drivers.front().name);
+    engine.Play(PlayItem{1, root + L"\\gap2\\a.flac"});
+    Pump(2500, [&] { return engine.Output().asio && engine.Position() > 0.2; });
+    const Engine::OutputInfo o = engine.Output();
+    batch.Next(L"ASIO output through the engine plays the track and reports ASIO");
+    Check(o.asio && !o.exclusive && !o.device.empty() && engine.Position() > 0.2 &&
+              (o.rate == 44100 || o.problem.find(L"44100") != std::wstring::npos),
+          L"ASIO engine: %ls %u Hz %d-bit%ls, position %.2f s%ls%ls", o.device.c_str(), o.rate, o.bits,
+          o.floatFormat ? L" float" : L"", engine.Position(), o.problem.empty() ? L"" : L", ", o.problem.c_str());
+    engine.Stop();
+    Pump(200);
+    engine.Shutdown();
 }
 
 // Exclusive output opens the device at each track's own rate. It takes the audio device away
@@ -976,6 +1144,16 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
                 const double playedTo = g.engine.Position();
                 const bool played = !g.engine.Paused() && playedTo > 3.2;
                 silence();
+                // Choosing a song that has a remembered place carries on from it rather than restarting.
+                const auto wasSpots = g.spots;
+                g.spots = {{id, 3.0}};
+                PlayList({id}, 0);
+                // Started at 0 it would need about 3 s to get there; started at the place it is there at once.
+                Pump(1500, [&] { return g.engine.Position() > 2.9; });
+                const double spotAt = g.engine.Position();
+                const bool continued = spotAt > 2.9 && spotAt < 3.8;
+                g.spots = wasSpots;
+                silence();
                 g.resumeOn = wasResumeOn;
                 g.resumeInSong = wasInSong;
                 g.resumePlay = wasPlay;
@@ -986,6 +1164,7 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
                 g.playingPl = wasPlayingPl;
                 g.playingToken = wasPlayingToken;
                 g.decodingToken = wasDecodingToken;
+                Check(continued, L"choosing a song with a remembered place continues it at 3 s (was at %.2f s)", spotAt);
                 Check(waited && stayed && carriedOn && played,
                       L"opening with the last session's song waits paused at 3 s and plays on from there when asked "
                       L"(paused %d at %.2f, then %.2f; carried to %.2f, resumed at %.2f)",
@@ -1121,5 +1300,6 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
     batch.End();
     TestOutputIdleRelease();
     TestExclusive(DirectoryOf(gapDir), hwnd);
+    TestAsio(DirectoryOf(gapDir), hwnd);
     DestroyWindow(hwnd);
 }

@@ -29,7 +29,9 @@ MAX_EXTENTS = 4096
 WORKSPACE_SLOT = 32768  # format.h workspace_slot: one model set per decoding thread
 # Cold code is cut into blocks of about this much, each decoded as a whole on its first fault:
 # smaller blocks leave more code compressed and compress worse, larger ones decode more than runs.
-LAZY_BLOCK = 128 * 1024
+# 256 KiB since cordinal links its hot code first (November 16, 2026): 2.5 MiB of code is cold, and
+# 128 KiB blocks of it made the player 33 KB larger.
+LAZY_BLOCK = 256 * 1024
 # Images at least this large are split into DEFAULT_CHUNKS streams the loader decodes in parallel.
 # Four cost about 4% of the stream on cordinal's player and cut its decode time about threefold.
 DEFAULT_CHUNKS = 4

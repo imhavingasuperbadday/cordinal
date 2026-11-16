@@ -1,5 +1,6 @@
 // Main-window startup, idle work and ordered shutdown.
 #include "app.h"
+#include "audio_output.h"
 
 #include "customcover.h"
 #include "discord.h"
@@ -38,7 +39,9 @@ void CreateMainWindow(HWND hwnd) {
     g.engine.SetEq(g.eq);
     ApplyEffects();
     g.engine.SetLimiter(g.rgOn, g.rgHeadphoneHeadroom);
-    if (g.exclusive) g.engine.SetExclusive(true);
+    if (g.output) g.engine.SetOutputMode((OutputMode)g.output, g.asioDriver);
+    if (!g.networkSpeaker.empty()) g.engine.SetSpeaker(g.networkSpeaker);
+    if (g.upmix) g.engine.SetUpmix(true);
     SetVolumePercent(g.volumePercent);
     if (g.alwaysOnTop) SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
     DragAcceptFiles(hwnd, TRUE);
@@ -61,6 +64,9 @@ void FinishStartup(HWND hwnd) {
     // The last session's song, loaded and paused or playing. Files named on the command line play
     // instead, so nothing is reopened behind them.
     if (!g.startupPaths) ReopenLastTrack();
+    // Coming back: offer songs left partway and ones gone quiet, unless all there is is the song just reopened.
+    if (!g.startupPaths && HasComebacks())
+        PostMessageW(hwnd, WM_COMMAND, IDM_SPOTS, 0);
     UpdateNowPlaying();
     UpdateStatus();
     FountainWake();  // ApplyTheme skipped it while the window was still hidden
@@ -92,6 +98,7 @@ void StopAppWorkers(HWND hwnd) {
     StopTagWriter();
     StopOrganizer();
     StopConverter();
+    StopDuplicates();  // files it already moved take their history with them before the save
     StopCopier();
     StopCollection();
     StopIpod();

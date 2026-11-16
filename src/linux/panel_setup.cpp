@@ -5,6 +5,7 @@
 
 #include "audio_output.h"
 #include "listenbrainz.h"
+#include "speakers.h"
 #include "titleformat.h"
 
 namespace lx::panel {
@@ -148,19 +149,36 @@ void FormatText(const char* s) {
 
 // --- output device ------------------------------------------------------------------------------------
 // Preferences > Output > Output device: where the music plays. PipeWire sinks are listed as the server
-// reports them; "System default" follows the choice the desktop makes. The windows of the headphone page
-// on Windows (headset hardware controls, per-output sound profiles) have no counterpart here.
+// reports them; "System default" follows the choice the desktop makes. Network speakers (UPnP/DLNA
+// renderers, speakers.h) follow, found by a search on a worker each time the window opens or is
+// refreshed; a chosen one gets what the engine renders, as Windows' Network speaker... does. The windows
+// of the headphone page on Windows (headset hardware controls, per-output sound profiles) have no
+// counterpart here.
 constexpr int kDeviceRows = 9;
 constexpr float kDeviceW = 560, kDeviceH = 470;
 
 struct DevicePanel {
-    std::vector<OutputDevice> devices;
+    std::vector<OutputDevice> devices;  // sinks, then network speakers (node = speakers::DeviceId)
+    size_t sinks = 0;                   // how many of `devices` are sinks
+    bool searching = false;             // a network speaker search is running
     int first = 0;  // the first row shown
     Rect panel, list, refresh, close;
 } g_dev;
 
 // Row 0 is the system default, then each sink.
 std::string DeviceNodeOf(int row) { return row == 0 ? std::string() : g_dev.devices[row - 1].node; }
+
+// The sinks now, and a network speaker search on a worker; OnSpeakersFound adds what it finds.
+void ListDevices() {
+    g_dev.devices = ListOutputDevices();
+    g_dev.sinks = g_dev.devices.size();
+    if (g_dev.searching) return;
+    g_dev.searching = true;
+    std::thread([] {
+        auto found = new std::vector<speakers::Speaker>(speakers::Discover(2500));
+        if (!PostMessageW(nullptr, WM_APP_SPEAKERS, 0, (LPARAM)found)) delete found;
+    }).detach();
+}
 
 void ChooseDevice(int row) {
     g.settings.outputDevice = DeviceNodeOf(row);
@@ -186,9 +204,15 @@ void DrawDevice(const Palette& p) {
     }
     const bool missing = !g.settings.outputDevice.empty() &&
                          std::none_of(g_dev.devices.begin(), g_dev.devices.end(), [](const OutputDevice& d) { return d.node == g.settings.outputDevice; });
-    std::string note = g_dev.devices.empty() ? "No output devices were found (is PipeWire or PulseAudio running?)."
-                       : missing             ? "The chosen device (" + g.settings.outputDevice + ") isn't connected; the default plays instead."
-                                             : "Exclusive output uses the chosen device too.";
+    speakers::Speaker chosen;
+    const bool speaker = speakers::ParseDeviceId(g.settings.outputDevice, chosen);
+    std::string note = g_dev.sinks == 0 && !speaker ? "No output devices were found (is PipeWire or PulseAudio running?)."
+                       : speaker && missing && g_dev.searching ? "Looking for network speakers..."
+                       : speaker && missing ? chosen.name + " didn't answer the search; cordinal keeps trying it."
+                       : missing ? "The chosen device (" + g.settings.outputDevice + ") isn't connected; the default plays instead."
+                       : speaker ? "A network speaker gets what you hear here, EQ and ReplayGain included."
+                       : g_dev.searching ? "Exclusive output uses the chosen device too. Looking for network speakers..."
+                                         : "Exclusive output uses the chosen device too.";
     DrawText(Font::Small, note, x0, g_dev.list.B() + S(10), p.faint, w);
     const float by = panel.B() - pad - S(28);
     g_dev.close = {panel.R() - pad - S(90), by, S(90), S(28)};
@@ -200,7 +224,7 @@ void DrawDevice(const Palette& p) {
 void DeviceMouseDown(float x, float y) {
     if (!g_dev.panel.In(x, y) || g_dev.close.In(x, y)) return ClosePanel();
     if (g_dev.refresh.In(x, y)) {
-        g_dev.devices = ListOutputDevices();
+        ListDevices();
         g_dev.first = 0;
         return;
     }
@@ -212,7 +236,7 @@ void DeviceMouseDown(float x, float y) {
 void DeviceKey(const SDL_KeyboardEvent& e) {
     if (e.key == SDLK_ESCAPE || e.key == SDLK_RETURN || e.key == SDLK_KP_ENTER) return ClosePanel();
     if (e.key == SDLK_F5) {
-        g_dev.devices = ListOutputDevices();
+        ListDevices();
         return;
     }
     if (e.key != SDLK_UP && e.key != SDLK_DOWN) return;
@@ -739,9 +763,29 @@ void OpenLayout() {
     g.redraw = true;
 }
 void OpenOutputDevice() {
+    const bool searching = g_dev.searching;
     g_dev = DevicePanel{};
-    g_dev.devices = ListOutputDevices();
+    g_dev.searching = searching;
+    ListDevices();
     g_kind = Kind::Device;
+    g.redraw = true;
+}
+
+void OnSpeakersFound(LPARAM lp) {
+    std::unique_ptr<std::vector<speakers::Speaker>> found(reinterpret_cast<std::vector<speakers::Speaker>*>(lp));
+    g_dev.searching = false;
+    g_dev.devices.resize(g_dev.sinks);
+    for (const auto& s : *found) {
+        std::string label = s.name + (s.model.empty() || s.model == s.name ? "" : " (" + s.model + ")") + " \xE2\x80\x94 network speaker";
+        g_dev.devices.push_back({speakers::DeviceId(s), label, {}, false});
+        // The chosen speaker may have moved to another address: keep the choice on the one found.
+        speakers::Speaker chosen;
+        if (speakers::ParseDeviceId(g.settings.outputDevice, chosen) && chosen.udn == s.udn &&
+            g.settings.outputDevice != g_dev.devices.back().node) {
+            g.settings.outputDevice = g_dev.devices.back().node;
+            SaveSettings();
+        }
+    }
     g.redraw = true;
 }
 

@@ -27,9 +27,9 @@ overlays, EXE/DLL and TLS loading, forced ASLR, zero pages left demand-zero, cod
 fault (including a fixup inside a cold page), the IAT directory and unsupported CFG rejection.
 
 `build.bat cdpack` gives the player cold code from `tools/code-profile.txt`: the functions the
-memory-budget scenarios run, which `tools/make-code-profile.py` regenerates from a native build and
-which the packer finds again through `build/cordinal.map`. Without those files every chunk is eager
-and the image is about 88 KB smaller.
+memory-budget scenarios run, which `tools/make-code-profile.py` regenerates from a native build,
+which the build links first and which the packer finds again through `build/cordinal.map`. Without
+those files every chunk is eager: the file is smaller and all of its code stays in memory.
 
 See `spec.md`, `PROVENANCE.md`, `PORTING.md` and `origin.json` for the format and source history.
 The imported original code is GPL-2.0-or-later; `COPYING` preserves the license text. It contains

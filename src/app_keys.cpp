@@ -24,6 +24,11 @@ constexpr ExtraCommand kExtras[] = {
     {IDM_VOLUME_DOWN, L"Playback", L"Volume down"},
     {IDM_SEEK_BACK, L"Playback", L"Seek back 10 seconds"},
     {IDM_SEEK_FORWARD, L"Playback", L"Seek forward 10 seconds"},
+    // A row's right-click menu, so they can be found by name and given keys of your own too.
+    {IDM_PLAY_SEL, L"Playback", L"Play selected track", true},
+    {IDM_QUEUE_NEXT, L"Playback", L"Play next", true},
+    {IDM_QUEUE_ADD, L"Playback", L"Add to queue", true},
+    {IDM_SHOW_IN_EXPLORER, L"Edit", L"Show in Explorer", true},
 };
 constexpr const wchar_t* kSections[] = {L"Keys", L"Global keys"};  // by Scope
 constexpr int kHotkeyBase = 0x4D00;  // WM_HOTKEY ids, beside the media keys (1-4) and packs' (0x5000)
@@ -41,18 +46,11 @@ void Load() {
     s.changes.clear();
     if (g.iniPath.empty()) return;
     for (int scope = 0; scope < 2; ++scope) {
-        std::vector<wchar_t> buf(32768, 0);
-        DWORD n = GetPrivateProfileSectionW(kSections[scope], buf.data(), (DWORD)buf.size(), g.iniPath.c_str());
-        for (const wchar_t* at = buf.data(); at < buf.data() + n && *at; at += wcslen(at) + 1) {
-            std::wstring line = at;
-            size_t eq = line.find(L'=');
-            if (eq == std::wstring::npos) continue;
+        for (auto& [key, command] : IniEntries(kSections[scope])) {
             Binding b;
             b.scope = (Scope)scope;
-            if (!keymap::Parse(line.substr(0, eq), b.key) || !keymap::Allowed(b.scope, b.key)) continue;
-            b.command = line.substr(eq + 1);
-            b.command.erase(0, b.command.find_first_not_of(L' '));
-            b.command.erase(b.command.find_last_not_of(L' ') + 1);
+            if (!keymap::Parse(key, b.key) || !keymap::Allowed(b.scope, b.key)) continue;
+            b.command = std::move(command);
             std::erase_if(s.changes, [&](const Binding& o) { return o.scope == b.scope && o.key == b.key; });
             s.changes.push_back(std::move(b));
         }
@@ -61,11 +59,10 @@ void Load() {
 
 void Save() {
     for (int scope = 0; scope < 2; ++scope) {
-        std::wstring data;
+        std::vector<std::pair<std::wstring, std::wstring>> entries;
         for (const Binding& b : s.changes)
-            if ((int)b.scope == scope) data += keymap::Text(b.key) + L"=" + b.command + L'\0';
-        if (data.empty()) WritePrivateProfileStringW(kSections[scope], nullptr, nullptr, g.iniPath.c_str());
-        else WritePrivateProfileSectionW(kSections[scope], (data + L'\0').c_str(), g.iniPath.c_str());
+            if ((int)b.scope == scope) entries.emplace_back(keymap::Text(b.key), b.command);
+        IniReplaceSection(kSections[scope], entries);
     }
 }
 

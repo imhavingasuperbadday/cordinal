@@ -6,6 +6,7 @@
 #include "soft_canvas.h"
 
 #include <d3d11.h>
+#include <dxgi1_3.h>
 
 using Microsoft::WRL::ComPtr;
 
@@ -78,6 +79,15 @@ void SoftCanvas::ReleaseSurface() {
     ComPtr<ID3D11DeviceContext> immediate;
     if (device_ && SUCCEEDED(device_.As(&device))) device->GetImmediateContext(&immediate);
     if (immediate) immediate->Flush();
+    // WARP keeps its rasterizer's work context and tile and upload pools on the process heap between
+    // frames: 3 MB of the 7.7 MB allocated while the album view plays (docs/memory.md, "Hot code linked
+    // first"). Trim gives them back, as Direct3D asks of an app going idle, and the next frame makes
+    // them again. ClearState first, as Trim requires: Direct2D sets its own state for each frame.
+    ComPtr<IDXGIDevice3> dxgi;
+    if (device_ && SUCCEEDED(device_.As(&dxgi))) {
+        if (immediate) immediate->ClearState();
+        dxgi->Trim();
+    }
 }
 
 void SoftCanvas::Reset() {

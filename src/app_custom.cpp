@@ -29,16 +29,16 @@ struct Part {
 // The menu's show / hide items, in menu order. The index is the command's offset from
 // IDM_LAYOUT_PART_BASE and the key's position in [Layout] Parts, so entries are only ever appended.
 const Part kLayoutParts[] = {
-    {&MainLayout::transport, L"&Previous, play and next", false, L"transport"},
-    {&MainLayout::order, L"&Shuffle and repeat", false, L"order"},
+    {&MainLayout::transport, L"Previous, play and ne&xt", false, L"transport"},
+    {&MainLayout::order, L"S&huffle and repeat", false, L"order"},
     {&MainLayout::wave, L"&Waveform seek bar", false, L"waveform"},
     {&MainLayout::times, L"&Times", false, L"times"},
     {&MainLayout::volume, L"&Volume", true, L"volume"},
     {&MainLayout::nowPlaying, L"&Now playing (cover, title and artist)", false, L"now_playing"},
-    {&MainLayout::largeCover, L"&Large cover", false, L"large_cover"},
-    {&MainLayout::points, L"Level and p&oints", true, L"points"},
+    {&MainLayout::largeCover, L"Lar&ge cover", false, L"large_cover"},
+    {&MainLayout::points, L"&Level and points", true, L"points"},
     {&MainLayout::tabs, L"Playlist t&abs", false, L"tabs"},
-    {&MainLayout::search, L"Searc&h box", false, L"search"},
+    {&MainLayout::search, L"Search b&ox", false, L"search"},
     {&MainLayout::views, L"Library v&iew buttons", false, L"view_buttons"},
     {&MainLayout::upNext, L"&Up next panel", true, L"up_next"},
     {&MainLayout::status, L"Status &bar", false, L"status_bar"},
@@ -525,7 +525,7 @@ HMENU LayoutMenu() {
     AppendMenuW(wave, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(wave, MF_STRING, IDM_LAYOUT_WAVE_ROW, L"On a line of its &own");
     AppendWaveLookMenu(wave);
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)wave, L"Wa&veform");
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)wave, L"Wave&form");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     for (int i = 0; i < kPartCount; ++i) {
         AppendMenuW(m, MF_STRING, IDM_LAYOUT_PART_BASE + i, kLayoutParts[i].name);
@@ -545,8 +545,11 @@ HMENU LayoutMenu() {
     if (!packs.empty()) AppendMenuW(presets, MF_SEPARATOR, 0, nullptr);
     for (size_t i = 0; i < packs.size(); ++i)
         AppendMenuW(presets, MF_STRING, IDM_LAYOUT_PRESET_BASE + kPresetCount + i, packs[i]->name.c_str());
+    // The classic preset again, by the name people look for. It lives here rather than beside Presets
+    // so that every item of this long menu keeps an access key of its own.
+    AppendMenuW(presets, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(presets, MF_STRING, IDM_LAYOUT_PRESET_BASE, L"&Reset the layout");
     AppendMenuW(m, MF_POPUP, (UINT_PTR)presets, L"Pre&sets");
-    AppendMenuW(m, MF_STRING, IDM_LAYOUT_PRESET_BASE, L"Rese&t the layout");
     return m;
 }
 

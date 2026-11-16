@@ -2,6 +2,7 @@
 // window, covering the tabs, playback strip and background jobs, and ending with the recovered
 // tab/playback behaviour checks in port_regressions.cpp. No player instance or user state is used.
 #include "selftest_common.h"
+#include "column_layout.h"
 #include "cover_fade.h"
 #include "metadata_fetch.h"
 #include "radio.h"
@@ -30,6 +31,18 @@ unsigned ProcessThreads() {
         threads += entry.th32OwnerProcessID == GetCurrentProcessId();
     CloseHandle(snapshot);
     return threads;
+}
+
+// Bytes allocated from the process heap, where WARP and Direct2D keep their working memory.
+size_t HeapBusyBytes() {
+    HANDLE heap = GetProcessHeap();
+    size_t busy = 0;
+    if (!HeapLock(heap)) return 0;
+    PROCESS_HEAP_ENTRY entry{};
+    while (HeapWalk(heap, &entry))
+        if (entry.wFlags & PROCESS_HEAP_ENTRY_BUSY) busy += entry.cbData;
+    HeapUnlock(heap);
+    return busy;
 }
 
 // The now playing cover's change to the next one (cover_fade.h): it starts as the outgoing cover exactly,
@@ -123,6 +136,23 @@ void TestSoftCanvas() {
     const unsigned after = ProcessThreads();
     const auto* rows = static_cast<const uint32_t*>(bits);
     const bool painted = drawn && (rows[5 * 1400 + 5] & 0xFFFFFF) == 0x2040C0 && (rows[20 * 1400 + 15] & 0xFFFFFF) == 0x102030;
+    const uint32_t coverPixel = rows[125 * 1400 + 105];
+    // An idle view gives its surface back and trims what WARP keeps for drawing (about 3 MB of heap in
+    // the playing scenario); the next frame builds them again and draws the same picture.
+    const size_t busy = HeapBusyBytes();
+    canvas.ReleaseSurface();
+    const size_t released = HeapBusyBytes();
+    bool redrawn = drawn && canvas.Begin(1000, 700);
+    if (redrawn) {
+        context->Clear(D2D1::ColorF(0x102030));
+        context->DrawBitmap(cover.Get(), D2D1::RectF(20.0f, 40.0f, 190.0f, 210.0f));
+        context->FillRectangle(D2D1::RectF(0, 0, 10, 10), brush.Get());
+        redrawn = SUCCEEDED(canvas.End(memory, 0, 0)) && rows[125 * 1400 + 105] == coverPixel &&
+                  (rows[5 * 1400 + 5] & 0xFFFFFF) == 0x2040C0;
+    }
+    Check(redrawn, L"UI: the software canvas draws the same frame after giving its surface back");
+    Check(released + 512 * 1024 < busy, L"UI: giving the surface back trims WARP's heap (%zu KB before, %zu KB after)",
+          busy / 1024, released / 1024);
     SelectObject(memory, old);
     DeleteObject(dib);
     DeleteDC(memory);
@@ -980,6 +1010,91 @@ void TestKeyboardShortcuts() {
     batch.End();
 }
 
+// Every menu answers the keyboard: in the menu bar and the row and tab right-click menus, no two items
+// of one popup share an access key (a shared key only moves between them, so neither runs), and every
+// item the menus always show has one. The commands only a right-click held are in the palette too, and
+// a key saved under a command's old name still finds it.
+void TestMenuAccessKeys() {
+    using namespace app;
+    testlog::Batch batch;
+    batch.Next(L"menus: one access key per item in every popup");
+    HMENU bar = MainMenuBar() ? nullptr : BuildMenu();  // the test window is created without one
+    if (bar) SetMenu(g.hwnd, bar);
+    UpdateMainMenu(MainMenuBar());
+    testlog::Cases cases;
+    // `fixed`: the popup's items are cordinal's own, not themes, packs, helpers or numbers.
+    std::function<void(HMENU, const std::wstring&, bool)> walk = [&](HMENU menu, const std::wstring& path, bool fixed) {
+        std::map<wchar_t, std::wstring> keys;
+        for (int i = 0, n = GetMenuItemCount(menu); i < n; ++i) {
+            wchar_t text[256]{};
+            MENUITEMINFOW mi{sizeof(mi)};
+            mi.fMask = MIIM_FTYPE | MIIM_SUBMENU | MIIM_STRING | MIIM_ID;
+            mi.dwTypeData = text;
+            mi.cch = (UINT)std::size(text);
+            if (!GetMenuItemInfoW(menu, i, TRUE, &mi) || (mi.fType & MFT_SEPARATOR) || !text[0]) continue;
+            std::wstring label = text;
+            label = label.substr(0, label.find(L'\t'));
+            wchar_t key = 0;
+            for (size_t k = 0; k + 1 < label.size(); ++k) {
+                if (label[k] != L'&') continue;
+                if (label[k + 1] != L'&') key = (wchar_t)towlower(label[k + 1]);
+                ++k;
+            }
+            const std::wstring where = path + L" > " + label;
+            if (key) {
+                auto [at, added] = keys.emplace(key, where);
+                cases.Add(added, where + L" shares its key with " + at->second);
+            } else {
+                cases.Add(!fixed, where + L" has no access key");
+            }
+            // Themes, packs, helpers, speeds, ratings, export formats and the gaps to find are lists of
+            // names, where a missing key is no fault.
+            if (mi.hSubMenu) {
+                std::wstring name;
+                for (wchar_t c : label)
+                    if (c != L'&') name += c;
+                bool list = false;
+                for (const wchar_t* named : {L"Theme", L"Packs", L"Helpers", L"Run", L"Speed", L"Tempo", L"Rating",
+                                             L"Export .cord", L"Find missing information"})
+                    list = list || name.rfind(named, 0) == 0;
+                walk(mi.hSubMenu, where, fixed && !list);
+            }
+        }
+    };
+    walk(MainMenuBar(), L"Menu bar", true);
+    if (!Active().items.empty()) ListView_SetItemState(g.list, 0, LVIS_SELECTED, LVIS_SELECTED);
+    HMENU row = BuildListContextMenu(), tab = BuildTabContextMenu(g.active);
+    walk(row, L"Row menu", true);
+    walk(tab, L"Tab menu", true);
+    DestroyMenu(row);
+    DestroyMenu(tab);
+    Check(cases.Passed(), L"menus: every item has its own access key%ls", cases.failed.c_str());
+
+    batch.Next(L"menus: the menu bar builds before the window's list view exists");
+    // wWinMain builds the bar before CreateWindowExW, and the editions submenu asks for the selection
+    // on the way. Asking a missing list (it answered 0 for ever) used to stop the player starting.
+    HWND list = g.list, canvas = g.libView;
+    g.list = nullptr;
+    g.libView = nullptr;
+    HMENU startup = BuildMenu();
+    g.list = list;
+    g.libView = canvas;
+    Check(startup != nullptr, L"menus: BuildMenu with no list view still leaves a menu bar");
+    if (startup) DestroyMenu(startup);
+
+    batch.Next(L"menus: right-click commands are in the palette, and old names still find their command");
+    bool playNext = false, explorer = false;
+    for (const MenuCommandInfo& c : AllMenuCommands()) {
+        playNext = playNext || (c.command == IDM_QUEUE_NEXT && c.label == L"Play next");
+        explorer = explorer || (c.command == IDM_SHOW_IN_EXPLORER && c.label == L"Show in Explorer");
+    }
+    Check(playNext && explorer, L"menus: the palette lists Play next (%d) and Show in Explorer (%d)", playNext, explorer);
+    Check(MenuCommandByName(L"Edit > Reload selected metadata") == IDM_RELOAD_TAGS &&
+              MenuCommandByName(L"Edit > Reload tags from files") == IDM_RELOAD_TAGS,
+          L"menus: a key saved as Edit > Reload selected metadata still runs Reload tags from files");
+    batch.End();
+}
+
 void TestUiControls(const std::wstring& scratch) {
     using namespace app;
     testlog::Batch batch;
@@ -1560,6 +1675,22 @@ void TestUiControls(const std::wstring& scratch) {
     Check(ui::PlayedWidth(900, 0, 60) == 0 && ui::PlayedWidth(900, 30, 60) == 450 && ui::PlayedWidth(900, 90, 60) == 900 &&
               ui::PlayedWidth(900, 10, 0) == 0,
           L"UI: the playing row's underline follows the position");
+    {
+        // At 1.1x tempo a 31:35 mix at 148 BPM is heard as 28:43 at 163; the normal rate and other
+        // columns keep the tags' own values, and an untagged BPM stays blank.
+        Track mix;
+        mix.durationMs = (31 * 60 + 35) * 1000;
+        mix.bpm = 148;
+        std::wstring duration, bpm, title = L"kept", untagged = L"x";
+        Track bare;
+        bool heard = HeardCell(ui::kColDuration, mix, 1.1, duration) && duration == L"28:43" &&
+                     HeardCell(ui::kColBpm, mix, 1.1, bpm) && bpm == L"163" &&
+                     HeardCell(ui::kColBpm, bare, 1.1, untagged) && untagged.empty() &&
+                     !HeardCell(ui::kColDuration, mix, 1.0, duration) && !HeardCell(2, mix, 1.1, title) &&
+                     title == L"kept" && !HeardCell(ui::kColBpm, mix, 0.0, bpm) &&
+                     HeardSeconds(3600, 2.0) == 1800 && HeardSeconds(3600, 1.0) == 3600;
+        Check(heard, L"UI: Duration, BPM and totals say what is heard at the playback rate");
+    }
     Check(ui::FitTabPadding(400, 5, 600, 18, 8) == 18 && ui::FitTabPadding(400, 5, 500, 18, 8) == 8 &&
               ui::FitTabPadding(400, 5, 450, 18, 8) == -1,
           L"UI: crowded tabs tighten, then share the strip, before scrolling");
@@ -1851,10 +1982,112 @@ void TestUiControls(const std::wstring& scratch) {
         g_lib.ApplyTags(id, tags);
         g.playlists[1].items.push_back(id);
     }
+    g.playlists[1].presort.clear();
+    const auto unsortedOrder = g.playlists[1].items;
     ActivatePlaylist(1);
     SetWindowTextW(g.search, L"Track"); FlushSearch();
     SortByColumn(SubitemOf(2));
     SortByColumn(SubitemOf(2));
+    {
+        // A third click on the same header drops the sort and brings back the order from before it.
+        SortByColumn(SubitemOf(2));
+        batch.Next(L"UI: a third click on a sorted header restores the original order");
+        Check(g.sortColumn == -1 && Active().sortColumn == -1 && Active().items == unsortedOrder,
+              L"UI: a third click on the sorted header clears the sort and restores the original order");
+        SortByColumn(SubitemOf(2));
+        SortByColumn(SubitemOf(2));
+    }
+    {
+        // The column model both platforms share (column_layout.h).
+        testlog::Cases model;
+        const std::vector<ui::ColumnSpec> cols{{0, 28, 20, true}, {1, 44, 32, false}, {2, 280, 80, false},
+                                               {3, 190, 40, false}, {6, 70, 40, false}};
+        const auto fit = ui::FitColumns(cols);
+        model.Add(fit == std::vector<int>{28, 44, 280, 190, 70}, L"each column keeps its own width");
+        const auto apollo = ui::FitColumns(cols, 1000, 2);
+        model.Add(apollo[2] == 1000 - 28 - 44 - 190 - 70 && ui::FitColumns(cols, 100, 2)[2] == 80,
+                  L"Apollo's stretch column takes the room left, never below its least");
+        const auto squeezed = ui::DragDivider(cols, fit, 1, -500);
+        model.Add(squeezed[1] == 32 && squeezed[2] == fit[2], L"a divider stops at the least width and moves only its column");
+        model.Add(ui::DragDivider(cols, fit, 4, 30)[4] == 100, L"the last column widens into the empty room");
+        const auto traded = ui::DragDivider(cols, apollo, 2, 20, 2);
+        model.Add(traded[3] == 170 && traded[2] == apollo[2] + 20, L"Apollo's Title divider trades with the next column");
+        model.Add(!ui::DividerMoves(cols, 0) && ui::DividerMoves(cols, 4) && ui::DividerMoves(cols, 1),
+                  L"the gutter's divider stays put");
+        model.Add(ui::DividerAt(cols, fit, 28 + 44 + 3, 5) == 1 && ui::DividerAt(cols, fit, 28 + 2, 5) == -1,
+                  L"divider hit testing");
+        model.Add(ui::DropSlot(cols, fit, 0) == 1 && ui::DropSlot(cols, fit, 5000) == 5, L"nothing lands before the gutter");
+        std::vector<int> types{0, 1, 2, 3, 6};
+        model.Add(ui::MoveColumn(types, 4, 2) && types == std::vector<int>{0, 1, 6, 2, 3}, L"a column lands before its slot");
+        model.Add(!ui::MoveColumn(types, 2, 3) && !ui::MoveColumn(types, 2, 2), L"dropping a column beside itself moves nothing");
+        ui::SortState sort{-1, true};
+        sort = ui::NextSort(sort, 3, true);
+        const bool first = sort.column == 3 && sort.ascending;
+        sort = ui::NextSort(sort, 3, true);
+        const bool second = sort.column == 3 && !sort.ascending;
+        model.Add(first && second && ui::NextSort(sort, 3, true).column == -1 && ui::NextSort(sort, 3, false).ascending &&
+                      ui::NextSort(sort, 1, true).column == 3,
+                  L"header clicks sort up, down, then not at all; # never sorts");
+        batch.Next(L"UI: the shared column model sizes, resizes, moves and sorts");
+        Check(model.Passed(), L"UI: the shared column model sizes, resizes, moves and sorts%ls", model.failed.c_str());
+    }
+    {
+        // The header's own mouse (app_columns.cpp), through its real messages: the columns keep their own
+        // widths with the room past them empty, a divider dragged far left stops at the least width and
+        // moves only its column, a dragged column lands where it is dropped, and the playing gutter stays first.
+        const auto savedColumns = g.columns;
+        ResetColumns();
+        auto send = [](UINT msg, int x) {
+            SendMessageW(g.header, msg, msg == WM_LBUTTONUP ? 0 : MK_LBUTTON, MAKELPARAM(x, S(8)));
+        };
+        auto drag = [&](int from, int to) {
+            send(WM_LBUTTONDOWN, from);
+            send(WM_MOUSEMOVE, (from + to) / 2);
+            send(WM_MOUSEMOVE, to);
+            send(WM_LBUTTONUP, to);
+        };
+        auto item = [](int i) {
+            RECT r{};
+            Header_GetItemRect(g.header, i, &r);
+            return r;
+        };
+        auto total = [] {
+            int sum = 0;
+            for (int i = 0; i < (int)g.columns.size(); ++i) sum += ListView_GetColumnWidth(g.list, i);
+            return sum;
+        };
+        const int before = total();
+        const bool own = ListView_GetColumnWidth(g.list, SubitemOf(2)) == S(ColumnAt(2).width);
+        const int number = SubitemOf(1), title = ListView_GetColumnWidth(g.list, SubitemOf(2));
+        drag(item(number).right, item(number).left - S(200));
+        const int squeezed = ListView_GetColumnWidth(g.list, number);
+        const bool least = std::abs(squeezed - S(ui::ColumnLeast(1))) <= 1 &&
+                           ListView_GetColumnWidth(g.list, SubitemOf(2)) == title && total() == before - (S(44) - squeezed);
+        const int year = SubitemOf(5), artist = SubitemOf(3);
+        drag((item(year).left + item(year).right) / 2, item(artist).left + S(2));
+        const bool moved = SubitemOf(5) == artist && SubitemOf(3) == artist + 1;
+        drag(item(0).left + S(4), item(3).right);
+        const bool gutter = g.columns[0] == 0;
+        batch.Next(L"UI: the track list header resizes and moves columns by its own rules");
+        Check(own && least && moved && gutter,
+              L"UI: the header's columns keep their own widths (%d), a squeezed # keeps its least width (%d), a "
+              L"dropped column lands there (%d), the playing gutter stays first (%d)",
+              own, least, moved, gutter);
+        ShowColumns(savedColumns);
+    }
+    {
+        // # shows each track's number, which only means something inside its album: clicking it
+        // must not sort the whole list by it and scatter the albums.
+        const int sort = g.sortColumn;
+        const bool ascending = g.sortAscending;
+        const auto items = Active().items;
+        const auto view = g.view;
+        SortByColumn(SubitemOf(1));
+        batch.Next(L"UI: the # header does not sort the list");
+        Check(SubitemOf(1) >= 0 && g.sortColumn == sort && g.sortAscending == ascending &&
+                  Active().items == items && g.view == view,
+              L"UI: clicking the # header leaves the list's sort and order alone");
+    }
     ListView_SetItemState(g.list, 35, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
     ListView_EnsureVisible(g.list, 35, FALSE);
     const auto remembered = SelectedTracks();
@@ -2083,6 +2316,7 @@ void TestUiControls(const std::wstring& scratch) {
     TestWebPreferences(scratch);
     TestLightweightMode();
     TestKeyboardShortcuts();
+    TestMenuAccessKeys();
     batch.Next(L"UI: shutdown joins every application worker before destroying the test window");
     StopAppWorkers(g.hwnd);
     Check(!g.rgWorker.joinable() && !g.tagWorker.joinable() && !g.importWorker.joinable() && !g.artWorker.joinable(),

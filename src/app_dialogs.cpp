@@ -109,7 +109,7 @@ struct About {
         {L"Formats", L"Cordinal's own decoders for FLAC, WAV, AIFF, MPEG audio, Vorbis, AAC-LC, ALAC, WMA Standard, "
                      L"Opus, APE, WavPack and AC3, with Matroska audio support."},
         {L"Playback", L"Gapless playback, ReplayGain with an EBU R128 scanner, a 10-band equalizer, exclusive "
-                      L"(bit-perfect) output and a waveform seek bar."},
+                      L"and ASIO (bit-perfect) output and a waveform seek bar."},
         {L"Extras", L"A play log with cordinal points and a year in review, and two games played with your own music."},
     };
     // Layout in pixels, filled by Measure().
@@ -169,7 +169,7 @@ void PaintAbout(HDC dc, RECT rc) {
     const int right = a.width - a.pad;
     if (a.icon) DrawIconEx(dc, a.iconRect.left, a.iconRect.top, a.icon, a.iconSize, a.iconSize, 0, nullptr, DI_NORMAL);
     DrawAboutText(dc, a.titleFont, TextColor(), L"cordinal", a.textLeft, a.titleTop, right - a.textLeft, DT_SINGLELINE);
-    DrawAboutText(dc, g.font, SubColor(), L"Version 0.1.13", a.textLeft, a.versionTop, right - a.textLeft, DT_SINGLELINE);
+    DrawAboutText(dc, g.font, SubColor(), L"Version 0.1.14", a.textLeft, a.versionTop, right - a.textLeft, DT_SINGLELINE);
     DrawAboutText(dc, g.font, TextColor(), kAboutTagline, a.textLeft, a.taglineTop, right - a.textLeft, DT_WORDBREAK);
     FillSolid(dc, {a.pad, a.ruleY, right, a.ruleY + 1}, Ref(P().border));
     int y = a.rowsTop;

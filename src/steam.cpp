@@ -357,7 +357,8 @@ std::vector<SteamSong> SnapshotSteamSongs(const Library& library) {
         if (!(t.flags & (Track::kInLibrary | Track::kInbox)) || (t.flags & (Track::kMissing | Track::kExcluded))) continue;
         songs.push_back({library.Path(id), SongKey(library.View(t.title), library.View(t.artist), library.View(t.album),
                                                  library.View(t.date), t.trackNo, t.disc),
-                         t.audioHash, t.durationMs, t.codec, FormatPathKey(library.Path(id))});
+                         // Files are compared by the MD5 their tags carry; a measured hash has no counterpart there.
+                         HasStoredAudioHash(t) ? t.audioHash : 0, t.durationMs, t.codec, FormatPathKey(library.Path(id))});
     }
     return songs;
 }

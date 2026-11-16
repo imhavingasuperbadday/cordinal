@@ -34,6 +34,20 @@ struct RgResult {
     float high;      // how far the loud parts sit above the integrated loudness, LU
     bool ok = true;  // false: the track could not be decoded
     uint16_t bpm = 0;  // tempo detected while decoding, 0 when there is no clear beat
+    uint64_t audioHash = 0;  // AudioHasher's hash of the whole decode, 0 when cut short (see Apply)
+};
+
+// A 64-bit hash of a decoder's output, one interleaved stereo float frame at a time: identical
+// audio in any format cordinal decodes the same way hashes the same, whatever its tags or file.
+// It is cheap next to decoding (one multiply per frame), so measuring computes it on the way.
+// Never 0, which means "no hash" in Track::audioHash.
+class AudioHasher {
+public:
+    void Add(const float* stereo, size_t frames);
+    uint64_t Finish() const;
+
+private:
+    uint64_t h_ = 0x243F6A8885A308D3ull, frames_ = 0;
 };
 
 namespace replaygain {
@@ -79,7 +93,8 @@ bool HasLibraryTracks();
 // run. A result with ok == false and `cancel` set means cut short, neither measured nor failed.
 RgResult Measure(const TrackPath& item, uint64_t fileSize, uint64_t fileTime, const std::atomic<bool>& cancel,
                  std::atomic<std::shared_ptr<Decoder>>& current, BackgroundCpuBudget* budget);
-// Stores a worker's result in the library.
+// Stores a worker's result in the library. The audio hash fills Track::audioHash unless the file
+// stores its own (a FLAC or .cord MD5, read with the tags), so Find duplicates covers every format.
 void Apply(const RgResult& r);
 // Forgets the ReplayGain data of `ids`; returns how many tracks had any.
 size_t Clear(const std::vector<TrackId>& ids);

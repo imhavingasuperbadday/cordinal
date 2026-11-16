@@ -8,12 +8,10 @@ namespace app {
 // adopt the rect Windows suggests. Art is reloaded because its pixel size is DPI-based.
 void MainDpiChanged(HWND hwnd, WPARAM wp, LPARAM lp) {
     EndRename(true);
-    UINT oldDpi = g.dpi;
     g.dpi = HIWORD(wp);
     CreateFonts();
     ApplyFonts();
-    for (int i = 0; i < (int)g.columns.size(); ++i)
-        ListView_SetColumnWidth(g.list, i, MulDiv(ListView_GetColumnWidth(g.list, i), (int)g.dpi, (int)oldDpi));
+    FitListColumns();  // the saved widths are at 96 DPI
     auto* r = reinterpret_cast<RECT*>(lp);
     SetWindowPos(hwnd, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
     g.artFor = kNone;
@@ -132,6 +130,7 @@ bool MainContextMenu(WPARAM wp, LPARAM lp) {
     if ((HWND)wp == g.header) ShowColumnMenu(pt);
     else if ((HWND)wp == g.list || (HWND)wp == g.libView) ShowListContextMenu(pt);
     else if ((HWND)wp == g.tabs) ShowTabContextMenu(pt);
+    else if ((HWND)wp == g.buttons[5] && g.resumeOn) ShowSpots();  // right-click Resume: the remembered songs
     else if (ApolloContextMenu((HWND)wp, pt)) return true;  // the rebar: Apollo's options
     // The seek bar's section menu while a track plays. A mouse right-click is sent here rather than
     // posted, so the message loop's RegionMouse never sees it.
@@ -283,6 +282,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP_COLLECTION: OnCollectionMessage(wp, lp); return 0;
         case WM_APP_HELPER: OnHelperMessage(wp, lp); return 0;
         case WM_APP_STEAM: OnSteamDiscovery(wp, lp); return 0;
+        case WM_APP_SPEAKERS: OnSpeakersFound(lp); return 0;
         case WM_APP_WEB: if (wp == 1) OpenWebPlayer(); else WebTick(); return 0;
         case WM_APP_IMPORT: OnImportResult(lp); return 0;
         case WM_APP_ART: OnArtResult(lp); return 0;

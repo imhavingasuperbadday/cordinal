@@ -6,6 +6,8 @@
 // pairs it with its reply, and the command's arguments; on a stream's channel, audio.
 #include "pulse_native.h"
 
+#include "upmix.h"
+
 #include <fcntl.h>
 #include <poll.h>
 #include <pwd.h>
@@ -76,7 +78,8 @@ public:
         bytes.push_back(channels);
         Be32(rate);
     }
-    void ChannelMap(std::initializer_list<uint8_t> positions) {
+    void ChannelMap(std::initializer_list<uint8_t> positions) { ChannelMap(std::vector<uint8_t>(positions)); }
+    void ChannelMap(const std::vector<uint8_t>& positions) {
         bytes.push_back('m');
         bytes.push_back((uint8_t)positions.size());
         bytes.insert(bytes.end(), positions.begin(), positions.end());
@@ -167,10 +170,12 @@ public:
         channels = *p_++;
         rate = Take32();
     }
-    void ChannelMap() {
+    void ChannelMap(std::vector<uint8_t>* positions = nullptr) {
         if (!Tag('m') || !Need(1)) return;
         uint8_t n = *p_++;
-        if (Need(n)) p_ += n;
+        if (!Need(n)) return;
+        if (positions) positions->assign(p_, p_ + n);
+        p_ += n;
     }
     void CVolume() {
         if (!Tag('v') || !Need(1)) return;
@@ -259,7 +264,10 @@ bool ParseSinkInfo(TagReader& t, uint32_t version, sound::Sink& sink) {
     uint8_t format, channels;
     uint32_t rate;
     t.SampleSpec(format, channels, rate);
-    t.ChannelMap();
+    std::vector<uint8_t> positions;
+    t.ChannelMap(&positions);
+    sink.channels.clear();
+    for (uint8_t position : positions) sink.channels.push_back(PulsePositionName(position));
     t.U32();  // owner module
     t.CVolume();
     t.Bool();  // mute
@@ -612,6 +620,13 @@ public:
         active_ = p.active;
         wakeFd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
         scratch_.resize(kChunkFrames * 2);
+        if (!p.channels.empty()) {
+            layout_ = LayoutFromNames(p.channels);
+            upmixer_ = std::make_unique<Upmixer>();
+            upmixer_->Configure(layout_, p.rate);
+            multi_.resize((size_t)kChunkFrames * layout_.count);
+        }
+        frameBytes_ = sizeof(float) * (upmixer_ ? layout_.count : 2);
     }
     ~PulseStream() override {
         quit_ = true;
@@ -644,7 +659,6 @@ public:
 
 private:
     static constexpr uint32_t kChunkFrames = 4096;
-    static constexpr size_t kFrameBytes = 8;
 
     void Wake() {
         uint64_t one = 1;
@@ -653,10 +667,17 @@ private:
 
     bool Create(std::chrono::steady_clock::time_point deadline) {
         const uint32_t v = conn_.version;
-        const uint32_t period = params_.latencyFrames * (uint32_t)kFrameBytes;
+        const uint32_t period = params_.latencyFrames * (uint32_t)frameBytes_;
         Tags t;
-        t.SampleSpec(kSampleFloat32LE, 2, params_.rate);
-        t.ChannelMap({1, 2});  // front left, front right
+        const uint8_t channels = upmixer_ ? layout_.count : 2;
+        t.SampleSpec(kSampleFloat32LE, channels, params_.rate);
+        if (upmixer_) {
+            std::vector<uint8_t> map;
+            for (uint8_t c = 0; c < layout_.count; ++c) map.push_back(PulsePosition(layout_.at[c]));
+            t.ChannelMap(map);
+        } else {
+            t.ChannelMap({1, 2});  // front left, front right
+        }
         t.U32(kInvalid);       // sink index
         if (params_.target.empty()) t.Null();
         else t.Str(params_.target);
@@ -665,13 +686,18 @@ private:
         // tlength: two periods queued, but at least 60 ms. The server asks for data from its own
         // thread, often without real-time priority; with less queued a busy moment (a server
         // that has just started, say) underruns: tens of milliseconds of silence in the music.
-        const uint32_t floor = params_.rate * 60 / 1000 * (uint32_t)kFrameBytes;
+        const uint32_t floor = params_.rate * 60 / 1000 * (uint32_t)frameBytes_;
         t.U32(std::max(period * 2, floor));
         t.U32(kInvalid);    // prebuf: the server's (a full tlength)
         t.U32(period / 2);  // minreq
         t.U32(0);           // sync id
-        t.CVolume(2, kVolumeNorm);
-        for (int i = 0; i < 7; ++i) t.Bool(false);  // no remap, no remix, fix format/rate/channels, don't move, variable rate
+        t.CVolume(channels, kVolumeNorm);
+        // No remap, no remix, fix format/rate/channels, don't move, variable rate. An upmixed stream
+        // is not remixed: on a sink without some of its speakers those channels are dropped, not
+        // folded into the fronts, which already carry everything.
+        t.Bool(false);
+        t.Bool(upmixer_ != nullptr);
+        for (int i = 0; i < 5; ++i) t.Bool(false);
         t.Bool(false);  // start muted
         t.Bool(true);   // adjust latency: the sink runs at about tlength
         Dict props = {{"media.name", params_.name}, {"application.name", "cordinal"},
@@ -720,7 +746,7 @@ private:
             Latency l;
             if (command == kReply && ParseLatency(t, conn_.version, l)) {
                 int64_t sinkFrames = (int64_t)(l.sinkUsec * params_.rate / 1000000);
-                int64_t played = l.readIndex / (int64_t)kFrameBytes - sinkFrames;
+                int64_t played = l.readIndex / (int64_t)frameBytes_ - sinkFrames;
                 played_ = (uint64_t)std::max<int64_t>(0, std::min<int64_t>(played, (int64_t)written_));
             }
         }
@@ -754,6 +780,7 @@ private:
                 Tags t;
                 t.U32(channel_);
                 conn_.Command(kFlushPlaybackStream, t);
+                if (upmixer_) upmixer_->Reset();
             }
             auto now = std::chrono::steady_clock::now();
             if (latencyTag_ == kInvalid && now - lastLatency > std::chrono::milliseconds(20)) {
@@ -766,17 +793,22 @@ private:
                 latencyTag_ = conn_.Command(kGetPlaybackLatency, t);
             }
             // Feed what the server asked for.
-            while (activeSent_ && requested_ >= kFrameBytes) {
-                uint32_t frames = (uint32_t)std::min<uint64_t>(requested_ / kFrameBytes, kChunkFrames);
+            while (activeSent_ && requested_ >= frameBytes_) {
+                uint32_t frames = (uint32_t)std::min<uint64_t>(requested_ / frameBytes_, kChunkFrames);
                 if (cb_.timing) cb_.timing(played_, serverRate_);
                 if (cb_.render) cb_.render(scratch_.data(), frames);
                 else std::fill(scratch_.begin(), scratch_.begin() + frames * 2, 0.0f);
-                if (!conn_.Send(channel_, scratch_.data(), (size_t)frames * kFrameBytes)) {
+                const float* data = scratch_.data();
+                if (upmixer_) {
+                    upmixer_->Process(scratch_.data(), frames, multi_.data());
+                    data = multi_.data();
+                }
+                if (!conn_.Send(channel_, data, (size_t)frames * frameBytes_)) {
                     Fail();
                     return;
                 }
                 written_ += frames;
-                requested_ -= (uint64_t)frames * kFrameBytes;
+                requested_ -= (uint64_t)frames * frameBytes_;
             }
         }
     }
@@ -795,7 +827,10 @@ private:
     bool activeSent_ = true, killed_ = false;
     uint32_t channel_ = kInvalid, latencyTag_ = kInvalid, serverRate_ = 0;
     uint64_t requested_ = 0, written_ = 0, played_ = 0;
-    std::vector<float> scratch_;
+    std::vector<float> scratch_, multi_;
+    SpeakerLayout layout_;
+    std::unique_ptr<Upmixer> upmixer_;
+    size_t frameBytes_ = 8;  // one frame of the stream: 4 bytes per channel
 };
 
 }  // namespace

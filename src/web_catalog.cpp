@@ -28,7 +28,8 @@ std::string TrackJson(const Track& t) {
         ",\"genre\":" + Json(t.genre) + ",\"codec\":" + Json(t.codec) + ",\"mime\":" + Json(t.mime) +
         ",\"duration\":" + std::to_string(t.duration) + ",\"number\":" + std::to_string(t.number) +
         ",\"disc\":" + std::to_string(t.disc) + ",\"plays\":" + std::to_string(t.plays) +
-        ",\"original\":" + (t.original ? "true" : "false") + '}';
+        ",\"original\":" + (t.original ? "true" : "false") +
+        ",\"file\":" + (IsSubtrack(t.path) ? "false" : "true") + '}';
 }
 namespace {
 std::string Value(const Request& r, const char* key) {
@@ -54,22 +55,9 @@ bool HasArtist(const Track& t, const std::string& artist) {
     return false;
 }
 }
-std::string Catalog(const Snapshot& s, const Request& r) {
-    std::string kind = Value(r, "view"), playlist = Value(r, "playlist"), album = Value(r, "album"),
-        artist = Value(r, "artist"), date = Value(r, "date");
-    size_t offset = (size_t)strtoull(Value(r, "offset").c_str(), nullptr, 10);
-    size_t limit = (size_t)std::clamp(strtoul(Value(r, "limit").c_str(), nullptr, 10), 1ul, 200ul);
-    if (Value(r, "limit").empty()) limit = 100;
-    if (kind == "playlists") {
-        std::string out = "{\"items\":[";
-        for (size_t i = 0; i < s.playlists.size(); ++i) {
-            if (i) out += ',';
-            const auto& p = s.playlists[i];
-            out += "{\"id\":" + Json(p.key) + ",\"name\":" + Json(p.name) + ",\"count\":" +
-                std::to_string(p.tracks.size()) + '}';
-        }
-        return out + "]}";
-    }
+std::vector<const Track*> CatalogTracks(const Snapshot& s, const Request& r) {
+    std::string playlist = Value(r, "playlist"), album = Value(r, "album"), artist = Value(r, "artist"),
+        date = Value(r, "date");
     auto words = FilterWords(textcase::Invariant(FromUtf8(Value(r, "q"))));
     std::vector<const Track*> tracks;
     if (!playlist.empty()) {
@@ -86,6 +74,24 @@ std::string Catalog(const Snapshot& s, const Request& r) {
         return (albumView && t->album != album) ||
             (r.query.count("date") && t->date != date) || !artistMatch || !Search(*t, words);
     });
+    return tracks;
+}
+std::string Catalog(const Snapshot& s, const Request& r) {
+    std::string kind = Value(r, "view");
+    size_t offset = (size_t)strtoull(Value(r, "offset").c_str(), nullptr, 10);
+    size_t limit = (size_t)std::clamp(strtoul(Value(r, "limit").c_str(), nullptr, 10), 1ul, 200ul);
+    if (Value(r, "limit").empty()) limit = 100;
+    if (kind == "playlists") {
+        std::string out = "{\"items\":[";
+        for (size_t i = 0; i < s.playlists.size(); ++i) {
+            if (i) out += ',';
+            const auto& p = s.playlists[i];
+            out += "{\"id\":" + Json(p.key) + ",\"name\":" + Json(p.name) + ",\"count\":" +
+                std::to_string(p.tracks.size()) + '}';
+        }
+        return out + "]}";
+    }
+    std::vector<const Track*> tracks = CatalogTracks(s, r);
     std::vector<std::string> items;
     if (kind == "albums" || kind == "artists") {
         std::map<GroupKey, std::vector<const Track*>> groups;

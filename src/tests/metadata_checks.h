@@ -4,6 +4,7 @@
 // cover with undo. The Windows self-test (selftest_metadata.cpp, suite "metadata") and the Linux core
 // test (core_test.cpp, "metadata") both run them, so the portable core is held to one standard.
 #pragma once
+#include "album_tagger.h"
 #include "backup.h"
 #include "coverfetch.h"
 #include "coverupload.h"
@@ -638,10 +639,90 @@ inline Group Discography() {
     return g;
 }
 
+// Tagging a whole album from MusicBrainz (album_tagger.h): the search and release replies, matching
+// local tracks by title, duration and position, ranking pressings, and the edits proposed.
+inline Group AlbumTagger() {
+    using namespace albumtag;
+    Group g{"album tagger"};
+    const auto found = ParseReleaseSearch(R"({"releases":[
+        {"id":"11111111-1111-4111-8111-111111111111","score":100,"title":"Two Sides","date":"2005-01-03",
+         "country":"GB","track-count":4,"artist-credit":[{"name":"Ann","joinphrase":" & "},{"artist":{"name":"Bo"}}],
+         "release-group":{"id":"aaaaaaaa-1111-4111-8111-111111111111"},"label-info":[{"label":{"name":"Rough"}}],
+         "media":[{"format":"CD"},{"format":"CD"}]},
+        {"id":"not-an-id","score":99,"title":"Two Sides"},
+        {"id":"22222222-2222-4222-8222-222222222222","score":80,"title":"Two Sides","track-count":5}]})");
+    g.Add(found.size() == 2 && found[0].artist == "Ann & Bo" && found[0].score == 100 && found[0].trackCount == 4 &&
+              found[0].label == "Rough" && found[0].format == "CD" && found[0].discs == 2 &&
+              found[0].groupId == "aaaaaaaa-1111-4111-8111-111111111111" && found[1].trackCount == 5,
+          "search replies give each release's credit, score, size, label and format, and skip bad ids");
+
+    // Two discs of two tracks; the second track takes its length from the recording, the third its
+    // artist from the release's credit.
+    auto releaseJson = [](const char* id, const char* group, int shift) {
+        return std::string(R"({"id":")") + id + R"(","title":"Two Sides","date":"2005-01-03","artist-credit":[{"name":"Ann"}],
+            "release-group":{"id":")" + group + R"("},"label-info":[{"label":{"name":"Rough"}}],"media":[
+            {"position":1,"format":"CD","tracks":[
+              {"position":1,"title":"Opening","length":)" + std::to_string(200000 + 1000 * shift) + R"(,"artist-credit":[{"name":"Ann"}]},
+              {"position":2,"title":"Second Song","length":null,"recording":{"length":)" + std::to_string(181000 + 1000 * shift) + R"(}}]},
+            {"position":2,"format":"CD","tracks":[
+              {"position":1,"title":"Flip","length":)" + std::to_string(240000 + 1000 * shift) + R"j(},
+              {"position":2,"title":"Last One (Live)","length":)j" +std::to_string(300000 + 1000 * shift) + R"(}]}]})";
+    };
+    Release right, wrong, other;
+    const bool parsed = ParseRelease(releaseJson("11111111-1111-4111-8111-111111111111", "aaaaaaaa-1111-4111-8111-111111111111", 0), right) &&
+                        ParseRelease(releaseJson("33333333-3333-4333-8333-333333333333", "aaaaaaaa-1111-4111-8111-111111111111", 30), wrong) &&
+                        ParseRelease(releaseJson("44444444-4444-4444-8444-444444444444", "bbbbbbbb-1111-4111-8111-111111111111", 0), other);
+    g.Add(parsed && right.tracks.size() == 4 && right.discs == 2 && right.tracks[1].seconds == 181 &&
+              right.tracks[2].disc == 2 && right.tracks[2].position == 1 && right.tracks[2].discTracks == 2 &&
+              right.tracks[2].artist == "Ann" && right.tracks[3].title == "Last One (Live)",
+          "a release lookup gives every disc's tracks with positions, lengths and credits");
+
+    // The local album: out of order, one title spelled differently, one track the release lacks.
+    std::vector<LocalTrack> local(5);
+    local[0] = {1, "flip", "Ann", "Two Sides", "", "2005", "", "", "", 1, 0, 0, 0, 241.4};
+    local[1] = {2, "Opening", "Ann", "Two Sides", "", "2004", "", "", "", 1, 0, 0, 0, 199.0};
+    local[2] = {3, "Last One", "Ann", "Two Sides", "", "", "", "", "", 4, 0, 0, 0, 300.2};
+    local[3] = {4, "Second Song", "Ann", "Two Sides", "Ann", "2005-01-03", "Rough", right.id, right.groupId, 2, 2, 1, 2, 181.0};
+    local[4] = {5, "Hidden Bonus", "Ann", "Two Sides", "", "", "", "", "", 9, 0, 0, 0, 30.0};
+    const Match all = MatchRelease(local, right);
+    const std::vector<LocalTrack> album(local.begin(), local.begin() + 4);
+    const Match m = MatchRelease(album, right);
+    g.Add(all.pick == std::vector<int>{2, 0, 3, 1, -1} && m.timed == 4 && m.close == 4 && m.confidence >= kConfident &&
+              all.confidence < kConfident,
+          "local tracks find their release tracks by title, length and position; a stray track finds none and "
+          "makes the match less certain");
+
+    SearchResult ranked;
+    ranked.candidates = {{wrong, MatchRelease(album, wrong)}, {right, m}};
+    Rank(ranked);
+    g.Add(ranked.confident && ranked.candidates[0].release.id == right.id &&
+              ranked.candidates[1].match.confidence < m.confidence,
+          "lengths pick the right pressing of a release");
+    SearchResult tied;
+    tied.candidates = {{right, m}, {other, MatchRelease(album, other)}};
+    Rank(tied);
+    g.Add(!tied.confident, "two release groups that match equally well are left for the listener to choose");
+
+    std::vector<Change> changes;
+    const auto edits = Propose(local, right, all, &changes);
+    auto changed = [&](size_t track, const std::string& field, const std::string& after) {
+        return std::any_of(changes.begin(), changes.end(),
+                           [&](const Change& c) { return c.track == track && c.field == field && c.after == after; });
+    };
+    const TagEdit* flip = edits.empty() ? nullptr : &edits[0].second;
+    g.Add(edits.size() == 3 && edits[0].first == 1 && flip && flip->title == std::optional<std::string>("Flip") &&
+              flip->disc == std::optional<uint32_t>(2) && flip->discTotal == std::optional<uint32_t>(2) && !flip->date &&
+              flip->musicBrainzRelease == std::optional<std::string>(right.id) && changed(1, "Date", "2005-01-03") &&
+              changed(2, "Title", "Last One (Live)") && changed(2, "Track", "2") && changed(0, "Album artist", "Ann") &&
+              std::none_of(edits.begin(), edits.end(), [](const auto& e) { return e.first == 4 || e.first == 5; }),
+          "proposals change only what differs, keep a date already in the release's year, and skip unmatched tracks");
+    return g;
+}
+
 inline std::vector<Group> All(const std::wstring& scratch) {
     return {Parsers(), Scoring(), Images(), TextImages(), FolderWrites(scratch), CustomCovers(scratch), CoverUpload(),
             Review(scratch),
-            Generations(), Lyrics(), LrcWrite(scratch), Artist(), Discography(), CoverAddresses()};
+            Generations(), Lyrics(), LrcWrite(scratch), Artist(), Discography(), CoverAddresses(), AlbumTagger()};
 }
 
 }  // namespace metadata_checks

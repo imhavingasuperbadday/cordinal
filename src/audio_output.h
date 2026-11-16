@@ -7,6 +7,11 @@
 // Exclusive mode: the device is opened at the rate the engine asks for, trying the widest integer
 // format first and then float, with no Windows mixing or resampling. Bit-perfect when the engine
 // doesn't change the samples either.
+// Upmix (shared mode only): on a device with more than two speakers, the stream is opened in the
+// device's own layout and the stereo render is spread over it by an Upmixer (upmix.h).
+// ASIO mode (Windows): an ASIO driver chosen by name (asio.h) plays the first two of its outputs at the
+// rate the engine asks for, in the driver's own sample type and buffer size, bypassing Windows audio.
+// Bit-perfect like exclusive mode. Falls back to shared output when the driver can't be opened.
 #pragma once
 #include <windows.h>
 
@@ -19,7 +24,7 @@
 #include <thread>
 #include <vector>
 
-enum class OutputMode { Shared, Exclusive };
+enum class OutputMode { Shared, Exclusive, Asio };
 
 #ifndef _WIN32
 // An audio sink the sound server (PipeWire or PulseAudio) offers, for choosing where cordinal plays.
@@ -102,17 +107,41 @@ public:
 
     // Source position that the speakers have actually reached.
     unsigned long long PlayedPosition() const { return played_; }
-    void DefaultDeviceChanged() { reopen_ = true; wake(); }
+    // ASIO output doesn't play through the Windows default device, so it doesn't follow it.
+    void DefaultDeviceChanged() {
+        if (mode_ == OutputMode::Asio && wantedMode_ == OutputMode::Asio) return;
+        reopen_ = true;
+        wake();
+    }
 
-    // Switches between shared and exclusive output (re-opens the device; ResetFn follows).
+    // Switches between shared, exclusive and ASIO output (re-opens the device; ResetFn follows).
     void SetMode(OutputMode mode);
     OutputMode Mode() const { return mode_; }  // the mode actually in use
     OutputMode WantedMode() const { return wantedMode_; }
-    // Exclusive mode: re-opens the device at `rate` (blocking until done) and returns the rate it
-    // runs at, which differs when the device can't do `rate`. Shared mode: returns Rate().
+    // Exclusive and ASIO modes: re-open the device at `rate` (blocking until done) and return the rate
+    // it runs at, which differs when the device can't do `rate`. Shared mode: returns Rate().
     unsigned RequestRate(unsigned rate);
     SampleFormat Format() const { return format_; }
-    std::wstring Problem() const;  // why exclusive mode isn't in use, or isn't at the asked rate
+    // Spreads stereo over every speaker of a surround device in shared mode (re-opens the device).
+    void SetUpmix(bool upmix);
+    // The layout being upmixed to ("5.1"), or empty while playing plain stereo.
+    std::string UpmixLabel() const;
+    std::wstring Problem() const;  // why exclusive or ASIO output isn't in use, or isn't at the asked rate
+#ifdef _WIN32
+    // The ASIO driver to use, by its registry name; empty picks the first installed one. Re-opens the
+    // device when ASIO output is in use.
+    void SetAsioDriver(const std::wstring& name);
+    std::wstring AsioDriver() const;  // the wanted name
+    std::wstring DeviceName() const;  // the ASIO driver playing, empty otherwise
+    // Plays on a network speaker (speakers.h, an id from speakers::DeviceId) instead of this computer's
+    // device, whatever the mode; empty comes back. The speaker is retried while it can't be reached.
+    void SetSpeaker(const std::string& id);
+    long AsioType() const { return asioType_; }  // its sample type (asio::SampleType), -1 when not ASIO
+    // Opens the playing ASIO driver's own settings (buffer size, clock). False when no driver is loaded.
+    bool ShowAsioPanel();
+#endif
+    // The network speaker chosen as output (SetSpeaker, or SetDevice on Linux), empty for none.
+    std::wstring SpeakerName() const;
     // True while a lost output device is being re-opened; playback is frozen until it returns.
     bool Waiting() const { return waiting_; }
     // False once a paused output has let the endpoint go (see Run). An exclusive stream keeps the
@@ -127,12 +156,15 @@ public:
     // For the sound stream's callbacks.
     size_t RenderInto(float* out, size_t frames, unsigned long long& sourcePos);
     void SetPlayed(unsigned long long pos) { played_ = pos; }
+    void ClearProblem();  // a network speaker that failed is playing again
     void SetGraphRate(unsigned graphRate);
 #endif
 
 private:
 #ifdef _WIN32
     void Run();
+    void RunSpeaker(unsigned long long& sourcePos);
+    std::string SpeakerId() const;
     void wake() { if (event_) SetEvent(event_); }
 #else
     void wake();
@@ -148,9 +180,17 @@ private:
     std::atomic<bool> quit_{false}, paused_{false}, flush_{false}, reopen_{false}, rateRequest_{false};
     std::atomic<unsigned> rate_{48000}, wantedRate_{0};
     std::atomic<OutputMode> mode_{OutputMode::Shared}, wantedMode_{OutputMode::Shared};
+    std::atomic<bool> wantedUpmix_{false};
+    std::string upmixLabel_;  // guarded by problemMx_
     std::atomic<bool> holding_{false};
     std::atomic<bool> waiting_{false};  // lost device, retrying the open
     std::atomic<SampleFormat> format_{SampleFormat::Float32};
+#ifdef _WIN32
+    std::atomic<long> asioType_{-1};
+    std::atomic<bool> panel_{false};
+    std::wstring asioDriver_, deviceName_;  // guarded by problemMx_
+    std::string speaker_;                   // guarded by problemMx_
+#endif
     std::atomic<unsigned long long> played_{0}, flushPos_{0};
     mutable std::mutex problemMx_;
     std::wstring problem_;

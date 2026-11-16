@@ -18,6 +18,7 @@ namespace {
 
 const wchar_t* const kRgModes[] = {L"Album", L"Track", L"By playback order"};
 const wchar_t* const kOffOn[] = {L"Off", L"On"};
+const wchar_t* const kOutputNames[] = {L"Shared", L"Exclusive", L"ASIO"};  // g.output, an OutputMode
 const wchar_t* const kLoopNames[] = {L"Ignore loop points", L"Play the loop once, then fade",
                                      L"Play the loop twice, then fade", L"Play the loop three times, then fade"};
 const wchar_t* const kReverbNames[] = {L"Off", L"Room", L"Hall", L"Plate"};
@@ -153,13 +154,21 @@ const Tweak kTweaks[] = {
      L"Track shuffle and Keep playing like this follow what you finish, rate, replay and come back to. Skips are judged by "
      L"their moment, and artists by how often you finish them, not how many of their songs you have.",
      TweakType::Bool, 0, 1, 0, [] { return (double)g.taste; }, [](double v) { g.taste = v != 0; }, IDM_TASTE},
-    {"output.exclusive", L"Player", L"Exclusive", L"Exclusive output",
-     L"Each track plays at its own rate, bit-perfect at 100% volume, and other programs can't play sound meanwhile.",
-     TweakType::Bool, 0, 1, 0, [] { return (double)g.exclusive; }, [](double v) { g.exclusive = v != 0; },
-     IDM_OUTPUT_SHARED, nullptr, nullptr, nullptr, kTweakRadio},
+    // The key and its settings.ini value predate ASIO: 0 and 1 are shared and exclusive as they always were.
+    {"output.exclusive", L"Player", L"Exclusive", L"Output",
+     L"Shared plays alongside other programs through Windows. Exclusive and ASIO play each track at its own rate, "
+     L"bit-perfect at 100% volume: Exclusive takes the Windows device, ASIO plays through an ASIO driver's "
+     L"first two outputs (ASIO driver... picks which).",
+     TweakType::Choice, 0, 2, 0, [] { return (double)g.output; }, [](double v) { g.output = (uint8_t)std::clamp((int)v, 0, 2); },
+     0, [] { SetOutput(g.output); }, kOutputNames},
+    {"output.upmix", L"Player", L"Upmix", L"Upmix to surround",
+     L"On a 5.1 or 7.1 device, stereo also plays from the center, subwoofer and surround speakers; the front pair "
+     L"keeps the original left and right. Shared output only.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)g.upmix; }, [](double v) { g.upmix = v != 0; }, 0,
+     [] { g.engine.SetUpmix(g.upmix); }},
     {"output.software_volume", L"Player", L"SoftwareVolume", L"Volume control in cordinal",
      L"Off sends the music at full level and leaves the volume to Windows or your amplifier; cordinal's slider "
-     L"rests and only mute still works. With Exclusive output, that keeps playback bit-perfect at any level.",
+     L"rests and only mute still works. With Exclusive or ASIO output, that keeps playback bit-perfect at any level.",
      TweakType::Bool, 0, 1, 1, [] { return (double)g.softwareVolume; }, [](double v) { g.softwareVolume = v != 0; },
      0, [] { SetVolumePercent(g.volumePercent); }},
     {"output.volume_curve", L"Player", L"VolumeCurve", L"Volume curve",
@@ -490,6 +499,10 @@ const Tweak kTweaks[] = {
      L"en.wikipedia.org for the article it names.",
      TweakType::Bool, 0, 1, 0, [] { return (double)online::Config().artistInfo; },
      [](double v) { online::Config().artistInfo = v != 0; }, 0, OnlineSettingsChanged},
+    {"online.album_tags", L"Online", L"AlbumTags", L"Album tags from MusicBrainz",
+     L"Sends the album's title and artist to musicbrainz.org when you choose Tag album from MusicBrainz, then the ids of the few releases that match, to read their tracks.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)online::Config().albumTags; },
+     [](double v) { online::Config().albumTags = v != 0; }, 0, OnlineSettingsChanged},
     {"library.explorer_menu", L"Explorer", L"FolderMenu", L"Play folders from Explorer",
      L"Right-clicking a folder offers Play with cordinal and Add to cordinal; a folder plays its tracks like a "
      L"command line does.", TweakType::Bool, 0, 1, 1, [] { return (double)g.explorerMenu; },
@@ -498,19 +511,18 @@ const Tweak kTweaks[] = {
      L"Turns on the web server whenever cordinal starts, so a paired phone or browser can play your library.",
      TweakType::Bool, 0, 1, 0, [] { return (double)WebStartsWithCordinal(); },
      [](double v) { SetWebStartsWithCordinal(v != 0); }, 0, ApplyWebStart},
-    // Non-tweak features: session rates, sizes and menu-only windows, exposed as preferences so
-    // every persistent choice is one home (Preferences). Speed, tempo and the reverb-mix preset
-    // are session rates: their rows name the menu's own command and never reach the file (see
-    // SaveTweaks). Everything else reuses the ini key its feature already writes.
+    // Non-tweak features: rates, sizes and menu-only windows, exposed as preferences so every
+    // persistent choice is one home (Preferences). Speed and tempo write their own [Player] keys as
+    // they change (SetSpeed/SetTempo); the reverb-mix preset is a session rate and never reaches the
+    // file (see SaveTweaks). Everything else reuses the ini key its feature already writes.
     {"playback.speed", L"Player", L"Speed", L"Playback speed",
-     L"Lasts for this session only: the next start is always normal speed, so a podcast's rate "
-     L"cannot carry over to tomorrow's album. Pitch follows.",
+     L"Kept for the next start, at the menu's rate. Pitch follows.",
      TweakType::Choice, 0, (float)std::size(kSpeedNames) - 1, 3,
      [] { return (double)std::max(0, IndexOf(kSpeeds, g.speed)); },
      [](double v) { if (int i = (int)v; i >= 0 && i < (int)std::size(kSpeedNames)) SetSpeed(kSpeeds[i]); },
      IDM_SPEED_BASE, nullptr, kSpeedNames, nullptr, kTweakRadio | kTweakLegacyLoad},
     {"playback.tempo", L"Player", L"Tempo", L"Playback tempo",
-     L"Lasts for this session only, like speed. Pitch stays.",
+     L"Kept for the next start, like speed. Pitch stays.",
      TweakType::Choice, 0, (float)std::size(kTempoNames) - 1, 2,
      [] { return (double)std::max(0, IndexOf(kTempos, g.tempo)); },
      [](double v) { if (int i = (int)v; i >= 0 && i < (int)std::size(kTempoNames)) SetTempo(kTempos[i]); },
@@ -693,8 +705,9 @@ struct Page {
 const Page kPages[] = {
     {nullptr, L"All settings", L"Every setting on one page, under the page it belongs to.", nullptr, {}},
     {"playback.", L"Playback", L"Resuming, how tracks change, shuffle and radio, and this session's speed.", L"Sound", {}},
-    {"output.", L"Output", L"Exclusive output and the volume control.", nullptr,
-     {{IDM_HEADPHONES, L"&Headphones and devices..."}}},
+    {"output.", L"Output", L"Shared, exclusive or ASIO output, a network speaker, and the volume control.", nullptr,
+     {{IDM_ASIO_DRIVERS, L"&ASIO driver..."}, {IDM_SPEAKERS, L"&Network speaker..."},
+      {IDM_HEADPHONES, L"&Headphones and devices..."}}},
     {"replaygain.", L"ReplayGain", L"Even loudness from track to track, and measuring it.", nullptr,
      {{IDM_RG_SCAN_SEL, L"Scan &selection"}, {IDM_RG_SCAN_PL, L"Scan &playlist"},
       {IDM_RG_SCAN_ALL, L"Scan &library"}, {IDM_RG_CANCEL, L"&Cancel scan"}}},
@@ -777,9 +790,14 @@ struct SheetRow {
     bool pageHeading = false;          // All settings: a page's name, above its own headings
     int y = 0, h = 0;                  // in the sheet's content, before scrolling
     int labelH = 0, helpH = 0;
+    std::wstring labelText, helpText;  // measured before the row has windows
     HWND label = nullptr, help = nullptr, control = nullptr, unit = nullptr, reset = nullptr;
 };
 enum StaticKind { kLabel, kHelp, kSubHeading, kPageHeading };
+// All settings is some 150 rows and 600 windows, which took half a second to make. Rows get their
+// windows in order, those in view at once and the rest a few per tick of this timer.
+constexpr UINT_PTR kFillTimer = 2;
+constexpr size_t kRowsPerTick = 6;
 
 struct PreferencesWindow {
     HWND hwnd = nullptr, pages = nullptr, search = nullptr, filter = nullptr, sheet = nullptr, title = nullptr;
@@ -791,7 +809,11 @@ struct PreferencesWindow {
     int page = 0;           // kPages index
     int current = -1;       // the kTweaks index focused or asked for
     int scroll = 0, contentH = 0, wheel = 0;
+    size_t realized = 0;    // rows[0, realized) have their windows
+    int width = 0, controlW = 0, cx = 0, textW = 0;  // LayoutSheet's columns
+    std::vector<HWND> retired;  // a previous page's windows, hidden, destroyed a few per tick
     bool filling = false;   // the controls are being filled in, so their notifications are not changes
+    bool sizing = false;    // LayoutSheet is showing the scroll bar and lays the sheet out itself
 } w;
 
 bool Searching() { return GetWindowTextLengthW(w.search) > 0; }
@@ -849,14 +871,99 @@ int SheetHeight() {
     return rc.bottom;
 }
 
-// Heights and places for every row at the sheet's width, then the scroll range.
+// A row's windows at their places for the current scroll, by LayoutSheet's columns.
+template <class Place>
+void PlaceRow(const SheetRow& row, Place place) {
+    const int top = row.y - w.scroll, pad = S(12), cx = w.cx;
+    if (row.tweak < 0) {
+        place(row.label, pad, top + row.h - S(30), w.width - pad * 2, S(22));
+        return;
+    }
+    const Tweak& t = kTweaks[row.tweak];
+    place(row.label, pad, top + S(12), w.textW, row.labelH);
+    place(row.help, pad, top + S(12) + row.labelH + S(3), w.textW, row.helpH);
+    if (t.type == TweakType::Float) {
+        place(row.control, cx, top + S(12), S(90), S(26));
+        place(row.unit, cx + S(98), top + S(15), S(60), S(20));
+    } else {
+        place(row.control, cx, top + S(12), t.type == TweakType::Bool ? S(120) : w.controlW,
+              t.type == TweakType::Bool ? S(26) : S(300));
+    }
+    place(row.reset, cx, top + S(44), S(84), S(24));
+}
+
+void MakeRowWindows(size_t index);
+
+// Gives rows up to `upTo` their windows, in row order so the tab order stays the order on screen.
+void RealizeRows(size_t upTo) {
+    upTo = std::min(upTo, w.rows.size());
+    for (; w.realized < upTo; ++w.realized) {
+        MakeRowWindows(w.realized);
+        PlaceRow(w.rows[w.realized], [](HWND h, int x, int y, int cw, int ch) {
+            if (h) SetWindowPos(h, nullptr, x, y, cw, ch, SWP_NOZORDER | SWP_NOACTIVATE);
+        });
+    }
+}
+
+// The rows in view at `scroll` and a little below, so a little scrolling never meets an empty row.
+size_t RowsInView(int scroll) {
+    const int bottom = scroll + std::max(SheetHeight(), S(200)) + S(200);
+    size_t n = 0;
+    while (n < w.rows.size() && w.rows[n].y < bottom) ++n;
+    return n;
+}
+
+// Makes the rows in view now and the rest a few per tick, and destroys a previous page's windows.
+void FillSheet() {
+    RealizeRows(RowsInView(w.scroll));
+    if (w.hwnd && (w.realized < w.rows.size() || !w.retired.empty())) SetTimer(w.hwnd, kFillTimer, 1, nullptr);
+}
+
+void FillSheetTick() {
+    for (size_t n = 0; n < kRowsPerTick * 5 && !w.retired.empty(); ++n) {
+        DestroyWindow(w.retired.back());
+        w.retired.pop_back();
+    }
+    RealizeRows(w.realized + kRowsPerTick);
+    if (w.realized >= w.rows.size() && w.retired.empty()) KillTimer(w.hwnd, kFillTimer);
+}
+
+// Heights and places for every row at the sheet's width, then the scroll range. Heights come from the
+// rows' texts, so rows without windows yet still take their room.
 void LayoutSheet() {
     if (!w.sheet) return;
     RECT rc;
     GetClientRect(w.sheet, &rc);
+    // A sheet sure to overflow gets its scroll bar before the texts are measured, so they are measured
+    // once, at the width they keep, rather than again when the scroll range brings the bar in.
+    int least = 0;
+    for (const SheetRow& row : w.rows) least += row.tweak < 0 ? S(40) : S(80);
+    if (least > rc.bottom && !(GetWindowLongPtrW(w.sheet, GWL_STYLE) & WS_VSCROLL)) {
+        w.sizing = true;
+        ShowScrollBar(w.sheet, SB_VERT, TRUE);
+        w.sizing = false;
+        GetClientRect(w.sheet, &rc);
+    }
     const int width = rc.right, pad = S(12), gap = S(20);
-    const int controlW = std::clamp(width * 2 / 5, S(150), S(280)), cx = width - pad - controlW;
-    const int textW = std::max(S(120), cx - gap - pad);
+    w.width = width;
+    w.controlW = std::clamp(width * 2 / 5, S(150), S(280));
+    w.cx = width - pad - w.controlW;
+    w.textW = std::max(S(120), w.cx - gap - pad);
+    // Measuring every help text takes some 30 ms and opening lays the sheet out several times, so heights
+    // are kept per setting (and with or without a search's page note) for one width and pair of fonts.
+    static struct {
+        int textW = -1, dpi = 0;
+        HFONT font = nullptr, bold = nullptr;
+        std::vector<std::pair<int, int>> heights;  // label, help; -1 when not measured
+    } cache;
+    if (cache.textW != w.textW || cache.dpi != (int)g.dpi || cache.font != g.font || cache.bold != g.fontBold) {
+        cache.textW = w.textW;
+        cache.dpi = (int)g.dpi;
+        cache.font = g.font;
+        cache.bold = g.fontBold;
+        cache.heights.assign(std::size(kTweaks) * 2, {-1, -1});
+    }
+    const bool searching = Searching();
     HDC dc = GetDC(w.sheet);
     int y = 0;
     for (SheetRow& row : w.rows) {
@@ -864,16 +971,17 @@ void LayoutSheet() {
         if (row.tweak < 0) {
             row.h = row.pageHeading ? S(52) : S(40);
         } else {
-            auto measure = [&](HFONT font, HWND text) {
-                RECT r{0, 0, textW, 0};
+            auto measure = [&](HFONT font, const std::wstring& s) {
+                RECT r{0, 0, w.textW, 0};
                 HGDIOBJ old = SelectObject(dc, font);
-                std::wstring s = WindowText(text);
                 DrawTextW(dc, s.c_str(), -1, &r, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
                 SelectObject(dc, old);
                 return (int)r.bottom;
             };
-            row.labelH = measure(g.fontBold, row.label);
-            row.helpH = measure(g.font, row.help);
+            auto& known = cache.heights[row.tweak * 2 + searching];
+            if (known.first < 0) known = {measure(g.fontBold, row.labelText), measure(g.font, row.helpText)};
+            row.labelH = known.first;
+            row.helpH = known.second;
             const int text = S(12) + row.labelH + S(3) + row.helpH + S(14);
             const int controls = S(12) + S(26) + S(6) + S(24) + S(12);
             row.h = std::max(text, controls);
@@ -883,37 +991,22 @@ void LayoutSheet() {
     ReleaseDC(w.sheet, dc);
     w.contentH = y;
     w.scroll = std::clamp(w.scroll, 0, std::max(0, w.contentH - (int)rc.bottom));
-    HDWP dwp = BeginDeferWindowPos((int)w.rows.size() * 4);
-    auto place = [&](HWND h, int x, int top, int cw, int ch) {
-        if (h && dwp) dwp = DeferWindowPos(dwp, h, nullptr, x, top, cw, ch, SWP_NOZORDER | SWP_NOACTIVATE);
-    };
-    for (const SheetRow& row : w.rows) {
-        const int top = row.y - w.scroll;
-        if (row.tweak < 0) {
-            place(row.label, pad, top + row.h - S(30), width - pad * 2, S(22));
-            continue;
-        }
-        const Tweak& t = kTweaks[row.tweak];
-        place(row.label, pad, top + S(12), textW, row.labelH);
-        place(row.help, pad, top + S(12) + row.labelH + S(3), textW, row.helpH);
-        if (t.type == TweakType::Float) {
-            place(row.control, cx, top + S(12), S(90), S(26));
-            place(row.unit, cx + S(98), top + S(15), S(60), S(20));
-        } else {
-            place(row.control, cx, top + S(12), t.type == TweakType::Bool ? S(120) : controlW,
-                  t.type == TweakType::Bool ? S(26) : S(300));
-        }
-        place(row.reset, cx, top + S(44), S(84), S(24));
-    }
+    HDWP dwp = BeginDeferWindowPos((int)w.realized * 5 + 1);
+    for (size_t i = 0; i < w.realized; ++i)
+        PlaceRow(w.rows[i], [&](HWND h, int x, int top, int cw, int ch) {
+            if (h && dwp) dwp = DeferWindowPos(dwp, h, nullptr, x, top, cw, ch, SWP_NOZORDER | SWP_NOACTIVATE);
+        });
     if (dwp) EndDeferWindowPos(dwp);
     SCROLLINFO si{sizeof(si), SIF_RANGE | SIF_PAGE | SIF_POS, 0, std::max(0, w.contentH - 1), (UINT)rc.bottom, w.scroll};
     SetScrollInfo(w.sheet, SB_VERT, &si, TRUE);
+    FillSheet();
     InvalidateRect(w.sheet, nullptr, FALSE);
 }
 
 void ScrollSheetTo(int y) {
     const int top = std::clamp(y, 0, std::max(0, w.contentH - SheetHeight()));
     if (top == w.scroll) return;
+    RealizeRows(RowsInView(top));  // placed for the old scroll; the scroll below moves them with the rest
     const int dy = w.scroll - top;
     w.scroll = top;
     ScrollWindowEx(w.sheet, 0, dy, nullptr, nullptr, nullptr, nullptr, SW_SCROLLCHILDREN | SW_INVALIDATE);
@@ -953,7 +1046,8 @@ void SetCurrent(int tweak) {
 void RefreshValues() {
     if (!w.hwnd) return;
     w.filling = true;
-    for (const SheetRow& row : w.rows) {
+    for (size_t i = 0; i < w.realized; ++i) {  // rows still to come read their values when they are made
+        const SheetRow& row = w.rows[i];
         if (row.tweak < 0) continue;
         const Tweak& t = kTweaks[row.tweak];
         if (t.type == TweakType::Bool) InvalidateRect(row.control, nullptr, FALSE);
@@ -985,56 +1079,85 @@ LRESULT CALLBACK WheelToSheet(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
     return DefSubclassProc(h, msg, wp, lp);
 }
 
-// Every row's windows, made afresh for what the sheet shows, in tab order.
-void BuildSheet() {
-    for (const SheetRow& row : w.rows)
-        for (HWND h : {row.label, row.help, row.control, row.unit, row.reset})
-            if (h) DestroyWindow(h);
+// One row's windows, with the values as they are now.
+void MakeRowWindows(size_t i) {
     auto make = [&](DWORD ex, const wchar_t* cls, const std::wstring& text, DWORD style, int id, HFONT font) {
         HWND c = CreateWindowExW(ex, cls, text.c_str(), WS_CHILD | WS_VISIBLE | style, 0, 0, 0, 0, w.sheet,
                                  (HMENU)(INT_PTR)id, g.inst, nullptr);
         SendMessageW(c, WM_SETFONT, (WPARAM)font, FALSE);
         return c;
     };
-    for (size_t i = 0; i < w.rows.size(); ++i) {
-        SheetRow& row = w.rows[i];
-        auto tag = [&](HWND h, StaticKind kind) { SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)(i * 4 + kind)); };
-        if (row.tweak < 0) {
-            row.label = make(0, WC_STATICW, row.heading, SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, 0,
-                             row.pageHeading ? w.titleFont : g.fontBold);
-            tag(row.label, row.pageHeading ? kPageHeading : kSubHeading);
-            continue;
-        }
-        const Tweak& t = kTweaks[row.tweak];
-        row.label = make(0, WC_STATICW, t.label, SS_LEFT | SS_NOPREFIX, 0, g.fontBold);
-        tag(row.label, kLabel);
-        std::wstring help = std::wstring(t.help) + L" Default: " +
-                            (t.type == TweakType::Float ? NumberText(t.def) + (t.unit ? std::wstring(L" ") + t.unit : L"")
-                                                        : TweakText(t, t.def)) + L".";
-        if (Searching()) help += std::wstring(L" (") + kPages[PageOf(t)].name + L")";
-        row.help = make(0, WC_STATICW, help, SS_LEFT | SS_NOPREFIX, 0, g.font);
-        tag(row.help, kHelp);
-        const int id = kIdRow0 + row.tweak;
-        if (t.type == TweakType::Bool) {
-            // An owner-drawn switch named for its setting, so a screen reader says what it turns on.
-            row.control = make(0, WC_BUTTONW, t.label, BS_OWNERDRAW | BS_NOTIFY | WS_TABSTOP, id, g.font);
-        } else if (t.type == TweakType::Choice) {
-            row.control = make(0, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, id, g.font);
-            for (int c = 0; c <= (int)t.max; ++c)
-                SendMessageW(row.control, CB_ADDSTRING, 0, (LPARAM)(t.choices ? t.choices[c] : kOffOn[c]));
-            SendMessageW(row.control, CB_SETCURSEL, (WPARAM)std::clamp((int)t.get(), 0, (int)t.max), 0);
-            SetWindowTheme(row.control, g.dark ? L"DarkMode_CFD" : L"Explorer", nullptr);
-            SetWindowSubclass(row.control, WheelToSheet, 0, 0);
-        } else {
-            row.control = make(WS_EX_CLIENTEDGE, WC_EDITW, NumberText(t.get()), ES_AUTOHSCROLL | WS_TABSTOP, id, g.font);
-            SetWindowTheme(row.control, g.dark ? L"DarkMode_CFD" : L"Explorer", nullptr);
-            row.unit = make(0, WC_STATICW, t.unit ? t.unit : L"", SS_LEFT | SS_NOPREFIX, 0, g.font);
-            tag(row.unit, kHelp);
-        }
-        row.reset = make(0, WC_BUTTONW, L"Reset", BS_PUSHBUTTON | BS_NOTIFY | WS_TABSTOP, kIdReset0 + row.tweak, g.font);
-        ApplyControlTheme(row.reset, g.dark);
-        ShowWindow(row.reset, TweakChanged(t) ? SW_SHOWNA : SW_HIDE);
+    SheetRow& row = w.rows[i];
+    auto tag = [&](HWND h, StaticKind kind) { SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)(i * 4 + kind)); };
+    if (row.tweak < 0) {
+        row.label = make(0, WC_STATICW, row.labelText, SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, 0,
+                         row.pageHeading ? w.titleFont : g.fontBold);
+        tag(row.label, row.pageHeading ? kPageHeading : kSubHeading);
+        return;
     }
+    const Tweak& t = kTweaks[row.tweak];
+    row.label = make(0, WC_STATICW, row.labelText, SS_LEFT | SS_NOPREFIX, 0, g.fontBold);
+    tag(row.label, kLabel);
+    row.help = make(0, WC_STATICW, row.helpText, SS_LEFT | SS_NOPREFIX, 0, g.font);
+    tag(row.help, kHelp);
+    const int id = kIdRow0 + row.tweak;
+    if (t.type == TweakType::Bool) {
+        // An owner-drawn switch named for its setting, so a screen reader says what it turns on.
+        row.control = make(0, WC_BUTTONW, t.label, BS_OWNERDRAW | BS_NOTIFY | WS_TABSTOP, id, g.font);
+    } else if (t.type == TweakType::Choice) {
+        row.control = make(0, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, id, g.font);
+        for (int c = 0; c <= (int)t.max; ++c)
+            SendMessageW(row.control, CB_ADDSTRING, 0, (LPARAM)(t.choices ? t.choices[c] : kOffOn[c]));
+        SendMessageW(row.control, CB_SETCURSEL, (WPARAM)std::clamp((int)t.get(), 0, (int)t.max), 0);
+        SetWindowTheme(row.control, g.dark ? L"DarkMode_CFD" : L"Explorer", nullptr);
+        SetWindowSubclass(row.control, WheelToSheet, 0, 0);
+    } else {
+        row.control = make(WS_EX_CLIENTEDGE, WC_EDITW, NumberText(t.get()), ES_AUTOHSCROLL | WS_TABSTOP, id, g.font);
+        SetWindowTheme(row.control, g.dark ? L"DarkMode_CFD" : L"Explorer", nullptr);
+        row.unit = make(0, WC_STATICW, t.unit ? t.unit : L"", SS_LEFT | SS_NOPREFIX, 0, g.font);
+        tag(row.unit, kHelp);
+    }
+    row.reset = make(0, WC_BUTTONW, L"Reset", BS_PUSHBUTTON | BS_NOTIFY | WS_TABSTOP, kIdReset0 + row.tweak, g.font);
+    ApplyControlTheme(row.reset, g.dark);
+    ShowWindow(row.reset, TweakChanged(t) ? SW_SHOWNA : SW_HIDE);
+}
+
+// The texts a row shows, known before it has windows so LayoutSheet can measure it.
+void SetRowTexts(SheetRow& row, bool searching) {
+    if (row.tweak < 0) {
+        row.labelText = row.heading;
+        return;
+    }
+    const Tweak& t = kTweaks[row.tweak];
+    row.labelText = t.label;
+    row.helpText = std::wstring(t.help) + L" Default: " +
+                   (t.type == TweakType::Float ? NumberText(t.def) + (t.unit ? std::wstring(L" ") + t.unit : L"")
+                                               : TweakText(t, t.def)) + L".";
+    if (searching) row.helpText += std::wstring(L" (") + kPages[PageOf(t)].name + L")";
+}
+
+// Hides the rows' windows at once and leaves destroying them to FillSheetTick: a full page's
+// windows took a tenth of a second to destroy. Their ids go, so a new row's id finds the new window.
+void RetireRows() {
+    HWND focus = GetFocus();
+    HDWP dwp = BeginDeferWindowPos((int)w.realized * 5 + 1);
+    for (size_t i = 0; i < w.realized; ++i) {
+        const SheetRow& row = w.rows[i];
+        for (HWND h : {row.label, row.help, row.control, row.unit, row.reset}) {
+            if (!h) continue;
+            if (h == focus) SetFocus(w.pages);
+            SetWindowLongPtrW(h, GWLP_ID, 0);
+            if (dwp)
+                dwp = DeferWindowPos(dwp, h, nullptr, 0, 0, 0, 0,
+                                     SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
+                                         SWP_NOREDRAW);
+            else
+                ShowWindow(h, SW_HIDE);
+            w.retired.push_back(h);
+        }
+    }
+    if (dwp) EndDeferWindowPos(dwp);
+    w.realized = 0;
 }
 
 void Rebuild(int keep) {
@@ -1078,14 +1201,11 @@ void Rebuild(int keep) {
         row.tweak = i;
         rows.push_back(row);
     }
+    for (SheetRow& row : rows) SetRowTexts(row, !query.empty());
     SetWindowRedraw(w.sheet, FALSE);
-    for (const SheetRow& row : w.rows)
-        for (HWND h : {row.label, row.help, row.control, row.unit, row.reset})
-            if (h) DestroyWindow(h);
-    w.rows.clear();
+    RetireRows();
     w.rows = std::move(rows);
     w.scroll = 0;
-    BuildSheet();
     w.current = RowOf(keep) >= 0 ? keep : -1;
     SetTextIfChanged(w.title, !query.empty() ? std::wstring(L"Search") : std::wstring(kPages[w.page].name));
     const int found = (int)picks.size();
@@ -1277,7 +1397,7 @@ LRESULT CALLBACK SheetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_SIZE:
-            if (w.hwnd) LayoutSheet();
+            if (w.hwnd && !w.sizing) LayoutSheet();
             return 0;
         case WM_MOUSEWHEEL: {
             w.wheel += GET_WHEEL_DELTA_WPARAM(wp);
@@ -1308,7 +1428,7 @@ LRESULT CALLBACK SheetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_LBUTTONDOWN: {  // a click on a row's words focuses its control
             const int y = GET_Y_LPARAM(lp) + w.scroll;
             for (const SheetRow& row : w.rows)
-                if (row.tweak >= 0 && y >= row.y && y < row.y + row.h) SetFocus(row.control);
+                if (row.tweak >= 0 && row.control && y >= row.y && y < row.y + row.h) SetFocus(row.control);
             return 0;
         }
         case WM_CTLCOLORSTATIC: {
@@ -1411,7 +1531,8 @@ LRESULT CALLBACK PreferencesProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_TIMER:
-            RefreshLinks();
+            if (wp == kFillTimer) FillSheetTick();
+            else RefreshLinks();
             return 0;
         case WM_SIZE:
             LayoutPreferences();
@@ -1568,8 +1689,7 @@ static void SeekBarKeys(bool save) {
     }
 }
 
-// Writes only what this tweak owns. A full SavePreferences rewrites every registry row through
-// WritePrivateProfileStringW and freezes the Preferences UI (~80 ms measured for ~120 keys).
+// Writes only what this tweak owns, not every registry row as a full SavePreferences does.
 static void PersistTweak(const Tweak& t) {
     if (t.flags & kTweakOutside) return;
     // Live layout, cover size and browser height stay session-only until Startup defaults; their
@@ -1584,6 +1704,8 @@ static void PersistTweak(const Tweak& t) {
         return;
     }
     if (!TweakHasOwnIniRow(t)) return;
+    // Speed and tempo are written by their own setters (SetSpeed/SetTempo) as the rate, not the
+    // row's index; the reverb-mix preset is a session rate and never reaches the file.
     if (t.flags & kTweakLegacyLoad && (!strcmp(t.key, "playback.speed") || !strcmp(t.key, "playback.tempo") ||
                                        !strcmp(t.key, "effects.reverb_mix_choice")))
         return;
@@ -1629,9 +1751,8 @@ void SaveTweaks() {
         // feature owns (SaveMainLayout, SaveBrowserSettings, SaveApollo, the Album List combo), not
         // as one key per row, so a profile never has two copies to reconcile.
         if (!TweakHasOwnIniRow(t)) continue;
-        // Speed, tempo and the reverb-mix preset are session rates: their rows name the menu's own
-        // choice, and LoadPreferences starts the next session at normal. Writing them would imply
-        // they persist, so they stay out of the file like the engine's own session state.
+        // Speed and tempo are written by their setters as the rate, and the reverb-mix preset is a
+        // session rate that names the menu's own choice: none of them has a row value to write here.
         if (t.flags & kTweakLegacyLoad && (!strcmp(t.key, "playback.speed") || !strcmp(t.key, "playback.tempo") ||
                                            !strcmp(t.key, "effects.reverb_mix_choice")))
             continue;
@@ -1679,7 +1800,8 @@ void ShowPreferences(const char* key) {
     SetForegroundWindow(w.hwnd);
     // The asked-for setting's own control, else the page list to choose from.
     const int row = wanted ? RowOf(keep) : -1;
-    SetFocus(row >= 0 ? w.rows[row].control : w.pages);
+    if (row >= 0) RealizeRows(row + 1);  // in view already, unless the window is too short to show it
+    SetFocus(row >= 0 && w.rows[row].control ? w.rows[row].control : w.pages);
 }
 
 }  // namespace app

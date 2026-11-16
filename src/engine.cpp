@@ -5,6 +5,7 @@
 // volume and the fades. Both serialize on ringMx.
 #include "engine.h"
 
+#include "asio.h"
 #include "audio_output.h"
 #include "audio_live.h"
 #include "decoder.h"
@@ -748,7 +749,8 @@ struct Engine::Impl {
         Post(EngineEvent::Damaged, decodingToken);
     }
 
-    bool Exclusive() const { return out.WantedMode() == OutputMode::Exclusive; }
+    // Exclusive and ASIO output both run the device at each track's own rate.
+    bool Exclusive() const { return out.WantedMode() != OutputMode::Shared; }
 
     // Exclusive output runs the device at the track's rate: switching it means a new ring (and
     // a fresh resampler, which is then a pass-through).
@@ -1412,6 +1414,26 @@ void Engine::SetExclusive(bool exclusive) {
     impl_->out.SetMode(exclusive ? OutputMode::Exclusive : OutputMode::Shared);
 }
 
+#ifdef _WIN32
+void Engine::SetOutputMode(OutputMode mode, const std::wstring& asioDriver) {
+    std::lock_guard<std::mutex> lock(impl_->outputMx);
+    impl_->out.SetAsioDriver(asioDriver);
+    impl_->out.SetMode(mode);
+}
+
+bool Engine::ShowAsioPanel() { return impl_->out.ShowAsioPanel(); }
+
+void Engine::SetSpeaker(const std::string& id) {
+    std::lock_guard<std::mutex> lock(impl_->outputMx);
+    impl_->out.SetSpeaker(id);
+}
+#endif
+
+void Engine::SetUpmix(bool upmix) {
+    std::lock_guard<std::mutex> lock(impl_->outputMx);
+    impl_->out.SetUpmix(upmix);
+}
+
 #ifndef _WIN32
 void Engine::SetOutputDevice(const std::string& node) {
     std::lock_guard<std::mutex> lock(impl_->outputMx);
@@ -1428,11 +1450,21 @@ Engine::OutputInfo Engine::Output() const {
     o.rate = d.out.Rate();
     o.bits = SampleBits(d.out.Format());
     o.floatFormat = d.out.Format() == SampleFormat::Float32;
+#ifdef _WIN32
+    o.asio = d.out.Mode() == OutputMode::Asio;
+    if (o.asio) {
+        o.device = d.out.DeviceName();
+        o.bits = AsioSampleBits(d.out.AsioType());
+        o.floatFormat = AsioTypeIsFloat(d.out.AsioType());
+    }
+#endif
     o.problem = d.out.Problem();
+    o.upmix = d.out.UpmixLabel();
+    o.speaker = d.out.SpeakerName();
     // Nothing between the decoder and the device: no resampling, gain, EQ or limiter, and a
     // device format that holds 24-bit samples. ReplayGain on puts the limiter in the path (it
     // delays the output and can hold peaks down), so that is not bit-perfect even at unity gain.
-    o.bitPerfect = o.exclusive && d.inputRate.load() == o.rate && d.volume.load() == 1.0f && d.playingGain.load() == 1.0f &&
+    o.bitPerfect = (o.exclusive || o.asio) && d.inputRate.load() == o.rate && d.volume.load() == 1.0f && d.playingGain.load() == 1.0f &&
                    !d.eqActive.load() && !d.limiterOn.load() && !d.effectsActive.load() && d.speedReq.load() == 1.0 &&
                    d.tempoReq.load() == 1.0 && (o.floatFormat || o.bits >= 24);
     return o;

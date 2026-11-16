@@ -19,6 +19,8 @@
 #include <memory>
 #include <string>
 
+enum class OutputMode;  // audio_output.h
+
 constexpr UINT WM_ENGINE = WM_APP + 1;
 enum class EngineEvent : WPARAM { NeedNext = 1, Error, TrackStarted, Ended, Estimated, Damaged };
 class LiveAudioSource;
@@ -80,15 +82,31 @@ public:
     // Exclusive output plays each track at its own sample rate with nothing in between (no
     // Windows mixer, no resampling); bit-perfect at 100% volume with EQ and ReplayGain off.
     void SetExclusive(bool exclusive);
+#ifdef _WIN32
+    // Shared, exclusive or ASIO output. ASIO plays through the driver named `asioDriver` (its registry
+    // name; empty is the first installed), at each track's own rate like exclusive output.
+    void SetOutputMode(OutputMode mode, const std::wstring& asioDriver);
+    // Opens the playing ASIO driver's own settings window; false when no ASIO driver is loaded.
+    bool ShowAsioPanel();
+    // Plays on a network speaker (speakers.h id) instead of this computer; empty comes back. On Linux
+    // a speaker's id is an output device (SetOutputDevice).
+    void SetSpeaker(const std::string& id);
+#endif
+    // Spreads stereo over every speaker of a surround device (shared output only; see upmix.h).
+    void SetUpmix(bool upmix);
 #ifndef _WIN32
     void SetOutputDevice(const std::string& node);  // a PipeWire sink by node name; empty is the default
 #endif
     struct OutputInfo {
         bool exclusive = false, bitPerfect = false, ready = false, waiting = false;
+        bool asio = false;     // an ASIO driver is playing (`device` names it)
+        std::wstring device;
         unsigned rate = 0;
-        int bits = 32;         // device sample format: 16, 24 or 32
+        int bits = 32;         // device sample format: 16, 24 or 32 (ASIO also 18, 20 or 64)
         bool floatFormat = true;
-        std::wstring problem;  // why exclusive output isn't (fully) in use
+        std::wstring problem;  // why exclusive or ASIO output isn't (fully) in use
+        std::string upmix;     // the speaker layout stereo is upmixed to ("5.1"), empty for none
+        std::wstring speaker;  // the network speaker chosen as output, empty for this computer
     };
     OutputInfo Output() const;
     void SetEq(const EqSettings& eq);

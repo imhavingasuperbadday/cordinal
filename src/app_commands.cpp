@@ -1,6 +1,7 @@
 // Playback button state (shuffle/repeat) and dispatch for every main-window command.
 // OnCommand decodes the id ranges declared in app_state.h and runs the matching action.
 #include "app.h"
+#include "asio.h"
 
 namespace app {
 
@@ -114,6 +115,7 @@ void OnCommand(int id, int code, HWND ctl) {
             g.resumePl = -1;
             g.resumePos = 0;
             g.resumeToken = 0;
+            g.spots.clear();
         }
         UpdateOrderButtons();
         IniWrite(L"Player", L"ResumeOn", g.resumeOn ? L"1" : L"0");
@@ -161,6 +163,19 @@ void OnCommand(int id, int code, HWND ctl) {
         SetRepeat(r == Repeat::All && g.repeat == Repeat::All ? Repeat::Off : r);
         return;
     }
+    if (id >= IDM_SPEAKER_BASE && id < IDM_SPEAKER_BASE + kMaxSpeakers) {
+        SpeakerCommand(id);
+        return;
+    }
+    if (id >= IDM_ASIO_DRIVER_BASE && id < IDM_ASIO_DRIVER_BASE + kMaxAsioDrivers) {
+        const std::vector<AsioDriverInfo> drivers = ListAsioDrivers();
+        if ((size_t)(id - IDM_ASIO_DRIVER_BASE) < drivers.size()) {
+            g.asioDriver = drivers[id - IDM_ASIO_DRIVER_BASE].name;
+            IniWrite(L"Player", L"AsioDriver", g.asioDriver.c_str());
+            SetOutput(2);  // choosing a driver is choosing to play through it
+        }
+        return;
+    }
     if (id >= IDM_COLUMN_BASE && id < IDM_COLUMN_BASE + ColumnTotal()) {
         ToggleColumn(id - IDM_COLUMN_BASE);
         return;
@@ -196,6 +211,8 @@ void OnCommand(int id, int code, HWND ctl) {
         {IDM_STOP, Stop},
         {IDC_NEXT, Next},
         {IDM_NEXT, Next},
+        {IDM_SPOTS, [] { ShowSpots(); }},
+        {IDM_PLAY_HISTORY, [] { ShowPlayHistory(); }},
         {IDM_STOP_AFTER, [] { g.stopAfterCurrent = !g.stopAfterCurrent; RefreshNext(); UpdateStatus(); }},
         {IDM_ADD_FILES, [] { AddPaths(PickPaths(false), false); }},
         {IDM_ADD_FOLDER, [] { AddPaths(PickPaths(true), false); }},
@@ -258,12 +275,13 @@ void OnCommand(int id, int code, HWND ctl) {
              if (!sel.empty()) ShowTagEditor(AlbumTracksOf(sel));
          }},
         {IDM_MAKE_ALBUM, [] { ShowAlbumMaker(SelectedTracks()); }},
+        {IDM_TAG_ALBUM_MB, [] { ShowAlbumTagger(SelectedTracks()); }},
         {IDM_FETCH_COVERS, FetchMissingCovers},
         {IDM_FETCH_COVERS_CANCEL, CancelCoverFetch},
         {IDM_ARTIST_INFO, ShowArtistInfo},
         {IDM_CANCEL_STEAM, CancelSteamDiscovery},
         {IDM_WATCH_IMPORTED, WatchImportedFolders},
-        {IDM_DUPLICATES, FindDuplicateAudioPlaylist},
+        {IDM_DUPLICATES, ShowDuplicates},
         {IDM_GAME_WHICH_CAME_FIRST, [] { ShowGames(1); }},
         {IDM_ABOUT, ShowAbout},
         {IDM_COLUMNS_RESET, ResetColumns},
@@ -287,6 +305,14 @@ void OnCommand(int id, int code, HWND ctl) {
         {IDM_PROPERTIES, ShowProperties},
         {IDM_EQUALIZER, ShowEqualizer},
         {IDM_HEADPHONES, ShowHeadphones},
+        {IDM_ASIO_DRIVERS, ShowAsioDrivers},
+        {IDM_SPEAKERS, [] { ShowSpeakers(false); }},
+        {IDM_SPEAKER_SEARCH, [] { ShowSpeakers(true); }},
+        {IDM_SPEAKER_HERE, [] { SpeakerCommand(IDM_SPEAKER_HERE); }},
+        {IDM_ASIO_PANEL, [] {
+             if (!g.engine.ShowAsioPanel())
+                 ShowMessage(L"The ASIO driver's settings open while it plays: choose ASIO output and play a song.");
+         }},
         {IDM_RG_ENABLE, [] {
              g.rgOn = !g.rgOn;
              IniWrite(L"ReplayGain", L"Enabled", g.rgOn ? L"1" : L"0");
@@ -421,7 +447,7 @@ void OnCommand(int id, int code, HWND ctl) {
             g.soundEffects = !g.soundEffects;
             IniWrite(L"Player", L"SoundEffects", g.soundEffects ? L"1" : L"0");
             PlaySfx(Sfx::Milestone);  // what-cheer!
-            if (g.soundEffects && g.exclusive) ShowMessage(L"Sound effects stay silent while output is exclusive.");
+            if (g.soundEffects && g.output) ShowMessage(L"Sound effects stay silent while output is exclusive or ASIO.");
             break;
         case IDM_ORGANIZE: {
             // The selection, or the whole library when nothing is selected.
@@ -434,13 +460,8 @@ void OnCommand(int id, int code, HWND ctl) {
         }
         case IDM_OUTPUT_SHARED:
         case IDM_OUTPUT_EXCLUSIVE:
-            g.exclusive = id == IDM_OUTPUT_EXCLUSIVE;
-            IniWrite(L"Player", L"Exclusive", g.exclusive ? L"1" : L"0");
-            sfx::SetSuppressed(g.exclusive);  // lets go of the device before exclusive output asks for it
-            g.engine.SetExclusive(g.exclusive);
-            ShowMessage(g.exclusive ? L"Exclusive output: each track at its own rate, bit-perfect at 100% volume with EQ, "
-                                      L"crossfeed and ReplayGain off. Other programs can't play sound meanwhile."
-                                    : L"Shared output.");
+        case IDM_OUTPUT_ASIO:
+            SetOutput(id == IDM_OUTPUT_ASIO ? 2 : id == IDM_OUTPUT_EXCLUSIVE ? 1 : 0);
             break;
         case IDM_EDIT_AUTO:
             if (Active().kind == PlaylistKind::Auto) ShowAutoPlaylistEditor(g.active);

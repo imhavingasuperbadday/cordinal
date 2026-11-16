@@ -9,7 +9,7 @@
 # D-Bus is spoken by its own client (src/linux/dbus.cpp), and sound goes to PipeWire or PulseAudio
 # through their native protocols (src/linux/pw_native.cpp, pulse_native.cpp), not a library.
 cmake_minimum_required(VERSION 3.20)
-project(cordinal VERSION 0.1.13 LANGUAGES C CXX)
+project(cordinal VERSION 0.1.14 LANGUAGES C CXX)
 
 if(WIN32)
     message(FATAL_ERROR "On Windows, build with build.bat")
@@ -43,15 +43,15 @@ set_source_files_properties(src/audio_avx.cpp PROPERTIES COMPILE_OPTIONS "-mavx2
 
 # The portable core, compiled against the Windows API subset in src/linux/compat.
 add_library(cordinal_core STATIC
-    src/album_editions.cpp src/album_editions_db.cpp src/album_editions_edit.cpp src/album_editions_title.cpp src/album_maker.cpp src/archive.cpp src/autoplaylist.cpp src/cue.cpp src/decoder.cpp src/dsp.cpp src/engine.cpp src/game_music.cpp src/inflate.cpp src/musicbrainz.cpp src/metadata_fetch.cpp src/coverfetch.cpp src/customcover.cpp src/cover_fade.cpp src/coverupload.cpp src/discart.cpp
-    src/discord.cpp src/library.cpp src/librarydb.cpp src/listenbrainz.cpp src/migration.cpp src/backup.cpp src/playlog.cpp src/points.cpp src/taste.cpp src/radio.cpp src/radio_browser.cpp src/radio_stream.cpp src/radio_hls.cpp src/scanner.cpp src/sfx.cpp src/sort.cpp src/steam.cpp
+    src/album_editions.cpp src/album_editions_db.cpp src/album_editions_edit.cpp src/album_editions_title.cpp src/album_maker.cpp src/album_tagger.cpp src/archive.cpp src/autoplaylist.cpp src/column_layout.cpp src/cue.cpp src/decoder.cpp src/duplicates.cpp src/dsp.cpp src/upmix.cpp src/engine.cpp src/game_music.cpp src/inflate.cpp src/musicbrainz.cpp src/metadata_fetch.cpp src/coverfetch.cpp src/customcover.cpp src/cover_fade.cpp src/coverupload.cpp src/discart.cpp
+    src/discord.cpp src/library.cpp src/librarydb.cpp src/listenbrainz.cpp src/migration.cpp src/backup.cpp src/playlog.cpp src/points.cpp src/taste.cpp src/radio.cpp src/radio_browser.cpp src/radio_stream.cpp src/radio_hls.cpp src/rediscover.cpp src/scanner.cpp src/sfx.cpp src/sort.cpp src/steam.cpp
     src/headsets.cpp src/helpers.cpp src/streamfile.cpp src/tags.cpp src/tags_fields.cpp src/tags_flacogg.cpp src/tags_id3.cpp src/tags_mp4.cpp src/tags_riff.cpp src/tagwriter.cpp src/tagwriter_flacogg.cpp src/tagwriter_mp3mp4.cpp
     src/tagwriter_cord.cpp src/tagundo.cpp src/playlist_files.cpp src/playlist.cpp src/md5.cpp src/cord_encode.cpp src/cord_export.cpp
     src/convert.cpp src/organize.cpp src/devicecopy.cpp src/collection.cpp src/linux/recycle.cpp src/linux/fontmatch.cpp
     src/linux/typeface.cpp src/linux/raster.cpp src/linux/shaper.cpp src/linux/textlayout.cpp
     src/titleformat.cpp src/peaks.cpp src/tempo.cpp src/theme_palette.cpp src/replaygain.cpp src/eq_profile.cpp
     src/tag_suggest.cpp src/keymap.cpp src/packs.cpp src/web_audio.cpp src/web_catalog.cpp src/web_http.cpp src/web_library.cpp src/web_server.cpp src/web_ui.cpp
-    src/web_aac.cpp src/web_acme.cpp src/web_reach.cpp src/web_remote.cpp src/qr.cpp src/linux/tls_bearssl.cpp src/linux/tls_der.cpp
+    src/web_aac.cpp src/web_acme.cpp src/web_dlna.cpp src/web_reach.cpp src/web_remote.cpp src/qr.cpp src/speakers.cpp src/linux/tls_bearssl.cpp src/linux/tls_der.cpp
     ${AUDIO} ${CHIPS} ${ENCODE} ${IPOD} src/linux/compat/compat.cpp src/linux/audio_linux.cpp src/linux/sfx_linux.cpp
     src/linux/sound_stream.cpp src/linux/spa_pod.cpp src/linux/pw_native.cpp src/linux/pulse_native.cpp)
 target_include_directories(cordinal_core PUBLIC src src/linux/compat src/ipod/gpod/include)
@@ -72,8 +72,8 @@ target_link_libraries(cordinal-core-test PRIVATE cordinal_core)
 add_executable(cordinal
     src/linux/main.cpp src/linux/ui.cpp src/linux/radio_ui.cpp src/linux/text.cpp src/linux/settings.cpp src/linux/library_sync.cpp
     src/linux/playback.cpp src/linux/cover.cpp src/linux/mpris.cpp src/linux/dbus.cpp src/linux/web.cpp src/linux/replaygain.cpp
-    src/linux/tagwrite.cpp src/linux/panels.cpp src/linux/panel_album.cpp src/linux/panel_eq.cpp src/linux/panel_organize.cpp
-    src/linux/panel_palette.cpp src/linux/panel_points.cpp src/linux/panel_prefs.cpp src/linux/panel_rules.cpp src/linux/panel_setup.cpp
+    src/linux/tagwrite.cpp src/linux/panels.cpp src/linux/panel_album.cpp src/linux/albumtag_ui.cpp src/linux/duplicates_ui.cpp src/linux/panel_eq.cpp src/linux/panel_organize.cpp
+    src/linux/panel_comeback.cpp src/linux/panel_palette.cpp src/linux/panel_points.cpp src/linux/panel_prefs.cpp src/linux/panel_rules.cpp src/linux/panel_setup.cpp
     src/linux/panel_tags.cpp src/linux/cord_export.cpp src/linux/convert_run.cpp src/linux/expand.cpp
     src/linux/organize_run.cpp src/linux/copy_run.cpp src/linux/collection_run.cpp src/linux/ipod_run.cpp src/linux/libview.cpp src/linux/libview_canvas.cpp src/linux/scrobble.cpp src/linux/sounds.cpp src/linux/points_ui.cpp src/linux/lyrics.cpp src/linux/mini.cpp src/linux/lightweight.cpp src/linux/keys.cpp src/linux/panel_keys.cpp src/linux/packs_ui.cpp src/linux/helpers_ui.cpp src/linux/preferences_ui.cpp src/linux/games.cpp src/linux/editions_ui.cpp src/linux/coverfetch_ui.cpp src/linux/artistinfo_ui.cpp
     src/linux/ui_model.cpp src/linux/ui_layout.cpp src/linux/ui_menus.cpp src/linux/ui_dialogs.cpp

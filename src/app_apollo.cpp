@@ -975,16 +975,8 @@ void ApolloTick() {
     }
     if (g.playing != kNone && !g.engine.Paused()) WakeVis();
     if (ap.bar) InvalidateRect(ap.bar, nullptr, FALSE);  // pause, loop and shuffle show their state
-    // "Automatically resize playlist columns to fit the window": the Title column takes what the
-    // others leave, here whenever the list's width changes or a column is resized.
-    int title = SubitemOf(kColApolloTitle);
-    RECT rc;
-    if (title < 0 || !GetClientRect(g.list, &rc)) return;
-    int others = 0;
-    for (int i = 0; i < (int)g.columns.size(); ++i)
-        if (i != title) others += ListView_GetColumnWidth(g.list, i);
-    int want = std::max(S(80), (int)rc.right - others);
-    if (want != ListView_GetColumnWidth(g.list, title)) ListView_SetColumnWidth(g.list, title, want);
+    // Apollo's "Automatically resize playlist columns to fit the window" is how every list's columns
+    // behave now: its Title column takes what the others leave (column_layout.h).
 }
 
 void ApolloStatus() {

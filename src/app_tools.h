@@ -6,6 +6,10 @@
 #include "app_state.h"
 #include "convert.h"
 
+#include <functional>
+
+namespace online { struct Reply; }
+
 namespace app {
 
 void ShowAutoPlaylistEditor(int playlist);
@@ -86,6 +90,17 @@ bool TagEditorDialogMessage(MSG* msg);
 void ShowAlbumMaker(const std::vector<TrackId>& ids);
 bool AlbumMakerDialogMessage(MSG* msg);
 bool AlbumMakerOpen();
+// Edit > Tag album from MusicBrainz (app_albumtag.cpp): the selection's whole album.
+void ShowAlbumTagger(const std::vector<TrackId>& selection);
+// The self-test's stand-in for MusicBrainz (album_tagger.h); an empty one restores the network.
+void SetAlbumTaggerFetch(std::function<online::Reply(const std::string& url)> fetch);
+bool AlbumTaggerDialogMessage(MSG* msg);
+// Library > Find duplicates (app_duplicates.cpp): copies of each song, cleaned up into the Recycle Bin
+// with their history moved to the copy kept. DuplicatesMeasured refreshes it after a ReplayGain scan.
+void ShowDuplicates();
+bool DuplicatesDialogMessage(MSG* msg);
+void DuplicatesMeasured();
+void StopDuplicates();
 void WriteTagsInBackground(const std::vector<TrackId>& ids, const TagEdit& edit, bool announce = true);
 bool CanUndoTagEdit(std::wstring& description);
 void UndoLastTagEdit();

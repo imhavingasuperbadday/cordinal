@@ -315,6 +315,11 @@ void LeaveTrack(bool manual) {
         return;
     }
     if (manual) TrackListening();
+    // Left on purpose, a song's place is kept; one that gave way by itself played to its end.
+    if (g.settings.resumeOn && !RadioPlaying()) {
+        if (manual) RememberSpot(g.playing, g.engine.Position());
+        else ForgetSpot(g.playing);
+    }
     if (ConsumeTasteSave()) g.libraryDirty = true;
     if (g.settings.radio && g.listened > 0) {
         g_radioHistory.push_back(g.playing);
@@ -616,6 +621,14 @@ void PlayFromQueue(int index, double start, bool paused) {
     g.resumeTrack = kNone;
     g.resumeIndex = -1;
     g.resumePosition = 0;
+    // A song with a remembered place carries on from it, as on Windows (PlayTrack).
+    if (start <= 0 && !paused && g.settings.resumeOn)
+        for (const auto& [spot, at] : g.spots)
+            if (spot == q[index]) {
+                start = at;
+                ShowMessage(L"Continuing from " + FormatDuration(at) + L".");
+                break;
+            }
     unsigned long long token = NewToken(index, q[index]);
     PrepareWaveform(q[index]);
     g.engine.Play(MakeItem(token, q[index]), start, paused);
@@ -652,6 +665,18 @@ bool Resume() {
     if (position <= 1 || position >= duration - 2) position = 0;
     PlayFromQueue(index, position);
     return true;
+}
+
+void PlayTracks(const std::vector<TrackId>& tracks, int index, double start);
+
+// Plays a remembered song from its place: in Now Playing if it is there, else on its own.
+void PlaySpot(size_t i) {
+    if (i >= g.spots.size() || !g_lib.Contains(g.spots[i].first)) return;
+    auto [id, pos] = g.spots[i];
+    auto& queue = Queue();
+    auto it = std::find(queue.begin(), queue.end(), id);
+    if (it != queue.end()) PlayFromQueue((int)(it - queue.begin()), pos);
+    else PlayTracks({id}, 0, pos);
 }
 
 // Reopens the last session's track as Preferences asks: loaded and paused where it stopped, or
@@ -718,7 +743,7 @@ void PlayRow(int row) {
 }
 
 // What a view plays (an album, the Albums & Tracks view) becomes Now Playing, from `index`.
-void PlayTracks(const std::vector<TrackId>& tracks, int index) {
+void PlayTracks(const std::vector<TrackId>& tracks, int index, double start) {
     if (tracks.empty()) return;
     int np = EnsureNowPlayingTab();
     g.playlists[np].items = tracks;
@@ -728,7 +753,7 @@ void PlayTracks(const std::vector<TrackId>& tracks, int index) {
     g.libraryDirty = true;
     g.shuffleOrder.clear();
     if (g.active == np) RebuildRows();
-    PlayFromQueue(std::clamp(index, 0, (int)tracks.size() - 1));
+    PlayFromQueue(std::clamp(index, 0, (int)tracks.size() - 1), start);
 }
 
 void TogglePause() {
@@ -982,6 +1007,7 @@ void SetResumeOn(bool on) {
         g.resumeTrack = kNone;
         g.resumeIndex = -1;
         g.resumePosition = 0;
+        g.spots.clear();
     }
     SaveSettings();
     g.redraw = true;
@@ -1039,19 +1065,23 @@ void SetExclusive(bool exclusive) {
 }
 
 void SetSpeed(double speed) {
-    g.speed = std::isfinite(speed) ? std::clamp(speed, 0.25, 4.0) : 1.0;
-    g.engine.SetSpeed(g.speed);
+    g.settings.speed = std::isfinite(speed) ? std::clamp(speed, 0.25, 4.0) : 1.0;
+    g.engine.SetSpeed(g.settings.speed);
+    SaveSettings();
+    g.redraw = true;  // the list's Duration, BPM and total follow the rate
     wchar_t text[96];
-    swprintf(text, std::size(text), g.speed == 1 ? L"Normal speed." : L"Playing at %gx speed (the pitch follows).", g.speed);
+    swprintf(text, std::size(text), g.settings.speed == 1 ? L"Normal speed." : L"Playing at %gx speed (the pitch follows).", g.settings.speed);
     ShowMessage(text);
     MprisChanged();
 }
 
 void SetTempo(double tempo) {
-    g.tempo = std::isfinite(tempo) ? std::clamp(tempo, 0.25, 4.0) : 1.0;
-    g.engine.SetTempo(g.tempo);
+    g.settings.tempo = std::isfinite(tempo) ? std::clamp(tempo, 0.25, 4.0) : 1.0;
+    g.engine.SetTempo(g.settings.tempo);
+    SaveSettings();
+    g.redraw = true;  // the list's Duration, BPM and total follow the rate
     wchar_t text[96];
-    swprintf(text, std::size(text), g.tempo == 1 ? L"Normal tempo." : L"Playing at %gx tempo (the pitch stays).", g.tempo);
+    swprintf(text, std::size(text), g.settings.tempo == 1 ? L"Normal tempo." : L"Playing at %gx tempo (the pitch stays).", g.settings.tempo);
     ShowMessage(text);
     MprisChanged();
 }

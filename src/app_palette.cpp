@@ -82,13 +82,16 @@ void Collect() {
     auto inMenus = [](int command) {
         return std::any_of(p.entries.begin(), p.entries.end(), [&](const Entry& e) { return e.command == command; });
     };
-    // The commands only keys reach (Volume up, Play a song...: app_keys.cpp), under the menu they belong to.
+    // The commands only keys and right-click menus reach (Volume up, Play next...: app_keys.cpp), under
+    // the menu they belong to.
+    const bool selected = !SelectedTracks().empty();
     for (const ExtraCommand& x : ExtraCommands()) {
         if (inMenus(x.command)) continue;
         Entry e;
         e.label = x.label;
         e.path = x.path;
         e.command = x.command;
+        e.enabled = selected || !x.selection;
         p.entries.push_back(std::move(e));
     }
     // A tweak that is also a menu toggle is already listed; the rest show their current value.
@@ -518,6 +521,9 @@ int MenuCommandByName(const std::wstring& name) {
     // Packs can keep the previous name of the playback-order command after Internet Radio arrived.
     if (want == L"keep playing like this (radio)" || want == L"playback>keep playing like this (radio)")
         want.erase(want.size() - wcslen(L" (radio)"));
+    // Keys and packs saved before Edit > Reload selected metadata took the tags' name.
+    if (want == L"reload selected metadata" || want == L"edit>reload selected metadata")
+        want = L"edit>reload tags from files";
     int found = 0;
     for (const Entry& e : p.entries) {
         // A setting that is a plain toggle runs its command, so a key bound to it keeps working

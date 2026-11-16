@@ -1,15 +1,15 @@
 // Independent .cord exports, with tags and pictures: exact FLAC/WAV, or built-in MP3/AAC copies.
-// Fixed FLAC predictors keep the encoder small (RFC 9639). Every sibling temporary file is read
-// back and verified before a no-replace rename publishes it; originals and undo logs aren't used.
+// FLAC frames come from the built-in encoder (encode/flac_encoder.h). Every sibling temporary file
+// is read back and verified before a no-replace rename publishes it; originals and undo logs aren't used.
 #include "convert.h"
 #include "cord.h"
 #include "decoder.h"
 #include "native_audio.h"
 #include "streamfile.h"
 #include "audio_encode.h"
+#include "encode/flac_encoder.h"
 
 #include <algorithm>
-#include <bit>
 #include <charconv>
 #include <clocale>
 #include <cmath>
@@ -122,15 +122,8 @@ bool Metadata(FileSource& input, const PcmFormat& format, std::string& head, Exp
         const auto result = std::to_chars(mask, mask + sizeof mask, format.channelMask, 16);
         comments.push_back("WAVEFORMATEXTENSIBLE_CHANNEL_MASK=0x" + std::string(mask, result.ptr));
     }
-    std::string info;
-    Be(info, 4096, 2);
-    Be(info, 4096, 2);  // the final block may be shorter, even shorter than 16 frames
-    info.append(6, '\0');  // frame byte sizes unknown
-    Be(info, (uint64_t)format.rate << 44 | (uint64_t)(format.channels - 1) << 41 |
-             (uint64_t)(format.bits - 1) << 36 | format.frames, 8);
-    info.append(16, '\0');  // patched with the source's verified digest
-    head = "fLaC";
-    MetadataBlock(head, 0, info);
+    head = "fLaC";  // STREAMINFO's frame sizes and MD5 are patched in once the audio is written
+    MetadataBlock(head, 0, cordinal::encode::FlacStreamInfo(format.rate, format.channels, format.bits, format.frames, 0, 0, {}));
     std::string vorbis;
     cord::PutLe(vorbis, 8, 4);
     vorbis += "cordinal";
@@ -276,113 +269,6 @@ std::string WaveHeader(const PcmFormat& f, const std::string& tags) {
     return head;
 }
 
-struct Bits {
-    std::string bytes;
-    unsigned used = 0;
-    void Put(uint32_t value, unsigned count) {
-        while (count) {
-            if (!used) bytes += '\0';
-            const unsigned n = std::min(count, 8 - used);
-            bytes.back() = (char)((uint8_t)bytes.back() | ((value >> (count - n)) & ((1u << n) - 1)) << (8 - used - n));
-            count -= n;
-            used = (used + n) % 8;
-        }
-    }
-    void Rice(uint32_t folded, unsigned k) {
-        uint32_t zeros = folded >> k;
-        while (zeros >= 32) { Put(0, 32); zeros -= 32; }
-        Put(1, zeros + 1);
-        Put(folded, k);
-    }
-};
-
-uint16_t Crc(std::string_view bytes, unsigned width, unsigned polynomial) {
-    unsigned crc = 0;
-    for (unsigned char c : bytes) {
-        crc ^= (unsigned)c << (width - 8);
-        for (unsigned i = 0; i < 8; ++i) crc = (crc << 1) ^ ((crc & (1u << (width - 1))) ? polynomial : 0);
-    }
-    return (uint16_t)(crc & ((1u << width) - 1));
-}
-
-int64_t Prediction(const std::vector<int32_t>& x, size_t i, unsigned order) {
-    switch (order) {
-        case 1: return x[i - 1];
-        case 2: return 2ll * x[i - 1] - x[i - 2];
-        case 3: return 3ll * x[i - 1] - 3ll * x[i - 2] + x[i - 3];
-        case 4: return 4ll * x[i - 1] - 6ll * x[i - 2] + 4ll * x[i - 3] - x[i - 4];
-        default: return 0;
-    }
-}
-
-void Subframe(Bits& out, const std::vector<int32_t>& x, unsigned bits) {
-    if (std::all_of(x.begin(), x.end(), [&](int32_t s) { return s == x[0]; })) {
-        out.Put(0, 8);
-        out.Put((uint32_t)x[0], bits);
-        return;
-    }
-    uint64_t best = x.size() * bits;
-    unsigned order = 5, rice = 0;
-    std::vector<uint32_t> residual(x.size()), chosen;
-    for (unsigned o = 0; o <= 4 && o < x.size(); ++o) {
-        uint64_t sum = 0;
-        bool fits = true;
-        for (size_t i = o; i < x.size(); ++i) {
-            const int64_t r = (int64_t)x[i] - Prediction(x, i, o);
-            if (r < -INT32_MAX || r > INT32_MAX) { fits = false; break; }
-            residual[i] = (uint32_t)(r < 0 ? -2 * r - 1 : 2 * r);
-            sum += residual[i];
-        }
-        if (!fits) continue;
-        const unsigned k = std::min(14u, (unsigned)std::bit_width(sum / (x.size() - o)));
-        for (unsigned p = k ? k - 1 : 0; p <= k; ++p) {
-            uint64_t cost = o * bits + 10 + (x.size() - o) * (p + 1);
-            for (size_t i = o; i < x.size(); ++i) cost += residual[i] >> p;
-            if (cost < best) { best = cost; order = o; rice = p; chosen = residual; }
-        }
-    }
-    if (order == 5) {
-        out.Put(2, 8);  // verbatim when prediction cannot save space or fit signed residuals
-        for (int32_t s : x) out.Put((uint32_t)s, bits);
-    } else {
-        out.Put((8 + order) << 1, 8);
-        for (unsigned i = 0; i < order; ++i) out.Put((uint32_t)x[i], bits);
-        out.Put(0, 6);  // Rice method 0, one partition
-        out.Put(rice, 4);
-        for (size_t i = order; i < x.size(); ++i) out.Rice(chosen[i], rice);
-    }
-}
-
-std::string Frame(const int32_t* pcm, size_t count, const PcmFormat& f, uint32_t number) {
-    // Common rates and depths are stated in the frame as well as STREAMINFO for hardware players.
-    constexpr unsigned rates[] = {0,88200,176400,192000,8000,16000,22050,24000,32000,44100,48000,96000};
-    constexpr unsigned depths[] = {0,8,12,0,16,20,24,32};
-    unsigned rate = 0, depth = 0;
-    for (unsigned i = 1; i < std::size(rates); ++i) if (rates[i] == f.rate) rate = i;
-    for (unsigned i = 1; i < std::size(depths); ++i) if (depths[i] == f.bits) depth = i;
-    if (!rate && f.rate <= 65535) rate = 13;
-    else if (!rate && f.rate % 10 == 0 && f.rate <= 655350) rate = 14;
-    Bits out;
-    out.bytes = std::string("\xFF\xF8", 2) + (char)(0x70 | rate) + (char)((f.channels - 1) << 4 | depth << 1);
-    if (number < 128) out.bytes += (char)number;
-    else {
-        unsigned bytes = 2;
-        while (number >= (1ull << (5 * bytes + 1))) ++bytes;
-        out.bytes += (char)((0xFFu << (8 - bytes)) | (number >> ((bytes - 1) * 6)));
-        while (--bytes) out.bytes += (char)(0x80 | ((number >> ((bytes - 1) * 6)) & 63));
-    }
-    Be(out.bytes, count - 1, 2);
-    if (rate >= 13) Be(out.bytes, f.rate / (rate == 14 ? 10 : 1), 2);
-    out.bytes += (char)Crc(out.bytes, 8, 0x07);
-    std::vector<int32_t> channel(count);
-    for (unsigned c = 0; c < f.channels; ++c) {
-        for (size_t i = 0; i < count; ++i) channel[i] = pcm[i * f.channels + c];
-        Subframe(out, channel, f.bits);
-    }
-    Be(out.bytes, Crc(out.bytes, 16, 0x8005), 2);  // Bits already zero-pads the final byte
-    return std::move(out.bytes);
-}
-
 class Output {
 public:
     explicit Output(const std::wstring& path) {
@@ -438,7 +324,7 @@ bool ExportCordFlac(const std::wstring& from, const std::wstring& to, std::wstri
     auto source = OpenCordExact(from);
     if (!input.Valid() || !source) { error = L"Couldn't read this .cord file."; return false; }
     const PcmFormat& f = source->Format();
-    if (f.bits < 4 || f.frames >= (1ull << 36)) {
+    if (!cordinal::encode::FlacEncoder::Supports(f.rate, f.channels, f.bits, f.frames)) {
         error = L"FLAC needs 4- to 32-bit samples and fewer than 68,719,476,736 frames.";
         return false;
     }
@@ -454,16 +340,28 @@ bool ExportCordFlac(const std::wstring& from, const std::wstring& to, std::wstri
     Output out(to);
     error = L"Couldn't write the FLAC file next to its source. Check free space and folder permissions.";
     if (!out.Write(head)) return false;
-    std::vector<int32_t> pcm(4096 * f.channels);
-    uint32_t number = 0;
+    constexpr size_t block = cordinal::encode::FlacEncoder::kBlockFrames;
+    std::vector<int32_t> pcm(block * f.channels);
+    cordinal::encode::FlacEncoder encoder(f.rate, f.channels, f.bits);
+    std::string frame;
     while (!cancel) {
-        const size_t n = source->Read(pcm.data(), 4096);
+        // The encoder needs whole blocks until the last; a reader may return fewer frames at a time.
+        size_t n = 0;
+        while (n < block) {
+            const size_t got = source->Read(pcm.data() + n * f.channels, block - n);
+            if (!got) break;
+            n += got;
+        }
         if (!n) break;
-        if (!out.Write(Frame(pcm.data(), n, f, number++))) return false;
+        frame.clear();
+        encoder.Frame(pcm.data(), n, frame);
+        if (!out.Write(frame)) return false;
+        if (n < block) break;
     }
     if (cancel) { error = L"Cancelled."; return false; }
     if (source->Damaged()) { error = L"The .cord audio is damaged. Nothing was exported."; return false; }
-    head.replace(26, 16, (const char*)source->Digest().data(), 16);
+    head.replace(8, 34, cordinal::encode::FlacStreamInfo(f.rate, f.channels, f.bits, f.frames, encoder.MinFrameBytes(),
+                                                         encoder.MaxFrameBytes(), source->Digest()));
     if (!out.Finish(head)) return false;
     bool same = false;
     if (auto back = OpenFlacExact(out.Path())) {

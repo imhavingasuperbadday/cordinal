@@ -126,6 +126,8 @@ bool EditComments(sv old, const TagEdit& e, bool inlineCover, bool opus, std::st
     text({"REPLAYGAIN_ALBUM_PEAK"}, e.rgAlbumPeak);
     text({"FMPS_RATING"}, e.rating);
     text({"FMPS_PLAYCOUNT"}, e.playCount);
+    text({"MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_RELEASEID"}, e.musicBrainzRelease);
+    text({"MUSICBRAINZ_RELEASEGROUPID"}, e.musicBrainzReleaseGroup);
     if (opus) {
         text({"R128_TRACK_GAIN"}, e.r128TrackGain);
         text({"R128_ALBUM_GAIN"}, e.r128AlbumGain);

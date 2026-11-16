@@ -2,6 +2,7 @@
 #include "alternate_ui.h"
 #include "big_ui.h"
 #include "ui_internal.h"
+#include "playlog.h"
 
 namespace lx {
 
@@ -145,13 +146,14 @@ std::vector<MenuItem> BarMenu(int m) {
                     Item("Select all", kSelectAll, "Ctrl+A", false, any), Item("Remove", kRemove, "Del", false, (editable || library) && any),
                     Item("Keep only selected tracks", kKeepSelected, {}, false, editable && !SelectedTracks().empty()),
                     Item("Clear playlist", kClear, {}, false, editable && any), Separator(),
-                    Item("Reload selected metadata", kReloadTags, {}, false, !SelectedTracks().empty() && !TagWriteBusy()),
+                    Item("Reload tags from files", kReloadTags, {}, false, !SelectedTracks().empty() && !TagWriteBusy()),
                     Item("Remove duplicates", kRemoveDuplicates, {}, false, editable && any),
                     Item("Remove dead items", kRemoveDead, {}, false, editable && any && !g_playlistFileBusy && !g_playlistImport),
                     Separator(), Item("Search", kFind, "Ctrl+F"), Separator(),
                     Item("Edit tags...", kEditTags, "Alt+Enter", false, g.focus >= 0 && any),
                     Item("Edit album tags...", kEditAlbumTags, {}, false, !SelectedTracks().empty()),
                     Item("Make album...", kMakeAlbum, {}, false, !SelectedTracks().empty()),
+                    Item("Tag album from MusicBrainz...", kTagAlbum, {}, false, !SelectedTracks().empty()),
                     Item("Undo last tag edit", kUndoTags, {}, false, CanUndoTagEdit())};
             if (g_checkingDead && g_playlistFileBusy) items.insert(items.begin() + 11, Item("Cancel checking dead items", kCancelDead));
             if (auto labels = HelperToolLabels(); !labels.empty()) {  // the tools of the helpers that are on
@@ -180,10 +182,12 @@ std::vector<MenuItem> BarMenu(int m) {
                     Radio("Repeat playlist", kRepeatSet, (int)Repeat::All, r == Repeat::All, "Ctrl+R"),
                     Radio("Repeat track", kRepeatSet, (int)Repeat::One, r == Repeat::One),
                     Item("Stop after current", kStopAfter, {}, g.stopAfterCurrent),
-                    Item("Clear the queue", kClearQueue, {}, false, !g.queue.empty()), Separator(),
+                    Item("Clear the queue", kClearQueue, {}, false, !g.queue.empty()),
+                    Item("Pick up where you left off...", kSpots, {}, false, g.settings.resumeOn),
+                    Item("Play history...", kPlayHistory, {}, false, !PlayLog().empty()), Separator(),
                     Submenu("ReplayGain", ReplayGainMenu()),
-                    Submenu("Speed (pitch follows)", RateItems(kSpeeds, std::size(kSpeeds), g.speed, kSpeed)),
-                    Submenu("Tempo (pitch stays)", RateItems(kTempos, std::size(kTempos), g.tempo, kTempo)),
+                    Submenu("Speed (pitch follows)", RateItems(kSpeeds, std::size(kSpeeds), g.settings.speed, kSpeed)),
+                    Submenu("Tempo (pitch stays)", RateItems(kTempos, std::size(kTempos), g.settings.tempo, kTempo)),
                     Separator(), Item("Equalizer...", kEqualizer, "Ctrl+E"),
                     Submenu("Output", {Radio("Shared (through the sound server)", kShared, 0, !g.settings.exclusive),
                                        Radio("Exclusive (bit-perfect)", kExclusive, 0, g.settings.exclusive)})};
@@ -244,14 +248,13 @@ std::vector<MenuItem> BarMenu(int m) {
                 Separator(), Submenu("Find missing information", MissingInfoItems()),
                 Item("Fetch missing covers...", kFetchCovers, {}, false, !CoverFetchBusy()),
                 Item("Remove recent additions (24 hours)...", kRecentAdditions),
-                Item("Find duplicate audio", kDuplicateAudio, {}, false, !g_playlistFileBusy && !g_playlistImport),
+                Item("Find duplicates...", kDuplicateAudio),
                 Item("Add Steam soundtracks", kSteam, {}, false, !g_playlistFileBusy && !g_playlistImport)};
             if (ConvertBusy()) items.push_back(Item("Cancel conversion", kCancelConvert));
             if (CopyBusy()) items.push_back(Item("Cancel copy", kCancelCopy));
             if (IpodBusy()) items.push_back(Item("Cancel iPod sync", kCancelIpodSync));
             if (CoverFetchBusy()) items.push_back(Item("Cancel cover search", kCancelFetchCovers));
             if (CordExportBusy()) items.push_back(Item("Cancel export", kCancelExport));
-            if (g_checkingDuplicates && g_playlistFileBusy) items.push_back(Item("Cancel duplicate search", kCancelDuplicates));
             if (g_checkingSteam && g_playlistFileBusy) items.push_back(Item("Cancel soundtrack search", kCancelSteam));
             return items;
         }
@@ -365,9 +368,10 @@ void OpenRowMenu(float x, float y) {
     ratings.push_back(Item("Write ratings and play counts to files", kWriteStatistics, {}, false, !TagWriteBusy()));
     items.push_back(Submenu("Rating", std::move(ratings)));
     bool manual = g.rgRunning && !g.rgAuto;
-    items.push_back(Item("Scan ReplayGain", kRgScanSel, {}, false, !manual));
-    items.push_back(Item("Write ReplayGain tags", kRgWrite, {}, false, !manual));
-    items.push_back(Item("Clear ReplayGain", kRgClear, {}, false, !manual));
+    // ReplayGain for the selection, named as in Playback > ReplayGain (and as on Windows).
+    items.push_back(Submenu("ReplayGain", {Item("Scan selection", kRgScanSel, {}, false, !manual),
+                                           Item("Clear ReplayGain", kRgClear, {}, false, !manual),
+                                           Item("Write ReplayGain tags", kRgWrite, {}, false, !manual)}));
     items.push_back(Item("Open containing folder", kOpenFolder));
     items.push_back(Item("Organize files...", kOrganize, {}, false, !OrganizeBusy()));
     items.push_back(Item("Convert to .cord...", kConvert, {}, false, !ConvertBusy() && !CordExportBusy() && !TagWriteBusy()));
@@ -377,6 +381,7 @@ void OpenRowMenu(float x, float y) {
     items.push_back(Item("Edit tags...", kEditTags, "Alt+Enter"));
     items.push_back(Item("Edit album tags...", kEditAlbumTags));
     items.push_back(Item("Make album...", kMakeAlbum));
+    items.push_back(Item("Tag album from MusicBrainz...", kTagAlbum));
     // The cover as a submenu: a file or the clipboard's picture becomes the album's cover at once;
     // only an online search needs the picker. Dropping an image on a row does the same.
     std::vector<MenuItem> cover{Item("Choose image file...", kCoverFile),
@@ -498,6 +503,8 @@ void RunAction(const MenuItem& item) {
             if (item.arg >= 0 && item.arg < (int)std::size(kTempos)) SetTempo(kTempos[item.arg]);
             break;
         case kStopAfter: ToggleStopAfterCurrent(); break;
+        case kSpots: OpenComebacks(false); break;
+        case kPlayHistory: OpenComebacks(true); break;
         case kShared: SetExclusive(false); break;
         case kExclusive: SetExclusive(true); break;
         case kNewPl: NewPlaylist(); break;
@@ -527,8 +534,7 @@ void RunAction(const MenuItem& item) {
         case kRating: SetRating(SelectedTracks(), (uint8_t)std::clamp(item.arg, 0, 100)); break;
         case kSectionPlay: case kSectionLoop: case kSectionStart: case kSectionEnd: case kSectionClear:
             SectionAction(item.action); break;
-        case kDuplicateAudio: FindDuplicateAudio(); break;
-        case kCancelDuplicates: g_playlistFileCancel = true; break;
+        case kDuplicateAudio: OpenDuplicates(); break;
         case kSteam: AddSteamSoundtracks(); break;
         case kFetchCovers: FetchMissingCovers(); break;
         case kRecentAdditions: OpenRecentAdditions(); break;
@@ -541,6 +547,7 @@ void RunAction(const MenuItem& item) {
             if (auto sel = SelectedTracks(); !sel.empty()) OpenTagEditor(AlbumTracksOf(sel));
             break;
         case kMakeAlbum: OpenAlbumMaker(SelectedTracks()); break;
+        case kTagAlbum: OpenAlbumTagger(SelectedTracks()); break;
         case kMissingInfo: ShowMissingInformation((size_t)std::max(0, item.arg)); break;
         case kSaveLyricsTags: SaveFetchedLyrics(true); break;
         case kSaveLyricsLrc: SaveFetchedLyrics(false); break;

@@ -437,6 +437,7 @@ void FinishReplayGain(WPARAM wp, LPARAM lp) {
     g.rgRunIds.clear();
     g.rgNextAuto = GetTickCount64() + 1000;  // more may be waiting: continue the sweep shortly
     UpdateStatus();
+    DuplicatesMeasured();  // Find duplicates waits for the songs it asked to have measured
     if (batch->background) return;
     std::wstring done = std::to_wstring(g.rgOk) + (g.rgOk == 1 ? L" track" : L" tracks");
     if (cancelled)

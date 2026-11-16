@@ -473,7 +473,7 @@ void TestCrashDump(const std::wstring& scratch) {
 void TestListenBrainz(const std::wstring& scratch) {
     using namespace listenbrainz;
     const std::string info = "\"media_player\":\"cordinal\",\"submission_client\":\"cordinal\","
-                             "\"submission_client_version\":\"0.1.13\"";
+                             "\"submission_client_version\":\"0.1.14\"";
 
     Listen a;
     a.listenedAt = 1700000000;

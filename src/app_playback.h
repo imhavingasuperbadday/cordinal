@@ -28,6 +28,17 @@ void FinishListening(bool manual);
 void RecordListening(TrackId id, double seconds, bool manual, uint32_t when = 0);
 void DrawStatusItems(HDC dc, RECT r);
 void ClickStatusItem(int item);
+// Shared (0), exclusive (1) or ASIO (2) output: saved, applied and announced.
+void SetOutput(int mode);
+// The installed ASIO drivers as a menu at the pointer; choosing one switches output to it.
+void ShowAsioDrivers();
+// Network speakers as a menu at the pointer, after a search when the last is over a minute old (or
+// `search`); choosing one plays there. OnSpeakersFound takes the search's result (WM_APP_SPEAKERS).
+void ShowSpeakers(bool search);
+void OnSpeakersFound(LPARAM result);
+void SpeakerCommand(int id);  // IDM_SPEAKER_HERE or IDM_SPEAKER_BASE + index
+// Plays on a network speaker (a speakers::DeviceId), or on this computer for empty: saved, applied, announced.
+void SetSpeakerOutput(const std::string& id);
 LRESULT CALLBACK StatusSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR);
 PlayItem MakeItem(unsigned long long token, TrackId id);
 unsigned long long NewToken(TrackId id, int pl, uint32_t index = UINT32_MAX);
@@ -44,6 +55,16 @@ void Previous();
 void PlayButton();
 void TogglePause();
 bool Resume();
+// Remembered places in songs left partway (app_spots.cpp): the popup that returns to one, and the
+// bookkeeping playback does as songs are left or finished.
+void RememberSpot();
+void ForgetSpot(TrackId id);
+void PlaySpot(size_t i);
+void ShowSpots();
+void ShowPlayHistory();
+bool HasComebacks();  // anything ShowSpots would list besides the song now loaded
+void SaveSpots();
+void LoadSpots();
 // Reopens the last session's track, paused where it stopped or playing at once, as Preferences asks.
 void ReopenLastTrack();
 void SetVolumePercent(int percent);

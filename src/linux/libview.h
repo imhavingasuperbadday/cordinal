@@ -60,6 +60,6 @@ double AlbumCoverHue(TrackId first, StringPool::Handle album, float width);
 void OpenTrackMenu(float x, float y);
 void RateTracks(const std::vector<TrackId>& ids, uint8_t rating);
 // playback.cpp: plays `tracks` from `index` as Now Playing.
-void PlayTracks(const std::vector<TrackId>& tracks, int index);
+void PlayTracks(const std::vector<TrackId>& tracks, int index, double start = 0);
 
 }  // namespace lx

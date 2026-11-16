@@ -1,6 +1,7 @@
 // Real loopback HTTP and HTTPS checks plus deterministic byte-range/decoder checks. This server never
 // opens the user's library or LAN; preview mode serves only the explicitly supplied fixture folder.
 #include "selftest_common.h"
+#include "archive.h"
 #include "qr.h"
 #include "web_internal.h"
 #include "web_library.h"
@@ -934,7 +935,115 @@ void TestWeb(const std::wstring& scratch) {
         auto head = Request(port, L"/api/v1/audio?id=fixture-track&format=wav", nullptr, cookie, {}, true);
         Check(head.status == 200 && head.body.empty() && head.headers.find("Content-Length: 384044") != head.headers.npos,
               L"HEAD reports decoded length without sending audio");
-        auto compressed = Request(port, L"/api/v1/audio?id=fixture-track&format=aac", nullptr, cookie);
+        {
+            batch.Next(L"a download is the exact file under the song's name and resumes by range; an album or "
+                       L"playlist downloads as one ZIP of the files in list order, each checked by its CRC");
+            auto file = Request(port, L"/api/v1/download?id=fixture-track", nullptr, cookie);
+            Check(file.status == 200 && file.body == original &&
+                  file.headers.find("Content-Disposition: attachment; filename=\"Toby Fox; Geoffrey Day - Sinus __ _____.wav\"; "
+                                    "filename*=UTF-8''Toby%20Fox%3B%20Geoffrey%20Day%20-%20Sinus%20%C3%84%20_%E9%9B%AA_.wav") !=
+                      std::string::npos,
+                  L"a download is the exact file, named after its artist and title in UTF-8 with a plain fallback");
+            auto part = Request(port, L"/api/v1/download?id=fixture-track", nullptr, cookie, L"Range: bytes=40-99\r\n");
+            Check(part.status == 206 && part.body == original.substr(40, 60) &&
+                  Request(port, L"/api/v1/download?id=missing", nullptr, cookie).status == 404 &&
+                  Request(port, L"/api/v1/download?id=fixture-track").status == 401,
+                  L"a download resumes by range, and needs pairing and a known song");
+            auto zipHead = Request(port, L"/api/v1/download?playlist=saved&name=Saved%20%E9%9B%AA", nullptr, cookie, {}, true);
+            auto zip = Request(port, L"/api/v1/download?playlist=saved&name=Saved%20%E9%9B%AA", nullptr, cookie);
+            const std::wstring zipPath = scratch + L"\\web-download.zip";
+            WriteTestBytes(zipPath, zip.body);
+            std::vector<std::wstring> members;
+            const bool listed = ListArchive(zipPath, members);
+            const std::wstring folder = zipPath + L"\\Saved \x96EA\\";
+            bool intact = listed && members.size() == 3;
+            for (const auto& m : members) {
+                auto member = ReadArchiveMember(m);  // null unless its CRC matches
+                intact = intact && member && *member == original;
+            }
+            Check(zip.status == 200 && zipHead.status == 200 && zipHead.body.empty() &&
+                  zipHead.headers.find("Content-Length: " + std::to_string(zip.body.size())) != std::string::npos &&
+                  zip.headers.find("filename*=UTF-8''Saved%20%E9%9B%AA.zip") != std::string::npos &&
+                  zip.headers.find("Accept-Ranges") == std::string::npos,
+                  L"a playlist downloads as one ZIP whose announced length is exact and which isn't offered by range");
+            Check(intact && members[0] == folder + L"01 Z page 2.wav" &&
+                  members[1] == folder + L"02 Sinus \x00C4 _\x96EA_.wav" && members[2] == folder + L"03 Z page 2.wav",
+                  L"the ZIP holds every song's file in list order, numbered so a repeated song keeps both copies, each CRC intact");
+            Check(Request(port, L"/api/v1/download?album=No+such+album", nullptr, cookie).status == 404,
+                  L"a download that selects nothing is refused");
+            DeleteFileW(zipPath.c_str());
+        }
+        {
+            batch.Next(L"sharing with network players is off until turned on, then a DLNA media server lists albums, "
+                       L"artists, playlists and songs whose original files and WAV versions play from the listed address");
+            Check(Request(port, L"/upnp/device.xml").status == 404, L"no media server answers while sharing is off");
+            web::Share share; share.on = true; share.name = "cordinal & test"; share.udn = web::NewShareId();
+            server.SetShare(share);
+            auto description = Request(port, L"/upnp/device.xml");
+            Check(description.status == 200 && share.udn.size() == 41 && description.body.find("<UDN>" + share.udn + "</UDN>") != std::string::npos &&
+                      description.body.find("urn:schemas-upnp-org:device:MediaServer:1") != std::string::npos &&
+                      description.body.find("<friendlyName>cordinal &amp; test</friendlyName>") != std::string::npos &&
+                      Request(port, L"/upnp/cd.xml").body.find("<name>Browse</name>") != std::string::npos &&
+                      server.GetStatus().sharing,
+                  L"turned on, it describes a media server under its lasting id and name, without pairing");
+            auto browse = [&](const std::string& id, const char* flag, const char* count = "0") {
+                std::string body = "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body>"
+                    "<u:Browse xmlns:u=\"urn:schemas-upnp-org:service:ContentDirectory:1\"><ObjectID>" + web::XmlEscape(id) +
+                    "</ObjectID><BrowseFlag>" + flag + "</BrowseFlag><Filter>*</Filter><StartingIndex>0</StartingIndex>"
+                    "<RequestedCount>" + count + "</RequestedCount><SortCriteria></SortCriteria></u:Browse></s:Body></s:Envelope>";
+                auto reply = Request(port, L"/upnp/cd", body.c_str(), {},
+                                     L"SOAPACTION: \"urn:schemas-upnp-org:service:ContentDirectory:1#Browse\"\r\n");
+                reply.body = web::XmlUnescape(web::XmlElement(reply.body, "Result")) + "|" + web::XmlElement(reply.body, "TotalMatches") +
+                    "|" + std::to_string(reply.status);
+                return reply.body;
+            };
+            auto root = browse("0", "BrowseDirectChildren");
+            Check(root.find("id=\"albums\"") != std::string::npos && root.find("id=\"playlists\"") != std::string::npos &&
+                      root.find(">Most played<") != std::string::npos && root.ends_with("|5|200"),
+                  L"the root holds Albums, Artists, Playlists, All songs and Most played");
+            auto album = browse("albums", "BrowseDirectChildren");
+            auto songs = browse("al/0", "BrowseDirectChildren", "2");
+            Check(album.find("Fixture album") != std::string::npos && album.find("childCount=\"13\"") != std::string::npos &&
+                      songs.find("id=\"al/0/1\"") != std::string::npos && songs.find("id=\"al/0/2\"") == std::string::npos &&
+                      songs.ends_with("|13|200") && songs.find("<upnp:class>object.item.audioItem.musicTrack</upnp:class>") != std::string::npos,
+                  L"an album lists its songs a page at a time with the full count");
+            const std::string res = web::XmlUnescape(web::XmlElement(songs, "res"));
+            const std::string resPath = res.substr(std::min(res.size(), res.find('/', 7)));
+            auto file = Request(port, FromUtf8(resPath));
+            auto part = Request(port, FromUtf8(resPath), nullptr, {}, L"Range: bytes=40-99\r\n");
+            size_t wavAt = songs.find("/upnp/wav/");
+            auto wav = wavAt == std::string::npos ? Reply{} :
+                Request(port, FromUtf8(songs.substr(wavAt, songs.find('<', wavAt) - wavAt)), nullptr, {}, L"Range: bytes=0-43\r\n");
+            Check(res.starts_with("http://127.0.0.1:") && resPath.ends_with(".wav") && file.status == 200 && file.body == original &&
+                      part.status == 206 && part.body == original.substr(40, 60) &&
+                      file.headers.find("contentFeatures.dlna.org: DLNA.ORG_OP=01") != std::string::npos &&
+                      wav.status == 206 && wav.body.starts_with("RIFF"),
+                  L"a listed song plays from its listed address as the exact file, by range, or as WAV");
+            auto saved = browse("pl/0", "BrowseDirectChildren");
+            auto item = browse("pl/0/2", "BrowseMetadata");
+            Check(saved.ends_with("|3|200") && item.find("id=\"pl/0/2\" parentID=\"pl/0\"") != std::string::npos &&
+                      item.find("Z page 2") != std::string::npos && browse("pl/9", "BrowseDirectChildren").ends_with("|500"),
+                  L"a playlist keeps its order and repeats, each entry has its own metadata, and an unknown object is an error");
+            server.TreatLoopbackAsAwayForTest(true);
+            Check(Request(port, L"/upnp/device.xml").status != 200, L"players away from home are never served");
+            server.TreatLoopbackAsAwayForTest(false);
+            share.on = false;
+            server.SetShare(share);
+            Check(Request(port, L"/upnp/device.xml").status == 404 && !server.GetStatus().sharing, L"turning it off stops it at once");
+            auto all = web::SsdpAnswers("M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 1\r\n"
+                                        "ST: ssdp:all\r\n\r\n", "uuid:x", "http://10.0.0.2:8787/upnp/device.xml");
+            auto one = web::SsdpAnswers("M-SEARCH * HTTP/1.1\r\nMAN: \"ssdp:discover\"\r\nst: urn:schemas-upnp-org:device:MediaServer:1\r\n\r\n",
+                                        "uuid:x", "http://h/");
+            auto bye = web::SsdpNotices("uuid:x", "http://h/", false);
+            Check(all.size() == 5 && all[0].find("LOCATION: http://10.0.0.2:8787/upnp/device.xml\r\n") != std::string::npos &&
+                      one.size() == 1 && one[0].find("USN: uuid:x::urn:schemas-upnp-org:device:MediaServer:1\r\n") != std::string::npos &&
+                      web::SsdpAnswers("M-SEARCH * HTTP/1.1\r\nST: ssdp:all\r\n\r\n", "uuid:x", "http://h/").empty() &&
+                      web::SsdpAnswers("M-SEARCH * HTTP/1.1\r\nMAN: \"ssdp:discover\"\r\nST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n",
+                                       "uuid:x", "http://h/").empty() &&
+                      bye.size() == 5 && bye[0].find("ssdp:byebye") != std::string::npos && bye[0].find("LOCATION") == std::string::npos,
+                  L"SSDP answers only real searches for what cordinal is, and says goodbye without an address");
+        }
+        auto compressed =Request(port, L"/api/v1/audio?id=fixture-track&format=aac", nullptr, cookie);
         batch.Next(L"HTTP compressed audio reports its exact length and answers the two-byte probe, mid-song "
                    L"resumption, suffix probes and HEAD with only the requested bytes");
         Check(compressed.status == 200 && AdtsFrames(compressed.body) >= 94 &&

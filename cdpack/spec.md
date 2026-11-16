@@ -108,12 +108,15 @@ inside code, and the full-file hash proves the rest.
 
 ## Code decoded on demand
 
-`tools/make-code-profile.py` samples the `.text` pages the native player runs in the memory-budget
-scenarios and writes, for each function it saw, the FNV-1a hash of the function's object file and
-decorated name plus the parts of it that were resident. The packer looks those hashes up in the
-linker map of the image being packed, so the profile survives a relink and code moving. Every
-executable page no listed range covers is cold; the packer keeps both pages eager when a relocation
-crosses a page boundary between them, then groups the rest into blocks of about 128 KiB, each a lazy
+`tools/make-code-profile.py` runs the memory-budget scenarios against the native player under a
+debugger that breaks once on each function's first byte, and writes, for each function that ran, the
+FNV-1a hash of the function's object file and decorated name. A line may also give hex byte ranges
+of the function to keep eager (`start:end,...`); without them the whole function is. cordinal's build
+links the listed functions first, so they fill as few pages as possible. The packer looks those
+hashes up in the linker map of the image being packed, so the profile survives a relink and code
+moving. Every executable page no listed range covers is cold; the packer keeps both pages eager when
+a relocation crosses a page boundary between them, then groups the rest into blocks of about 256 KiB
+(`LAZY_BLOCK`), each a lazy
 chunk (`Chunk::flags & lazy`). A hash the map no longer has is a function that changed since the
 profile was taken: its pages stay cold and are decoded when they first run, which costs one fault,
 never correctness. Without a profile and a map every chunk is eager, and a DLL never has cold code

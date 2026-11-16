@@ -7,6 +7,7 @@
 #include "alternate_ui.h"
 #include "background_cpu.h"
 #include "decoder.h"
+#include "panels.h"
 
 #include <sys/resource.h>
 #include <sys/syscall.h>
@@ -233,6 +234,7 @@ void FinishReplayGain(WPARAM wp, LPARAM lp) {
     g.rgCancel = false;
     g.rgRunIds.clear();
     g.rgNextAuto = SDL_GetTicks() + 1000;  // more may be waiting: continue the sweep shortly
+    DuplicatesMeasured();  // Find duplicates waits for the songs it asked to have measured
     if (batch->background) return;
     std::wstring done = std::to_wstring(g.rgOk) + (g.rgOk == 1 ? L" track" : L" tracks");
     if (cancelled) ShowMessage(L"ReplayGain scan cancelled after " + done + L".");

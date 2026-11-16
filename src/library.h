@@ -125,7 +125,9 @@ struct Track {
     uint16_t flags = 0;
     int16_t rgTrackGain = kNoGain, rgAlbumGain = kNoGain;  // centi-dB
     uint16_t rgTrackPeak = 0, rgAlbumPeak = 0;             // 1/20000 units, 0 = unknown
-    uint64_t audioHash = 0;  // FLAC audio MD5 prefix (TagData::audioHash), 0 = unknown
+    // Identifies the decoded audio, 0 = unknown: the MD5 prefix a FLAC or .cord file stores
+    // (TagData::audioHash), otherwise the hash measuring computed (replaygain.h AudioHasher).
+    uint64_t audioHash = 0;
     uint32_t firstPlayed = 0;  // first counted play, including imported statistics; 0 = unknown
     // The path index's hash of dir + file, set by Library::Index; it fills the record's last four
     // bytes of padding. Code that copies a Track over another path copies it with dir and file.
@@ -155,6 +157,19 @@ struct Track {
     double Duration() const { return durationMs / 1000.0; }
 };
 static_assert(sizeof(Track) <= 128, "keep tracks compact");
+// The audio hash came from the file itself (FLAC's or .cord's MD5), not from measuring.
+inline bool HasStoredAudioHash(const Track& t) {
+    return t.audioHash && (t.codec == Codec::FLAC || t.codec == Codec::Cord);
+}
+
+// A track as heard at playback `rate` (speed times tempo, 1 = normal). Both shorten a track and
+// quicken its beat, yet the tags only know the file: at 1.1x tempo a 31:35 mix is over in 28:43 at
+// 163 beats a minute, not 148. The track list, its totals and "ends at" use these so each says what
+// the listener will hear. HeardCell fills a Duration or BPM cell (ui_spec.h ids) and returns true,
+// blank when the tag is; for any other column, or at the normal rate, it returns false and leaves
+// the cell to the column's own format.
+double HeardSeconds(double seconds, double rate);
+bool HeardCell(int column, const Track& t, double rate, std::wstring& out);
 
 using TrackId = uint32_t;
 constexpr TrackId kInvalidTrack = UINT32_MAX;
@@ -256,9 +271,6 @@ public:
     StringPool::Handle InternW(std::wstring_view s) { return strings_.Intern(ToUtf8(s)); }
 
     void ApplyTags(TrackId id, const TagData& tags);
-    // Groups of two or more library tracks (in the library or the Inbox) whose audio is identical,
-    // by audioHash. Each group lists its tracks in ascending id order.
-    std::vector<std::vector<TrackId>> FindDuplicateAudio() const;
     size_t MemoryBytes() const;
 
     // Bumped by every change that can alter what a library view shows, so views rebuild lazily.
@@ -323,8 +335,8 @@ int MissingTagTerm(const Library& library, TrackId id, std::wstring_view word);
 // folder scans leave them out. Clears the Inbox and steam-duplicate flags too.
 void ExcludeTracks(const std::vector<TrackId>& ids);
 
-// Group a copied list of nonzero audio hashes off the UI thread; each group contains two or more
-// track IDs, and both the IDs and the groups are sorted.
+// Groups (audio hash, track) pairs with nonzero hashes for duplicates::Find; each group contains two
+// or more track IDs, and both the IDs and the groups are sorted.
 std::vector<std::vector<TrackId>> GroupDuplicateAudio(std::vector<std::pair<uint64_t, TrackId>> byHash);
 
 // Static playlists hold tracks the user put there. The others are views: the Library and the
@@ -360,6 +372,7 @@ struct Playlist {
     // Remembered sort; views reapply it when their library revision changes.
     int sortColumn = -1;
     bool sortAscending = true;
+    std::vector<TrackId> presort;  // a playlist's order before its first column sort; not saved
     uint32_t builtRevision = 0;
     PlaylistPosition position;
     uint64_t identity = 0;

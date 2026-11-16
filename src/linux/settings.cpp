@@ -11,6 +11,7 @@
 #include "metadata_fetch.h"
 #include "backup.h"
 #include "peaks.h"
+#include "radio_ui.h"
 #include "points.h"
 
 #include <algorithm>
@@ -170,6 +171,9 @@ void LoadSettings() {
     s.webCode.clear();
     if (auto it = v.find("web_code"); it != v.end() && web::CheckFixedCode(it->second, s.webCode)) s.webCode.clear();
     if (auto it = v.find("web_hosts"); it != v.end()) s.webHosts = it->second;
+    s.webShare = ToInt(v, "web_share", 0) != 0;
+    s.webShareId.clear();
+    if (auto it = v.find("web_share_id"); it != v.end() && it->second.starts_with("uuid:")) s.webShareId = it->second;
     if (auto it = v.find("output_device"); it != v.end()) s.outputDevice = it->second;
     s.lyricsPanel = ToInt(v, "lyrics_panel", 0) != 0;
     s.nttGuesses.clear();
@@ -271,6 +275,9 @@ void LoadSettings() {
     s.inboxEnabled = ToInt(v, "inbox_enabled", 0) != 0;
     s.steamOffered = ToInt(v, "steam_offered", 0) != 0;
     s.volume = std::clamp(ToInt(v, "volume", 100), 0, 100) / 100.0f;
+    // Playback rates (Playback > Speed and Tempo) come back as saved: the next start keeps them.
+    s.speed = ToFloat(v, "speed", 1, 0.25f, 4);
+    s.tempo = ToFloat(v, "tempo", 1, 0.25f, 4);
     s.volumeCurve = std::clamp(ToInt(v, "volume_curve", 0), 0, kVolumeCurves - 1);
     s.softwareVolume = ToInt(v, "software_volume", 1) != 0;
     s.crossfade = std::clamp(ToInt(v, "crossfade", 0), 0, (int)std::size(kCrossfadeSeconds) - 1);
@@ -286,6 +293,18 @@ void LoadSettings() {
     if (auto it = v.find("resume_path"); it != v.end()) s.resumePath = compat::Widen(it->second.c_str());
     s.resumePosition = ToFloat(v, "resume_position", 0, 0, 1e9f);
     s.resumeIndex = ToInt(v, "resume_index", -1);
+    // spot_N=place|path and rediscover_snoozed_N=last play|path, in order.
+    auto pairs = [&](const char* prefix, auto& out) {
+        for (int i = 0;; ++i) {
+            auto it = v.find(prefix + std::to_string(i));
+            if (it == v.end()) break;
+            size_t bar = it->second.find('|');
+            if (bar == std::string::npos) continue;
+            out.emplace_back(compat::Widen(it->second.substr(bar + 1).c_str()), std::strtod(it->second.substr(0, bar).c_str(), nullptr));
+        }
+    };
+    pairs("spot_", s.spots);
+    pairs("rediscover_snoozed_", s.snoozed);
     for (const auto& [key, value] : v) {
         if (!key.starts_with("section_") || key.size() != 24 ||
             !std::all_of(key.begin() + 8, key.end(), [](unsigned char c) { return std::isxdigit(c) != 0; })) continue;
@@ -303,6 +322,7 @@ void LoadSettings() {
         s.sections[FromUtf8(key.substr(8))] = {start / 1000.0, end / 1000.0, on == "1"};
     }
     s.exclusive = ToInt(v, "exclusive", 0) != 0;
+    s.upmix = ToInt(v, "upmix", 0) != 0;
     s.repeat = (Repeat)std::clamp(ToInt(v, "repeat", 0), 0, 2);
     // ui_theme counts in the shared ThemeMode; the older theme key only knew four of them.
     static const ThemeMode kOldThemes[] = {ThemeMode::System, ThemeMode::Light, ThemeMode::Dark, ThemeMode::Foobar};
@@ -323,6 +343,7 @@ void LoadSettings() {
     net.lyrics[0] = ToInt(v, "online_lyrics_lrclib", 0) != 0;
     net.lyrics[1] = ToInt(v, "online_lyrics_ovh", 0) != 0;
     net.artistInfo = ToInt(v, "online_artist_info", 0) != 0;
+    net.albumTags = ToInt(v, "online_album_tags", 0) != 0;
     s.convertRecycle = ToInt(v, "convert_recycle", 1) != 0;
     s.convertShowOriginals = ToInt(v, "convert_show_originals", 0) != 0;
     s.convertMemory = (uint8_t)std::clamp(ToInt(v, "convert_undo_days", 3), 0, (int)std::size(kConvertMemoryDays) - 1);
@@ -407,6 +428,7 @@ void SaveSettings() {
     text += "web_port=" + std::to_string(s.webPort) + "\nweb_start=" + std::to_string(s.webStart) + "\n";
     text += "web_away=" + std::to_string(s.webAway) + "\nweb_away_agreed=" + std::to_string(s.webAwayAgreed) +
             "\nweb_away_port=" + std::to_string(s.webAwayPort) + "\nweb_code=" + s.webCode + "\nweb_hosts=" + s.webHosts + "\n";
+    text += "web_share=" + std::to_string(s.webShare) + "\nweb_share_id=" + s.webShareId + "\n";
     for (size_t i = 0; i < s.folders.size(); ++i)
         text += "folder" + std::to_string(i) + "=" + compat::Narrow(s.folders[i].c_str()) + "\n";
     text += "folders_chosen=" + std::to_string(s.foldersChosen ? 1 : 0) + "\n";
@@ -414,7 +436,9 @@ void SaveSettings() {
     text += "inbox_enabled=" + std::to_string(s.inboxEnabled) + "\n";
     text += "steam_offered=" + std::to_string(s.steamOffered) + "\n";
     text += "volume=" + std::to_string((int)std::lround(s.volume * 100)) + "\n";
+    text += "speed=" + FloatText((float)s.speed) + "\ntempo=" + FloatText((float)s.tempo) + "\n";
     text += "shuffle=" + std::to_string(s.shuffle) + "\nexclusive=" + std::to_string(s.exclusive) + "\n";
+    text += "upmix=" + std::to_string(s.upmix) + "\n";
     text += "skip_aware_shuffle=" + std::to_string(s.skipAwareShuffle) + "\n";
     text += "radio=" + std::to_string(s.radio) + "\n";
     text += "taste=" + std::to_string(s.taste) + "\n";
@@ -427,6 +451,20 @@ void SaveSettings() {
             (haveResume ? compat::Narrow(g_lib.Path(resume).c_str()) : std::string()) +
             "\nresume_position=" + FloatText(haveResume && std::isfinite(resumePosition) ? (float)std::max(0.0, resumePosition) : 0) +
             "\nresume_index=" + std::to_string(haveResume ? resumeIndex : -1) + "\n";
+    // The playing song counts as left where it is, so it is offered next time too.
+    auto spots = g.spots;
+    if (s.resumeOn && g_lib.Contains(g.playing) && !RadioPlaying()) {
+        std::erase_if(spots, [](const auto& spot) { return spot.first == g.playing; });
+        double at = g.engine.Position(), duration = g_lib[g.playing].Duration();
+        if (std::isfinite(at) && at >= 5 && (duration <= 0 || at < duration - 5)) spots.insert(spots.begin(), {g.playing, at});
+    }
+    for (size_t i = 0; s.resumeOn && i < spots.size() && i < 12; ++i)
+        if (g_lib.Contains(spots[i].first))
+            text += "spot_" + std::to_string(i) + "=" + FloatText((float)spots[i].second) + "|" +
+                    compat::Narrow(g_lib.Path(spots[i].first).c_str()) + "\n";
+    for (size_t i = 0; i < s.snoozed.size(); ++i)
+        text += "rediscover_snoozed_" + std::to_string(i) + "=" + std::to_string(s.snoozed[i].second) + "|" +
+                compat::Narrow(s.snoozed[i].first.c_str()) + "\n";
     for (const auto& [key, section] : s.sections)
         text += "section_" + ToUtf8(key) + "=" + std::to_string((int64_t)std::llround(section.start * 1000)) + "," +
                 std::to_string((int64_t)std::llround(section.end * 1000)) + "," + std::to_string(section.on) + "\n";
@@ -444,7 +482,8 @@ void SaveSettings() {
             "\nonline_cover_first=" + std::to_string(net.coverFirst) + "\nonline_cover_save=" +
             std::to_string(net.coverSave) + "\nonline_cover_overwrite=" + std::to_string(net.coverOverwrite) +
             "\nonline_lyrics_lrclib=" + std::to_string(net.lyrics[0]) + "\nonline_lyrics_ovh=" + std::to_string(net.lyrics[1]) +
-            "\nonline_artist_info=" + std::to_string(net.artistInfo) + "\n";
+            "\nonline_artist_info=" + std::to_string(net.artistInfo) +
+            "\nonline_album_tags=" + std::to_string(net.albumTags) + "\n";
     text += "output_device=" + s.outputDevice + "\n";
     text += "view_size=" + std::to_string((int)s.defaultSize) + "\n";
     // The layout keys hold the saved default layout: a Preferences or Customize-layout change
@@ -583,6 +622,9 @@ void LoadLibraryFile() {
             g.resumeIndex = g.settings.resumeIndex;
         }
     }
+    for (const auto& [path, at] : g.settings.spots)
+        if (TrackId id = g_lib.Find(path); g.settings.resumeOn && g_lib.Contains(id) && g.spots.size() < 12)
+            g.spots.emplace_back(id, at);
     if (!PointsInitialized()) {
         GrantBackPayIfNeeded();
         g.libraryDirty = true;

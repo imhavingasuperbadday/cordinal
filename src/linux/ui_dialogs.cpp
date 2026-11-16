@@ -116,7 +116,8 @@ void WebAction(int control) {
     else if (control == 10) RetryWebAway();
     else if (control == 11 && !WebStatus().away.empty()) {
         SDL_SetClipboardText(WebStatus().away.c_str()); ShowMessage(L"Internet address copied.");
-    } else if (control == 12 || control == 13) {
+    } else if (control == 14) SetWebShare(!g.settings.webShare);
+    else if (control == 12 || control == 13) {
         std::wstring notice = SetWebFixedCode(g_web.fixed);
         g_web.fixed = g.settings.webCode;  // as kept: spaces and dashes go
         if (!notice.empty()) ShowMessage(notice);
@@ -158,6 +159,13 @@ void DrawWeb(const Palette& p) {
         DrawPairingCode(code, p);
         float cy = code.B() + S(8);
         for (const std::string& line : Wrap(Font::Small, pairing.caption, code.w)) {
+            DrawText(Font::Small, line, code.x, cy, p.sub, code.w); cy += LineHeight(Font::Small);
+        }
+        // Sharing with network players, under the code as in the Windows window.
+        cy += S(14);
+        g_web.controls[14] = {code.x, cy, code.w, S(28)};
+        cy += S(34);
+        for (const std::string& line : Wrap(Font::Small, WebShareText(), code.w)) {
             DrawText(Font::Small, line, code.x, cy, p.sub, code.w); cy += LineHeight(Font::Small);
         }
     }
@@ -233,9 +241,9 @@ void DrawWeb(const Palette& p) {
         g.settings.webStart ? "[x] Start with cordinal" : "[ ] Start with cordinal", "Pair device", "Remove all", "Close",
         "Open web player", "Copy phone address", "Copy code",
         WebAway() ? "[x] Listen away from home" : "[ ] Listen away from home", "Check again", "Copy internet address", "",
-        "Use this code"};
+        "Use this code", g.settings.webShare ? "[x] Share with players" : "[ ] Share with players"};
     const bool enabled[kWebControls] = {true, true, true, true, true, true, true, true, true, true, WebAway() && status.running,
-                                        !status.away.empty(), true, true};
+                                        !status.away.empty(), true, true, true};
     for (int i = 1; i < kWebControls; ++i) {
         if (i == 12) continue;  // the fixed code's field, drawn above
         auto r = g_web.controls[i];
@@ -324,7 +332,7 @@ void DrawAbout(const Palette& p) {
         SDL_RenderTexture(g.renderer, g_about.texture, nullptr, &dst);
     }
     float x = g_about.icon.R() + S(18), y = panel.y + S(18);
-    DrawText(Font::Title, "cordinal 0.1.13", x, y, p.text);
+    DrawText(Font::Title, "cordinal 0.1.14", x, y, p.text);
     y += S(34);
     for (const std::string& line : lines) {
         if (y + lineH > panel.B() - S(30)) break;

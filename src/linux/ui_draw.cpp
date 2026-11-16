@@ -1178,9 +1178,11 @@ void DrawList(const Palette& p) {
     float total = x;
     const Playlist& pl = Active();
     uint32_t divider = Mix(p.bg, p.border, 50);
+    const int hot = HeaderHotColumn();  // hovered, pressed or being moved (app_ui_controls.cpp HeaderSubclass)
     for (size_t i = 0; i < xs.size(); ++i) {
         int c = ActiveColumnTypes()[i];
         float w = ColumnWidth(c);
+        if ((int)i == hot) Fill({xs[i], L.header.y, w, L.header.h - S(1)}, p.hover);
         Fill({xs[i] + w - 1, L.header.y + S(6), 1, L.header.h - S(12)}, divider);
         bool sorted = pl.sortColumn == c;
         Rect tr{xs[i] + S(5), L.header.y, w - S(10) - (sorted ? S(14) : 0), L.header.h};
@@ -1193,6 +1195,7 @@ void DrawList(const Palette& p) {
         }
     }
     Fill({L.header.x, L.header.B() - S(1), L.header.w, S(1)}, p.border);
+    if (float drop = HeaderDropX(); drop >= 0) Fill({std::max(L.header.x, drop - S(1)), L.header.y, S(2), L.header.h}, p.accent);
 
     SDL_Rect clip{(int)L.rows.x, (int)L.rows.y, (int)L.rows.w, (int)L.rows.h};
     SDL_SetRenderClipRect(g.renderer, &clip);
@@ -1240,6 +1243,14 @@ void DrawList(const Palette& p) {
         } else if (isPlaying) {
             // The playing row underlines how far the track has got (app_playlists.cpp, DrawTrackRow).
             Fill({r.x, r.B() - S(2), (float)ui::PlayedWidth((int)r.w, g.engine.Position(), TrackDuration()), S(2)}, p.playing);
+        } else if (g.settings.resumeOn && g.settings.theme != ThemeMode::Foobar) {
+            // A song left partway underlines, at half strength, how far it had got (DrawTrackRow).
+            for (const auto& [spot, at] : g.spots)
+                if (spot == id) {
+                    Fill({r.x, r.B() - S(2), (float)ui::PlayedWidth((int)r.w, at, t.Duration()), S(2)},
+                         Mix(sel ? p.select : p.bg, p.playing, 50));
+                    break;
+                }
         }
         for (size_t i = 0; i < xs.size(); ++i) {
             int c = ActiveColumnTypes()[i];
@@ -1268,7 +1279,12 @@ void DrawList(const Palette& p) {
                 continue;
             }
             if (GroupHidesCell(ln, c)) continue;
-            const std::string& text = Cell(id, c);
+            // Away from the normal rate, Duration and BPM say what is heard (library.h HeardCell).
+            static std::wstring heardW;
+            static std::string heard;
+            bool atRate = HeardCell(c, t, g.settings.speed * g.settings.tempo, heardW);
+            if (atRate) heard = Utf8(heardW);
+            const std::string& text = atRate ? heard : Cell(id, c);
             if (text.empty()) continue;
             bool right = ColumnAt(c).align == ui::kAlignRight;
             if (!right) cell.w = CellTextWidth(ln, i, cell.w);
@@ -1313,10 +1329,11 @@ std::wstring StatusMessage() {
     if (g.playing == kNone) return L"Stopped.";
     std::wstring status = (IsPaused() ? L"Paused | " : L"") +
         FormatTitle(EffectiveFormat(kPackStatus, g.settings.fmtStatus), Lookup(g.playing, true));
-    if (g.speed != 1 || g.tempo != 1) {
+    const double speed = g.settings.speed, tempo = g.settings.tempo;
+    if (speed != 1 || tempo != 1) {
         wchar_t rate[64];
-        if (g.speed != 1 && g.tempo != 1) swprintf(rate, std::size(rate), L" | %gx speed, %gx tempo", g.speed, g.tempo);
-        else swprintf(rate, std::size(rate), L" | %gx %ls", g.speed != 1 ? g.speed : g.tempo, g.speed != 1 ? L"speed" : L"tempo");
+        if (speed != 1 && tempo != 1) swprintf(rate, std::size(rate), L" | %gx speed, %gx tempo", speed, tempo);
+        else swprintf(rate, std::size(rate), L" | %gx %ls", speed != 1 ? speed : tempo, speed != 1 ? L"speed" : L"tempo");
         status += rate;
     }
     if (g.settings.layout.statusDetails) {
@@ -1324,15 +1341,18 @@ std::wstring StatusMessage() {
         status += g.settings.eq.enabled ? L" | EQ" : L"";
         if (g.settings.eq.crossfeed) status += L" + crossfeed";
         if (g.settings.rg.on) status += L" | ReplayGain";
-        if (output.ready) status += L" | " + std::wstring(output.exclusive ? L"Exclusive " : L"Shared ") +
-            std::to_wstring(output.rate) + L" Hz";
+        if (!output.speaker.empty())
+            status += L" | " + output.speaker + (output.waiting ? L" not answering; trying again" : L" (network speaker)");
+        else if (output.ready) status += L" | " + std::wstring(output.exclusive ? L"Exclusive " : L"Shared ") +
+            std::to_wstring(output.rate) + L" Hz" +
+            (output.upmix.empty() ? L"" : L" upmixed to " + std::wstring(output.upmix.begin(), output.upmix.end()));
     }
     if (g.stopAfterCurrent) status += L" | stop after current";
     if (size_t yours = QueuedByYou()) status += L"  \x2022  " + std::to_wstring(yours) + L" queued";
     // When a long track will be over, on the local clock (app_playback.cpp, EndsAtText).
     double dur = TrackDuration();
     if (dur >= ui::kLongTrackSeconds && !IsPaused() && g.settings.repeat != Repeat::One) {
-        double left = std::max(0.0, dur - g.engine.Position()) / std::max(0.05, g.speed * g.tempo);
+        double left = std::max(0.0, dur - g.engine.Position()) / std::max(0.05, g.settings.speed * g.settings.tempo);
         time_t end = time(nullptr) + (time_t)left;
         tm local{};
         char clock[64];
@@ -1352,14 +1372,13 @@ void DrawStatus(const Palette& p) {
     float parts[] = {0, std::max(S(100), W - S(ui::kStatusDetails)), std::max(S(200), W - S(ui::kStatusCounts)), W};
     std::wstring progress = TagWriteStatus();
     if (progress.empty() && g_checkingDead) progress = L"Checking for missing files...";
-    if (progress.empty() && g_checkingDuplicates) progress = L"Finding duplicate audio...";
     if (progress.empty() && g.scanning) progress = L"Adding audio files...";
     if (progress.empty()) {
         std::lock_guard lock(g.tagMx);
         if (!g.tagQueue.empty()) progress = L"Reading metadata: " + std::to_wstring(g.tagQueue.size()) + L" remaining";
     }
     if (progress.empty()) progress = ReplayGainStatus();
-    double total = 0;
+    double total = 0, rate = g.settings.speed * g.settings.tempo;
     size_t sel = 0;
     for (size_t i = 0; i < g.rows.size(); ++i)
         if (i < g.selected.size() && g.selected[i]) {
@@ -1368,11 +1387,12 @@ void DrawStatus(const Palette& p) {
         }
     std::wstring counts;
     if (InternetRadio().active) counts = std::to_wstring(InternetRadio().rows.size()) + L" stations";
-    else if (sel) counts = std::to_wstring(sel) + L" selected  \x2022  " + FormatTotalDuration(total);
+    else if (sel)
+        counts = std::to_wstring(sel) + L" selected  \x2022  " + FormatTotalDuration(HeardSeconds(total, rate));
     else {
         for (TrackId id : g.rows) total += g_lib[id].Duration();
         counts = std::to_wstring(g.rows.size()) + (g.search.empty() ? L"" : L" of " + std::to_wstring(g_sourceCount)) +
-                 L" tracks  \x2022  " + FormatTotalDuration(total);
+                 L" tracks  \x2022  " + FormatTotalDuration(HeardSeconds(total, rate));
     }
     std::wstring text[] = {StatusMessage(), progress, counts};
     for (int i = 0; i < 3; ++i) {

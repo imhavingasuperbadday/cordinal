@@ -4,6 +4,7 @@
 #include "cue.h"
 #include "customcover.h"
 #include "decoder.h"
+#include "inflate.h"
 #include "peaks.h"
 #include "tags.h"
 #include "library.h"
@@ -11,8 +12,11 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <numeric>
+#include <set>
 
 namespace web {
 namespace {
@@ -47,19 +51,32 @@ std::string ImageMime(std::string_view bytes) {
     return {};
 }
 }
-Media OriginalMedia(const Track& track) {
-    Media result;
-    if (!track.original || track.mime.empty()) { result.error = "This track needs PCM conversion."; return result; }
+namespace {
+// Opens the track's own file, refusing one that changed since the snapshot (its key would now name
+// different bytes). Empty with `error` set when it can't be served.
+std::shared_ptr<Source> OpenTrackFile(const Track& track, std::string& error) {
+    if (IsSubtrack(track.path)) { error = "This song is part of a larger file, so it has no file of its own."; return {}; }
     auto file = std::make_shared<Source>();
-    if (!file->Open(track.path)) { result.error = "The music file is unavailable."; return result; }
+    if (!file->Open(track.path)) { error = "The music file is unavailable."; return {}; }
     FILETIME time{};
     if ((track.fileSize && file->size != track.fileSize) ||
         (track.fileTime && GetFileTime(file->h, nullptr, nullptr, &time) &&
          (((uint64_t)time.dwHighDateTime << 32) | time.dwLowDateTime) != track.fileTime)) {
-        result.error = "The music file changed. Refresh the library and try again.";
-        return result;
+        error = "The music file changed. Refresh the library and try again.";
+        return {};
     }
-    result.size = file->size; result.mime = track.mime;
+    return file;
+}
+}
+Media OriginalMedia(const Track& track) {
+    if (!track.original || track.mime.empty()) { Media result; result.error = "This track needs PCM conversion."; return result; }
+    return FileMedia(track);
+}
+Media FileMedia(const Track& track) {
+    Media result;
+    auto file = OpenTrackFile(track, result.error);
+    if (!file) return result;
+    result.size = file->size; result.mime = track.mime.empty() ? "application/octet-stream" : track.mime;
     result.send = [file](uint64_t at, size_t length, const auto& send) {
         std::array<char, 65536> buffer;
         while (length) {
@@ -68,6 +85,149 @@ Media OriginalMedia(const Track& track) {
             at += n; length -= n;
         }
         return true;
+    };
+    return result;
+}
+// A file name the phone can keep: no path separators, reserved or control characters, at most
+// about 120 bytes without cutting a UTF-8 sequence, and never empty.
+std::string SafeFileName(std::string name) {
+    for (char& c : name)
+        if ((unsigned char)c < 32 || strchr("\\/:*?\"<>|", c)) c = '_';
+    if (name.size() > 120) {
+        size_t cut = 120;
+        while (cut && ((unsigned char)name[cut] & 0xC0) == 0x80) --cut;
+        name.resize(cut);
+    }
+    while (!name.empty() && (name.back() == ' ' || name.back() == '.')) name.pop_back();
+    while (!name.empty() && (name.front() == ' ' || name.front() == '.')) name.erase(0, 1);
+    return name.empty() ? std::string("track") : name;
+}
+namespace {
+std::string Extension(const Track& track) {
+    std::wstring file = AudioFileOf(track.path);
+    size_t dot = file.find_last_of(L'.'), slash = file.find_last_of(L"\\/");
+    if (dot == file.npos || (slash != file.npos && dot < slash)) return {};
+    return ToUtf8(file.substr(dot));
+}
+}
+std::string DownloadName(const Track& track, unsigned number) {
+    std::string name = track.title.empty() ? ToUtf8(FileNameOf(AudioFileOf(track.path))) : track.title;
+    if (!track.title.empty() && !track.artist.empty() && !number) name = track.artist + " - " + name;
+    if (number) {
+        char prefix[16];
+        snprintf(prefix, sizeof(prefix), "%02u ", number);
+        name = prefix + name;
+    }
+    std::string extension = track.title.empty() ? std::string() : Extension(track);
+    return SafeFileName(name.substr(0, 120)) + extension;
+}
+// A stored (uncompressed) ZIP built while it is sent: music is compressed already, and the size is
+// known before the first byte, so the phone shows real progress. Each entry's CRC follows its data
+// (general purpose bit 3), computed on the way. Only a whole-file request is served.
+Media ZipMedia(const std::vector<const Track*>& tracks, const std::string& folder, bool numbered) {
+    struct Entry {
+        const Track* track;
+        std::string name;
+        uint64_t size = 0, offset = 0;
+        uint32_t crc = 0;
+    };
+    Media result;
+    auto entries = std::make_shared<std::vector<Entry>>();
+    std::set<std::string> used;
+    uint64_t total = 0;
+    const std::string base = SafeFileName(folder);
+    unsigned number = 0;
+    for (const Track* t : tracks) {
+        ++number;
+        if (IsSubtrack(t->path)) continue;
+        Source probe;
+        if (!probe.Open(t->path)) continue;
+        std::string name = base + '/' + DownloadName(*t, numbered ? number : 0);
+        // Two songs can share a title (and a playlist can hold a song twice): keep both.
+        for (int copy = 2; !used.insert(name).second; ++copy) {
+            std::string extension = Extension(*t);
+            std::string stem = base + '/' + DownloadName(*t, numbered ? number : 0);
+            stem.resize(stem.size() - extension.size());
+            name = stem + " (" + std::to_string(copy) + ')' + extension;
+        }
+        Entry e{t, std::move(name), probe.size, total};
+        total += 30 + e.name.size() + e.size + 16;
+        entries->push_back(std::move(e));
+    }
+    if (entries->empty()) { result.error = "None of these songs has a file of its own to download."; return result; }
+    uint64_t directory = 0;
+    for (const auto& e : *entries) directory += 46 + e.name.size();
+    if (entries->size() >= 0xFFFF || total + directory + 22 >= 0xFFFFFFFFull) {
+        result.error = "That is more than one ZIP can hold (4 GB). Download an album or a shorter playlist.";
+        return result;
+    }
+    // The same date on every entry: now, in local time as ZIP expects.
+    time_t now = time(nullptr);
+    tm local{};
+#ifdef _WIN32
+    localtime_s(&local, &now);
+#else
+    localtime_r(&now, &local);
+#endif
+    const uint16_t dosTime = (uint16_t)((local.tm_hour << 11) | (local.tm_min << 5) | (local.tm_sec / 2));
+    const uint16_t dosDate = (uint16_t)(((std::max(local.tm_year, 80) - 80) << 9) | ((local.tm_mon + 1) << 5) | local.tm_mday);
+    result.size = total + directory + 22;
+    result.mime = "application/zip";
+    result.send = [entries, total, directory, dosTime, dosDate](uint64_t at, size_t length, const auto& send) {
+        if (at != 0) return false;  // ranges are refused before this; sent whole, in order
+        auto header = [&](const Entry& e, bool central) {
+            std::string h(central ? 46 : 30, '\0');
+            char* p = h.data();
+            Put32(p, central ? 0x02014b50 : 0x04034b50);
+            int o = central ? 6 : 4;
+            if (central) Put16(p + 4, 20);                       // made by: 2.0
+            Put16(p + o, 20);                                    // needed: 2.0
+            Put16(p + o + 2, 0x0808);                            // data descriptor, UTF-8 names
+            Put16(p + o + 6, dosTime); Put16(p + o + 8, dosDate);
+            if (central) {
+                Put32(p + 16, e.crc); Put32(p + 20, (uint32_t)e.size); Put32(p + 24, (uint32_t)e.size);
+                Put16(p + 28, (uint16_t)e.name.size());
+                Put32(p + 42, (uint32_t)e.offset);
+            } else {
+                // The CRC follows the data, but the sizes are known: readers that stream a stored
+                // entry need them, and every other reader takes the central directory's.
+                Put32(p + 18, (uint32_t)e.size); Put32(p + 22, (uint32_t)e.size);
+                Put16(p + 26, (uint16_t)e.name.size());
+            }
+            return h + e.name;
+        };
+        uint64_t sent = 0;
+        for (auto& e : *entries) {
+            std::string error;
+            auto file = OpenTrackFile(*e.track, error);
+            // A file that changed size since the plan would break every offset after it.
+            if (!file || file->size != e.size) return false;
+            std::string h = header(e, false);
+            if (!send(h.data(), h.size())) return false;
+            std::array<char, 65536> buffer;
+            uint32_t crc = 0;
+            for (uint64_t done = 0; done < e.size;) {
+                size_t n = (size_t)std::min<uint64_t>(buffer.size(), e.size - done);
+                if (!file->Read(done, n, buffer.data())) return false;
+                crc = Crc32((const unsigned char*)buffer.data(), n, crc);
+                if (!send(buffer.data(), n)) return false;
+                done += n;
+            }
+            e.crc = crc;
+            char descriptor[16];
+            Put32(descriptor, 0x08074b50); Put32(descriptor + 4, crc);
+            Put32(descriptor + 8, (uint32_t)e.size); Put32(descriptor + 12, (uint32_t)e.size);
+            if (!send(descriptor, sizeof(descriptor))) return false;
+            sent += h.size() + e.size + sizeof(descriptor);
+        }
+        std::string tail;
+        for (const auto& e : *entries) tail += header(e, true);
+        std::string end(22, '\0');
+        Put32(end.data(), 0x06054b50);
+        Put16(end.data() + 8, (uint16_t)entries->size()); Put16(end.data() + 10, (uint16_t)entries->size());
+        Put32(end.data() + 12, (uint32_t)directory); Put32(end.data() + 16, (uint32_t)total);
+        tail += end;
+        return sent == total && sent + tail.size() == length && send(tail.data(), tail.size());
     };
     return result;
 }

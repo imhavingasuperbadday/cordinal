@@ -10,11 +10,16 @@
 // rate is checked on every cycle: while it runs at another rate (the stream resamples then), the
 // output reports shared mode with the reason, so cordinal never claims bit-perfect output it
 // doesn't have. PulseAudio always mixes, so exclusive mode on it is reported as shared.
+// Upmix (shared mode only): when the sink has more than two speakers, the stream is opened with the
+// sink's channels and the backend spreads the stereo render over them (upmix.h).
 // The server may start after cordinal (at login) or restart: a stream that can't connect, or
 // fails, is opened again every second.
 #include "audio_output.h"
 
+#include "library.h"
 #include "sound_stream.h"
+#include "speakers.h"
+#include "upmix.h"
 
 #include <algorithm>
 #include <condition_variable>
@@ -48,7 +53,11 @@ struct PipewireState {
     unsigned long long deviceWritten = 0, sourcePos = 0;
     std::atomic<bool> flushRequest{false};
     std::string device;  // the sink to open the stream on; empty is the default
+    bool upmix = false;  // spread stereo over a surround sink's speakers
+    std::mutex labelMx;
+    std::string upmixLabel;  // guarded by labelMx: the layout upmixed to, empty for stereo
     std::atomic<bool> failed{false};  // the stream failed (the server went away): open it again
+    std::atomic<bool> staleProblem{false};  // a network speaker's failure is shown until it plays again
     std::mutex retryMx;
     std::condition_variable retryCv;
 };
@@ -72,6 +81,7 @@ void OnRender(PipewireState& st, float* dst, uint32_t frames) {
 void OnTiming(PipewireState& st, uint64_t playedDevice, unsigned serverRate) {
     AudioOutput* out = st.out;
     if (st.flushRequest) return;  // the position was set by Flush; the next render applies it
+    if (playedDevice && st.staleProblem.exchange(false)) out->ClearProblem();
     unsigned long long played = st.sourcePos;
     for (const auto& c : st.chunks) {
         if (c.deviceEnd <= playedDevice) continue;
@@ -88,6 +98,11 @@ void CloseStream(PipewireState& st) { st.stream.reset(); }
 
 bool OpenStream(PipewireState& st, bool exclusive, unsigned rate, bool active, std::string& error) {
     CloseStream(st);
+    // A network speaker plays one rate, like shared output: the engine resamples.
+    if (speakers::IsSpeakerId(st.device)) {
+        exclusive = false;
+        rate = kSharedRate;
+    }
     st.exclusive = exclusive;
     st.rate = rate;
     st.deviceWritten = 0;
@@ -100,6 +115,25 @@ bool OpenStream(PipewireState& st, bool exclusive, unsigned rate, bool active, s
     p.exclusive = exclusive;
     p.target = st.device;
     p.active = active;
+    std::string label;
+    if (st.upmix && !exclusive) {
+        // The sink's speakers, asked of the server now: the chosen sink, else the default one.
+        std::vector<lx::sound::Sink> sinks = lx::sound::ListSinks();
+        const lx::sound::Sink* sink = nullptr;
+        for (const auto& s : sinks)
+            if (st.device.empty() ? s.systemDefault : s.name == st.device) sink = &s;
+        if (sink) {
+            SpeakerLayout layout = LayoutFromNames(sink->channels);
+            if (layout.Upmixes()) {
+                p.channels = sink->channels;
+                label = LayoutLabel(layout);
+            }
+        }
+    }
+    {
+        std::lock_guard lock(st.labelMx);
+        st.upmixLabel = label;
+    }
     lx::sound::Callbacks cb;
     PipewireState* s = &st;
     cb.render = [s](float* out, uint32_t frames) {
@@ -157,6 +191,7 @@ bool AudioOutput::Start(RenderFn render, ResetFn reset, std::wstring& error) {
     reset_ = std::move(reset);
     state_ = std::make_unique<PipewireState>();
     state_->out = this;
+    state_->upmix = wantedUpmix_;
     {
         std::lock_guard<std::mutex> lock(problemMx_);
         state_->device = device_;
@@ -195,19 +230,39 @@ bool AudioOutput::Start(RenderFn render, ResetFn reset, std::wstring& error) {
 
 // The stream again, as it was (mode, rate, position), after the server came (back).
 void AudioOutput::Reopen() {
-    std::string why;
+    std::string why, speakerProblem;
     bool ok;
     {
         std::lock_guard lock(state_->streamMx);
+        // A network speaker that failed says why; that stays shown while it is tried again.
+        if (state_->stream && state_->failed) speakerProblem = state_->stream->Problem();
         unsigned long long pos = state_->sourcePos;
         bool exclusive = wantedMode_ == OutputMode::Exclusive;
         ok = OpenStream(*state_, exclusive, exclusive ? rate_.load() : kSharedRate, !paused_, why);
         state_->sourcePos = pos;
     }
-    waiting_ = !ok;
+    waiting_ = !ok || !speakerProblem.empty();
+    state_->staleProblem = !speakerProblem.empty();
     std::lock_guard<std::mutex> lock(problemMx_);
-    if (ok) problem_.clear();
+    if (!speakerProblem.empty()) problem_ = FromUtf8(speakerProblem) + L" Trying again.";
+    else if (ok) problem_.clear();
     else problem_ = L"Waiting for PipeWire or PulseAudio (no audio output yet: " + Widen(why) + L").";
+}
+
+void AudioOutput::ClearProblem() {
+    waiting_ = false;
+    std::lock_guard<std::mutex> lock(problemMx_);
+    problem_.clear();
+}
+
+std::wstring AudioOutput::SpeakerName() const {
+    std::string id;
+    {
+        std::lock_guard<std::mutex> lock(problemMx_);
+        id = device_;
+    }
+    speakers::Speaker s;
+    return speakers::ParseDeviceId(id, s) ? FromUtf8(s.name) : std::wstring();
 }
 
 void AudioOutput::Stop() {
@@ -253,6 +308,10 @@ void AudioOutput::SetDevice(const std::string& node) {
         state_->sourcePos = pos;
     }
     mode_ = OutputMode::Shared;  // exclusive once the server is seen running at the rate
+    if (speakers::IsSpeakerId(node) && rate_ != kSharedRate) {
+        rate_ = kSharedRate;
+        if (reset_) reset_(kSharedRate);
+    }
 }
 
 void AudioOutput::SetMode(OutputMode mode) {
@@ -277,6 +336,10 @@ void AudioOutput::SetMode(OutputMode mode) {
 
 unsigned AudioOutput::RequestRate(unsigned rate) {
     if (wantedMode_ != OutputMode::Exclusive || !state_) return rate_;
+    {
+        std::lock_guard lock(state_->streamMx);
+        if (speakers::IsSpeakerId(state_->device)) return rate_;  // a speaker plays one rate
+    }
     std::string why;
     bool ok;
     {
@@ -289,6 +352,22 @@ unsigned AudioOutput::RequestRate(unsigned rate) {
     if (ok) rate_ = rate;
     mode_ = OutputMode::Shared;
     return rate_;
+}
+
+void AudioOutput::SetUpmix(bool upmix) {
+    if (wantedUpmix_.exchange(upmix) == upmix || !state_) return;
+    std::string why;
+    std::lock_guard lock(state_->streamMx);
+    unsigned long long pos = state_->sourcePos;
+    state_->upmix = upmix;
+    OpenStream(*state_, state_->exclusive, state_->rate, !paused_, why);
+    state_->sourcePos = pos;
+}
+
+std::string AudioOutput::UpmixLabel() const {
+    if (!state_) return {};
+    std::lock_guard lock(state_->labelMx);
+    return state_->upmixLabel;
 }
 
 std::wstring AudioOutput::Problem() const {

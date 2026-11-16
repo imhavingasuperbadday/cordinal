@@ -9,12 +9,14 @@
 
 namespace app {
 
-// Commands a key can run that no menu holds, listed by the palette and the shortcut window beside the
-// menu bar's: their menu path, name and id.
+// Commands no menu bar item holds (keys, or a row's right-click menu), listed by the palette and the
+// shortcut window beside the menu bar's: their menu path, name and id, and whether they act on the
+// selected tracks, so the palette greys them out with nothing selected.
 struct ExtraCommand {
     int command;
     const wchar_t* path;
     const wchar_t* label;
+    bool selection = false;
 };
 std::span<const ExtraCommand> ExtraCommands();
 

@@ -13,7 +13,7 @@ bool TagEdit::Empty() const {
     return !title && !artist && !album && !albumArtist && !genre && !date && !composer && !comment && !grouping &&
            !label && !lyrics && !track && !trackTotal && !disc && !discTotal && !bpm && !compilation && !cover &&
            !rgTrackGain && !rgTrackPeak && !rgAlbumGain && !rgAlbumPeak && !r128TrackGain && !r128AlbumGain &&
-           !rating && !playCount;
+           !rating && !playCount && !musicBrainzRelease && !musicBrainzReleaseGroup;
 }
 
 bool CanWriteTags(const std::wstring& path) {

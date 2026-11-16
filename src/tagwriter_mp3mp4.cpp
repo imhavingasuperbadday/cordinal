@@ -304,6 +304,15 @@ bool WriteMp3(const std::wstring& path, const TagEdit& e, std::wstring& error) {
     txxx("REPLAYGAIN_TRACK_PEAK", e.rgTrackPeak);
     txxx("REPLAYGAIN_ALBUM_GAIN", e.rgAlbumGain);
     txxx("REPLAYGAIN_ALBUM_PEAK", e.rgAlbumPeak);
+    // Picard's descriptions are mixed case; any spelling of them is replaced.
+    auto mbid = [&](const char* desc, std::initializer_list<const char*> keys, const std::optional<std::string>& v) {
+        if (!v) return;
+        dropTxxx(keys);
+        if (!v->empty()) frames.push_back({"TXXX", Id3TxxxFrame(ver, desc, *v), 0});
+    };
+    mbid("MusicBrainz Album Id", {"MUSICBRAINZ ALBUM ID", "MUSICBRAINZ_ALBUMID", "MUSICBRAINZ RELEASE ID"}, e.musicBrainzRelease);
+    mbid("MusicBrainz Release Group Id", {"MUSICBRAINZ RELEASE GROUP ID", "MUSICBRAINZ_RELEASEGROUPID"},
+         e.musicBrainzReleaseGroup);
     // FMPS names are mixed case by its spec; dropTxxx compares upper case.
     auto fmps = [&](const char* desc, const char* upper, const std::optional<std::string>& v) {
         if (!v) return;
@@ -533,6 +542,8 @@ std::string BuildIlst(sv oldIlst, const TagEdit& e) {
     freeform("REPLAYGAIN_ALBUM_PEAK", e.rgAlbumPeak);
     freeform("FMPS_Rating", e.rating);
     freeform("FMPS_Playcount", e.playCount);
+    freeform("MusicBrainz Album Id", e.musicBrainzRelease);
+    freeform("MusicBrainz Release Group Id", e.musicBrainzReleaseGroup);
     if (e.cover) {
         drop("covr");
         if (!e.cover->empty())

@@ -62,6 +62,9 @@ constexpr UINT WM_APP_IPOD = WM_APP + 37;    // classic iPod progress (0) or syn
 constexpr UINT WM_APP_GAME = WM_APP + 36;  // a game's clip or cover decoded (lParam owns it, games.cpp)
 constexpr UINT WM_APP_FILE = WM_APP + 31;    // a file chosen for a dialog (wParam = what for, lParam = std::wstring*)
 constexpr UINT WM_APP_COLLECTION = WM_APP + 40;  // collection export/import progress, results and choices (collection_run.cpp)
+constexpr UINT WM_APP_ALBUMTAG = WM_APP + 42;  // a MusicBrainz album search finished (lParam owns it, albumtag_ui.cpp)
+constexpr UINT WM_APP_DUPLICATES = WM_APP + 43;  // a duplicate clean-up or its undo moved its files (duplicates_ui.cpp)
+constexpr UINT WM_APP_SPEAKERS = WM_APP + 41;  // network speakers a search found (lParam owns them, panel_setup.cpp)
 
 // How long a conversion can be undone, in days; the Windows build's kConvertMemoryDays.
 constexpr unsigned kConvertMemoryDays[] = {1, 3, 7, 49};
@@ -130,6 +133,8 @@ struct Settings {
     bool webStart = false;
     // Listening away from home (web.cpp): on, its consent given once, and the HTTPS port outside.
     bool webAway = false, webAwayAgreed = false;
+    bool webShare = false;     // network players may browse the library (web::Share)
+    std::string webShareId;    // its lasting "uuid:..." id, made the first time it is turned on
     uint16_t webAwayPort = 443;
     // A fixed pairing code (empty: a new code for each pairing) and the names a reverse proxy on this computer
     // answers to (Tailscale Serve, say), separated by commas or spaces: the Windows build's Code= and Hosts=.
@@ -188,6 +193,9 @@ struct Settings {
     bool inboxEnabled = false;
     bool steamOffered = false;
     float volume = 1;
+    // Playback rates (Playback > Speed and Tempo), remembered as the menu's own values like the
+    // Windows build's [Player] Speed and Tempo.
+    double speed = 1, tempo = 1;
     int shuffle = kShuffleOff;
     bool skipAwareShuffle = false;
     bool radio = false;
@@ -198,6 +206,8 @@ struct Settings {
     std::wstring resumePath;
     double resumePosition = 0;
     int resumeIndex = -1;
+    std::vector<std::pair<std::wstring, double>> spots;           // songs left partway: path, place
+    std::vector<std::pair<std::wstring, uint32_t>> snoozed;       // rediscoveries x'd out: path, last play
     std::map<std::wstring, PlaybackSection> sections;
     // Startup defaults (preferences_ui.cpp): theme, libraryMode and browserVisible are this session's choices;
     // the approved ones below are what settings.ini keeps and what cordinal opens with.
@@ -208,6 +218,7 @@ struct Settings {
     bool preferenceSavingChosen = false;  // the saving policy was answered (so it is not asked again)
     uint64_t suggestionLastReview = 0;    // Unix seconds of the last review of startup defaults
     bool exclusive = false;
+    bool upmix = false;  // spread stereo over a surround sink's speakers (shared output)
     Repeat repeat = Repeat::Off;
     ThemeMode theme = ThemeMode::System;
     bool groupAlbums = true;  // album headers over each album's tracks, as View > Group tracks by album
@@ -305,11 +316,13 @@ struct App {
     // Playback.
     TrackId playing = kNone;        // audible track
     TrackId resumeTrack = kNone;    // stopped track offered for continuation
+    // Songs left partway, newest first, with where each was left (panel_comeback.cpp). A song drops
+    // out once it plays to its end.
+    std::vector<std::pair<TrackId, double>> spots;
     int resumeIndex = -1;
     double resumePosition = 0;
     unsigned long long token = 0;   // engine token of the audible track
     int queuePos = -1;              // index of `playing` in `queue`
-    double speed = 1, tempo = 1;    // session-only: reset to normal when the player starts
     bool stopAfterCurrent = false;
     std::vector<uint32_t> shuffleOrder;  // a permutation of queue indexes while shuffling
     int shufflePos = -1;
@@ -385,6 +398,11 @@ void SetRadio(bool on);
 void SetTaste(bool on);
 void SetResumeOn(bool on);
 bool Resume();
+// Remembered places in songs left partway (panel_comeback.cpp, as the Windows build's app_spots.cpp).
+void RememberSpot(TrackId id, double pos);
+void ForgetSpot(TrackId id);
+void PlaySpot(size_t i);
+bool HasComebacks();  // anything OpenComebacks would list besides the song now loaded
 // Opens with the last session's track, paused where it stopped or playing at once, as Preferences asks.
 void ReopenLastTrack();
 PlaybackSection SectionOf(TrackId id);
@@ -713,6 +731,9 @@ bool WebAway();
 void SetWebAway(bool on);
 void RetryWebAway();
 std::string WebAwayText();
+// Sharing with network players (DLNA): the switch, and what to show.
+void SetWebShare(bool on);
+std::string WebShareText();
 struct WebPairing {
     std::string link;     // what the QR code carries; empty when there is no unspent link
     std::string caption;  // how to use it

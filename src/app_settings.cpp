@@ -5,49 +5,18 @@
 #include "native_audio.h"
 #include "backup.h"
 #include "coverupload.h"
+#include "speakers.h"
 
 namespace app {
 
 namespace {
-uint64_t iniWriteFailures = 0;
 bool preferencesPending = false;
 }
 
-// Thin wrappers over the Win32 profile API, always targeting g.iniPath. Reads take a
-// default; IniWrite creates the section/key as needed. InitDataPaths() must have run. Values can
-// be long (the pipe-separated library folder list), so a full small buffer retries with the
-// largest string the API returns instead of silently dropping the tail.
-std::wstring IniRead(const wchar_t* section, const wchar_t* key, const wchar_t* def) {
-    // A stack buffer for ordinary values: this runs for every track's saved section and for most
-    // preference reads, and a 4 KB vector per call was a heap allocation each time.
-    wchar_t buf[1024];
-    DWORD n = GetPrivateProfileStringW(section, key, def, buf, (DWORD)std::size(buf), g.iniPath.c_str());
-    if (n == std::size(buf) - 1) {
-        std::vector<wchar_t> big(32768, 0);
-        n = GetPrivateProfileStringW(section, key, def, big.data(), (DWORD)big.size(), g.iniPath.c_str());
-        return std::wstring(big.data(), n);
-    }
-    return std::wstring(buf, n);
-}
-int IniInt(const wchar_t* section, const wchar_t* key, int def) {
-    return (int)GetPrivateProfileIntW(section, key, def, g.iniPath.c_str());
-}
+// IniRead, IniInt, IniWrite and the rest of settings.ini's accessors are in app_ini.cpp.
 float IniFloat(const wchar_t* section, const wchar_t* key, float def) {
     std::wstring v = IniRead(section, key, L"");
     return v.empty() ? def : (float)_wtof(v.c_str());
-}
-// A failed write (a read-only settings.ini, an unavailable profile folder) is reported once, until a
-// write succeeds again, so a whole SaveState fails with one message instead of dozens.
-bool IniWrite(const wchar_t* section, const wchar_t* key, const std::wstring& value) {
-    static bool reported = false;
-    if (WritePrivateProfileStringW(section, key, value.c_str(), g.iniPath.c_str())) {
-        reported = false;
-        return true;
-    }
-    ++iniWriteFailures;
-    if (!reported) ShowMessage(L"Couldn't save settings to " + g.iniPath + L". Is the file read-only?");
-    reported = true;
-    return false;
 }
 // Floats are stored fixed at 2 decimals so saved values round-trip stably and never
 // become locale-dependent or scientific through the profile API.
@@ -207,17 +176,8 @@ void SaveEq() {
 
 bool SavedOutputProfiles() {
     if (g.iniPath.empty()) return false;
-    std::wstring names(65536, L'\0');
-    for (;;) {
-        DWORD n = GetPrivateProfileSectionNamesW(names.data(), (DWORD)names.size(), g.iniPath.c_str());
-        if (!n) return false;
-        // nSize - 2 means the buffer was short and the list was cut off.
-        if (n < names.size() - 2) break;
-        if (names.size() >= (1u << 20)) return false;
-        names.assign(names.size() * 2, L'\0');
-    }
-    for (const wchar_t* at = names.c_str(); *at; at += wcslen(at) + 1)
-        if (wcsncmp(at, L"OutputEQ-", 9) == 0) return true;
+    for (const std::wstring& name : IniSectionNames())
+        if (!name.compare(0, 9, L"OutputEQ-")) return true;
     return false;
 }
 
@@ -366,8 +326,10 @@ void SaveState() {
     IniWrite(L"Player", L"ResumePath", known ? g_lib.Path(resume) : L"");
     IniWrite(L"Player", L"ResumePosition", F2S(known ? (float)(playing ? g.engine.Position() : g.resumePos) : 0.0f));
     IniWrite(L"Player", L"ResumePlaylist", std::to_wstring(playing ? g.playingPl : g.resumePl));
+    SaveSpots();
     SaveColumns();
     SaveBrowserSettings();
+    IniFlush();  // on disk before the process can end
 }
 
 // Save preferences as they change, without rewriting the library or capturing a session.
@@ -389,9 +351,8 @@ void SavePreferences() {
     SaveMainLayout();
 }
 
-// A full SavePreferences rewrites every tweak key through WritePrivateProfileStringW (~80 ms for a
-// typical profile here). Menu toggles and theme changes schedule that write for the next tick so
-// the click returns immediately; shutdown and explicit SavePreferences still flush now.
+// Menu toggles and theme changes gather their preference writes for the next tick, so a burst of
+// changes is one pass over the Tweaks registry. The file itself is saved later by app_ini.cpp.
 void SavePreferencesSoon() {
     preferencesPending = true;
     if (g.hwnd) SetTimer(g.hwnd, kPrefsTimer, 50, nullptr);
@@ -402,15 +363,14 @@ void FlushPendingPreferences() {
 }
 
 bool SaveBackupSettings(std::string& bytes) {
-    uint64_t before = iniWriteFailures;
     SaveState();
-    return before == iniWriteFailures && WritePrivateProfileStringW(nullptr, nullptr, nullptr, g.iniPath.c_str()) &&
-           backup::ReadBytes(g.iniPath, bytes);
+    return IniFlush() && backup::ReadBytes(g.iniPath, bytes);
 }
 
 // Loads everything from disk. Order matters: the library must exist before playlists,
 // the active index and the resume track can be resolved against it.
 void LoadState() {
+    IniRefresh();  // settings.ini as it is on disk now
     // Fallback chain for the library: the changes that couldn't be saved at the last close, then
     // library.cdb, then its .bak. An unreadable file is kept aside and named to the user. A
     // one-time import of Waveforge's playlists.wfl follows when there is no library at all.
@@ -485,11 +445,13 @@ void LoadState() {
             if (g.resumePl >= (int)g.playlists.size()) g.resumePl = -1;
         }
     }
+    LoadSpots();
     LoadPreferences();
     ApplyPackFormats();  // the user's own patterns, then those of the packs that are on
 }
 
 void LoadPreferences() {
+    IniRefresh();
     // The user's own upload tool for a cover Discord cannot fetch by itself. It is a command line, which the
     // preferences list cannot hold, so it lives in settings.ini; empty means the feature is off.
     coverupload::SetCommand(IniRead(L"Scrobbling", L"DiscordCoverUpload", L""));
@@ -514,11 +476,21 @@ void LoadPreferences() {
         std::clamp(IniInt(L"Player", L"LastAudibleVolume", 80), 1, 100);
     // Skip-aware shuffle, radio, output, ReplayGain, effects, conversion and the view toggles.
     LoadTweaks();
-    // Session-only rates: the registry's Speed/Tempo rows are legacy-loaded, so the engine always
-    // starts at normal speed and tempo however the last session ended.
-    g.speed = g.tempo = 1;
-    g.engine.SetSpeed(1);
-    g.engine.SetTempo(1);
+    g.asioDriver = IniRead(L"Player", L"AsioDriver", L"");
+    g.networkSpeaker = ToUtf8(IniRead(L"Player", L"Speaker", L""));
+    if (!speakers::IsSpeakerId(g.networkSpeaker)) g.networkSpeaker.clear();
+    // Speed and tempo come back as saved: a rate the menu offers, otherwise normal (a hand-edited
+    // value or one from an older menu). The engine takes them before anything plays.
+    auto savedRate = [](const wchar_t* key, const auto& rates) {
+        const double saved = IniFloat(L"Player", key, 1);
+        for (double rate : rates)
+            if (std::fabs(rate - saved) < 0.001) return rate;
+        return 1.0;
+    };
+    g.speed = savedRate(L"Speed", kSpeeds);
+    g.tempo = savedRate(L"Tempo", kTempos);
+    g.engine.SetSpeed(g.speed);
+    g.engine.SetTempo(g.tempo);
     // The LibView cover size and the column browser's height: the live copies start from the
     // approved startup defaults in the profile. A change stays in the session until the startup
     // review keeps it, exactly as a layout change does.

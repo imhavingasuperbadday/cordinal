@@ -56,6 +56,7 @@
 #include "convert.h"
 #include "decoder.h"
 #include "devicecopy.h"
+#include "duplicates.h"
 #include "engine.h"
 #include "helpers.h"
 #include "ipod.h"
@@ -239,6 +240,46 @@ int MeasureReplayGain(int count, char** files) {
     float gain = replaygain::Gain(t, ReplayGainOptions{}, 0);
     printf("album %+.2f dB, plays at %+.2f dB\n", t.rgAlbumGain / 100.0, 20 * std::log10(gain));
     return t.rgAlbumGain == kNoGain || !std::isfinite(gain) ? 1 : 0;
+}
+
+// Find duplicates on Linux: two copies of FILE in DIR (a format without a stored MD5) hash alike once
+// measured and form one identical group; cleaning the second up moves it to the trash and its plays to
+// the first, and undo brings both back.
+int DuplicatesRoundTrip(const char* file, const char* dirArg) {
+    const std::wstring dir = Wide(dirArg), source = Wide(file);
+    std::filesystem::create_directories(Narrow(dir));
+    const std::wstring ext = source.substr(source.find_last_of(L'.'));
+    const std::wstring a = dir + L"/first" + ext, b = dir + L"/second" + ext;
+    std::filesystem::copy_file(Narrow(source), Narrow(a), std::filesystem::copy_options::overwrite_existing);
+    std::filesystem::copy_file(Narrow(source), Narrow(b), std::filesystem::copy_options::overwrite_existing);
+    g_lib = Library();
+    std::atomic<bool> cancel{false};
+    std::atomic<std::shared_ptr<Decoder>> current;
+    TrackId ids[2];
+    for (int i = 0; i < 2; ++i) {
+        ids[i] = g_lib.Add(i ? b : a);
+        TagData tags;
+        if (!ReadTags(i ? b : a, tags)) return 1;
+        g_lib.ApplyTags(ids[i], tags);
+        g_lib[ids[i]].flags |= Track::kInLibrary;
+        replaygain::Apply(replaygain::Measure(g_lib.SnapshotPath(ids[i]), 0, 0, cancel, current, nullptr));
+    }
+    auto groups = duplicates::Find(g_lib);
+    if (groups.size() != 1 || !groups[0].identical || groups[0].tracks.size() != 2 || !g_lib[ids[0]].audioHash) {
+        fprintf(stderr, "duplicates: %zu group(s), hash %016llx\n", groups.size(), (unsigned long long)g_lib[ids[0]].audioHash);
+        return 1;
+    }
+    g_lib[ids[1]].playCount = 4;
+    std::vector<Playlist> playlists;
+    const std::vector<duplicates::Move> moves{{b, a}};
+    const bool recycled = RecycleFile(b);
+    const auto cleanup = duplicates::Merge(g_lib, playlists, moves, {recycled});
+    const bool merged = recycled && !std::filesystem::exists(Narrow(b)) && g_lib[ids[0]].playCount == 4;
+    const bool restored = RestoreFromRecycleBin(b);
+    duplicates::Undo(g_lib, playlists, cleanup, {restored});
+    const bool undone = restored && std::filesystem::exists(Narrow(b)) && g_lib[ids[0]].playCount == 0 && g_lib[ids[1]].playCount == 4;
+    printf("duplicates: hash %016llx, cleaned up %d, undone %d\n", (unsigned long long)g_lib[ids[0]].audioHash, merged, undone);
+    return merged && undone ? 0 : 1;
 }
 
 // Edits a file's tags with an undo journal, then undoes the edit, as the tag editor does. The
@@ -1234,6 +1275,7 @@ int main(int argc, char** argv) {
     if (argc >= 4 && !strcmp(argv[1], "tags")) return TagRoundTrip(argv[2], argv[3]);
     if (argc >= 4 && !strcmp(argv[1], "convert")) return ConvertRoundTrip(argv[2], argv[3]);
     if (argc >= 4 && !strcmp(argv[1], "organize")) return OrganizeRoundTrip(argv[2], argv[3]);
+    if (argc >= 4 && !strcmp(argv[1], "duplicates")) return DuplicatesRoundTrip(argv[2], argv[3]);
     if (argc >= 4 && !strcmp(argv[1], "copy")) return CopyRoundTrip(argv[2], argv[3]);
     if (argc >= 3 && !strcmp(argv[1], "collection")) return CollectionRoundTrip(argv[2]);
     if (argc >= 2 && !strcmp(argv[1], "eq")) return CheckEq();

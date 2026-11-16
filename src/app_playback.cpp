@@ -3,11 +3,14 @@
 // count plays and skips. Runs on the UI thread: the engine's WM_ENGINE messages arrive through
 // OnEngineEvent, and UI ticks call UpdateStatus/WaveformTick from MainTick.
 #include "app.h"
+#include "asio.h"
+#include "audio_output.h"
 #include "cue.h"
 #include "discart.h"
 #include "game_music.h"
 #include "peaks.h"
 #include "playlog.h"
+#include "speakers.h"
 #include "taste.h"
 
 namespace app {
@@ -553,12 +556,22 @@ void PlayTrack(int pl, int index, bool remember, double start, bool paused) {
     RadioCancelPlayback();
     if (g.playlists[pl].IsView()) pl = SnapshotToNowPlaying(pl, index);
     auto& items = g.playlists[pl].items;
+    RememberSpot();
     FinishListening(true);
     if (remember && g.playing != kNone) {
         g.history.push_back(g.playing);
         if (g.history.size() > 256) g.history.erase(g.history.begin());
     }
     TrackId id = items[index];
+    // A song with a remembered place carries on from it, so choosing it again by accident (or on
+    // purpose) never throws the place away. Its x in Pick up where you left off starts it over.
+    if (start <= 0 && !paused && g.resumeOn)
+        for (const auto& [spot, at] : g.spots)
+            if (spot == id) {
+                start = at;
+                ShowMessage(L"Continuing from " + FormatDuration(at) + L".");
+                break;
+            }
     g_lib[id].flags &= ~Track::kFailed;
     unsigned long long token = NewToken(id, pl, (uint32_t)index);
     g.firstValidToken = token;
@@ -593,6 +606,7 @@ void Stop() {
         g.resumePl = g.playingPl;
         g.resumePos = g.engine.Position();
     }
+    RememberSpot();
     FinishListening(true);
     g.engine.Stop();
     CancelSeekPreview();
@@ -613,6 +627,7 @@ void Stop() {
 void Next() {
     if (RadioPlaying()) return;
     if (!g.queue.empty()) {
+        RememberSpot();
         FinishListening(true);
         unsigned long long token = QueuedToken(g.playingToken);
         g.firstValidToken = token;
@@ -765,10 +780,20 @@ void ApplyEffects() {
     g.engine.SetSmartVolume(g.loudnessComp, g.nightMode);
 }
 
-// Neither is saved: a podcast's 1.5x tempo shouldn't still be on for tomorrow's album.
+// The list's Duration and BPM cells and its total follow the rate (library.h HeardCell).
+static void RateChanged() {
+    g.statsDirty = true;
+    if (g.list) InvalidateRect(g.list, nullptr, FALSE);
+}
+
+// Both are remembered for the next start as the rate itself, not the menu index, so the file stays
+// readable and a later menu reorder cannot change the saved rate. A rate the menu does not offer is
+// ignored when loading (LoadPreferences), so a hand-edited value cannot leave the menu unmarked.
 void SetSpeed(double speed) {
     g.speed = speed;
     g.engine.SetSpeed(speed);
+    IniWrite(L"Player", L"Speed", F2S((float)speed));
+    RateChanged();
     ShowMessage(speed == 1 ? L"Normal speed." : L"Playing at " + RateText() + L" (the pitch follows).");
     UpdateStatus();
 }
@@ -776,6 +801,8 @@ void SetSpeed(double speed) {
 void SetTempo(double tempo) {
     g.tempo = tempo;
     g.engine.SetTempo(tempo);
+    IniWrite(L"Player", L"Tempo", F2S((float)tempo));
+    RateChanged();
     ShowMessage(tempo == 1 ? L"Normal tempo." : L"Playing at " + RateText() + L" (the pitch stays).");
     UpdateStatus();
 }
@@ -833,9 +860,9 @@ void RevealPlayingTrack() {
 }
 
 // Sound effects follow the volume slider, well below the music, and quieter still while it
-// plays. Exclusive output has the device to itself, so they stay silent there.
+// plays. Exclusive and ASIO output have the device to themselves, so they stay silent there.
 void PlaySfx(Sfx sound, int arg, bool evenWhenOff) {
-    if ((!g.soundEffects && !evenWhenOff) || g.exclusive) return;
+    if ((!g.soundEffects && !evenWhenOff) || g.output) return;
     bool ducked = g.playing != kNone && !g.engine.Paused();
     double v = g.volumePercent / 100.0;
     if (PlayPackThemeSound(sound, (float)(0.3 * v * v * (ducked ? 0.6 : 1)))) return;
@@ -1017,7 +1044,7 @@ void UpdateStatus() {
             if (elapsed > 0.1) dsp += L"  \x2022  " + FormatDuration((total - done) * elapsed / done) + L" left";
         }
     } else {
-        // Output: shared or exclusive, the device's rate and format, and whether it's bit-perfect. A
+        // Output: shared, exclusive or ASIO, the device's rate and format, and whether it's bit-perfect. A
         // track a helper program decodes says so, and claims no bit-perfect path: cordinal hasn't
         // checked that program's decoding as it checks its own.
         Engine::OutputInfo o = g.engine.Output();
@@ -1026,7 +1053,9 @@ void UpdateStatus() {
         static bool waitedForDevice = false;
         if (o.waiting != waitedForDevice) {
             waitedForDevice = o.waiting;
-            ShowMessage(o.waiting ? L"No audio output device; waiting for it to come back."
+            // A network speaker says what went wrong (not found, refused the stream) in its problem.
+            ShowMessage(o.waiting ? (!o.speaker.empty() && !o.problem.empty() ? o.problem
+                                                                             : L"No audio output device; waiting for it to come back.")
                                   : L"Audio output is back.");
         }
         // Only shown when the layout asks for them; work in progress above always shows. Building
@@ -1049,16 +1078,25 @@ void UpdateStatus() {
             if (g.rgRunning && g.rgAuto)
                 rg += L"  \x2022  measuring " + std::to_wstring(g.rgDone.load()) + L"/" + std::to_wstring(g.rgTotal.load());
             const std::wstring helper = active ? HelperDecoding(g.playing) : L"";
-            wchar_t out[96];
-            if (o.waiting)
+            wchar_t out[160];
+            if (!o.speaker.empty() && o.waiting)
+                swprintf_s(out, L"%.48ls not answering; trying again", o.speaker.c_str());
+            else if (!o.speaker.empty())
+                swprintf_s(out, L"Network speaker: %.48ls%ls", o.speaker.c_str(), o.ready ? L" \x2022 48 kHz 16-bit" : L" (idle)");
+            else if (o.waiting)
                 swprintf_s(out, L"No audio output; waiting");
             else if (!o.ready)
-                swprintf_s(out, L"%ls (idle)", g.exclusive ? L"Exclusive" : L"Shared");
+                swprintf_s(out, L"%ls (idle)", g.output == 2 ? L"ASIO" : g.output ? L"Exclusive" : L"Shared");
+            else if (o.asio)
+                swprintf_s(out, L"ASIO %.48ls %g kHz %d-bit%ls%ls", o.device.c_str(), o.rate / 1000.0, o.bits,
+                           o.floatFormat ? L" float" : L"", active && o.bitPerfect && helper.empty() ? L" \x2022 bit-perfect" : L"");
             else if (o.exclusive)
                 swprintf_s(out, L"Exclusive %g kHz %d-bit%ls%ls", o.rate / 1000.0, o.bits, o.floatFormat ? L" float" : L"",
                            active && o.bitPerfect && helper.empty() ? L" \x2022 bit-perfect" : L"");
             else
-                swprintf_s(out, L"%ls %g kHz", g.exclusive ? L"Shared (exclusive unavailable)" : L"Shared", o.rate / 1000.0);
+                swprintf_s(out, L"%ls %g kHz%ls%hs", g.output == 2 ? L"Shared (ASIO unavailable)" :
+                           g.output ? L"Shared (exclusive unavailable)" : L"Shared", o.rate / 1000.0,
+                           o.upmix.empty() ? L"" : L" \x2022 upmixed to ", o.upmix.c_str());
             statusItems = {rg, g.eq.crossfeed ? (g.eq.enabled ? L"EQ + crossfeed" : L"Crossfeed") :
                               g.eq.enabled ? L"EQ on" : L"EQ off", out + (helper.empty() ? L"" : L" \x2022 decoded by " + helper)};
             dsp = statusItems[0] + L"  |  " + statusItems[1] + L"  |  " + statusItems[2];
@@ -1078,11 +1116,11 @@ void UpdateStatus() {
         std::wstring text;
         if (!selected.empty()) {
             for (TrackId id : selected) total += g_lib[id].Duration();
-            text = std::to_wstring(selected.size()) + L" selected  \x2022  " + FormatTotalDuration(total);
+            text = std::to_wstring(selected.size()) + L" selected  \x2022  " + FormatTotalDuration(HeardSeconds(total, g.speed * g.tempo));
         } else {
             for (uint32_t i : g.view) total += g_lib[items[i]].Duration();
             text = std::to_wstring(g.view.size()) + (g.filter.empty() ? L"" : L" of " + std::to_wstring(items.size())) +
-                   L" tracks  \x2022  " + FormatTotalDuration(total);
+                   L" tracks  \x2022  " + FormatTotalDuration(HeardSeconds(total, g.speed * g.tempo));
         }
         SetStatusPart(2, text);
     }
@@ -1128,9 +1166,135 @@ void ClickStatusItem(int item) {
             OnCommand(IDM_RG_ENABLE, 0, nullptr);
             break;
         case 1: ShowEqualizer(); break;
-        case 2: OnCommand(g.exclusive ? IDM_OUTPUT_SHARED : IDM_OUTPUT_EXCLUSIVE, 0, nullptr); break;
+        // Shared, then exclusive, then ASIO when a driver is installed, then shared again.
+        case 2: {
+            const int next = g.output == 0 ? IDM_OUTPUT_EXCLUSIVE :
+                             g.output == 1 && !ListAsioDrivers().empty() ? IDM_OUTPUT_ASIO : IDM_OUTPUT_SHARED;
+            OnCommand(next, 0, nullptr);
+            break;
+        }
     }
     UpdateStatus();
+}
+
+void SetOutput(int mode) {
+    g.output = (uint8_t)std::clamp(mode, 0, 2);
+    IniWrite(L"Player", L"Exclusive", std::to_wstring(g.output).c_str());
+    sfx::SetSuppressed(g.output != 0);  // lets go of the device before exclusive or ASIO output asks for it
+    g.engine.SetOutputMode((OutputMode)g.output, g.asioDriver);
+    if (g.output == 0) {
+        ShowMessage(L"Shared output.");
+    } else if (g.output == 1) {
+        ShowMessage(L"Exclusive output: each track at its own rate, bit-perfect at 100% volume with EQ, "
+                    L"crossfeed and ReplayGain off. Other programs can't play sound meanwhile.");
+    } else {
+        const std::vector<AsioDriverInfo> drivers = ListAsioDrivers();
+        std::wstring name = drivers.empty() ? std::wstring() : drivers.front().name;
+        for (const AsioDriverInfo& d : drivers)
+            if (!_wcsicmp(d.name.c_str(), g.asioDriver.c_str())) name = d.name;
+        ShowMessage(drivers.empty()
+            ? std::wstring(L"ASIO output plays once an ASIO driver is installed; until then output stays shared.")
+            : L"ASIO output through " + name + L": each track at its own rate, bit-perfect at 100% volume with EQ, "
+              L"crossfeed and ReplayGain off. The driver's own settings choose its buffer size.");
+    }
+}
+
+void ShowAsioDrivers() {
+    const std::vector<AsioDriverInfo> drivers = ListAsioDrivers();
+    HMENU menu = CreatePopupMenu();
+    if (drivers.empty()) AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"No ASIO driver is installed");
+    bool chosen = false;
+    for (size_t i = 0; i < drivers.size() && i < (size_t)kMaxAsioDrivers; ++i) {
+        const bool current = !_wcsicmp(drivers[i].name.c_str(), g.asioDriver.c_str());
+        chosen |= current;
+        AppendMenuW(menu, MF_STRING | (current ? MF_CHECKED : 0), IDM_ASIO_DRIVER_BASE + (int)i, drivers[i].name.c_str());
+    }
+    // An unset or uninstalled choice plays through the first driver, so that one shows as chosen.
+    if (!chosen && !drivers.empty()) CheckMenuItem(menu, IDM_ASIO_DRIVER_BASE, MF_BYCOMMAND | MF_CHECKED);
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    const bool playing = g.engine.Output().asio;
+    AppendMenuW(menu, MF_STRING | (playing ? 0 : MF_GRAYED), IDM_ASIO_PANEL, L"Driver &settings...");
+    POINT pt;
+    GetCursorPos(&pt);
+    const int command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, g.hwnd, nullptr);
+    DestroyMenu(menu);
+    if (command) OnCommand(command, 0, nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// Network speakers (speakers.h): a search on a worker, its result as a menu at the pointer, and the
+// choice saved and handed to the engine.
+
+static std::vector<speakers::Speaker> g_speakers;  // the last search's, which the menu ids index
+static ULONGLONG g_speakersAt = 0;                   // when it finished
+static bool g_searchingSpeakers = false;
+
+static void SpeakerMenu() {
+    speakers::Speaker chosen;
+    const bool on = speakers::ParseDeviceId(g.networkSpeaker, chosen);
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING | (on ? 0 : MF_CHECKED), IDM_SPEAKER_HERE, L"&This computer");
+    bool listed = false;
+    for (size_t i = 0; i < g_speakers.size() && i < (size_t)kMaxSpeakers; ++i) {
+        const speakers::Speaker& s = g_speakers[i];
+        const bool current = on && s.udn == chosen.udn;
+        listed |= current;
+        std::wstring label = FromUtf8(s.name);
+        if (!s.model.empty() && s.model != s.name) label += L"  (" + FromUtf8(s.model) + L")";
+        AppendMenuW(menu, MF_STRING | (current ? MF_CHECKED : 0), IDM_SPEAKER_BASE + (int)i, label.c_str());
+    }
+    if (on && !listed)
+        AppendMenuW(menu, MF_STRING | MF_GRAYED | MF_CHECKED, 0, (FromUtf8(chosen.name) + L"  (not found just now)").c_str());
+    if (g_speakers.empty()) AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"No network speakers found");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, IDM_SPEAKER_SEARCH, L"&Look again");
+    POINT pt;
+    GetCursorPos(&pt);
+    SetForegroundWindow(g.hwnd);
+    const int command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, g.hwnd, nullptr);
+    DestroyMenu(menu);
+    if (command) OnCommand(command, 0, nullptr);
+}
+
+void ShowSpeakers(bool search) {
+    if (!search && g_speakersAt && GetTickCount64() - g_speakersAt < 60000) {
+        SpeakerMenu();
+        return;
+    }
+    if (g_searchingSpeakers) return;
+    g_searchingSpeakers = true;
+    ShowMessage(L"Looking for network speakers...");
+    HWND hwnd = g.hwnd;
+    std::thread([hwnd] {
+        auto found = std::make_unique<std::vector<speakers::Speaker>>(speakers::Discover(2500));
+        if (PostMessageW(hwnd, WM_APP_SPEAKERS, 0, (LPARAM)found.get())) found.release();
+    }).detach();
+}
+
+void OnSpeakersFound(LPARAM result) {
+    std::unique_ptr<std::vector<speakers::Speaker>> found(reinterpret_cast<std::vector<speakers::Speaker>*>(result));
+    g_searchingSpeakers = false;
+    g_speakers = std::move(*found);
+    g_speakersAt = GetTickCount64();
+    ShowMessage(g_speakers.empty() ? L"No network speakers answered. They have to be on this computer's network."
+                                   : std::to_wstring(g_speakers.size()) + (g_speakers.size() == 1 ? L" network speaker" : L" network speakers") +
+                                         L" found.");
+    SpeakerMenu();
+}
+
+void SpeakerCommand(int id) {
+    if (id == IDM_SPEAKER_HERE) SetSpeakerOutput({});
+    else if ((size_t)(id - IDM_SPEAKER_BASE) < g_speakers.size()) SetSpeakerOutput(speakers::DeviceId(g_speakers[id - IDM_SPEAKER_BASE]));
+}
+
+void SetSpeakerOutput(const std::string& id) {
+    g.networkSpeaker = id;
+    IniWrite(L"Player", L"Speaker", FromUtf8(id).c_str());
+    g.engine.SetSpeaker(id);
+    speakers::Speaker s;
+    if (!speakers::ParseDeviceId(id, s)) ShowMessage(L"Playing on this computer.");
+    else ShowMessage(L"Playing on " + FromUtf8(s.name) + L": cordinal sends it what you hear here, EQ and ReplayGain "
+                     L"included. It starts a moment after you press play.");
 }
 
 static int StatusItemAt(POINT pt) {
@@ -1381,6 +1545,9 @@ void OnEngineEvent(EngineEvent e, unsigned long long token) {
                 g.history.push_back(g.playing);
                 if (g.history.size() > 256) g.history.erase(g.history.begin());
             }
+            // A song that gave way without being left on purpose played to its end: its place is done.
+            if (g.playing != kNone && g.playing != g.spotLeft) ForgetSpot(g.playing);
+            g.spotLeft = kNone;
             FinishListening(false);
             g.consecutiveErrors = 0;
             g.playingToken = token;
@@ -1416,6 +1583,7 @@ void OnEngineEvent(EngineEvent e, unsigned long long token) {
         }
         case EngineEvent::Ended:
             g.resumeTrack = kNone;  // the playlist is over; nothing to continue
+            if (g.playing != kNone) ForgetSpot(g.playing);
             CancelSeekPreview();
             FinishListening(false);
             g.playing = kNone;

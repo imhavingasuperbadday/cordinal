@@ -345,18 +345,6 @@ void CheckDeadItems() {
     OnPlaylistFile(0, (LPARAM)request.release());
 }
 
-void FindDuplicateAudio() {
-    if (g_playlistFileBusy || g_playlistImport) return;
-    auto request = std::make_unique<PlaylistFile>();
-    request->findDuplicates = true;
-    for (TrackId id = 0; id < (TrackId)g_lib.Count(); ++id) {
-        const Track& t = g_lib[id];
-        if (t.audioHash && !(t.flags & Track::kMissing) && (t.flags & (Track::kInLibrary | Track::kInbox)))
-            request->hashes.push_back({t.audioHash, id});
-    }
-    OnPlaylistFile(0, (LPARAM)request.release());
-}
-
 void AddSteamSoundtracks() {
     if (g_playlistFileBusy || g_playlistImport) return;
     auto request = std::make_unique<PlaylistFile>();

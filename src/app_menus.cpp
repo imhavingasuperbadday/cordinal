@@ -3,6 +3,7 @@
 // toggles changed while a song plays; settings live in Preferences (app_tweaks.cpp). Command
 // ids share IDM_*_BASE ranges so a whole group can be checked or enabled in one call.
 #include "app.h"
+#include "playlog.h"
 
 namespace app {
 
@@ -45,7 +46,7 @@ HMENU ReplayGainMenu() {
     AppendMenuW(m, MF_STRING, IDM_RG_SCAN_PL, L"Scan &playlist");
     AppendMenuW(m, MF_STRING, IDM_RG_SCAN_ALL, L"Scan &library");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING, IDM_RG_CLEAR, L"Clear ReplayGain");
+    AppendMenuW(m, MF_STRING, IDM_RG_CLEAR, L"&Clear ReplayGain");
     AppendMenuW(m, MF_STRING, IDM_RG_WRITE_TAGS, L"&Write ReplayGain tags");
     return m;
 }
@@ -59,15 +60,15 @@ HMENU BuildMenu() {
     AppendMenuW(file, MF_STRING, IDM_IMPORT_M3U, L"&Open playlist file...");
     AppendMenuW(file, MF_STRING, IDM_EXPORT_M3U, L"&Save playlist as...\tCtrl+S");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(file, MF_STRING, IDM_EXPORT_COLLECTION, L"Export collection...");
-    AppendMenuW(file, MF_STRING, IDM_IMPORT_COLLECTION, L"Import collection...");
+    AppendMenuW(file, MF_STRING, IDM_EXPORT_COLLECTION, L"&Export collection...");
+    AppendMenuW(file, MF_STRING, IDM_IMPORT_COLLECTION, L"&Import collection...");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(file, MF_STRING, IDM_BACKUP, L"Back up library and settings...");
-    AppendMenuW(file, MF_STRING, IDM_RESTORE_BACKUP, L"Restore backup...");
-    AppendMenuW(file, MF_STRING, IDM_IMPORT_STATISTICS, L"Import playback statistics...");
+    AppendMenuW(file, MF_STRING, IDM_BACKUP, L"&Back up library and settings...");
+    AppendMenuW(file, MF_STRING, IDM_RESTORE_BACKUP, L"&Restore backup...");
+    AppendMenuW(file, MF_STRING, IDM_IMPORT_STATISTICS, L"Import pla&yback statistics...");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, IDM_WEB_SERVER, L"&Web server...");
-    AppendMenuW(file, MF_STRING, IDM_LISTENBRAINZ, L"Scrobbling...");
+    AppendMenuW(file, MF_STRING, IDM_LISTENBRAINZ, L"S&crobbling...");
     AppendMenuW(file, MF_STRING, IDM_PREFERENCES, L"&Preferences...\tCtrl+,");
     AppendMenuW(file, MF_STRING, IDM_KEYBOARD, L"&Keyboard shortcuts...");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
@@ -82,8 +83,8 @@ HMENU BuildMenu() {
     AppendMenuW(edit, MF_STRING, IDM_CROP, L"&Keep only selected tracks");
     AppendMenuW(edit, MF_STRING, IDM_CLEAR, L"C&lear playlist");
     AppendMenuW(edit, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(edit, MF_STRING, IDM_RELOAD_TAGS, L"Reload selected metadata");
-    AppendMenuW(edit, MF_STRING, IDM_REMOVE_DUPES, L"Remove &duplicates");
+    AppendMenuW(edit, MF_STRING, IDM_RELOAD_TAGS, L"Rel&oad tags from files");
+    AppendMenuW(edit, MF_STRING, IDM_REMOVE_DUPES, L"Remove du&plicates");
     AppendMenuW(edit, MF_STRING, IDM_REMOVE_DEAD, L"Remove dead &items");
     AppendMenuW(edit, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(edit, MF_STRING, IDM_FIND, L"&Search\tCtrl+F");
@@ -91,6 +92,7 @@ HMENU BuildMenu() {
     AppendMenuW(edit, MF_STRING, IDM_PROPERTIES, L"Edit &tags...\tAlt+Enter");
     AppendMenuW(edit, MF_STRING, IDM_EDIT_ALBUM_TAGS, L"Edit al&bum tags...");
     AppendMenuW(edit, MF_STRING, IDM_MAKE_ALBUM, L"&Make album...");
+    AppendMenuW(edit, MF_STRING, IDM_TAG_ALBUM_MB, L"Tag album from MusicBrain&z...");
     AppendMenuW(edit, MF_STRING, IDM_TAG_UNDO, L"Undo last ta&g edit");
     AppendHelperTools(edit, true);  // the tools of the helpers that are on, when there are any
 
@@ -98,20 +100,22 @@ HMENU BuildMenu() {
     AppendMenuW(playback, MF_STRING, IDM_PLAY_PAUSE, L"&Play / Pause\tSpace");
     AppendMenuW(playback, MF_STRING, IDM_STOP, L"&Stop");
     AppendMenuW(playback, MF_STRING, IDM_MUTE, L"&Mute\tCtrl+M");
-    AppendMenuW(playback, MF_STRING, IDM_PREV, L"Pre&vious\tCtrl+Left");
-    AppendMenuW(playback, MF_STRING, IDM_NEXT, L"&Next\tCtrl+Right");
+    AppendMenuW(playback, MF_STRING, IDM_PREV, L"Previo&us\tCtrl+Left");
+    AppendMenuW(playback, MF_STRING, IDM_NEXT, L"Ne&xt\tCtrl+Right");
     AppendMenuW(playback, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(playback, MF_STRING, IDM_SHUFFLE, L"S&huffle\tCtrl+H");
-    AppendMenuW(playback, MF_STRING, IDM_SHUFFLE_ALBUMS, L"Shuffle al&bums");
-    AppendMenuW(playback, MF_STRING, IDM_RADIO, L"Keep playing like this");
-    AppendMenuW(playback, MF_STRING, IDM_TASTE, L"Choose by taste");
+    AppendMenuW(playback, MF_STRING, IDM_SHUFFLE_ALBUMS, L"Shuffle a&lbums");
+    AppendMenuW(playback, MF_STRING, IDM_RADIO, L"&Keep playing like this");
+    AppendMenuW(playback, MF_STRING, IDM_TASTE, L"Choose b&y taste");
     AppendMenuW(playback, MF_STRING, IDM_REPEAT_BASE + (int)Repeat::Off, L"Repeat o&ff");
     AppendMenuW(playback, MF_STRING, IDM_REPEAT_BASE + (int)Repeat::All, L"&Repeat playlist\tCtrl+R");
     AppendMenuW(playback, MF_STRING, IDM_REPEAT_BASE + (int)Repeat::One, L"Repeat &track");
     AppendMenuW(playback, MF_STRING, IDM_STOP_AFTER, L"Stop &after current");
-    AppendMenuW(playback, MF_STRING, IDM_QUEUE_CLEAR, L"&Clear the queue");
+    AppendMenuW(playback, MF_STRING, IDM_QUEUE_CLEAR, L"Clear the &queue");
+    AppendMenuW(playback, MF_STRING, IDM_SPOTS, L"Pick up &where you left off...");
+    AppendMenuW(playback, MF_STRING, IDM_PLAY_HISTORY, L"Play h&istory...");
     AppendMenuW(playback, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(playback, MF_POPUP, (UINT_PTR)ReplayGainMenu(), L"&ReplayGain");
+    AppendMenuW(playback, MF_POPUP, (UINT_PTR)ReplayGainMenu(), L"Replay&Gain");
     HMENU speed = CreatePopupMenu(), tempo = CreatePopupMenu();
     for (int i = 0; i < (int)std::size(kSpeeds); ++i) {
         wchar_t buf[32];
@@ -132,11 +136,11 @@ HMENU BuildMenu() {
     static const wchar_t* const mixNames[] = {L"&Subtle (25%)", L"&Light (40%)", L"&Medium (55%)", L"S&trong (75%)"};
     for (int i = 0; i < (int)std::size(kReverbMixes); ++i) AppendMenuW(reverb, MF_STRING, IDM_REVERB_MIX_BASE + i, mixNames[i]);
     AppendMenuW(playback, MF_POPUP, (UINT_PTR)reverb, L"Rever&b");
-    AppendMenuW(playback, MF_STRING, IDM_NIGHT_MODE, L"Ni&ght mode");
-    AppendMenuW(playback, MF_STRING, IDM_BITCRUSH, L"Bitcr&ush");
+    AppendMenuW(playback, MF_STRING, IDM_NIGHT_MODE, L"&Night mode");
+    AppendMenuW(playback, MF_STRING, IDM_BITCRUSH, L"Bit&crush");
     AppendMenuW(playback, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(playback, MF_STRING, IDM_EQUALIZER, L"&Equalizer...\tCtrl+E");
-    AppendMenuW(playback, MF_STRING, IDM_HEADPHONES, L"&Headphones and device settings...");
+    AppendMenuW(playback, MF_STRING, IDM_HEADPHONES, L"Headphones and de&vice settings...");
 
     HMENU playlist = CreatePopupMenu();
     AppendMenuW(playlist, MF_STRING, IDM_NEW_PL, L"&New playlist\tCtrl+N");
@@ -146,10 +150,10 @@ HMENU BuildMenu() {
     AppendMenuW(playlist, MF_STRING, IDM_RENAME_PL, L"&Rename playlist\tF2");
     AppendMenuW(playlist, MF_STRING, IDM_REMOVE_PL, L"&Close playlist\tCtrl+W");
     AppendMenuW(playlist, MF_STRING, IDM_DUPLICATE_PL, L"&Duplicate playlist\tCtrl+Shift+D");
-    AppendMenuW(playlist, MF_STRING, IDM_REOPEN_PL, L"Reopen closed playlist\tCtrl+Shift+T");
-    AppendMenuW(playlist, MF_STRING, IDM_MOVE_PL_LEFT, L"Move left\tCtrl+Shift+PageUp");
-    AppendMenuW(playlist, MF_STRING, IDM_MOVE_PL_RIGHT, L"Move right\tCtrl+Shift+PageDown");
-    AppendMenuW(playlist, MF_STRING, IDM_PLAYING_PL, L"Reveal playing track\tCtrl+J");
+    AppendMenuW(playlist, MF_STRING, IDM_REOPEN_PL, L"Re&open closed playlist\tCtrl+Shift+T");
+    AppendMenuW(playlist, MF_STRING, IDM_MOVE_PL_LEFT, L"Move &left\tCtrl+Shift+PageUp");
+    AppendMenuW(playlist, MF_STRING, IDM_MOVE_PL_RIGHT, L"Move ri&ght\tCtrl+Shift+PageDown");
+    AppendMenuW(playlist, MF_STRING, IDM_PLAYING_PL, L"Reveal playing &track\tCtrl+J");
     AppendMenuW(playlist, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(playlist, MF_STRING, IDM_NEXT_PL, L"Ne&xt playlist\tCtrl+Tab");
     AppendMenuW(playlist, MF_STRING, IDM_PREV_PL, L"Pre&vious playlist\tCtrl+Shift+Tab");
@@ -160,39 +164,26 @@ HMENU BuildMenu() {
     AppendMenuW(library, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(library, MF_STRING, IDM_INBOX_ACCEPT_ALL, L"Add everything in the &Inbox");
     AppendMenuW(library, MF_STRING, IDM_REMOVE_MISSING, L"Forget &missing files...");
-    AppendMenuW(library, MF_STRING, IDM_RECENT_ADDITIONS, L"Remove &recent additions (24 hours)...");
+    AppendMenuW(library, MF_STRING, IDM_RECENT_ADDITIONS, L"Remove recen&t additions (24 hours)...");
     AppendMenuW(library, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(library, MF_STRING, IDM_ORGANIZE, L"&Organize files...");
     AppendMenuW(library, MF_STRING, IDM_ORGANIZE_UNDO, L"&Undo last organize");
     AppendMenuW(library, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(library, MF_STRING, IDM_CONVERT, L"Con&vert to .cord...");
-    AppendMenuW(library, MF_POPUP, (UINT_PTR)CordExportMenu(), L"&Export .cord");
-    AppendMenuW(library, MF_STRING, IDM_CONVERT_UNDO, L"Undo last conversion");
+    AppendMenuW(library, MF_POPUP, (UINT_PTR)CordExportMenu(), L"Export .cor&d");
+    AppendMenuW(library, MF_STRING, IDM_CONVERT_UNDO, L"Undo &last conversion");
     AppendMenuW(library, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(library, MF_STRING, IDM_COPY_TO, L"Cop&y to folder or device...");
-    AppendMenuW(library, MF_STRING, IDM_IPOD_SYNC, L"Sync to &iPod...");
+    AppendMenuW(library, MF_STRING, IDM_IPOD_SYNC, L"Sync to i&Pod...");
     AppendMenuW(library, MF_SEPARATOR, 0, nullptr);
-    HMENU editions = CreatePopupMenu();
-    AppendMenuW(editions, MF_STRING, IDM_EDITION_GROUP, L"&Group selected albums as editions");
-    AppendMenuW(editions, MF_STRING, IDM_EDITION_MANAGER, L"Album &editions...");
-    AppendMenuW(editions, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(editions, MF_STRING, IDM_EDITION_PREFERRED, L"Set &preferred edition");
-    AppendMenuW(editions, MF_STRING, IDM_EDITION_REMOVE, L"&Remove edition from group");
-    AppendMenuW(editions, MF_STRING, IDM_EDITION_SPLIT, L"&Split album group");
-    AppendMenuW(editions, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(editions, MF_STRING, IDM_EDITION_ART, L"Use this edition's &cover for the group");
-    AppendMenuW(editions, MF_STRING, IDM_EDITION_CLEAR_ART, L"&Clear group cover choice");
-    AppendMenuW(editions, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(editions, MF_STRING, IDM_EDITION_COMPARE, L"&Compare editions...");
-    AppendMenuW(editions, MF_STRING, IDM_EDITION_VERSIONS, L"Other &versions...");
-    AppendMenuW(library, MF_POPUP, (UINT_PTR)editions, L"Album &editions");
+    AppendEditionMenu(library);  // the same submenu a row's right-click shows
     AppendMenuW(library, MF_SEPARATOR, 0, nullptr);
     HMENU missing = CreatePopupMenu();
     for (size_t i = 0; i < std::size(kMissingFields); ++i)
         AppendMenuW(missing, MF_STRING, IDM_MISSING_BASE + (UINT)i, FromUtf8(kMissingFields[i].label).c_str());
     AppendMenuW(library, MF_POPUP, (UINT_PTR)missing, L"Fi&nd missing information");
     AppendMenuW(library, MF_STRING, IDM_FETCH_COVERS, L"Fetch missing &covers...");
-    AppendMenuW(library, MF_STRING, IDM_DUPLICATES, L"Find &duplicate audio");
+    AppendMenuW(library, MF_STRING, IDM_DUPLICATES, L"Find duplic&ates...");
     AppendMenuW(library, MF_STRING, IDM_STEAM, L"Add &Steam soundtracks");
 
     HMENU view = CreatePopupMenu();
@@ -214,7 +205,7 @@ HMENU BuildMenu() {
     AppendMenuW(view, MF_STRING, IDM_LYRICS, L"L&yrics panel\tCtrl+L");
     AppendMenuW(view, MF_STRING, IDM_QUEUE_SHOW, L"&Up next\tCtrl+Shift+Q");
     AppendMenuW(view, MF_STRING, IDM_ARTIST_INFO, L"Artist &info...");
-    AppendMenuW(view, MF_POPUP, (UINT_PTR)LayoutMenu(), L"Customize la&yout");
+    AppendMenuW(view, MF_POPUP, (UINT_PTR)LayoutMenu(), L"Customize &layout");
     HMENU sizes = CreatePopupMenu();
     const wchar_t* sizeNames[] = {L"&Compact", L"&Normal", L"Big mode &plus", L"&Big mode"};
     for (int i = 0; i < (int)ViewSize::Count; ++i) AppendMenuW(sizes, MF_STRING, IDM_SIZE_BASE + i, sizeNames[i]);
@@ -360,11 +351,11 @@ void UpdateMainMenu(HMENU m) {
     std::wstring undoDescription;
     const struct { UINT id; bool enabled; } enables[] = {
         {IDM_REOPEN_PL, !g.closedPlaylists.empty()}, {IDM_RELOAD_TAGS, selected},
-        {IDM_QUEUE_CLEAR, !g.queue.empty()}, {IDM_EDIT_AUTO, Active().kind == PlaylistKind::Auto},
+        {IDM_QUEUE_CLEAR, !g.queue.empty()}, {IDM_SPOTS, g.resumeOn}, {IDM_PLAY_HISTORY, !PlayLog().empty()}, {IDM_EDIT_AUTO, Active().kind == PlaylistKind::Auto},
         {IDM_RENAME_PL, removable}, {IDM_REMOVE_PL, RadioActive() || removable},
         {IDM_REMOVE, selected && (editable || LibraryActive())}, {IDM_CROP, selected && editable},
         {IDM_CLEAR, populated}, {IDM_REMOVE_DUPES, populated}, {IDM_REMOVE_DEAD, populated},
-        {IDM_PROPERTIES, selected}, {IDM_EDIT_ALBUM_TAGS, selected}, {IDM_MAKE_ALBUM, selected}, {IDM_TAG_UNDO, CanUndoTagEdit(undoDescription)},
+        {IDM_PROPERTIES, selected}, {IDM_EDIT_ALBUM_TAGS, selected}, {IDM_MAKE_ALBUM, selected}, {IDM_TAG_ALBUM_MB, selected}, {IDM_TAG_UNDO, CanUndoTagEdit(undoDescription)},
         {IDM_RG_SCAN_PL, !manualScan}, {IDM_RG_SCAN_SEL, selected && !manualScan},
         {IDM_RG_SCAN_ALL, replaygain::HasLibraryTracks() && !manualScan},
         {IDM_RG_CLEAR, selected && !manualScan},
@@ -377,20 +368,29 @@ void UpdateMainMenu(HMENU m) {
     std::wstring undo = canUndo && (undoDescription.empty() || Active().history.undo.back().when >= NewestTagEditTime())
                             ? playlistUndo : undoDescription;
     canUndo = canUndo || !undoDescription.empty();
+    // The names keep their access keys (&Undo, Re&do); a playlist's name may hold a literal '&'.
+    auto keyed = [](const std::wstring& text, size_t key) {
+        std::wstring out;
+        for (size_t i = 0; i < text.size(); ++i) {
+            if (i == key) out += L'&';
+            out += text[i] == L'&' ? std::wstring(L"&&") : std::wstring(1, text[i]);
+        }
+        return out;
+    };
     ModifyMenuW(m, IDM_UNDO, MF_BYCOMMAND | MF_STRING | (canUndo ? 0 : MF_GRAYED), IDM_UNDO,
-                ((canUndo ? undo : std::wstring(L"Undo")) + L"\tCtrl+Z").c_str());
+                (keyed(canUndo ? undo : std::wstring(L"Undo"), 0) + L"\tCtrl+Z").c_str());
     ModifyMenuW(m, IDM_REDO, MF_BYCOMMAND | MF_STRING | (canRedo ? 0 : MF_GRAYED), IDM_REDO,
-                ((canRedo ? redo : std::wstring(L"Redo")) + L"\tCtrl+Y").c_str());
-    ShowWhileRunning(m, IDM_ADD_FOLDER, IDM_CANCEL_IMPORT, L"&Cancel import", g.importRunning);
+                (keyed(canRedo ? redo : std::wstring(L"Redo"), 2) + L"\tCtrl+Y").c_str());
+    ShowWhileRunning(m, IDM_ADD_FOLDER, IDM_CANCEL_IMPORT, L"Cancel i&mport", g.importRunning);
     ShowWhileRunning(m, IDM_STEAM, IDM_CANCEL_STEAM, L"Cancel soundtrack search", SteamDiscoveryRunning());
     EnableMenuItem(m, IDM_STEAM, MF_BYCOMMAND | (SteamDiscoveryRunning() ? MF_GRAYED : MF_ENABLED));
     ShowWhileRunning(m, IDM_FETCH_COVERS, IDM_FETCH_COVERS_CANCEL, L"Cancel cover search", CoverFetchBusy());
     EnableMenuItem(m, IDM_FETCH_COVERS, MF_BYCOMMAND | (CoverFetchBusy() ? MF_GRAYED : MF_ENABLED));
     ShowWhileRunning(m, IDM_RESCAN, IDM_WATCH_IMPORTED, L"&Watch imported folders", !g.importedFolders.empty());
-    ShowWhileRunning(m, IDM_RG_SCAN_ALL, IDM_RG_CANCEL, L"&Cancel scan", manualScan);
+    ShowWhileRunning(m, IDM_RG_SCAN_ALL, IDM_RG_CANCEL, L"Cancel sc&an", manualScan);
     ShowWhileRunning(m, IDM_CONVERT, IDM_CONVERT_CANCEL, L"Cancel conversion", ConvertBusy());
     ShowWhileRunning(m, IDM_COPY_TO, IDM_COPY_CANCEL, L"Cancel copy", CopyBusy());
-    ShowWhileRunning(m, IDM_BACKUP, IDM_CANCEL_BACKUP, L"Cancel backup operation", BackupBusy());
+    ShowWhileRunning(m, IDM_BACKUP, IDM_CANCEL_BACKUP, L"Cancel backup", BackupBusy());
     ShowWhileRunning(m, IDM_IMPORT_COLLECTION, IDM_COLLECTION_CANCEL, CollectionCancelText().c_str(), CollectionRunning());
     for (UINT id : {IDM_EXPORT_COLLECTION, IDM_IMPORT_COLLECTION})
         EnableMenuItem(m, id, MF_BYCOMMAND | (CollectionBusy() ? MF_GRAYED : MF_ENABLED));

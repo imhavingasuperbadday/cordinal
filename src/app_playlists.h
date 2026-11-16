@@ -18,8 +18,8 @@ private:
 };
 
 
-// Column type (kCol*) ↔ list subitem index; the shown columns and their order come from the
-// saved header layout, so a subitem index is not a fixed type.
+// Column type (kCol*) ↔ list subitem index. Subitems are created left to right, so a subitem is a
+// position on screen; which type sits there comes from the saved layout (app_columns.cpp).
 int ColumnType(int subitem);
 int SubitemOf(int type);
 void LoadColumns();
@@ -28,6 +28,14 @@ void SaveColumns();
 void ToggleColumn(int type);
 void ResetColumns();
 void ShowColumns(const std::vector<int>& types);  // exactly these, left to right (a pack's column set)
+void MoveColumnTo(int from, int slot);            // as a header drag: lands before `slot`
+void SetColumnWidth96(int type, int width);       // saved width at 96 DPI (0: default), then refit
+void FitListColumns();                            // applies the columns' widths (after a drag or DPI change)
+bool ColumnsFollowListWidth();                    // Apollo's Title takes the room left: refit on resize
+bool ColumnHeaderInput(HWND h, UINT msg, LPARAM lp, LRESULT& result);
+int ColumnHeaderHot();
+int ColumnHeaderDropX();
+bool ColumnHeaderLive(int subitem);
 void ShowColumnMenu(POINT pt);
 void DrawStars(HDC dc, RECT r, uint8_t rating, bool selected, bool hover);
 LONG CellTextRight(int row, int sub, LONG right);
@@ -168,6 +176,8 @@ void StepPlaylistEdit(bool redo);
 void UndoLatest();
 void ShowListContextMenu(POINT pt);
 void ShowTabContextMenu(POINT pt);
+HMENU BuildListContextMenu();          // what ShowListContextMenu shows, for the self-test
+HMENU BuildTabContextMenu(int index);  // and ShowTabContextMenu
 LRESULT OnListNotify(NMHDR* hdr);
 LRESULT CALLBACK ListSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR);
 // Playlist persistence bookkeeping: stable identities and remembered cursor positions.

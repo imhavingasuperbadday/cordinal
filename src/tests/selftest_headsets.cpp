@@ -35,7 +35,7 @@ void TestHeadsets() {
         scratch += L"\\headset-profiles";
         CreateDirectoryW(scratch.c_str(), nullptr);
         const std::wstring ini = scratch + L"\\settings.ini";
-        WritePrivateProfileStringW(nullptr, nullptr, nullptr, ini.c_str());
+        IniFlush();
         DeleteFileW(ini.c_str());
         g.iniPath = ini;
         const bool none = !SavedOutputProfiles();
@@ -43,7 +43,7 @@ void TestHeadsets() {
         const bool ignored = !SavedOutputProfiles();
         IniWrite(OutputProfileSection(L"endpoint-a").c_str(), L"Remember", L"1");
         const bool found = SavedOutputProfiles();
-        WritePrivateProfileStringW(nullptr, nullptr, nullptr, ini.c_str());
+        IniFlush();
         DeleteFileW(ini.c_str());
         g.iniPath = savedIni;
         Check(none && ignored && found,

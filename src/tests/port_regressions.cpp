@@ -3,6 +3,7 @@
 // guards tab, playback and background-job behaviour. Every check runs in a testlog group and writes
 // only scratch files, under a hidden window, so no user state is touched.
 #include "app.h"
+#include "metadata_fetch.h"
 #include "playlog.h"
 #include "selftest_common.h"
 #include "testlog.h"
@@ -330,6 +331,43 @@ void TestPortedUi(const std::wstring& directory) {
             if (maker) SendMessageW(maker, WM_COMMAND, IDCANCEL, 0);
             Check(listed && !AlbumMakerOpen() && !TagWriteBusy(),
                   L"Make album lists the tracks once each, starts from their album, and Cancel writes nothing");
+
+            // Tag album from MusicBrainz, fed canned replies: a release matching by titles alone is
+            // listed but not chosen for you; choosing it lists the changes; Cancel writes nothing.
+            std::vector<std::string> asked;
+            SetAlbumTaggerFetch([&asked](const std::string& url) {
+                asked.push_back(url);
+                online::Reply reply;
+                reply.status = 200;
+                if (url.find("/release?query=") != url.npos)
+                    reply.body = R"({"releases":[{"id":"55555555-5555-4555-8555-555555555555","score":100,
+                        "title":"Pickaxe Songs","track-count":3}]})";
+                else
+                    reply.body = R"({"id":"55555555-5555-4555-8555-555555555555","title":"Pickaxe Songs","date":"1999",
+                        "artist-credit":[{"name":"Rook"}],"release-group":{"id":"66666666-6666-4666-8666-666666666666"},
+                        "media":[{"position":1,"tracks":[{"position":1,"title":"Now playing album 0"},
+                        {"position":2,"title":"Now playing album 1"},{"position":3,"title":"Now playing album 3"}]}]})";
+                return reply;
+            });
+            ShowAlbumTagger({np[1]});
+            HWND tagger = FindWindowW(L"CordinalAlbumTagger", nullptr);
+            HWND releases = tagger ? GetDlgItem(tagger, 100) : nullptr, changes = tagger ? GetDlgItem(tagger, 101) : nullptr;
+            HWND apply = tagger ? GetDlgItem(tagger, IDOK) : nullptr;
+            Pump(5000, [&] { return releases && SendMessageW(releases, LB_GETCOUNT, 0, 0) > 0; });
+            const bool undecided = releases && SendMessageW(releases, LB_GETCOUNT, 0, 0) == 1 &&
+                                   SendMessageW(releases, LB_GETCURSEL, 0, 0) == LB_ERR && !IsWindowEnabled(apply);
+            if (releases) {
+                SendMessageW(releases, LB_SETCURSEL, 0, 0);
+                SendMessageW(tagger, WM_COMMAND, MAKEWPARAM(100, LBN_SELCHANGE), (LPARAM)releases);
+            }
+            const bool shown = changes && SendMessageW(changes, LB_GETCOUNT, 0, 0) > 0 && IsWindowEnabled(apply);
+            if (tagger) SendMessageW(tagger, WM_COMMAND, IDCANCEL, 0);
+            SetAlbumTaggerFetch({});
+            Check(undecided && shown && !FindWindowW(L"CordinalAlbumTagger", nullptr) && !TagWriteBusy() &&
+                      asked.size() == 2 && asked[0].find("Pickaxe") != std::string::npos &&
+                      asked[1].find("/release/55555555-5555-4555-8555-555555555555?") != std::string::npos,
+                  L"Tag album from MusicBrainz leaves an unclear match unchosen, shows a chosen release's changes, "
+                  L"and Cancel writes nothing");
         }
         {
             // The auto-playlists share one tab at the first one's place. It names the one last

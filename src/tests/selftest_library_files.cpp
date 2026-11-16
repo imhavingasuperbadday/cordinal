@@ -1,7 +1,12 @@
 // Library file checks of the self test (see selftest.cpp): folder scanning, organize, tag undo,
-// duplicate audio detection and scan merging. RunSelfTest calls each one inside its own testlog
+// Find duplicates and scan merging. RunSelfTest calls each one inside its own testlog
 // group, in the order the groups appear in the log.
 #include "selftest_common.h"
+
+#include "decoder.h"
+#include "duplicates.h"
+#include "playlog.h"
+#include "replaygain.h"
 
 // Organize: planned paths, sanitizing, collisions, covers moving along, cleanup, and undo.
 void TestOrganize(const std::wstring& media, const std::wstring& scratch) {
@@ -234,8 +239,8 @@ void TestLibraryFolders(const std::wstring& scratch) {
     LoadLibrarySettings();
     Check(g.libraryFolders.empty(), L"LIBRARY FOLDERS a new profile watches no folder, even the system Music folder");
 
-    WritePrivateProfileStringW(L"Library", L"FoldersChosen", nullptr, g.iniPath.c_str());
-    WritePrivateProfileStringW(L"Library", L"Folders", music.c_str(), g.iniPath.c_str());
+    IniDelete(L"Library", L"FoldersChosen");
+    IniWrite(L"Library", L"Folders", music);
     LoadLibrarySettings();
     Check(g.libraryFolders.empty() && IniInt(L"Library", L"FoldersChosen", 0) != 0,
           L"LIBRARY FOLDERS the auto-added system Music folder is cleared once and never added again");
@@ -288,6 +293,7 @@ void TestTagUndo(const std::wstring& media, const std::wstring& scratch) {
         TagEdit edit;
         edit.title = "Undo test title";
         edit.artist = "Undo test artist";
+        edit.musicBrainzReleaseGroup = "a1b2c3d4-0000-4000-8000-000000000002";  // the journal's newest field
         std::wstring error, file;
         uint32_t count = 0;
         TagJournal journal;
@@ -297,7 +303,8 @@ void TestTagUndo(const std::wstring& media, const std::wstring& scratch) {
         bool written = saved && WriteTags(copy, edit, error);
         TagData changed;
         ReadTags(copy, changed);
-        bool applied = written && changed.title == "Undo test title" && changed.artist == "Undo test artist";
+        bool applied = written && changed.title == "Undo test title" && changed.artist == "Undo test artist" &&
+                       changed.musicBrainzReleaseGroup == *edit.musicBrainzReleaseGroup;
         // Named by the time of the edit: Ctrl+Z compares it with the newest playlist edit's time.
         uint64_t when = 0;
         const uint64_t now = (uint64_t)std::time(nullptr);
@@ -307,6 +314,7 @@ void TestTagUndo(const std::wstring& media, const std::wstring& scratch) {
         const TagUndoFile* old = loaded ? &back.files[0] : nullptr;
         bool fields = loaded && old->path == copy && old->coverRestorable && old->old.title &&
                       *old->old.title == before.title && old->old.artist && *old->old.artist == before.artist &&
+                      old->old.musicBrainzReleaseGroup && *old->old.musicBrainzReleaseGroup == before.musicBrainzReleaseGroup &&
                       !old->old.album && !old->old.cover;
         journalled.Add(applied && fields, std::wstring(name) + L" (old title \"" + FromUtf8(before.title) + L"\")");
 
@@ -315,7 +323,8 @@ void TestTagUndo(const std::wstring& media, const std::wstring& scratch) {
         ReadTags(copy, after);
         unsigned rate2 = 0;
         const auto audioAfter = DecodeAll(copy, rate2);
-        bool same = restored && after.title == before.title && after.artist == before.artist && !audioBefore.empty() &&
+        bool same = restored && after.title == before.title && after.artist == before.artist &&
+                    after.musicBrainzReleaseGroup == before.musicBrainzReleaseGroup && !audioBefore.empty() &&
                     audioAfter == audioBefore;
         DeleteTagJournal(file);
         reversed.Add(same && !FindNewestTagJournal(dir, file, count),
@@ -379,39 +388,143 @@ void TestTagUndo(const std::wstring& media, const std::wstring& scratch) {
     g.dataDir = savedDataDir;
 }
 
-// Two copies of one FLAC with different tags share the audio MD5 in STREAMINFO, so they group.
+// Find duplicates (duplicates.h): identical audio by a FLAC's stored MD5 and, for every other format,
+// by the hash measuring computes; the same song in other encodes; the copy suggested to keep; and a
+// clean-up that carries plays, ratings, play log entries and playlist places over and back again.
 void TestAudioHash(const std::wstring& media, const std::wstring& scratch) {
-    testlog::Batch batch(L"DUPLICATES audio hashes group retagged copies but not WAV");
-    const std::wstring a = scratch + L"\\hash_a.flac", b = scratch + L"\\hash_b.flac", w = scratch + L"\\hash_c.wav";
+    testlog::Batch batch(L"DUPLICATES FLAC copies with different tags share the stored MD5");
+    const std::wstring a = scratch + L"\\hash_a.flac", b = scratch + L"\\hash_b.flac", w = scratch + L"\\hash_c.wav",
+                       w2 = scratch + L"\\hash_d.wav", mp3 = scratch + L"\\hash_e.mp3";
     WriteTestBytes(a, ReadTestBytes(media + L"\\sine.flac"));
     WriteTestBytes(b, ReadTestBytes(media + L"\\sine.flac"));
     WriteTestBytes(w, ReadTestBytes(media + L"\\sine.wav"));
+    WriteTestBytes(w2, ReadTestBytes(media + L"\\sine.wav"));
+    WriteTestBytes(mp3, ReadTestBytes(media + L"\\sine.mp3"));
     TagEdit edit;
     edit.title = "Same audio, other tags";
     edit.artist = "Other artist";
     std::wstring error;
-    bool retagged = WriteTags(b, edit, error);
-    TagData ta, tb, tw;
-    bool read = ReadTags(a, ta) && ReadTags(b, tb) && ReadTags(w, tw);
-    TrackId ia = g_lib.Add(a), ib = g_lib.Add(b), iw = g_lib.Add(w);
-    for (TrackId id : {ia, ib, iw}) g_lib[id].flags |= Track::kInLibrary;
-    g_lib.ApplyTags(ia, ta);
-    g_lib.ApplyTags(ib, tb);
-    g_lib.ApplyTags(iw, tw);
-    bool sameHash = ta.audioHash != 0 && ta.audioHash == tb.audioHash && tb.title != ta.title;
-    Check(retagged && read && sameHash, L"DUPLICATES two FLAC copies, different tags: audio hash %016llx / %016llx",
-          (unsigned long long)ta.audioHash, (unsigned long long)tb.audioHash);
-
-    auto groups = g_lib.FindDuplicateAudio();
-    bool grouped = false, wavGrouped = false;
-    for (const auto& group : groups) {
-        bool hasA = std::find(group.begin(), group.end(), ia) != group.end();
-        bool hasB = std::find(group.begin(), group.end(), ib) != group.end();
-        grouped |= hasA && hasB;
-        wavGrouped |= std::find(group.begin(), group.end(), iw) != group.end();
+    const bool retagged = WriteTags(b, edit, error);
+    g_lib = Library();
+    std::vector<TrackId> ids;
+    bool read = true;
+    for (const auto& path : {a, b, w, w2, mp3}) {
+        TagData d;
+        read &= ReadTags(path, d);
+        const TrackId id = g_lib.Add(path);
+        g_lib[id].flags |= Track::kInLibrary;
+        g_lib.ApplyTags(id, d);
+        ids.push_back(id);
     }
-    Check(grouped && !wavGrouped && tw.audioHash == 0, L"DUPLICATES FindDuplicateAudio groups the copies (%zu group(s)), WAV without an MD5 is not grouped",
-          groups.size());
+    const TrackId ia = ids[0], ib = ids[1], iw = ids[2], iw2 = ids[3], im = ids[4];
+    Check(retagged && read && g_lib[ia].audioHash && g_lib[ia].audioHash == g_lib[ib].audioHash && !g_lib[iw].audioHash,
+          L"DUPLICATES two FLAC copies, different tags, share the stored MD5 %016llx; a WAV has none until measured",
+          (unsigned long long)g_lib[ia].audioHash);
+    auto has = [](const duplicates::Group& g, TrackId id) { return std::find(g.tracks.begin(), g.tracks.end(), id) != g.tracks.end(); };
+    auto groupOf = [&](const std::vector<duplicates::Group>& groups, TrackId id) -> const duplicates::Group* {
+        for (const auto& g : groups)
+            if (has(g, id)) return &g;
+        return nullptr;
+    };
+    const std::vector<TrackId> unmeasured = duplicates::Unmeasured(g_lib);
+    Check(unmeasured.size() == 3 && std::find(unmeasured.begin(), unmeasured.end(), ia) == unmeasured.end(),
+          L"DUPLICATES the formats without a stored hash are the ones left to measure (%zu)", unmeasured.size());
+
+    batch.Next(L"DUPLICATES measuring hashes every format; identical copies match, other audio doesn't");
+    std::atomic<bool> cancel{false};
+    std::atomic<std::shared_ptr<Decoder>> current;
+    const uint64_t flacMd5 = g_lib[ia].audioHash;
+    for (TrackId id : {ia, iw, iw2, im}) replaygain::Apply(replaygain::Measure(g_lib.SnapshotPath(id), 0, 0, cancel, current, nullptr));
+    Check(g_lib[iw].audioHash && g_lib[iw].audioHash == g_lib[iw2].audioHash && g_lib[im].audioHash &&
+              g_lib[im].audioHash != g_lib[iw].audioHash && g_lib[ia].audioHash == flacMd5 && duplicates::Unmeasured(g_lib).empty(),
+          L"DUPLICATES WAV copies hash alike (%016llx), the MP3 differently, and FLAC keeps its stored MD5",
+          (unsigned long long)g_lib[iw].audioHash);
+    AudioHasher whole, split, shorter;
+    const float frames[8] = {0.1f, -0.1f, 0.2f, -0.2f, 0.3f, -0.3f, 0.4f, -0.4f};
+    whole.Add(frames, 4);
+    split.Add(frames, 1);
+    split.Add(frames + 2, 3);
+    shorter.Add(frames, 3);
+    Check(whole.Finish() == split.Finish() && whole.Finish() != shorter.Finish() && AudioHasher().Finish() != 0,
+          L"DUPLICATES the audio hash doesn't depend on how reads are split, counts length, and is never 0");
+
+    batch.Next(L"DUPLICATES a measured hash survives re-reading tags, not a replaced file");
+    TagData wavTags;
+    ReadTags(w, wavTags);
+    const uint64_t measured = g_lib[iw].audioHash;
+    g_lib.ApplyTags(iw, wavTags);
+    const bool kept = g_lib[iw].audioHash == measured;
+    TagData replaced = wavTags;
+    replaced.duration += 5;
+    g_lib.ApplyTags(iw, replaced);
+    const bool dropped = g_lib[iw].audioHash == 0;
+    g_lib.ApplyTags(iw, wavTags);
+    g_lib[iw].audioHash = measured;
+    Check(kept && dropped, L"DUPLICATES re-reading tags keeps the measured hash; a different length drops it");
+
+    batch.Next(L"DUPLICATES groups identical audio and the same song in other files, best copy first");
+    // The MP3 becomes another encode of the FLACs' song: same artist and title, length within a second.
+    g_lib[im].artist = g_lib[ia].artist;
+    g_lib[im].title = g_lib[ia].title;
+    g_lib[im].durationMs = g_lib[ia].durationMs + 400;
+    auto groups = duplicates::Find(g_lib);
+    const auto* flacs = groupOf(groups, ib);
+    const auto* wavs = groupOf(groups, iw);
+    const auto* song = groupOf(groups, im);
+    Check(flacs && flacs->identical && has(*flacs, ia) && wavs && wavs->identical && has(*wavs, iw2) && !has(*wavs, ia) && song &&
+              !song->identical && song->tracks.size() == 2 && song->tracks[1] == im && has(*song, flacs->tracks[0]),
+          L"DUPLICATES %zu group(s): FLACs and WAVs identical, the MP3 the same song as the FLACs' best copy", groups.size());
+    g_lib[ib].playCount = 3;
+    Check(duplicates::Better(g_lib, ib, ia) && duplicates::Better(g_lib, ia, im) && duplicates::Better(g_lib, ia, iw),
+          L"DUPLICATES lossless beats lossy, FLAC beats WAV, and history breaks a tie");
+    g_lib[ib].playCount = 0;
+
+    batch.Next(L"DUPLICATES a clean-up moves history to the copy kept and undo returns it");
+    g_lib[iw].playCount = 2;
+    g_lib[iw].lastPlayed = 1000;
+    g_lib[iw].added = 500;
+    g_lib[iw2].playCount = 5;
+    g_lib[iw2].skipCount = 1;
+    g_lib[iw2].lastPlayed = 2000;
+    g_lib[iw2].firstPlayed = 100;
+    g_lib[iw2].added = 400;
+    g_lib[iw2].rating = 80;
+    const std::vector<PlayEvent> savedLog = PlayLog();
+    SetPlayLog({{iw2, 1500, 60, PlayEvent::kCounted}, {iw, 1600, 60, PlayEvent::kCounted}, {ia, 1700, 60, PlayEvent::kCounted}});
+    std::vector<Playlist> playlists(2);
+    playlists[0].identity = 1;
+    playlists[0].items = {iw2, ia, iw};  // already lists the kept copy: the extra entry goes
+    playlists[1].identity = 2;
+    playlists[1].items = {iw2, ia};
+    // The WAV pair, with the first WAV kept and the second ticked.
+    const std::vector<duplicates::Group> pair{{true, {iw, iw2}}};
+    const std::vector<std::vector<bool>> ticks{{false, true}};
+    size_t all = 0;
+    const auto moves = duplicates::Plan(g_lib, pair, ticks, kInvalidTrack, &all);
+    Check(moves.size() == 1 && moves[0].extra == w2 && moves[0].keep == w && !all &&
+              duplicates::Plan(g_lib, pair, ticks, iw2).empty(),
+          L"DUPLICATES the plan removes the ticked copy in favour of the unticked one, never a playing track");
+    duplicates::Plan(g_lib, pair, {{true, true}}, kInvalidTrack, &all);
+    Check(all == 1, L"DUPLICATES a song with every copy ticked is left alone");
+
+    const auto cleanup = duplicates::Merge(g_lib, playlists, moves, {true});
+    const Track& keep = g_lib[iw];
+    Check(keep.playCount == 7 && keep.skipCount == 1 && keep.lastPlayed == 2000 && keep.firstPlayed == 100 && keep.added == 400 &&
+              keep.rating == 80 && g_lib[iw2].playCount == 0 && (g_lib[iw2].flags & Track::kMissing) && PlayLog()[0].id == iw &&
+              PlayLog()[2].id == ia && playlists[0].items == std::vector<TrackId>{ia, iw} &&
+              playlists[1].items == std::vector<TrackId>{iw, ia} && !playlists[0].history.undo.empty(),
+          L"DUPLICATES plays, skips, dates, rating, listens and playlist places move to the copy kept");
+    Check(duplicates::Merge(g_lib, playlists, moves, {false}).Empty(), L"DUPLICATES a copy that stayed on disk keeps its history");
+
+    playlists[1].items.push_back(ia);  // changed since: left as it is
+    size_t skipped = 0;
+    const auto reread = duplicates::Undo(g_lib, playlists, cleanup, {true}, &skipped);
+    Check(reread == std::vector<TrackId>{iw2} && g_lib[iw].playCount == 2 && g_lib[iw].lastPlayed == 1000 && g_lib[iw].added == 500 &&
+              g_lib[iw].rating == 0 && g_lib[iw2].playCount == 5 && g_lib[iw2].rating == 80 && !(g_lib[iw2].flags & Track::kMissing) &&
+              PlayLog()[0].id == iw2 && PlayLog()[1].id == iw && playlists[0].items == std::vector<TrackId>{iw2, ia, iw} && skipped == 1,
+          L"DUPLICATES undo returns the history, listens and unchanged playlists to the restored copy");
+    SetPlayLog(std::vector<PlayEvent>(savedLog));
+    g_lib = Library();
 }
 
 // The scanner sends a folder's listing in chunks (ScanResult.first/complete); the merge must

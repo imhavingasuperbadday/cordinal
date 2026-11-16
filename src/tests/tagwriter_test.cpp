@@ -110,6 +110,8 @@ void TestFile(TestLog& t, const std::wstring& path) {
     all.cover = kPng;
     all.rating = "0.8";
     all.playCount = "12";
+    all.musicBrainzRelease = "a1b2c3d4-0000-4000-8000-000000000001";
+    all.musicBrainzReleaseGroup = "a1b2c3d4-0000-4000-8000-000000000002";
     std::wstring err;
     bool ok = WriteTags(path, all, err);
     TagData d;
@@ -138,6 +140,8 @@ void TestFile(TestLog& t, const std::wstring& path) {
     expect(d.compilation, L"compilation");
     expect(cover == kPng, L"cover");
     expect(d.rating == "0.8" && d.playCount == "12", L"statistics");
+    expect(d.musicBrainzRelease == *all.musicBrainzRelease && d.musicBrainzReleaseGroup == *all.musicBrainzReleaseGroup,
+           L"musicbrainz");
     t.setAll.Add(ok && wrong.empty(), name + (wrong.empty() ? L"" : L" wrong:" + wrong) + L" " + err);
     same(L"set all");
 
@@ -179,11 +183,13 @@ void TestFile(TestLog& t, const std::wstring& path) {
     clear.track = clear.trackTotal = clear.bpm = 0;
     clear.compilation = false;
     clear.rating = clear.playCount = "";
+    clear.musicBrainzRelease = clear.musicBrainzReleaseGroup = "";
     ok = WriteTags(path, clear, err);
     d = TagData();
     ReadTags(path, d);
     t.clear.Add(ok && d.artist.empty() && d.comment.empty() && d.label.empty() && d.grouping.empty() && !d.track &&
                     !d.trackTotal && !d.bpm && !d.compilation && d.rating.empty() && d.playCount.empty() &&
+                    d.musicBrainzRelease.empty() && d.musicBrainzReleaseGroup.empty() &&
                     d.album == *all.album,
                 name + L" " + err);
     same(L"clear");

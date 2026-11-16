@@ -76,36 +76,51 @@ float VolumeAt(float x) {
     return std::clamp((x - L.volume.x - inset) / std::max(1.0f, L.volume.w - 2 * inset), 0.0f, 1.0f);
 }
 
+// The header's columns (column_layout.h, as on Windows in app_columns.cpp): a press on a divider
+// resizes the column on its left; a press on a column sorts by it when released where it began, or
+// drags it to a new place once it moves.
+namespace {
+std::vector<int> g_columnStart;  // the widths when a divider press began
+int g_columnSlot = -1;           // a moving column's landing slot
+}  // namespace
+
+// The divider under the mouse, by the index of the column on its left, or -1.
 int ColumnEdgeAt(float x, float y) {
     if (!L.header.In(x, y)) return -1;
-    float cx = L.header.x;
-    for (size_t i = 0; i < ActiveColumnTypes().size(); ++i) {
-        cx += ColumnWidth(ActiveColumnTypes()[i]);
-        if (std::fabs(x - cx) <= S(4) && i > 0) return (int)i;
-    }
-    return -1;
+    return ui::DividerAt(ColumnSpecs(), ColumnWidths(), (int)std::lround(x - L.header.x), (int)std::lround(S(4)),
+                         ColumnStretch());
 }
 
-int ColumnAt(float x) {
-    float cx = L.header.x;
-    for (size_t i = 0; i < ActiveColumnTypes().size(); ++i) {
-        float w = ColumnWidth(ActiveColumnTypes()[i]);
-        if (x >= cx && x < cx + w) return (int)i;
-        cx += w;
-    }
-    return -1;
+int ColumnAt(float x) { return ui::ColumnAtX(ColumnWidths(), (int)std::floor(x - L.header.x)); }
+
+// The header column to light: the one pressed or moving, else the one hovered when it sorts or moves.
+int HeaderHotColumn() {
+    if (g_drag == Drag::ColumnPress || g_drag == Drag::ColumnMove) return g_dragColumn;
+    if (g_drag != Drag::None || !g_popups.empty() || !L.header.In(g_mouseX, g_mouseY) || ColumnEdgeAt(g_mouseX, g_mouseY) >= 0)
+        return -1;
+    int column = ColumnAt(g_mouseX);
+    if (column < 0) return -1;
+    const auto specs = ColumnSpecs();
+    return ui::SortsBy(specs[column].type) || !specs[column].fixed ? column : -1;
+}
+
+// Where a moving column would land, or -1.
+float HeaderDropX() {
+    if (g_drag != Drag::ColumnMove || g_columnSlot < 0) return -1;
+    float x = L.header.x;
+    const auto& widths = ColumnWidths();
+    for (int i = 0; i < g_columnSlot && i < (int)widths.size(); ++i) x += widths[i];
+    return x;
 }
 
 void SortBy(int c) {
     Playlist& pl = Active();
-    if (c <= 0) return;
-    if (pl.sortColumn == c) {
-        if (!pl.sortAscending) pl.sortColumn = -1;  // a third click: back to the list's own order
-        else pl.sortAscending = false;
-    } else {
-        pl.sortColumn = c;
-        pl.sortAscending = true;
-    }
+    // The playing indicator and # are not sort keys, as on Windows (app_playlists.cpp SortByColumn); a
+    // third click goes back to the list's own order.
+    if (!ui::SortsBy(c)) return;
+    const ui::SortState next = ui::NextSort({pl.sortColumn, pl.sortAscending}, c, true);
+    pl.sortColumn = next.column;
+    pl.sortAscending = next.ascending;
     g.libraryDirty = true;
     RebuildRows();
 }
@@ -281,6 +296,7 @@ void MouseDown(const SDL_MouseButtonEvent& e) {
     if (!L.browser.In(x, y)) BrowserBlur();
     if (e.button == SDL_BUTTON_RIGHT) {
         if (InternetRadio().active && L.list.In(x, y)) return;
+        if (L.buttons[kBtnResume].In(x, y) && g.settings.resumeOn) { OpenComebacks(false); return; }  // the remembered songs
         if (L.player.In(x, y) && !L.seek.In(x, y)) { OpenLayout(); return; }
         if (L.seek.In(x, y) && g.playing != kNone) { OpenSectionMenu(x, y); return; }
         if (L.browser.In(x, y)) { BrowserMouseDown(L.browser, x, y, e.button, e.clicks, SDL_GetModState()); return; }
@@ -366,12 +382,16 @@ void MouseDown(const SDL_MouseButtonEvent& e) {
         g_dragStartValue = g.scroll;
     } else if (int edge = ColumnEdgeAt(x, y); edge >= 0) {
         g_drag = Drag::ColumnEdge;
-        g_dragColumn = ActiveColumnTypes()[edge];
+        g_dragColumn = edge;
         g_dragStart = x;
-        g_dragStartValue = ColumnWidth(g_dragColumn) / g.scale;
+        g_columnStart = ColumnWidths();
     } else if (L.header.In(x, y)) {
-        int col = ColumnAt(x);
-        if (col >= 0) SortBy(ActiveColumnTypes()[col]);
+        if (int col = ColumnAt(x); col >= 0) {
+            g_drag = Drag::ColumnPress;
+            g_dragColumn = col;
+            g_dragStart = x;
+            g_columnSlot = -1;
+        }
     } else if (L.tabs.In(x, y)) {
         for (size_t t = 0; t < L.tabRects.size() && t < L.tabSlots.size(); ++t)
             if (L.tabRects[t].In(x, y)) {
@@ -480,8 +500,22 @@ void MouseMove(const SDL_MouseMotionEvent& e) {
             ClampScroll();
             break;
         }
-        case Drag::ColumnEdge:
-            if (g_dragColumn >= 0) ActiveColumnWidths()[g_dragColumn] = std::max(24, (int)std::lround(g_dragStartValue + (x - g_dragStart) / g.scale));
+        case Drag::ColumnEdge: {
+            // The dragged column keeps its new width; beside Apollo's Title (the room left) the next one does.
+            const auto specs = ColumnSpecs();
+            const int stretch = ColumnStretch();
+            auto widths = ui::DragDivider(specs, g_columnStart, g_dragColumn, (int)std::lround(x - g_dragStart), stretch);
+            int i = g_dragColumn == stretch ? g_dragColumn + 1 : g_dragColumn;
+            if (i >= 0 && i < (int)widths.size() && !specs[i].fixed)
+                ActiveColumnWidths()[specs[i].type] = std::max(1, (int)std::lround(widths[i] / g.scale));
+            break;
+        }
+        case Drag::ColumnPress:
+            if (std::fabs(x - g_dragStart) < S(4) || ColumnSpecs()[g_dragColumn].fixed) break;
+            g_drag = Drag::ColumnMove;
+            [[fallthrough]];
+        case Drag::ColumnMove:
+            g_columnSlot = ui::DropSlot(ColumnSpecs(), ColumnWidths(), (int)std::lround(x - L.header.x));
             break;
         case Drag::Tracks: break;
         case Drag::Splitter: SetBrowserHeight(g_dragStartValue + y - g_dragStart); break;
@@ -544,6 +578,8 @@ void MouseUp(const SDL_MouseButtonEvent& e) {
         SDL_CaptureMouse(false);
     }
     if (g_drag == Drag::Seek && g_seekPreview >= 0) SeekTo(g_seekPreview);
+    if (g_drag == Drag::ColumnPress && g_dragColumn < (int)ActiveColumnTypes().size()) SortBy(ActiveColumnTypes()[g_dragColumn]);
+    if (g_drag == Drag::ColumnMove && ui::MoveColumn(ActiveColumnTypes(), g_dragColumn, g_columnSlot)) SaveSettings();
     if (g_drag == Drag::Volume || g_drag == Drag::ColumnEdge || g_drag == Drag::Splitter) SaveSettings();
     g_seekPreview = -1;
     g_drag = Drag::None;

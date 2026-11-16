@@ -29,7 +29,8 @@
 //    album never means measuring the rest of it again.
 //  - Tracks are measured automatically in the background (each front end's sweep, using
 //    AutoMeasureTracks), the next ones to play first, so playback rarely meets a track without data.
-//  - The same decode detects tempo, so showing the BPM column fills it without a second pass.
+//  - The same decode detects tempo, so showing the BPM column fills it without a second pass, and
+//    hashes the audio (AudioHasher), so Find duplicates recognizes identical copies in any format.
 #include "replaygain.h"
 
 #include "background_cpu.h"
@@ -42,10 +43,29 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <set>
 #include <tuple>
 #include <unordered_set>
+
+void AudioHasher::Add(const float* stereo, size_t frames) {
+    for (size_t i = 0; i < frames; ++i) {
+        uint64_t word;
+        memcpy(&word, stereo + i * 2, sizeof word);  // one frame: both channels' bits
+        h_ ^= word * 0x9E3779B97F4A7C15ull;
+        h_ = (h_ << 31 | h_ >> 33) * 0xC2B2AE3D27D4EB4Full;
+    }
+    frames_ += frames;
+}
+
+uint64_t AudioHasher::Finish() const {
+    uint64_t h = h_ ^ frames_;  // murmur's finalizer, so every input bit reaches every output bit
+    h = (h ^ (h >> 33)) * 0xFF51AFD7ED558CCDull;
+    h = (h ^ (h >> 33)) * 0xC4CEB9FE1A85EC53ull;
+    h ^= h >> 33;
+    return h ? h : 1;
+}
 
 namespace replaygain {
 
@@ -401,6 +421,7 @@ RgResult Measure(const TrackPath& item, uint64_t fileSize, uint64_t fileTime, co
         TruePeak truePeak;
         PeakAccumulator peaks;
         tempo::Detector tempo;
+        AudioHasher hasher;
         peaks.Begin((uint64_t)(dec->Duration() * dec->Rate()), dec->Rate());
         tempo.Begin(dec->Rate());
         bool complete = false;
@@ -414,6 +435,7 @@ RgResult Measure(const TrackPath& item, uint64_t fileSize, uint64_t fileTime, co
             truePeak.Add(buf.data(), n);
             peaks.Add(buf.data(), n);
             tempo.Add(buf.data(), n);
+            hasher.Add(buf.data(), n);
             if (budget) budget->Pace(cancel);
         }
         const double lufs = meter.Integrated();
@@ -425,7 +447,7 @@ RgResult Measure(const TrackPath& item, uint64_t fileSize, uint64_t fileTime, co
             const double high = meter.HighLoudness();
             result = {item.id, (float)(kReplayGainReference - lufs), truePeak.FinalPeak(),
                       std::isfinite(high) ? (float)std::max(0.0, high - lufs) : 0.0f, true,
-                      (uint16_t)std::clamp(tempo.Bpm(), 0, 65535)};
+                      (uint16_t)std::clamp(tempo.Bpm(), 0, 65535), hasher.Finish()};
         }
     }
     current.store(nullptr);
@@ -444,6 +466,7 @@ void Apply(const RgResult& r) {
     t.rgTrackPeak = EncodeReplayPeak(r.trackPeak);
     t.rgHigh = (uint8_t)std::clamp(1 + (int)std::lround(r.high * 4), 1, 255);
     t.flags |= Track::kRgScanned | Track::kRgTruePeak;
+    if (r.audioHash && !HasStoredAudioHash(t)) t.audioHash = r.audioHash;
     // A tag's BPM wins; otherwise keep what the audio says, including "no clear beat", so the
     // background sweep doesn't decode the same track over and over.
     if (!t.bpm || (t.flags & Track::kBpmDetected)) {

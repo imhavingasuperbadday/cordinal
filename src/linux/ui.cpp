@@ -98,7 +98,7 @@ uint64_t g_nextPlaylistIdentity = 1;
 std::thread g_playlistFileWorker;
 std::thread g_steamOfferWorker;
 bool g_playlistFileBusy = false, g_playlistFileStopping = false;
-bool g_checkingDead = false, g_checkingDuplicates = false, g_checkingSteam = false;
+bool g_checkingDead = false, g_checkingSteam = false;
 std::atomic<bool> g_playlistFileCancel{false};
 std::atomic<bool> g_steamOfferCancel{false};
 std::unique_ptr<PlaylistFile> g_playlistImport;

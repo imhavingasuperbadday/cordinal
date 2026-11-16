@@ -7,6 +7,7 @@
 
 #include "app.h"
 #include "archive.h"
+#include "column_layout.h"
 #include "cue.h"
 #include "draw.h"
 #include "libview.h"
@@ -57,7 +58,7 @@ extern Layout L;
 enum Button { kBtnPrev, kBtnPlay, kBtnNext, kBtnShuffle, kBtnRepeat, kBtnResume };
 
 // What the mouse is doing.
-enum class Drag { None, Seek, Volume, Dock, Scroll, ColumnEdge, Tracks, Splitter };
+enum class Drag { None, Seek, Volume, Dock, Scroll, ColumnEdge, ColumnPress, ColumnMove, Tracks, Splitter };
 extern uint64_t g_lastInput;
 extern Drag g_drag;
 extern int g_dragColumn;
@@ -117,9 +118,9 @@ enum Action {
     kAddFiles, kAddFolder, kOpenPlaylistFile, kSavePlaylistFile, kExit,
     kBackup, kRestore, kStatistics, kExportCollection, kImportCollection, kCancelCollection,
     kSelectAll, kRemove, kKeepSelected, kClear, kReloadTags, kRemoveDuplicates, kRemoveDead, kCancelDead, kFind,
-    kPlayPause, kStopAction, kMute, kPrevAction, kNextAction, kShuffleAction, kShuffleAlbumsAction, kRadio, kTaste, kRepeatSet, kStopAfter, kSpeed, kTempo, kShared, kExclusive,
+    kPlayPause, kStopAction, kMute, kPrevAction, kNextAction, kShuffleAction, kShuffleAlbumsAction, kRadio, kTaste, kRepeatSet, kStopAfter, kSpots, kPlayHistory, kSpeed, kTempo, kShared, kExclusive,
     kNewPl, kRenamePl, kClosePl, kDuplicatePl, kReopenPl, kMovePlLeft, kMovePlRight, kNextPl, kPrevPl, kReveal,
-    kFolders, kRescan, kAcceptInbox, kAcceptAllInbox, kExcludeLibrary, kDuplicateAudio, kCancelDuplicates,
+    kFolders, kRescan, kAcceptInbox, kAcceptAllInbox, kExcludeLibrary, kDuplicateAudio,
     kSteam, kCancelSteam, kWebServer, kExportCord, kCancelExport, kConvert, kConvertUndo, kCancelConvert, kOrganize, kOrganizeUndo, kCopyTo, kCancelCopy,
     kIpodSync, kCancelIpodSync,
     kTheme, kOpenRadio, kGroupAlbums, kStartOnLogin, kNameThatTrack, kWhichCameFirst, kPoints, kReview, kPalette, kLyrics, kLayout, kViewSize, kBigPanel, kBigReset, kMini, kLightweight, kPickSong, kVolumeUp, kVolumeDown, kSeekBack, kSeekForward, kKeyboard, kPacks, kPackPlaylist, kHelpers, kHelperTool, kHelperCancel,
@@ -130,7 +131,7 @@ enum Action {
     kNewAuto, kEditAuto, kChoice, kGroupEditions, kPreferredEdition, kRemoveEdition, kSplitEditions,
     kAlbumEditions, kEditionVersions, kRgScanAll, kFindCover, kFetchCovers, kCancelFetchCovers, kRecentAdditions,
     kSaveLyricsTags, kSaveLyricsLrc, kArtistInfo, kRestoreCover,
-    kCoverFile, kCoverPaste, kEditAlbumTags, kMissingInfo, kQueuePanel, kQueueEdit, kMakeAlbum,
+    kCoverFile, kCoverPaste, kEditAlbumTags, kMissingInfo, kQueuePanel, kQueueEdit, kMakeAlbum, kTagAlbum,
 };
 extern std::function<void(int)> g_choicePick;  // the choice a panel's OpenChoice menu is for
 struct MenuItem {
@@ -157,7 +158,7 @@ extern uint64_t g_nextPlaylistIdentity;
 
 struct PlaylistFile {
     bool save = false, ok = false, failed = false, addToExisting = false, checkDead = false;
-    bool findDuplicates = false, findSteam = false, cancelled = false;
+    bool findSteam = false, cancelled = false;
     std::wstring path;
     std::vector<M3UExportEntry> entries;
     std::vector<std::wstring> paths;
@@ -168,8 +169,6 @@ struct PlaylistFile {
     std::vector<TrackId> snapshot;
     std::vector<TrackId> undoBefore;  // an import's target before its first batch, for Undo
     std::vector<std::pair<TrackId, std::wstring>> checkedPaths, missing;
-    std::vector<std::pair<uint64_t, TrackId>> hashes;
-    std::vector<std::vector<TrackId>> duplicateGroups;
     size_t done = 0;
     size_t added = 0, failedInputs = 0;
     uint64_t target = 0;
@@ -177,7 +176,7 @@ struct PlaylistFile {
 extern std::thread g_playlistFileWorker;
 extern std::thread g_steamOfferWorker;
 extern bool g_playlistFileBusy, g_playlistFileStopping;
-extern bool g_checkingDead, g_checkingDuplicates, g_checkingSteam;
+extern bool g_checkingDead, g_checkingSteam;
 extern std::atomic<bool> g_playlistFileCancel;
 extern std::atomic<bool> g_steamOfferCancel;
 extern std::unique_ptr<PlaylistFile> g_playlistImport;
@@ -215,7 +214,7 @@ extern bool g_aboutOpen;
 // The Web server window (File > Web server): its controls are 0 the port, 1 Start/Stop, 2 Start with cordinal,
 // 3 Pair device, 4 Remove all, 5 Close, 6 Open web player, 7 Copy phone address, 8 Copy code, 9 Listen away
 // from home, 10 Check again, 11 Copy internet address, 12 the fixed code and 13 Use this code.
-inline constexpr int kWebControls = 14;
+inline constexpr int kWebControls = 15;
 struct WebPanel {
     bool open = false;
     std::string port, fixed;
@@ -296,6 +295,9 @@ bool SortKeepsAlbums(int column);
 void BuildLines();
 bool GroupHidesCell(const Line& line, int column);
 float ColumnWidth(int column);
+std::vector<ui::ColumnSpec> ColumnSpecs();
+int ColumnStretch();
+const std::vector<int>& ColumnWidths();
 float CellTextWidth(const Line& line, size_t index, float width);
 std::string TabName(size_t i);
 // Now Playing lists only the playing song's album (Preferences > View): the track it is narrowed to,
@@ -361,7 +363,6 @@ void StepPlaylistEdit(bool redo);
 void UndoLatest();
 void RemoveDuplicateTracks();
 void CheckDeadItems();
-void FindDuplicateAudio();
 void AddSteamSoundtracks();
 std::vector<std::wstring> NewSteamFolders(const std::vector<std::wstring>& folders, const std::atomic<bool>& cancel, const std::vector<std::wstring>* discovered = nullptr);
 void SetTheme(ThemeMode mode);
@@ -436,6 +437,8 @@ void SectionAction(int action);
 float VolumeAt(float x);
 int ColumnEdgeAt(float x, float y);
 int ColumnAt(float x);
+int HeaderHotColumn();
+float HeaderDropX();
 void SortBy(int c);
 void ClickGroup(int group, bool add);
 void PrepareTrackDrag(float x, float y, int clicked, bool collapseOnClick);

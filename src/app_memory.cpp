@@ -82,6 +82,7 @@ void CompactLibrary() {
     for (const auto& event : PlayLog()) mark(event.id);
     for (const auto& event : PointsRecent()) mark(event.id);
     for (TrackId id : {g.playing, g.resumeTrack, g.statTrack, g.artFor}) mark(id);
+    for (const auto& spot : g.spots) mark(spot.first);
     std::vector<TrackId> live;
     for (TrackId id = 0; id < retained.size(); ++id) if (retained[id]) live.push_back(id);
     // Browser selections refer to pooled strings; capture text before rebuilding the pool.
@@ -110,7 +111,9 @@ void CompactLibrary() {
     for (auto& [token, info] : g.tokens) { remap(info.id); remap(info.anchor); }
     for (auto& id : g.history) remap(id);
     for (auto& id : g.queue) remap(id);
-    for (TrackId* id : {&g.playing, &g.resumeTrack, &g.statTrack, &g.artFor}) remap(*id);
+    for (TrackId* id : {&g.playing, &g.resumeTrack, &g.statTrack, &g.artFor, &g.spotLeft}) remap(*id);
+    for (auto& spot : g.spots) remap(spot.first);
+    std::erase_if(g.spots, [](const auto& spot) { return spot.first == kNone; });
     ForgetAlbumDynamics(true);  // Compact remapped the measurements; discard only the derived cache
     ForgetApolloProbes();       // its per-id file probes cannot follow the new numbering
     LyricsLibraryChanged();     // and the lyrics panel's loaded lines belong to the old ids

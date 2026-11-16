@@ -253,9 +253,9 @@ void NewRound() {
     q.note.clear();
     SetWindowTextW(q.guess, L"");
     ShowWindow(q.suggest, SW_HIDE);
-    if (g.exclusive) {
+    if (g.output) {
         q.phase = Phase::Unavailable;
-        q.note = L"Clips play next to the music, which exclusive output doesn't allow. Switch to shared output "
+        q.note = L"Clips play next to the music, which exclusive and ASIO output don't allow. Switch to shared output "
                  L"(Preferences \x25B8 Output) to play.";
         Relayout();
         return;

@@ -196,7 +196,8 @@ bool Response(Connection& c, int status, const std::string& mime, uint64_t lengt
         status == 304 ? "Not Modified" : status == 307 ? "Temporary Redirect" :
         status == 400 ? "Bad Request" : status == 401 ? "Unauthorized" : status == 403 ? "Forbidden" :
         status == 404 ? "Not Found" : status == 405 ? "Method Not Allowed" : status == 409 ? "Conflict" :
-        status == 416 ? "Range Not Satisfiable" : status == 429 ? "Too Many Requests" : "Service Unavailable";
+        status == 416 ? "Range Not Satisfiable" : status == 429 ? "Too Many Requests" :
+        status == 500 ? "Internal Server Error" : "Service Unavailable";
     // Callers that set Cache-Control in `extra` replace the default; otherwise private data stays uncached.
     const bool hasCache = extra.find("Cache-Control:") != std::string::npos;
     std::string header = "HTTP/1.1 " + std::to_string(status) + " " + reason + "\r\nContent-Type: " + mime +
@@ -433,6 +434,7 @@ struct Server::Impl {
     std::deque<std::shared_ptr<Connection>> pending;
     std::vector<std::shared_ptr<Connection>> connections;
     std::vector<Listener> listeners;  // the main port first; only the listener thread changes it once started
+    Announcer announcer;  // tells network players about the shared library (Config::share)
     Config config;
     Status status;
     std::string cookieName;
@@ -772,7 +774,9 @@ struct Server::Impl {
             if (required <= c.input.size()) break;
             if (c.cancel || ClockMs() >= deadline || !Receive(c, 1000)) return;
         }
-        if (r.method != "GET" && r.method != "HEAD" && r.method != "POST") {
+        // UPnP players subscribe to events; that is the only other method the server answers.
+        if (r.method != "GET" && r.method != "HEAD" && r.method != "POST" &&
+            !((r.method == "SUBSCRIBE" || r.method == "UNSUBSCRIBE") && r.path.starts_with("/upnp/"))) {
             Error(c, r, 405, "Use GET, HEAD or POST."); return;
         }
         // Let's Encrypt fetches its challenge over plain HTTP by address, so this comes before the
@@ -819,6 +823,7 @@ struct Server::Impl {
             else Body(c, r, 307, "", "text/plain; charset=utf-8", "Location: " + url + r.target.substr(1) + "\r\n");
             return;
         }
+        if (r.path.starts_with("/upnp/")) { Upnp(c, r); return; }
         if (r.path == "/api/v1/themes" && r.method != "POST") {
             std::string data;
             ThemeMode current; bool dark;
@@ -951,6 +956,7 @@ struct Server::Impl {
                 ",\"secure\":" + (https ? "true" : "false") + ",\"dataSaver\":true}");
             return;
         }
+        if (r.path == "/api/v1/download" && r.method != "POST") { Download(c, r, *data); return; }
         std::string key = Value(r, "id");
         auto found = data->byKey.find(key);
         const Track* track = found == data->byKey.end() ? nullptr : &data->tracks[found->second];
@@ -1052,6 +1058,118 @@ struct Server::Impl {
             std::to_string(range.first + range.size - 1) + '/' + std::to_string(media.size) + "\r\n";
         if (Response(c, range.partial ? 206 : 200, media.mime, range.size, extra) && r.method != "HEAD")
             media.send(range.first, (size_t)range.size, [&](const char* bytes, size_t n) { return Send(c, bytes, n); });
+    }
+    // Saves music on the device as its own files: one song's file exactly as stored (`id`, any format,
+    // resumable), or every song a catalog query selects (an album, a playlist) in one ZIP named `name`.
+    void Download(Connection& c, const Request& r, const Snapshot& data) {
+        Media media;
+        std::string name;
+        bool whole = false;
+        if (const std::string id = Value(r, "id"); !id.empty()) {
+            auto found = data.byKey.find(id);
+            if (found == data.byKey.end()) { Error(c, r, 404, "This track is no longer available. Refresh the library."); return; }
+            media = FileMedia(data.tracks[found->second]);
+            name = DownloadName(data.tracks[found->second]);
+        } else {
+            auto tracks = CatalogTracks(data, r);
+            if (tracks.empty()) { Error(c, r, 404, "There is nothing here to download."); return; }
+            std::string folder = SafeFileName(Value(r, "name").empty() ? std::string("cordinal") : Value(r, "name"));
+            media = ZipMedia(tracks, folder, true);
+            name = folder + ".zip";
+            whole = true;
+        }
+        if (!media.error.empty()) { Error(c, r, 409, media.error); return; }
+        if (streams.fetch_add(1) >= 4) { --streams; Error(c, r, 503, "Four streams are already active. Try again shortly."); return; }
+        struct StreamGuard { std::atomic<unsigned>& n; ~StreamGuard() { --n; } } guard{streams};
+        c.streaming = r.method != "HEAD";  // a phone on slow Wi-Fi may pause reading; don't drop it
+        // RFC 6266: a plain fallback for old browsers, then the real name in UTF-8.
+        std::string plain, encoded;
+        for (unsigned char ch : name) {
+            plain += ch < 128 && ch != '"' && ch != '\\' && ch != '%' ? (char)ch : '_';
+            if (isalnum(ch) || strchr("-._~", ch)) encoded += (char)ch;
+            else { char hex[4]; snprintf(hex, sizeof(hex), "%%%02X", ch); encoded += hex; }
+        }
+        std::string extra = "Content-Disposition: attachment; filename=\"" + plain + "\"; filename*=UTF-8''" + encoded + "\r\n";
+        ByteRange range;
+        if (whole) range.size = media.size;  // a ZIP is built as it goes, so it is sent whole
+        else if (auto header = r.headers.find("range");
+                 !ParseRange(header == r.headers.end() ? std::string_view() : header->second, media.size, range)) {
+            Body(c, r, 416, "", media.mime, "Content-Range: bytes */" + std::to_string(media.size) + "\r\n"); return;
+        } else {
+            extra += "Accept-Ranges: bytes\r\n";
+            if (range.partial) extra += "Content-Range: bytes " + std::to_string(range.first) + '-' +
+                std::to_string(range.first + range.size - 1) + '/' + std::to_string(media.size) + "\r\n";
+        }
+        if (Response(c, range.partial ? 206 : 200, media.mime, range.size, extra) && r.method != "HEAD")
+            media.send(range.first, (size_t)range.size, [&](const char* bytes, size_t n) { return Send(c, bytes, n); });
+    }
+    // Sends `media` with byte ranges, counted among the bounded streams.
+    void Serve(Connection& c, Request& r, Media& media, std::string extra) {
+        if (!media.error.empty()) { Error(c, r, 409, media.error); return; }
+        if (streams.fetch_add(1) >= 4) { --streams; Error(c, r, 503, "Four streams are already active. Try again shortly."); return; }
+        struct StreamGuard { std::atomic<unsigned>& n; ~StreamGuard() { --n; } } guard{streams};
+        c.streaming = r.method != "HEAD";
+        ByteRange range;
+        if (!ParseRange(r.headers["range"], media.size, range)) {
+            Body(c, r, 416, "", media.mime, "Content-Range: bytes */" + std::to_string(media.size) + "\r\n"); return;
+        }
+        extra += "Accept-Ranges: bytes\r\n";
+        if (range.partial) extra += "Content-Range: bytes " + std::to_string(range.first) + '-' +
+            std::to_string(range.first + range.size - 1) + '/' + std::to_string(media.size) + "\r\n";
+        if (Response(c, range.partial ? 206 : 200, media.mime, range.size, extra) && r.method != "HEAD")
+            media.send(range.first, (size_t)range.size, [&](const char* bytes, size_t n) { return Send(c, bytes, n); });
+    }
+    // The library for network players (Config::share): the DLNA media server's description, its
+    // control and the songs, covers and WAV versions it lists. No pairing, as DLNA has none, so only
+    // the home network, and only while sharing is on.
+    void Upnp(Connection& c, Request& r) {
+        Share share;
+        std::shared_ptr<const Snapshot> data;
+        {
+            std::lock_guard lock(mutex);
+            share = config.share;
+            data = snapshot;
+        }
+        if (!share.on || c.away || share.udn.empty()) { Error(c, r, 404, "Sharing with network players is off."); return; }
+        const std::string upnp = "EXT:\r\nServer: cordinal/1.0 UPnP/1.0 DLNADOC/1.50\r\n";
+        auto xml = [&](std::string_view body, int status = 200) { Body(c, r, status, body, "text/xml; charset=\"utf-8\"", upnp); };
+        if (r.method == "SUBSCRIBE" || r.method == "UNSUBSCRIBE") {
+            // Accepted so players that insist on events carry on; the library's changes reach them on their next browse.
+            Body(c, r, 200, "", "text/plain", upnp + (r.method == "SUBSCRIBE" ? "SID: uuid:" + RandomHex(16) + "\r\nTIMEOUT: Second-1800\r\n" : ""));
+            return;
+        }
+        if (r.method == "POST" && (r.path == "/upnp/cd" || r.path == "/upnp/cm")) {
+            const std::string header = r.headers["soapaction"];
+            size_t hash = header.find('#');
+            std::string action = hash == header.npos ? std::string() : header.substr(hash + 1);
+            while (!action.empty() && (action.back() == '"' || action.back() == ' ')) action.pop_back();
+            int code = 200;
+            std::string reply = DlnaControl(*data, r.path == "/upnp/cd", action, r.body, "http://" + r.headers["host"], code);
+            xml(reply, code);
+            return;
+        }
+        if (r.method == "POST") { Error(c, r, 405, "Use GET."); return; }
+        if (r.path == "/upnp/device.xml") { xml(DlnaDescription(share, !config.icon.empty())); return; }
+        if (r.path == "/upnp/cd.xml" || r.path == "/upnp/cm.xml") { xml(DlnaScpd(r.path == "/upnp/cd.xml")); return; }
+        if (r.path == "/upnp/icon.png" && !config.icon.empty()) { Body(c, r, 200, config.icon, "image/png"); return; }
+        // /upnp/media/<key>.<ext>, /upnp/wav/<key>.wav and /upnp/art/<key>: the key ends at its first dot.
+        std::string kind, key;
+        for (const char* prefix : {"/upnp/media/", "/upnp/wav/", "/upnp/art/"})
+            if (r.path.starts_with(prefix)) { kind = prefix; key = r.path.substr(kind.size()); }
+        key = key.substr(0, key.find('.'));
+        auto found = data->byKey.find(key);
+        if (kind.empty() || found == data->byKey.end()) { Error(c, r, 404, "No such song."); return; }
+        const Track& track = data->tracks[found->second];
+        if (kind == "/upnp/art/") {
+            std::string mime, bytes = Artwork(track, mime);
+            if (bytes.empty()) Error(c, r, 404, "No artwork.");
+            else Body(c, r, 200, bytes, mime, "Cache-Control: private, max-age=86400\r\n");
+            return;
+        }
+        const bool wav = kind == "/upnp/wav/";
+        Media media = wav ? WaveMedia(track, 0, c.cancel) : FileMedia(track);
+        Serve(c, r, media, upnp + "transferMode.dlna.org: Streaming\r\ncontentFeatures.dlna.org: DLNA.ORG_OP=01;DLNA.ORG_CI=" +
+              (wav ? "1" : "0") + ";DLNA.ORG_FLAGS=01700000000000000000000000000000\r\n");
     }
     // Plays a browser made of kept tracks while it couldn't reach cordinal, sent when it can again:
     // "id_key_end_seconds_manual" records joined by '*'. Each is counted once, only for a track
@@ -1166,6 +1284,8 @@ bool Server::Start(const Config& config) {
     p.cookieName = "cordinal_" + std::to_string(p.status.port);
     p.status.running = true; p.stop = false;
     p.OpenFixed();
+    p.status.sharing = config.share.on && !config.share.udn.empty();
+    if (p.status.sharing && config.port) p.announcer.Start(p.status.port, config.share.udn);
     try {
         for (int i = 0; i < 8; ++i) p.workers.emplace_back([&p] { p.Worker(); });
         p.listener = std::thread([&p] { p.Accept(); });
@@ -1184,6 +1304,7 @@ bool Server::LoadDevices(const std::wstring& path) {
 void Server::Stop() {
     auto& p = *p_;
     p.stop = true;
+    p.announcer.Stop();
     {
         std::lock_guard lock(p.mutex);
         for (auto& c : p.connections) { c->cancel = true; Shutdown(c->socket); }
@@ -1207,6 +1328,7 @@ void Server::Stop() {
         std::lock_guard lock(p.mutex);
         while (!p.listening.empty()) p.Finish(p.listening.begin(), false);
         p.status.running = false; p.status.pairingCode.clear(); p.pairingUntil = 0; p.pairingLinks.clear();
+        p.status.sharing = false;
         p.status.ports.clear(); p.status.portError.clear();
         p.waveforms.clear(); p.preparing.reset(); p.snapshot = std::make_shared<Snapshot>();
     }
@@ -1220,6 +1342,7 @@ Status Server::GetStatus() const {
     status.pairingSeconds = open && p.pairingUntil != UINT64_MAX ? (p.pairingUntil - now + 999) / 1000 : 0;
     if (!open) status.pairingCode.clear();
     if (p.status.running && p.away.identity) status.away = p.away.url;
+    if (status.sharing) status.shareError = p.announcer.Error();
     for (const auto& d : p.paired) status.devices.push_back({d.id, d.name, d.seen ? (now - d.seen) / 1000 + 1 : 0, d.away});
     return status;
 }
@@ -1285,6 +1408,21 @@ void Server::SetAway(Away away) {
     auto& p = *p_; std::lock_guard lock(p.mutex);
     p.hosts.insert(away.hosts.begin(), away.hosts.end());  // the rest of the refresh follows on the listener thread
     p.away = std::move(away); p.rebuild = true;
+}
+void Server::SetShare(const Share& share) {
+    auto& p = *p_;
+    bool start;
+    uint16_t port;
+    {
+        std::lock_guard lock(p.mutex);
+        p.config.share = share;
+        start = p.status.running && share.on && !share.udn.empty();
+        p.status.sharing = start;
+        port = p.status.port;
+    }
+    // Restarted rather than left as it was: a new name or id is announced at once.
+    p.announcer.Stop();
+    if (start && p.config.port) p.announcer.Start(port, share.udn);
 }
 void Server::TreatLoopbackAsAwayForTest(bool away) {
     std::lock_guard lock(p_->mutex); p_->loopbackAway = away;

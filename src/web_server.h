@@ -58,7 +58,18 @@ struct Status {
     std::string away;              // the secure address for away from home, once it has a certificate
     std::vector<uint16_t> ports;   // every port listening now, the main one first
     std::string portError;         // an extra port that couldn't be opened, in words
+    bool sharing = false;          // network players can browse the library (Share)
+    std::string shareError;        // why they may not find it, in words
 };
+// Sharing with network players: UPnP/DLNA players on the home network (foobar2000, VLC, Kodi,
+// BubbleUPnP, a TV) find the library, browse it and play its songs, without pairing: DLNA has no
+// sign-in. Never from another network, and off until the user turns it on.
+struct Share {
+    bool on = false;
+    std::string name;  // what players list it as
+    std::string udn;   // "uuid:...", kept across runs (NewShareId) so players know it again
+};
+std::string NewShareId();
 struct Config {
     uint16_t port = 8787;  // 0 selects a loopback-only ephemeral port for the existing test harness.
     std::wstring devicesPath;
@@ -71,6 +82,7 @@ struct Config {
     std::string fixedCode;  // empty: Pair makes a new code each time; checked with CheckFixedCode
     // More names browsers may use, as host or host:port: a reverse proxy's, such as Tailscale Serve's.
     std::vector<std::string> names;
+    Share share;
 };
 // Away from home: what the frontend's remote-access manager gives the running server. Browsers on
 // other networks must use HTTPS and pair with a link; the home network keeps plain HTTP and codes.
@@ -104,6 +116,7 @@ public:
     void Publish(std::shared_ptr<Snapshot> snapshot);
     void SetTheme(ThemeMode theme, bool systemDark);
     void SetAway(Away away);  // applies to new connections at once; extra ports open within a moment
+    void SetShare(const Share& share);  // applies at once while running
     void TreatLoopbackAsAwayForTest(bool away);
     std::vector<ListenEvent> TakeListens();
 private:

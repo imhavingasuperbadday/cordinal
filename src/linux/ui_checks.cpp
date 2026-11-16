@@ -77,12 +77,92 @@ int CheckLayout() {
     off += !stars;
     bool notches = ui::SeekNotchSeconds(19 * 60) == 0 && ui::SeekNotchSeconds(30 * 60 + 16) == 5 * 60 &&
                    ui::SeekNotchSeconds(6 * 3600 + 3 * 60) == 3600 && ui::PlayedWidth(900, 30, 60) == 450;
+    // Duration and BPM as heard at the playback rate (library.h HeardCell), as the Windows ui suite checks.
+    Track mix;
+    mix.durationMs = (31 * 60 + 35) * 1000;
+    mix.bpm = 148;
+    std::wstring heardDuration, heardBpm;
+    bool heard = HeardCell(ui::kColDuration, mix, 1.1, heardDuration) && heardDuration == L"28:43" &&
+                 HeardCell(ui::kColBpm, mix, 1.1, heardBpm) && heardBpm == L"163" &&
+                 !HeardCell(ui::kColDuration, mix, 1.0, heardDuration);
+    printf("%s Duration and BPM say what is heard at the playback rate\n", heard ? "ok  " : "FAIL");
+    off += !heard;
     bool tabsFit = ui::FitTabPadding(400, 5, 600, 18, 8) == 18 && ui::FitTabPadding(400, 5, 500, 18, 8) == 8 &&
                    ui::FitTabPadding(400, 5, 450, 18, 8) == -1;
     printf("%s crowded tabs tighten, then share the strip, before scrolling\n", tabsFit ? "ok  " : "FAIL");
     off += !tabsFit;
     printf("%s long tracks notch the seek bar and the playing row underlines its progress\n", notches ? "ok  " : "FAIL");
     off += !notches;
+    {
+        // The header's own mouse, through real mouse events (column_layout.h; the Windows ui suite checks
+        // the same): the columns keep their own widths, a squeezed # stops at its least width and moves
+        // only itself, and a dragged column lands where it is dropped.
+        const auto savedTypes = ActiveColumnTypes();
+        const auto savedWidths = ActiveColumnWidths();
+        ActiveColumnTypes() = {0, 1, 2, 3, 4, 5, ui::kColRating, 6};
+        for (int type : ActiveColumnTypes()) ActiveColumnWidths()[type] = 0;  // every column at its default
+        DoLayout();
+        auto edge = [](int k) {
+            float x = L.header.x;
+            for (int i = 0; i <= k; ++i) x += ColumnWidths()[i];
+            return x;
+        };
+        auto button = [](float x, float y, bool down) {
+            SDL_MouseButtonEvent b{};
+            b.button = SDL_BUTTON_LEFT;
+            b.clicks = 1;
+            b.x = x / Density();
+            b.y = y / Density();
+            if (down) MouseDown(b);
+            else MouseUp(b);
+        };
+        auto move = [](float x, float y) {
+            SDL_MouseMotionEvent m{};
+            m.state = SDL_BUTTON_LMASK;
+            m.x = x / Density();
+            m.y = y / Density();
+            MouseMove(m);
+        };
+        const float hy = L.header.y + L.header.h / 2;
+        const bool fills = ColumnWidths()[2] == (int)std::lround(S((float)ColumnAt(2).width));
+        const int title = ColumnWidths()[2];
+        const float divider = edge(1);
+        button(divider, hy, true);
+        move(divider - S(100), hy);
+        move(divider - S(200), hy);
+        button(divider - S(200), hy, false);
+        const bool least = std::abs(ColumnWidths()[1] - (int)std::lround(S((float)ui::ColumnLeast(1)))) <= 1 &&
+                           ColumnWidths()[2] == title;
+        const float year = edge(4) + ColumnWidths()[5] / 2.f, artist = edge(2) + S(2);
+        button(year, hy, true);
+        move(year - S(40), hy);
+        move(artist, hy);
+        button(artist, hy, false);
+        const bool moved = ActiveColumnTypes() == std::vector<int>{0, 1, 2, 5, 3, 4, ui::kColRating, 6};
+        ActiveColumnTypes() = savedTypes;
+        ActiveColumnWidths() = savedWidths;
+        DoLayout();
+        const bool header = fills && least && moved;
+        printf("%s the header's columns keep their own widths (%d), their least width (%d) and move where dropped (%d)\n",
+               header ? "ok  " : "FAIL", fills, least, moved);
+        off += !header;
+    }
+    {
+        // # shows each track's number, which only means something inside its album: clicking its
+        // header must not sort the list by it (the Windows ui suite checks the same).
+        Playlist& pl = Active();
+        const int savedColumn = pl.sortColumn;
+        const bool savedAscending = pl.sortAscending;
+        pl.sortColumn = 2;
+        pl.sortAscending = true;
+        SortBy(1);
+        const bool inert = pl.sortColumn == 2 && pl.sortAscending;
+        pl.sortColumn = savedColumn;
+        pl.sortAscending = savedAscending;
+        RebuildRows();
+        printf("%s the # header is not a sort key\n", inert ? "ok  " : "FAIL");
+        off += !inert;
+    }
     {
         // A one-track library of its own, so the check needs no profile; the real one is put back.
         Library saved = std::move(g_lib);

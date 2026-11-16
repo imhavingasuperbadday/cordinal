@@ -123,7 +123,7 @@ void MessageBlip() {
     static ULONGLONG last = 0;
     ULONGLONG now = GetTickCount64();
     // A sound effect still playing (the one that came with the message) isn't cut off by it.
-    if (!ThemeInfo(g.themeMode).gameSounds || !RoboticSounds() || !g.soundEffects || g.exclusive || now - last < 1500 ||
+    if (!ThemeInfo(g.themeMode).gameSounds || !RoboticSounds() || !g.soundEffects || g.output || now - last < 1500 ||
         (now < ourClipUntil && sfx::ClipPosition() >= 0))
         return;
     last = now;

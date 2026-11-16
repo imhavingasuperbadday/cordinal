@@ -254,10 +254,9 @@ void OnPlaylistFile(WPARAM kind, LPARAM value) {
         if (g_playlistFileWorker.joinable()) g_playlistFileWorker.join();
         g_playlistFileBusy = true;
         g_checkingDead = request->checkDead;
-        g_checkingDuplicates = request->findDuplicates;
         g_checkingSteam = request->findSteam;
         g_playlistFileCancel = false;
-        ShowMessage(request->checkDead ? L"Checking for missing files..." : request->findDuplicates ? L"Finding duplicate audio..." :
+        ShowMessage(request->checkDead ? L"Checking for missing files..." :
                     request->findSteam ? L"Looking for Steam soundtracks..." :
                     request->addToExisting ? L"Finding audio files..." :
                     request->save ? L"Saving playlist..." : L"Opening playlist...");
@@ -267,10 +266,6 @@ void OnPlaylistFile(WPARAM kind, LPARAM value) {
                 request->ok = PrepareSteamImport(request->steam, std::move(request->steamSongs), &g_playlistFileCancel);
                 request->paths = NewSteamFolders(request->watchedFolders, g_playlistFileCancel, &request->steam.folders);
                 request->cancelled = g_playlistFileCancel;
-            } else if (request->findDuplicates) {
-                request->duplicateGroups = GroupDuplicateAudio(std::move(request->hashes));
-                request->cancelled = g_playlistFileCancel;
-                request->ok = true;
             } else if (request->checkDead) {
                 for (const auto& [id, path] : request->checkedPaths) {
                     if (g_playlistFileCancel) { request->cancelled = true; break; }
@@ -296,9 +291,8 @@ void OnPlaylistFile(WPARAM kind, LPARAM value) {
     if (g_playlistFileWorker.joinable()) g_playlistFileWorker.join();
     g_playlistFileBusy = false;
     g_checkingDead = false;
-    g_checkingDuplicates = false;
     g_checkingSteam = false;
-    if ((request->checkDead || request->findDuplicates || request->findSteam) && g_playlistFileCancel) request->cancelled = true;
+    if ((request->checkDead || request->findSteam) && g_playlistFileCancel) request->cancelled = true;
     if (request->cancelled) { ShowMessage(L"Search or import cancelled."); return; }
     if (!request->ok) {
         ShowMessage(request->findSteam ? L"Couldn't search for Steam soundtracks." :
@@ -344,28 +338,6 @@ void OnPlaylistFile(WPARAM kind, LPARAM value) {
         StartScanner();
         ShowMessage(L"Added " + std::to_wstring(count) + (count == 1 ? L" Steam soundtrack folder." : L" Steam soundtrack folders.") +
                     L" Skipped " + std::to_wstring(skipped) + L" duplicate tracks.");
-        return;
-    }
-    if (request->findDuplicates) {
-        std::vector<TrackId> tracks;
-        for (const auto& group : request->duplicateGroups) {
-            uint64_t hash = 0;
-            for (TrackId id : group) {
-                if (!g_lib.Contains(id) || !g_lib[id].audioHash || (g_lib[id].flags & Track::kMissing) ||
-                    !(g_lib[id].flags & (Track::kInLibrary | Track::kInbox)) || (hash && hash != g_lib[id].audioHash)) {
-                    ShowMessage(L"The library changed while finding duplicates. Try again.");
-                    return;
-                }
-                hash = g_lib[id].audioHash;
-                tracks.push_back(id);
-            }
-        }
-        if (tracks.empty()) { ShowMessage(L"No duplicate audio found. cordinal recognizes identical audio in FLAC files."); return; }
-        size_t groups = request->duplicateGroups.size();
-        g.playlists.push_back(Playlist{UniquePlaylistName(g.playlists, L"Duplicate audio"), std::move(tracks), PlaylistKind::Static});
-        g.libraryDirty = true;
-        SetActiveTab((int)g.playlists.size() - 1);
-        ShowMessage(std::to_wstring(groups) + (groups == 1 ? L" song is" : L" songs are") + L" in the library more than once.");
         return;
     }
     if (request->checkDead) {

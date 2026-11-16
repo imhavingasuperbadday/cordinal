@@ -65,21 +65,35 @@ long Penalty(const std::vector<uint8_t>& m, int size) {
 }
 }  // namespace
 
-std::vector<uint8_t> CheckBytes(const std::vector<uint8_t>& data, int count) {
-    // The generator is the product of (x - 2^i) for i below count; its leading 1 is implied.
-    std::vector<uint8_t> divisor(count), result(count);
+// The generator is the product of (x - 2^i) for i below count; its leading 1 is implied. It depends
+// only on count, so every block of one symbol shares the same one.
+std::vector<uint8_t> Generator(int count) {
+    std::vector<uint8_t> divisor(count);
     divisor.back() = 1;
     for (int i = 0, root = 1; i < count; ++i, root = Multiply((uint8_t)root, 2))
         for (int j = 0; j < count; ++j) {
             divisor[j] = Multiply(divisor[j], (uint8_t)root);
             if (j + 1 < count) divisor[j] ^= divisor[j + 1];
         }
+    return divisor;
+}
+
+// Divides `data` by the generator's shift register. The generator is passed in because it depends
+// only on count, so every block of one symbol can share it instead of rebuilding it each time.
+std::vector<uint8_t> CheckBytesWith(const std::vector<uint8_t>& data, const std::vector<uint8_t>& divisor) {
+    const int count = (int)divisor.size();
+    std::vector<uint8_t> result(count);
     for (uint8_t b : data) {
         uint8_t factor = b ^ result[0];
-        result.erase(result.begin()); result.push_back(0);
+        result.erase(result.begin());
+        result.push_back(0);
         for (int i = 0; i < count; ++i) result[i] ^= Multiply(divisor[i], factor);
     }
     return result;
+}
+
+std::vector<uint8_t> CheckBytes(const std::vector<uint8_t>& data, int count) {
+    return CheckBytesWith(data, Generator(count));
 }
 
 Code Encode(std::string_view text) {
@@ -108,12 +122,13 @@ Code Encode(std::string_view text) {
     // Split into blocks (the later ones one byte longer), add each block's check bytes, interleave.
     const int blocks = kBlocks[version], check = kCheckPerBlock[version], raw = RawModules(version) / 8;
     const int shortBlocks = blocks - raw % blocks, shortLength = raw / blocks;
+    const std::vector<uint8_t> generator = Generator(check);  // one generator for every block
     std::vector<std::vector<uint8_t>> parts;
     for (int i = 0, at = 0; i < blocks; ++i) {
         int length = shortLength - check + (i < shortBlocks ? 0 : 1);
         std::vector<uint8_t> part(data.begin() + at, data.begin() + at + length);
         at += length;
-        auto ecc = CheckBytes(part, check);
+        auto ecc = CheckBytesWith(part, generator);
         if (i < shortBlocks) part.push_back(0);  // a gap that keeps every column aligned; skipped below
         part.insert(part.end(), ecc.begin(), ecc.end());
         parts.push_back(std::move(part));

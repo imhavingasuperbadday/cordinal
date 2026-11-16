@@ -269,6 +269,7 @@ struct Settings {
     bool coverOverwrite = false;      // replace an existing cover.jpg
     bool lyrics[kLyricsSources] = {};  // per lyrics provider, all off
     bool artistInfo = false;           // MusicBrainz and Wikipedia for Artist info...
+    bool albumTags = false;            // MusicBrainz for Tag album from MusicBrainz
 };
 Settings& Config();
 std::vector<CoverSource> CoverOrder();  // the enabled providers, the preferred one first

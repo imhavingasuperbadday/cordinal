@@ -256,7 +256,52 @@ int LineAt(float y) {
     return line >= 0 && line < (int)g_lines.size() ? line : -1;
 }
 
+// The track list's columns (column_layout.h, shared with Windows): each shown column's wanted width,
+// least width and whether it is the fixed playing gutter, in pixels.
+std::vector<ui::ColumnSpec> ColumnSpecs() {
+    std::vector<ui::ColumnSpec> specs;
+    for (int type : ActiveColumnTypes()) {
+        int w = ActiveColumnWidths()[type];
+        specs.push_back({type, (int)std::lround(S((float)(w > 0 ? w : ColumnAt(type).width))),
+                         (int)std::lround(S((float)ui::ColumnLeast(type))), type == 0 && !*ActiveColumnHeading(0)});
+    }
+    return specs;
+}
+
+// Apollo's "fit the window" Title, which takes the room the other columns leave, or -1: every other
+// list keeps each column's own width, with the room past the last one empty.
+int ColumnStretch() {
+    if (g.settings.theme != ThemeMode::Apollo) return -1;
+    const auto& types = ActiveColumnTypes();
+    auto at = std::find(types.begin(), types.end(), ui::kColApolloTitle);
+    return at == types.end() ? -1 : (int)(at - types.begin());
+}
+
+// The shown columns' widths, left to right; worked out again only when the columns, their saved
+// widths, the scale or the list's width change (each painted cell asks).
+const std::vector<int>& ColumnWidths() {
+    struct Key {
+        std::vector<int> types, saved;
+        float scale = 0, room = -1;
+        int stretch = -1;
+        bool operator==(const Key&) const = default;
+    };
+    static Key key;
+    static std::vector<int> widths;
+    Key now{ActiveColumnTypes(), {}, g.scale, L.rows.w, ColumnStretch()};
+    for (int type : now.types) now.saved.push_back(ActiveColumnWidths()[type]);
+    if (!(now == key)) {
+        key = std::move(now);
+        widths = ui::FitColumns(ColumnSpecs(), (int)L.rows.w, ColumnStretch());
+    }
+    return widths;
+}
+
 float ColumnWidth(int column) {
+    const auto& types = ActiveColumnTypes();
+    auto at = std::find(types.begin(), types.end(), column);
+    const auto& widths = ColumnWidths();
+    if (at != types.end() && (size_t)(at - types.begin()) < widths.size()) return (float)widths[at - types.begin()];
     int w = ActiveColumnWidths()[column];
     return S((float)(w > 0 ? w : ColumnAt(column).width));
 }

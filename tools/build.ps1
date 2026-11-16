@@ -188,6 +188,8 @@ function Get-OrderCandidates([string]$Map, [int]$Count) {
 New-Item -ItemType Directory -Force -Path $objDir, 'build\unpacked' | Out-Null
 
 $scriptHash = Get-ContentHash (Join-Path $PSScriptRoot 'build.ps1')
+# Which files build without unwinding is not in the incremental record, so the switch rebuilds all.
+if ($env:CORDINAL_UNWIND_ALL) { $scriptHash += ':unwind-all' }
 # Repack when either the packing policy or the research executable changes, even with no relink.
 $packingHash = Get-ContentHash (Join-Path $PSScriptRoot 'pack-release.ps1')
 $packingHash += ':' + (Get-ContentHash (Join-Path $PSScriptRoot 'packing-mode.ps1'))
@@ -270,13 +272,48 @@ $plainApp = @($appSources | Where-Object {
     $name -ne 'audio_avx' -and $name -ne 'audio_mdct' -and
     $slowCodecs -notcontains $name -and $hotCodecs -notcontains $name
 })
+# These files build without C++ unwinding (no /EHsc). None of their code runs between a throw and a
+# catch: an exception thrown through them has no handler, so it goes straight to the crash handler
+# (crashdump.cpp) and no destructor runs, with or without unwind tables. Those tables and cleanup
+# funclets were dead weight, 25 KB of the packed player (docs/size.md, "Unwinding only where a catch
+# can see it"). tools/check-unwind.py proves the list against the linked player: rerun it after adding
+# a try block, a worker job or a callback that runs inside one. A listed file that throws or catches
+# keeps unwinding anyway. The group links last, so a template that code with unwinding also uses keeps
+# the copy that unwinds. CORDINAL_UNWIND_ALL=1 builds every file with unwinding, the checker's baseline.
+$noUnwindNames = @(
+    'album_editions_edit', 'album_editions_title', 'album_maker', 'app', 'app_albummaker', 'app_apollo',
+    'app_art', 'app_artistinfo', 'app_autoplaylist', 'app_badges', 'app_big', 'app_browser', 'app_columns',
+    'app_commands', 'app_controls', 'app_convert', 'app_copy', 'app_coverfetch', 'app_custom',
+    'app_deltarune', 'app_dialogs', 'app_editions', 'app_eq', 'app_foobar', 'app_format', 'app_fountain',
+    'app_groups', 'app_headphones', 'app_helpers', 'app_import', 'app_layout', 'app_library',
+    'app_lifecycle', 'app_lightweight', 'app_lyrics', 'app_menus', 'app_mini', 'app_organize',
+    'app_packfiles', 'app_packs', 'app_palette', 'app_panels', 'app_playlists', 'app_points',
+    'app_preferences', 'app_recent', 'app_review', 'app_settings', 'app_sizes', 'app_spots', 'app_tabs',
+    'app_tabstrip', 'app_taskbar', 'app_toast', 'app_tray', 'app_tweaks', 'app_ui', 'app_ui_controls',
+    'app_ui_menu', 'app_ui_trackbar', 'app_waveform', 'app_window', 'app_workers', 'art',
+    'asio_output', 'audio_kernels', 'audio_live', 'convert', 'cord_export', 'cover_fade', 'coverfetch',
+    'coverupload', 'crashdump', 'delayload', 'devicecopy', 'discart', 'eq_profile', 'headsets', 'inflate',
+    'keymap', 'libview', 'libview_draw', 'libview_input', 'md5', 'memory_report', 'musicbrainz',
+    'packed_image', 'packs', 'playlist_files', 'qr', 'recycle', 'rediscover', 'replaygain', 'sfx',
+    'sfx_output', 'smtc', 'soft_canvas', 'streamfile', 'tag_suggest', 'tagundo', 'tagwriter',
+    'tagwriter_cord', 'tagwriter_flacogg', 'tagwriter_mp3mp4', 'tempo', 'theme_palette', 'theme_win', 'upmix')
+$noUnwind = @(if (!$env:CORDINAL_UNWIND_ALL) {
+    $plainApp | Where-Object {
+        $noUnwindNames -contains $_.BaseName -and
+        !(Select-String -LiteralPath $_.FullName -Pattern '\b(try|catch|throw)\b' -Quiet)
+    }
+})
+$plainApp = @($plainApp | Where-Object { $noUnwind -notcontains $_ })
 
 # Game-music emulators: size-optimised and whole-program optimised like the app.
 Add-Group 'chiptune' 'chiptune' ($common + $size + @('/Ob0', '/GL', '/MP')) `
     (Get-ChildItem -LiteralPath 'src\chiptune' -Filter *.cpp -File)
 # Most app modules favour size; the app set also gets Unicode and whole-program optimisation.
 Add-Group 'app' '' ($common + $size + $unicode + @('/Ob0', '/GL', '/MP')) $plainApp
-# Original built-in lossy encoders: source-only, baseline SSE2, one worker supplied by the caller.
+# C4530/C4577: the standard headers note that unwinding is off; that is the point of this group.
+Add-Group 'ui' '' (@($common | Where-Object { $_ -ne '/EHsc' }) + $size + $unicode +
+    @('/Ob0', '/GL', '/MP', '/wd4530', '/wd4577')) $noUnwind
+# Original built-in encoders (MP3, AAC-LC, FLAC): source-only, baseline SSE2, one worker supplied by the caller.
 Add-Group 'encode' 'encode' ($common + $size + @('/Ob2', '/GL', '/MP', '/D_USE_MATH_DEFINES')) `
     (Get-ChildItem -LiteralPath 'src\encode' -Filter *.cpp -File)
 # Classic iPod sync: cordinal's adapter plus the size-trimmed pure C++ libgpod subset. The
@@ -379,7 +416,7 @@ if ($resourceStale) {
 if ($sourceSetChanged) { $appLinked = $true }
 
 $appObjects = @()
-foreach ($name in @('app', 'ipod', 'encode', 'slow', 'hot', 'mdct', 'avx')) {
+foreach ($name in @('app', 'ipod', 'encode', 'slow', 'hot', 'mdct', 'avx', 'ui')) {
     $appObjects += Get-Objects $groups[$name].ObjDir $groups[$name].Sources
 }
 $chipObjects = Get-Objects $groups['chiptune'].ObjDir $groups['chiptune'].Sources
@@ -400,16 +437,43 @@ $testExe = 'build\unpacked\cordinal-test.exe'
 
 # The two links run one after the other: side by side, their whole-program code generation competes
 # and both take longer (measured November 3, 2026: 28 s together against 16 s in turn).
+#
+# cdpack decodes a code page at start-up when it holds any function tools/code-profile.txt lists, and
+# leaves the rest compressed until first run. Unordered, the 0.7 MiB the scenarios run was spread over
+# 2.5 MiB of pages; linked first, over 1.25 MiB (docs/memory.md, "Hot code linked first"). The order
+# names come from the profile and the last link's map, so a cdpack build may link twice: once to get
+# this build's names, once in that order. Other modes have no use for it and link once.
+$codeOrder = Join-Path $objDir 'code-order.txt'
+$codeOrderLinked = Join-Path $objDir 'code-order-linked.txt'
+$codeProfile = Join-Path $PSScriptRoot 'code-profile.txt'
+$orderCode = $Cdpack -and (Test-Path -LiteralPath $codeProfile)
 function Invoke-PlayerLink([string[]]$Extra = @()) {
+    $ordered = $orderCode -and (Test-Path -LiteralPath $codeOrder)
+    $order = if ($ordered) { @("/ORDER:@$codeOrder", '/IGNORE:4037') } else { @() }
     Invoke-Tool 'link.exe' (@('/nologo', '/LTCG', '/SUBSYSTEM:WINDOWS', '/MANIFEST:NO', '/OPT:REF',
             '/OPT:ICF', '/DEBUG:NONE', '/NODEFAULTLIB:libucrt.lib', '/MAP:build\cordinal.map',
-            "/OUT:$appExe") + $Extra + $appObjects + @($resPath) + $stubObjects + $chipObjects + $libraries)
+            "/OUT:$appExe") + $order + $Extra + $appObjects + @($resPath) + $stubObjects + $chipObjects + $libraries)
+    $linkedWith = if ($ordered) { Get-Content -Raw -LiteralPath $codeOrder } else { '' }
+    Set-Content -LiteralPath $codeOrderLinked -Value $linkedWith -NoNewline -Encoding ascii
 }
 if ($appLinked -or !(Test-Path -LiteralPath $appExe)) {
     Initialize-Msvc
     Write-Host 'Linking cordinal.exe'
     Invoke-PlayerLink
     $testLinked = $true
+}
+if ($orderCode) {
+    $python = @(if ($env:CDPACK_PYTHON) { $env:CDPACK_PYTHON } else { 'py.exe'; '-3.14' })
+    & $python[0] @($python | Select-Object -Skip 1) (Join-Path $PSScriptRoot 'make-code-profile.py') --write-order `
+        --map build\cordinal.map --out $codeProfile --order $codeOrder
+    if ($LASTEXITCODE) { Fail 'Writing the code order failed.' }
+    $linkedWith = if (Test-Path -LiteralPath $codeOrderLinked) { Get-Content -Raw -LiteralPath $codeOrderLinked } else { '' }
+    if ($linkedWith -ne (Get-Content -Raw -LiteralPath $codeOrder)) {
+        Initialize-Msvc
+        Write-Host 'Linking cordinal.exe with the profiled code first'
+        Invoke-PlayerLink
+        $appLinked = $true
+    }
 }
 # The release player is packed by stock UPX, so keep its call filter usable (Test-CallFilter). Checked
 # on every release build, whichever mode last linked the player: moving one function to the front
@@ -482,7 +546,18 @@ foreach ($exe in @('build\cordinal.exe', 'build\cordinal-test.exe', 'build\unpac
 
 if (Test-Path -LiteralPath 'build\cordinal.exe') {
     $size = (Get-Item -LiteralPath 'build\cordinal.exe').Length
-    Write-Host ("Built executable ({0}): {1:N0} bytes" -f $mode, $size)
+    # The change since the last build of the same mode, so size work and code additions see their cost
+    # on every build instead of only through a separate report.
+    $sizeRecord = "build\obj\last-size-$mode$(if ($Themes) { '-themes' }).txt"
+    $delta = ''
+    if (Test-Path -LiteralPath $sizeRecord) {
+        $previous = 0L
+        if ([long]::TryParse((Get-Content -Raw -LiteralPath $sizeRecord).Trim(), [ref]$previous) -and $previous -ne $size) {
+            $delta = ' ({0:+#,0;-#,0} since the last {1} build)' -f ($size - $previous), $mode
+        }
+    }
+    Set-Content -LiteralPath $sizeRecord -Value $size -Encoding ASCII
+    Write-Host ("Built executable ({0}): {1:N0} bytes{2}" -f $mode, $size, $delta)
     # Checked on every build, rebuilt or not, so an over-budget player keeps failing until it shrinks
     # or the budget is raised. A development build is not packed, so it has no budget.
     if (!$Unpacked -and $size -gt $SizeBudget) {

@@ -60,9 +60,12 @@ void Dispatch(const Message& m) {
         case WM_APP_ORGANIZE: OnOrganizeDone(); break;
         case WM_APP_COPY: OnCopyMessage(m.wp, m.lp); break;
         case WM_APP_COLLECTION: OnCollectionMessage(m.wp, m.lp); break;
+        case WM_APP_SPEAKERS: OnSpeakersFound(m.lp); break;
         case WM_APP_IPOD: OnIpodMessage(m.wp, m.lp); break;
         case WM_APP_COVERFETCH: OnCoverFetchMessage(m.wp, m.lp); break;
         case WM_APP_ARTISTINFO: OnArtistInfoMessage(m.lp); break;
+        case WM_APP_ALBUMTAG: OnAlbumTagMessage(m.lp); break;
+        case WM_APP_DUPLICATES: OnDuplicatesMessage(); break;
         case WM_APP_PLAYLIST_FILE: OnPlaylistFile(m.wp, m.lp); break;
         case WM_APP_LISTENBRAINZ: OnListenBrainzMessage(m.wp, m.lp); break;
         case WM_APP_LYRICS: OnLyricsLoaded(m.lp); break;
@@ -216,7 +219,7 @@ int Run(int argc, char** argv) {
         if (!full.empty()) paths.push_back(full);
     }
 
-    SDL_SetAppMetadata("cordinal", "0.1.13", "cordinal");
+    SDL_SetAppMetadata("cordinal", "0.1.14", "cordinal");
     SDL_SetHint(SDL_HINT_VIDEO_WAYLAND_PREFER_LIBDECOR, "1");
     if (parity) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
@@ -303,7 +306,11 @@ int Run(int argc, char** argv) {
     // this handle to the UI queue, just as it does for the waveform worker below.
     if (!g.engine.Init(reinterpret_cast<HWND>(&g), error)) ShowMessage(error);
     SetVolume(s.volume);
+    // The remembered playback rates (LoadSettings) apply before the first track plays.
+    g.engine.SetSpeed(s.speed);
+    g.engine.SetTempo(s.tempo);
     if (s.exclusive) g.engine.SetExclusive(true);
+    if (s.upmix) g.engine.SetUpmix(true);
     g.engine.SetOutputDevice(s.outputDevice);
     g.engine.SetEq(s.eq);
     ApplyEffects();
@@ -331,6 +338,8 @@ int Run(int argc, char** argv) {
     InitScrobble();
     if (!paths.empty()) ExpandPaths(paths, Opening::Play);
     else if (!parity) ReopenLastTrack();  // the last session's song, paused or playing, as Preferences asks
+    // Coming back: offer songs left partway and ones gone quiet, unless all there is is the song just reopened.
+    if (paths.empty() && !parity && HasComebacks()) OpenComebacks(false);
     if (s.folders.empty() && paths.empty()) ShowMessage(L"Welcome! Add your music: Library \x25B8 Library folders...");
     // Diagnostics leave the user's profile untouched.
     if (checkLayout) {
@@ -435,6 +444,7 @@ int Run(int argc, char** argv) {
     StopHelpers();
     ShutdownSounds();
     StopReplayGain();
+    StopDuplicates();  // files it already moved take their history with them before the save
     Stop();  // finish the current listening session before saving the library
     ShutdownRadio();
     musicbrainz::Stop();

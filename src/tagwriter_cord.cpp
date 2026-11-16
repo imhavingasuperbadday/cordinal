@@ -81,6 +81,8 @@ bool EditEntries(std::string_view old, const TagEdit& e, std::string& out, std::
     };
     freeForm("FMPS_RATING", e.rating);
     freeForm("FMPS_PLAYCOUNT", e.playCount);
+    freeForm("MUSICBRAINZ_ALBUMID", e.musicBrainzRelease);
+    freeForm("MUSICBRAINZ_RELEASEGROUPID", e.musicBrainzReleaseGroup);
     auto sameKey = [](std::string_view a, std::string_view b) {
         return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) { return toupper((unsigned char)x) == y; });
     };

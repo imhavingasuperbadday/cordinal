@@ -19,6 +19,7 @@ struct Sink {
     std::string description;  // what to show
     std::string alsaCard;     // the ALSA card number, when the server says
     bool systemDefault = false;
+    std::vector<std::string> channels;  // its speakers in order, by PipeWire name ("FL", "FR", "FC", "LFE"...)
 };
 
 struct Params {
@@ -27,8 +28,11 @@ struct Params {
     unsigned rate = 48000;              // what the render callback produces
     unsigned latencyFrames = 960;       // wanted period, in frames at `rate`
     bool exclusive = false;             // ask the server to run the device at `rate`
-    std::string target;                 // a Sink::name; empty follows the default
+    std::string target;                 // a Sink::name, or a network speaker's id (speakers.h); empty follows the default
     bool active = true;                 // false opens it paused
+    // Empty plays stereo. Otherwise the stream has these channels (PipeWire names) and the backend
+    // upmixes the stereo render into them (upmix.h); the render callback stays stereo either way.
+    std::vector<std::string> channels;
 };
 
 // Called on the stream's thread, which must not block. Render fills `frames` interleaved stereo
@@ -49,10 +53,12 @@ public:
     virtual void Flush() = 0;
     // The server went away, or refused the stream: open a new one.
     virtual bool Failed() const = 0;
-    virtual const char* Backend() const = 0;  // "PipeWire" or "PulseAudio"
+    virtual const char* Backend() const = 0;  // "PipeWire", "PulseAudio" or "network speaker"
+    virtual std::string Problem() const { return {}; }  // why it failed, when it can say
 };
 
-// The first backend that accepts the stream (none when no sound server answers; `error` says why).
+// The first backend that accepts the stream (none when no sound server answers; `error` says why). A
+// network speaker's id as the target opens a stream to that speaker instead (speakers.h).
 // `onFailure` is called from the stream's thread when Failed() becomes true.
 std::unique_ptr<Stream> Open(const Params& params, Callbacks callbacks, std::function<void()> onFailure,
                              std::string& error);

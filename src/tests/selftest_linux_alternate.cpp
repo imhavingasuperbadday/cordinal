@@ -8,6 +8,13 @@
 #include <unistd.h>
 
 namespace lx {
+// Apollo's Title takes what the other columns leave (column_layout.h), so the columns span the rows.
+static bool FillsRows() {
+    int sum = 0;
+    for (int w : ColumnWidths()) sum += w;
+    return std::abs(sum - (int)std::lround(L.rows.w)) <= 1;
+}
+
 int CheckLinuxAlternateThemes() {
     int failed = 0;
     auto check = [&](bool ok, const char* label) {
@@ -78,7 +85,7 @@ int CheckLinuxAlternateThemes() {
         g.settings.theme = ThemeMode::Apollo;
         ApplyTheme(); DoLayout();
         check(AlternateMode() && L.menuBar.h == 0 && L.tabs.h == 0 && L.list.x > 0 &&
-            L.visuals[0].w > 0 && L.visuals[1].w > 0 && ActiveColumnWidths()[ui::kColApolloTitle] >= 80 &&
+            L.visuals[0].w > 0 && L.visuals[1].w > 0 && ColumnWidth(ui::kColApolloTitle) >= S(80) && FillsRows() &&
             ActiveColumnTypes()[1] == ui::kColApolloTitle && DrawAlternate(CurrentPalette()) &&
             DrawAlternateStatus(CurrentPalette()) && g.settings.columns == baseColumns,
             factor == 1 ? "Apollo draws its rebar, classic toolbar and fitted playlist at 100 percent" :

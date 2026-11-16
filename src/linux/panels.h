@@ -27,11 +27,21 @@ void OpenEqualizer();
 void OpenTagEditor(const std::vector<TrackId>& ids);
 // Edit > Make album (panel_album.cpp, as app_albummaker.cpp): the tracks given become one album.
 void OpenAlbumMaker(const std::vector<TrackId>& ids);
+// Edit > Tag album from MusicBrainz (albumtag_ui.cpp, as app_albumtag.cpp): the selection's whole album.
+void OpenAlbumTagger(const std::vector<TrackId>& selection);
+void OnAlbumTagMessage(LPARAM lp);  // WM_APP_ALBUMTAG
+// Library > Find duplicates (duplicates_ui.cpp, as app_duplicates.cpp). DuplicatesMeasured refreshes it
+// after a ReplayGain scan; StopDuplicates applies a clean-up still moving files, before the library is saved.
+void OpenDuplicates();
+void OnDuplicatesMessage();  // WM_APP_DUPLICATES
+void DuplicatesMeasured();
+void StopDuplicates();
 void OpenPreferences();
 int CheckPreferences();  // headless control geometry, state and keyboard checks; saves no images
 int CheckTagSuggestions();  // headless tag-editor completion check; saves no images
 void OpenRules(int playlist);  // -1: a new auto-playlist; else that auto-playlist's rules
-void OpenOutputDevice();  // choose the PipeWire sink to play on (Preferences > Output)
+void OpenOutputDevice();  // choose the PipeWire sink or network speaker to play on (Preferences > Output)
+void OnSpeakersFound(LPARAM lp);  // WM_APP_SPEAKERS: the network speakers a search found
 void OpenPoints();  // cordinal points (View > Games and stats, or the chip)
 void OpenReview();  // Your year in music
 // games.cpp: Name That Track (0) and Which Came First (1), View > Games and stats. The panel is one with two
@@ -53,6 +63,8 @@ void OpenHelpers();  // View > Helpers
 void OpenPacks();    // View > Packs
 void OpenLayout();   // View > Customize layout
 void OpenPalette();  // View > Command palette (Ctrl+Shift+P)
+// Playback > Pick up where you left off (history false) or Play history (panel_comeback.cpp).
+void OpenComebacks(bool history);
 void OpenFormat();       // the title formatting window (Preferences > View)
 void OpenListenBrainz();  // the service connections panel (Preferences > Scrobbling)
 void OnListenBrainzMessage(WPARAM wp, LPARAM lp);  // WM_APP_LISTENBRAINZ: a token check's answer

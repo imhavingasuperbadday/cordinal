@@ -3,7 +3,12 @@
 // chunk table mapping device frames already played back to source positions for PlayedPosition().
 #include "audio_output.h"
 
+#include "upmix.h"
+
 #ifdef _WIN32
+#include "asio.h"
+#include "speakers.h"
+
 #include <audioclient.h>
 #include <mmdeviceapi.h>
 #include <wrl/client.h>
@@ -290,6 +295,52 @@ struct Device {
     unsigned rate = 0;
     bool exclusive = false;
     SampleFormat format = SampleFormat::Float32;
+    SpeakerLayout upmix;  // the device's speakers when the stereo render is upmixed; empty otherwise
+    std::shared_ptr<AsioStream> asio;  // ASIO output: the driver renders from its own callback instead
+    std::wstring asioName;             // the registry name it was opened by
+    bool Open() const { return client || asio; }
+};
+
+// The nearest WASAPI sample format to an ASIO sample type, for Format().
+SampleFormat FormatForAsio(long type) {
+    switch (type) {
+        case asio::kInt16LSB: case asio::kInt32LSB16: return SampleFormat::Int16;
+        case asio::kInt24LSB: return SampleFormat::Int24;
+        case asio::kInt32LSB24: return SampleFormat::Int24In32;
+        case asio::kFloat32LSB: case asio::kFloat64LSB: return SampleFormat::Float32;
+        default: return SampleFormat::Int32;
+    }
+}
+
+// Device frames rendered by an ASIO driver mapped back to source positions, one entry per buffer
+// switch, the way Run's chunk table does it for WASAPI. Written only on the driver's thread.
+struct AsioClock {
+    struct Chunk {
+        unsigned long long deviceEnd, sourceEnd;
+        size_t audio, total;
+    };
+    static constexpr size_t kChunks = 32;  // covers a latency of 32 buffers
+    Chunk at[kChunks]{};
+    size_t count = 0, next = 0;
+    unsigned long long written = 0;
+    void Clear() { count = next = 0; written = 0; }
+    void Push(size_t frames, unsigned long long sourceEnd, size_t audio) {
+        written += frames;
+        at[next] = {written, sourceEnd, audio, frames};
+        next = (next + 1) % kChunks;
+        count = std::min(count + 1, kChunks);
+    }
+    // The source position reached when the device has played `playedDevice` frames.
+    unsigned long long Played(unsigned long long playedDevice, unsigned long long fallback) const {
+        for (size_t k = 0; k < count; ++k) {
+            const Chunk& c = at[(next + kChunks - count + k) % kChunks];
+            if (c.deviceEnd <= playedDevice) continue;
+            const unsigned long long start = c.deviceEnd - c.total;
+            const size_t into = playedDevice > start ? (size_t)(playedDevice - start) : 0;
+            return c.sourceEnd - c.audio + std::min(into, c.audio);
+        }
+        return fallback;
+    }
 };
 
 // An extensible 2-channel format at `rate` for the chosen sample type, on the front L/R mask.
@@ -381,7 +432,26 @@ HRESULT OpenSharedFormat(IMMDevice* device, HANDLE event, Device& d, WAVEFORMATE
     return FinishOpen(event, d);
 }
 
-HRESULT OpenShared(IMMDevice* device, HANDLE event, Device& d) {
+// The device's speakers when its mix has more than two and the upmixer can feed some of them.
+SpeakerLayout UpmixLayout(const WAVEFORMATEX* mix, DWORD& mask) {
+    mask = 0;
+    if (!mix || mix->nChannels <= 2 || mix->nChannels > kMaxSpeakers) return {};
+    if (mix->wFormatTag == WAVE_FORMAT_EXTENSIBLE && mix->cbSize >= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX))
+        mask = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(mix)->dwChannelMask;
+    SpeakerLayout layout = LayoutFromMask(mask, mix->nChannels);
+    if (!mask) {
+        for (uint8_t i = 0; i < layout.count; ++i) {
+            const Speaker s = layout.at[i];
+            static const DWORD bits[] = {SPEAKER_FRONT_LEFT, SPEAKER_FRONT_RIGHT, SPEAKER_FRONT_CENTER,
+                                         SPEAKER_LOW_FREQUENCY, SPEAKER_BACK_LEFT, SPEAKER_BACK_RIGHT,
+                                         SPEAKER_SIDE_LEFT, SPEAKER_SIDE_RIGHT};
+            if (s != Speaker::Other) mask |= bits[(int)s];
+        }
+    }
+    return layout.Upmixes() ? layout : SpeakerLayout{};
+}
+
+HRESULT OpenShared(IMMDevice* device, HANDLE event, Device& d, bool upmix) {
     auto activate = [&] { return device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &d.client); };
     HRESULT hr = activate();
     if (FAILED(hr)) return hr;
@@ -393,8 +463,28 @@ HRESULT OpenShared(IMMDevice* device, HANDLE event, Device& d) {
     std::vector<unsigned char> mixCopy(mixBytes);
     memcpy(mixCopy.data(), mix, mixBytes);
     const std::optional<SampleFormat> native = FormatFromMix(mix);
+    DWORD mask = 0;
+    const SpeakerLayout layout = upmix ? UpmixLayout(mix, mask) : SpeakerLayout{};
     CoTaskMemFree(mix);
     auto* mixFmt = reinterpret_cast<WAVEFORMATEX*>(mixCopy.data());
+    const DWORD convert = AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
+                          AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+    if (layout.count) {
+        // Float in the device's own speaker layout; Windows converts to the mix's sample type.
+        WAVEFORMATEXTENSIBLE fmt = MakeFormat(d.rate, SampleFormat::Float32);
+        fmt.Format.nChannels = layout.count;
+        fmt.Format.nBlockAlign = (WORD)(4 * layout.count);
+        fmt.Format.nAvgBytesPerSec = d.rate * fmt.Format.nBlockAlign;
+        fmt.dwChannelMask = mask;
+        hr = OpenSharedFormat(device, event, d, &fmt.Format, convert, SampleFormat::Float32);
+        if (SUCCEEDED(hr)) {
+            d.upmix = layout;
+            return hr;
+        }
+        d.client.Reset();
+        hr = activate();
+        if (FAILED(hr)) return hr;
+    }
     if (native) {
         hr = OpenSharedFormat(device, event, d, mixFmt, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, *native);
         if (SUCCEEDED(hr)) return hr;
@@ -403,8 +493,6 @@ HRESULT OpenShared(IMMDevice* device, HANDLE event, Device& d) {
         if (FAILED(hr)) return hr;
     }
     WAVEFORMATEXTENSIBLE fmt = MakeFormat(d.rate, SampleFormat::Float32);
-    const DWORD convert = AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
-                          AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
     return OpenSharedFormat(device, event, d, &fmt.Format, convert, SampleFormat::Float32);
 }
 
@@ -445,11 +533,54 @@ std::wstring HrText(HRESULT hr) {
     return buf;
 }
 
+// The driver ASIO output should use: `wanted` by name, else the first installed one.
+bool FindAsioDriver(const std::wstring& wanted, AsioDriverInfo& out, std::wstring& why) {
+    const std::vector<AsioDriverInfo> drivers = ListAsioDrivers();
+    if (drivers.empty()) {
+        why = L"no ASIO driver is installed";
+        return false;
+    }
+    for (const AsioDriverInfo& d : drivers)
+        if (!_wcsicmp(d.name.c_str(), wanted.c_str())) {
+            out = d;
+            return true;
+        }
+    out = drivers.front();
+    return true;
+}
+
+// ASIO output at `rate` (0 keeps the driver's own). On success the driver is already playing from
+// `render`.
+bool OpenAsio(const std::wstring& wanted, unsigned rate, AsioStream::RenderFn render, AsioStream::ResetFn reset,
+              Device& d, std::wstring& problem) {
+    AsioDriverInfo info;
+    std::wstring why;
+    if (FindAsioDriver(wanted, info, why)) {
+        auto stream = std::make_shared<AsioStream>();
+        if (stream->Open(info, rate, std::move(render), std::move(reset), why)) {
+            d.asio = std::move(stream);
+            d.asioName = info.name;
+            d.rate = d.asio->Rate();
+            d.format = FormatForAsio(d.asio->Type());
+            problem = d.asio->Problem();
+            return true;
+        }
+        why = info.name + L": " + why;
+    }
+    problem = L"ASIO output isn't available (" + why + L"); using shared output.";
+    return false;
+}
+
 // Opens the default device: shared, or exclusive at `rate` (else at another rate it supports,
-// else shared). `problem` says why exclusive output isn't exactly what was asked for.
-HRESULT OpenDevice(IMMDeviceEnumerator* enumerator, HANDLE event, OutputMode mode, unsigned rate, Device& d, std::wstring& problem) {
+// else shared), or the ASIO driver `asioDriver` (else shared). `problem` says why exclusive or ASIO
+// output isn't exactly what was asked for.
+HRESULT OpenDevice(IMMDeviceEnumerator* enumerator, HANDLE event, OutputMode mode, unsigned rate, bool upmix, Device& d,
+                   std::wstring& problem, const std::wstring& asioDriver = {}, AsioStream::RenderFn asioRender = {},
+                   AsioStream::ResetFn asioReset = {}) {
     d = Device{};
     problem.clear();
+    if (mode == OutputMode::Asio && OpenAsio(asioDriver, rate, std::move(asioRender), std::move(asioReset), d, problem))
+        return S_OK;
     ComPtr<IMMDevice> device;
     HRESULT hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
     if (FAILED(hr)) return hr;
@@ -483,7 +614,7 @@ HRESULT OpenDevice(IMMDeviceEnumerator* enumerator, HANDLE event, OutputMode mod
         }
         problem = L"Exclusive output isn't available (" + HrText(last) + L"); using shared output.";
     }
-    return OpenShared(device.Get(), event, d);
+    return OpenShared(device.Get(), event, d, upmix);
 }
 
 }  // namespace
@@ -521,9 +652,48 @@ void AudioOutput::SetMode(OutputMode mode) {
     wake();
 }
 
+void AudioOutput::SetUpmix(bool upmix) {
+    if (wantedUpmix_.exchange(upmix) == upmix) return;
+    if (thread_.joinable()) reopen_ = true;
+    wake();
+}
+
+std::string AudioOutput::UpmixLabel() const {
+    std::lock_guard<std::mutex> lock(problemMx_);
+    return upmixLabel_;
+}
+
+void AudioOutput::SetAsioDriver(const std::wstring& name) {
+    {
+        std::lock_guard<std::mutex> lock(problemMx_);
+        if (asioDriver_ == name) return;
+        asioDriver_ = name;
+    }
+    if (thread_.joinable() && wantedMode_ == OutputMode::Asio) reopen_ = true;
+    wake();
+}
+
+std::wstring AudioOutput::AsioDriver() const {
+    std::lock_guard<std::mutex> lock(problemMx_);
+    return asioDriver_;
+}
+
+std::wstring AudioOutput::DeviceName() const {
+    std::lock_guard<std::mutex> lock(problemMx_);
+    return deviceName_;
+}
+
+bool AudioOutput::ShowAsioPanel() {
+    if (mode_ != OutputMode::Asio || !holding_) return false;
+    panel_ = true;
+    wake();
+    return true;
+}
+
 unsigned AudioOutput::RequestRate(unsigned rate) {
-    if (wantedMode_ != OutputMode::Exclusive || !thread_.joinable()) return rate_;
-    if (rate == rate_ && mode_ == OutputMode::Exclusive) return rate_;
+    // A network speaker plays one rate whatever the mode: the engine resamples, as for shared output.
+    if (wantedMode_ == OutputMode::Shared || !thread_.joinable() || !SpeakerId().empty()) return rate_;
+    if (rate == rate_ && mode_ == wantedMode_) return rate_;
     wantedRate_ = rate;
     ResetEvent(rateDone_);
     rateRequest_ = true;
@@ -536,6 +706,137 @@ unsigned AudioOutput::RequestRate(unsigned rate) {
 std::wstring AudioOutput::Problem() const {
     std::lock_guard<std::mutex> lock(problemMx_);
     return problem_;
+}
+
+static std::wstring WideText(const std::string& utf8) {
+    std::wstring out(utf8.size(), L'\0');
+    out.resize((size_t)std::max(0, MultiByteToWideChar(CP_UTF8, 0, utf8.data(), (int)utf8.size(), out.data(), (int)out.size())));
+    return out;
+}
+
+void AudioOutput::SetSpeaker(const std::string& id) {
+    {
+        std::lock_guard<std::mutex> lock(problemMx_);
+        if (speaker_ == id) return;
+        speaker_ = id;
+    }
+    wake();
+}
+
+std::string AudioOutput::SpeakerId() const {
+    std::lock_guard<std::mutex> lock(problemMx_);
+    return speaker_;
+}
+
+std::wstring AudioOutput::SpeakerName() const {
+    speakers::Speaker s;
+    return speakers::ParseDeviceId(SpeakerId(), s) ? WideText(s.name) : std::wstring();
+}
+
+// Render thread, while a network speaker is the output: the speaker's own thread renders as the
+// speaker reads (see speakers.h), and this one passes on pause and flush, and opens the speaker
+// again a few seconds after it failed. Returns once the speaker is no longer wanted.
+void AudioOutput::RunSpeaker(unsigned long long& sourcePos) {
+    const std::string id = SpeakerId();
+    constexpr unsigned kRate = 48000;
+    // Stream frames -> source positions, one entry per render (as for WASAPI below). Only the
+    // speaker's thread touches these and `sourcePos` while a stream exists.
+    struct Chunk {
+        unsigned long long end, sourceEnd;
+        size_t audio, total;
+    };
+    std::deque<Chunk> chunks;
+    unsigned long long written = 0;
+    std::atomic<bool> reset{false};
+    std::atomic<unsigned long long> resetPos{0};
+    speakers::Callbacks callbacks;
+    callbacks.render = [&](float* out, uint32_t frames) {
+        if (reset.exchange(false)) {
+            sourcePos = resetPos;
+            chunks.clear();
+        }
+        const size_t audio = render_(out, frames, sourcePos);
+        written += frames;
+        if (chunks.size() >= 1024) chunks.pop_front();
+        chunks.push_back({written, sourcePos, audio, frames});
+    };
+    callbacks.timing = [&](uint64_t played) {
+        if (reset) return;  // the position was set by Flush; the next render applies it
+        while (chunks.size() > 1 && chunks.front().end <= played) chunks.pop_front();
+        unsigned long long pos = sourcePos;
+        for (const Chunk& c : chunks) {
+            if (c.end <= played) continue;
+            const unsigned long long start = c.end - c.total;
+            pos = c.sourceEnd - c.audio + std::min<unsigned long long>(played > start ? played - start : 0, c.audio);
+            break;
+        }
+        played_ = pos;
+    };
+    std::unique_ptr<speakers::Stream> stream;
+    ULONGLONG retryAt = 0;
+    bool active = false;
+    auto open = [&] {
+        std::string error;
+        active = !paused_;
+        stream = speakers::Stream::Open(id, kRate, active, callbacks, [this] { wake(); }, error);
+        std::lock_guard<std::mutex> lock(problemMx_);
+        problem_ = stream ? std::wstring() : L"Couldn't use the network speaker: " + WideText(error) + L".";
+    };
+    mode_ = OutputMode::Shared;
+    format_ = SampleFormat::Int16;
+    asioType_ = -1;
+    holding_ = true;
+    waiting_ = false;
+    {
+        std::lock_guard<std::mutex> lock(problemMx_);
+        upmixLabel_.clear();
+        deviceName_.clear();
+    }
+    if (rate_ != kRate) {
+        rate_ = kRate;
+        if (reset_) reset_(kRate);
+    }
+    open();
+    while (!quit_ && SpeakerId() == id) {
+        if (flush_.exchange(false)) {
+            played_ = flushPos_.load();
+            if (stream) {
+                resetPos = flushPos_.load();
+                reset = true;
+                stream->Flush();
+            } else {
+                sourcePos = flushPos_;
+            }
+        }
+        // Nothing to re-open for: a rate request answers at once, at the speaker's rate.
+        if (rateRequest_.exchange(false)) SetEvent(rateDone_);
+        reopen_ = false;
+        if (stream) {
+            if (active == paused_) {
+                active = !paused_;
+                stream->SetActive(active);
+            }
+            if (stream->Failed()) {
+                const std::wstring why = WideText(stream->Problem());
+                stream.reset();  // no callback runs after this: `sourcePos` is ours again
+                if (reset.exchange(false)) sourcePos = resetPos;
+                waiting_ = true;
+                retryAt = GetTickCount64() + 3000;
+                std::lock_guard<std::mutex> lock(problemMx_);
+                problem_ = why + L" Trying again.";
+            }
+        } else if (GetTickCount64() >= retryAt) {
+            open();
+            waiting_ = !stream;
+        }
+        WaitForSingleObject(event_, 200);
+    }
+    stream.reset();  // tells the speaker to stop
+    if (reset.exchange(false)) sourcePos = resetPos;
+    waiting_ = false;
+    holding_ = false;
+    std::lock_guard<std::mutex> lock(problemMx_);
+    problem_.clear();
 }
 
 // How long a paused output keeps the device before letting it go. Long enough that a pause/skip
@@ -553,7 +854,40 @@ void AudioOutput::Run() {
     HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&enumerator));
     Device dev;
     std::wstring problem;
-    if (SUCCEEDED(hr)) hr = OpenDevice(enumerator.Get(), event_, wantedMode_, wantedRate_, dev, problem);
+    unsigned long long sourcePos = 0;
+    // ASIO output renders on the driver's thread, from its buffer switch. While a driver is loaded only
+    // that thread touches `sourcePos` and `asioClock`; this one reads them again once the driver is gone.
+    AsioClock asioClock;
+    std::atomic<bool> asioClockReset{false};
+    std::atomic<unsigned> asioLatency{0};  // the loaded driver's, set once it is open
+    AsioStream::RenderFn asioRender = [this, &sourcePos, &asioClock, &asioClockReset, &asioLatency](float* out,
+                                                                                                    size_t frames) {
+        if (asioClockReset.exchange(false)) asioClock.Clear();
+        if (flush_.exchange(false)) {
+            sourcePos = flushPos_;
+            asioClock.Clear();
+            played_ = sourcePos;
+        }
+        if (paused_) {
+            memset(out, 0, frames * 2 * sizeof(float));
+            return;
+        }
+        const size_t audio = render_(out, frames, sourcePos);
+        asioClock.Push(frames, sourcePos, audio);
+        // What the speakers play now went into the driver one buffer and its output latency ago.
+        const unsigned long long queued = frames + asioLatency.load(std::memory_order_relaxed);
+        played_ = asioClock.Played(asioClock.written > queued ? asioClock.written - queued : 0, sourcePos);
+    };
+    AsioStream::ResetFn asioReset = [this] {
+        reopen_ = true;
+        wake();
+    };
+    auto open = [&](Device& d) {
+        asioClockReset = true;
+        return OpenDevice(enumerator.Get(), event_, wantedMode_, wantedRate_, wantedUpmix_, d, problem, AsioDriver(),
+                          asioRender, asioReset);
+    };
+    if (SUCCEEDED(hr)) hr = open(dev);
     if (FAILED(hr)) {
         wchar_t buf[96];
         swprintf_s(buf, L"No audio output device (0x%08lX).", (unsigned long)hr);
@@ -562,13 +896,23 @@ void AudioOutput::Run() {
         CoUninitialize();
         return;
     }
+    std::unique_ptr<Upmixer> upmixer;  // made the first time a surround device is upmixed
     auto applyDevice = [&] {
-        mode_ = dev.exclusive ? OutputMode::Exclusive : OutputMode::Shared;
+        mode_ = dev.asio ? OutputMode::Asio : dev.exclusive ? OutputMode::Exclusive : OutputMode::Shared;
         format_ = dev.format;
+        asioType_ = dev.asio ? dev.asio->Type() : -1;
+        asioLatency = dev.asio ? dev.asio->Latency() : 0;
         holding_ = true;
         waiting_ = false;
+        if (dev.upmix.count) {
+            if (!upmixer) upmixer = std::make_unique<Upmixer>();
+            upmixer->Configure(dev.upmix, dev.rate);
+            upmixer->Reset();
+        }
         std::lock_guard<std::mutex> lock(problemMx_);
         problem_ = problem;
+        upmixLabel_ = dev.upmix.count ? LayoutLabel(dev.upmix) : std::string();
+        deviceName_ = dev.asio ? dev.asio->DriverName() : std::wstring();
     };
     applyDevice();
     auto* notifier = new DeviceNotifier(this);
@@ -586,12 +930,22 @@ void AudioOutput::Run() {
     std::vector<Chunk> chunks;
     chunks.reserve(16);
     size_t chunkHead = 0;
-    std::vector<float> convert;  // render buffer when the device doesn't take float
-    unsigned long long deviceWritten = 0, sourcePos = 0;
+    std::vector<float> convert;  // render buffer when the device doesn't take float, or is upmixed
+    unsigned long long deviceWritten = 0;
     bool running = false;
     ULONGLONG idleSince = 0;  // when a paused output started sitting on the device
 
     while (!quit_) {
+        if (!SpeakerId().empty()) {
+            // A network speaker takes over: this computer's device (or ASIO driver) is let go meanwhile.
+            if (running && dev.client) dev.client->Stop();
+            running = false;
+            dev = Device{};
+            holding_ = false;
+            RunSpeaker(sourcePos);
+            reopen_ = true;  // back on this computer: open its device again
+            continue;
+        }
         bool lost = reopen_.exchange(false);
         // A paused output gives the endpoint back instead of sitting on it: an exclusive stream
         // keeps the device claimed for as long as its IAudioClient lives, even stopped, so a
@@ -603,17 +957,18 @@ void AudioOutput::Run() {
             dev.client->Stop();
             running = false;
         }
-        if (dev.client && paused_ && !wantDevice) {
+        if (dev.Open() && paused_ && !wantDevice) {
             ULONGLONG now = GetTickCount64();
             if (!idleSince) idleSince = now;
             else if (now - idleSince >= kIdleReleaseMs) {
-                dev = Device{};  // the claim goes with the client
+                dev = Device{};  // the claim goes with the client (or the ASIO driver)
                 holding_ = false;
             }
         } else {
             idleSince = 0;
         }
-        if (!lost && wantDevice && !dev.client) lost = true;  // resume after letting go
+        if (!lost && wantDevice && !dev.Open()) lost = true;  // resume after letting go
+        if (panel_.exchange(false) && dev.asio) dev.asio->ShowPanel();
         if (!lost && dev.client) {
             if (flush_.exchange(false)) {
                 if (running) dev.client->Stop();
@@ -624,6 +979,7 @@ void AudioOutput::Run() {
                 chunkHead = 0;
                 sourcePos = flushPos_;
                 played_ = sourcePos;
+                if (upmixer) upmixer->Reset();
             }
             if (!paused_) {
                 UINT32 padding = 0;
@@ -637,7 +993,11 @@ void AudioOutput::Run() {
                     BYTE* data = nullptr;
                     if (avail > 0 && SUCCEEDED(dev.render->GetBuffer(avail, &data))) {
                         size_t audio;
-                        if (dev.format == SampleFormat::Float32) {
+                        if (dev.upmix.count) {
+                            convert.resize((size_t)avail * 2);
+                            audio = render_(convert.data(), avail, sourcePos);
+                            upmixer->Process(convert.data(), avail, reinterpret_cast<float*>(data));
+                        } else if (dev.format == SampleFormat::Float32) {
                             audio = render_(reinterpret_cast<float*>(data), avail, sourcePos);
                         } else {
                             convert.resize((size_t)avail * 2);
@@ -680,16 +1040,35 @@ void AudioOutput::Run() {
         if (lost) {
             if (running && dev.client) dev.client->Stop();
             running = false;
-            dev = Device{};  // release the device first: exclusive mode can't be opened twice
-            holding_ = false;
-            Device fresh;
             bool requested = rateRequest_.exchange(false);  // RequestRate is waiting: no reset callback
-            if (SUCCEEDED(OpenDevice(enumerator.Get(), event_, wantedMode_, wantedRate_, fresh, problem))) {
+            Device fresh;
+            HRESULT opened = E_FAIL;
+            // The same ASIO driver is set up again in place (a new rate, a reset from its panel): loading
+            // a driver can take far longer than restarting it.
+            const std::wstring wantedDriver = AsioDriver();  // empty: whichever is installed first, as loaded
+            if (dev.asio && wantedMode_ == OutputMode::Asio &&
+                (wantedDriver.empty() || !_wcsicmp(dev.asioName.c_str(), wantedDriver.c_str()))) {
+                std::wstring why;
+                asioClockReset = true;
+                if (dev.asio->Restart(wantedRate_, why)) {
+                    fresh = dev;
+                    fresh.rate = dev.asio->Rate();
+                    fresh.format = FormatForAsio(dev.asio->Type());
+                    problem = dev.asio->Problem();
+                    opened = S_OK;
+                }
+            }
+            if (FAILED(opened)) {
+                dev = Device{};  // release the device first: exclusive mode can't be opened twice
+                holding_ = false;
+                opened = open(fresh);
+            }
+            if (SUCCEEDED(opened)) {
                 dev = fresh;
                 deviceWritten = 0;
                 chunks.clear();
                 chunkHead = 0;
-                played_ = sourcePos;
+                if (!dev.asio) played_ = sourcePos;  // a driver's buffer switch keeps it itself
                 applyDevice();
                 if (dev.rate != rate_) {
                     rate_ = dev.rate;

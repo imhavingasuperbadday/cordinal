@@ -132,6 +132,8 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int showCmd) {
         if (WebDialogMessage(&msg)) continue;
         if (TagEditorDialogMessage(&msg)) continue;
         if (AlbumMakerDialogMessage(&msg)) continue;
+        if (AlbumTaggerDialogMessage(&msg)) continue;
+        if (DuplicatesDialogMessage(&msg)) continue;
         if (AutoEditorDialogMessage(&msg)) continue;
         if (FormatDialogMessage(&msg)) continue;
         if (StartupDefaultsDialogMessage(&msg)) continue;
@@ -159,6 +161,7 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int showCmd) {
     if (g.surfaceBrush) DeleteObject(g.surfaceBrush);
     if (wc.hIconSm) DestroyIcon(wc.hIconSm);
     CoUninitialize();
+    IniFlush();  // a setting changed after the closing save, before its delayed write
     FinishProfileRestore();
     return (int)msg.wParam;
 }

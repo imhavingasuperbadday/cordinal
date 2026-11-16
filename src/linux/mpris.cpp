@@ -583,7 +583,7 @@ void MprisChanged(bool seeked) {
         s.url = "file://" + compat::Narrow(path.c_str());
     }
     s.at = SDL_GetTicks();
-    s.rate = g.speed * g.tempo;
+    s.rate = g.settings.speed * g.settings.tempo;
     s.volume = g.settings.volume;
     s.shuffle = g.settings.shuffle;
     s.repeat = g.settings.repeat;

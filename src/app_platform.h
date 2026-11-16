@@ -44,7 +44,6 @@ void CancelSteamDiscovery();
 void OnSteamDiscovery(WPARAM offer, LPARAM result);
 void StopSteamDiscovery();
 void SetLoops(int count);
-void FindDuplicateAudioPlaylist();
 // Taskbar thumbnail buttons and progress (app_taskbar.cpp).
 void InitTaskbar();
 bool OnTaskbarMessage(UINT msg);

@@ -17,11 +17,23 @@ bool RestoreUnsavedLibrary(std::wstring* kept = nullptr);
 // Saves everything at close, falling back to library.cdb.unsaved. When neither can be written, asks
 // whether to try again, save a copy elsewhere, or quit without it; returns once the user has chosen.
 void SaveBeforeClose();
-// Profile-API accessors over g.iniPath.
+// settings.ini (g.iniPath), read and edited in memory and saved shortly after a change (app_ini.cpp).
+// Lookups follow the Win32 profile API. IniWrite returns false while the last save failed; that
+// failure is reported to the user once.
 std::wstring IniRead(const wchar_t* section, const wchar_t* key, const wchar_t* def);
 int IniInt(const wchar_t* section, const wchar_t* key, int def);
 float IniFloat(const wchar_t* section, const wchar_t* key, float def);
 bool IniWrite(const wchar_t* section, const wchar_t* key, const std::wstring& value);
+// Removes a key, or the whole section when `key` is null.
+void IniDelete(const wchar_t* section, const wchar_t* key);
+// A section's key=value entries in file order, and its replacement (empty removes the section).
+std::vector<std::pair<std::wstring, std::wstring>> IniEntries(const wchar_t* section);
+void IniReplaceSection(const wchar_t* section, const std::vector<std::pair<std::wstring, std::wstring>>& entries);
+std::vector<std::wstring> IniSectionNames();
+// Saves unsaved edits now and waits; false when the file couldn't be written.
+bool IniFlush();
+// Rereads settings.ini when something else changed it since it was read or saved.
+void IniRefresh();
 std::wstring F2S(float v);
 std::vector<int> ParseInts(const std::wstring& s);
 std::wstring JoinInts(const std::vector<int>& v);

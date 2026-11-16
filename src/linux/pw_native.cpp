@@ -6,6 +6,7 @@
 
 #include "decoder.h"
 #include "spa_pod.h"
+#include "upmix.h"
 
 #include <fcntl.h>
 #include <poll.h>
@@ -905,7 +906,7 @@ private:
     std::vector<float> scratch_, fifo_, out_;
 };
 
-// ---- The playback stream: a client node with two output ports
+// ---- The playback stream: a client node with an output port per channel (two unless upmixing)
 
 class PwStream final : public sound::Stream {
 public:
@@ -913,6 +914,15 @@ public:
         : params_(params), cb_(std::move(cb)), onFailure_(std::move(onFailure)), adapter_(params.rate) {
         active_ = params.active;
         mix_.resize(kMaxFrames * 2);
+        channels_ = params.channels;
+        if (channels_.empty()) channels_ = {"FL", "FR"};
+        ports_.resize(channels_.size());
+        linkedPorts_.assign(channels_.size(), kInvalid);
+        if (!params.channels.empty()) {
+            upmix_ = LayoutFromNames(channels_);
+            upmixer_ = std::make_unique<Upmixer>();
+            multi_.resize((size_t)kMaxFrames * channels_.size());
+        }
         wakeFd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     }
 
@@ -999,10 +1009,16 @@ private:
                   {"node.latency", latency},
                   {"node.autoconnect", "false"},  // it links itself
                   {"node.want-driver", "true"},
-                  {"audio.channels", "2"},
-                  {"audio.position", "FL,FR"}};
+                  {"audio.channels", std::to_string(channels_.size())},
+                  {"audio.position", Positions()}};
         if (params_.exclusive) d.push_back({"node.rate", rate});  // ask the graph to run at our rate
         return d;
+    }
+
+    std::string Positions() const {
+        std::string out;
+        for (const std::string& c : channels_) out += (out.empty() ? "" : ",") + c;
+        return out;
     }
 
     void SendNodeUpdate() {
@@ -1013,7 +1029,7 @@ private:
         b.Int(0);
         b.BeginStruct();
         b.Int(0);   // max input ports
-        b.Int(2);   // max output ports
+        b.Int((int32_t)channels_.size());  // max output ports
         b.LongV(1 | 2);  // flags, props
         b.LongV(1);      // SPA_NODE_FLAG_RT
         b.Int((int32_t)props.size());
@@ -1040,7 +1056,7 @@ private:
 
     void SendPortUpdate(uint32_t port) {
         const bool format = ports_[port].hasFormat;
-        const char* channel = port == 0 ? "FL" : "FR";
+        const std::string& channel = channels_[port];
         Dict props = {{"format.dsp", "32 bit float mono audio"},
                       {"port.name", std::string("output_") + channel},
                       {"port.alias", params_.name + ":output_" + channel},
@@ -1123,8 +1139,7 @@ private:
             s_.conn.Send(kCoreId, kCreateObject, b);
         }
         SendNodeUpdate();
-        SendPortUpdate(0);
-        SendPortUpdate(1);
+        for (uint32_t port = 0; port < channels_.size(); ++port) SendPortUpdate(port);
         SendActive(active_);
         activeDirty_ = false;
         s_.Sync(1);
@@ -1254,7 +1269,7 @@ private:
             }
             case kEvPortSetParam: {
                 PortParam p;
-                if (!ParsePortSetParam(m.data, m.size, p) || p.direction != kDirectionOutput || p.port > 1) break;
+                if (!ParsePortSetParam(m.data, m.size, p) || p.direction != kDirectionOutput || p.port >= ports_.size()) break;
                 if (p.id == kParamFormat) {
                     ports_[p.port].hasFormat = p.param.Valid() && IsDspF32(p.param);
                     if (!p.param.Valid())
@@ -1271,7 +1286,7 @@ private:
             }
             case kEvPortUseBuffers: {
                 UseBuffers u;
-                if (!ParseUseBuffers(m.data, m.size, u) || u.direction != kDirectionOutput || u.port > 1) break;
+                if (!ParseUseBuffers(m.data, m.size, u) || u.direction != kDirectionOutput || u.port >= ports_.size()) break;
                 Mix& mix = ports_[u.port].mixes[u.mix];
                 for (Buffer& b : mix.buffers) {
                     b.map.Release();
@@ -1311,7 +1326,7 @@ private:
             }
             case kEvPortSetIo: {
                 SetIo io;
-                if (!ParseSetIo(m.data, m.size, io, true) || io.direction != kDirectionOutput || io.port > 1) break;
+                if (!ParseSetIo(m.data, m.size, io, true) || io.direction != kDirectionOutput || io.port >= ports_.size()) break;
                 if (io.id != kIoBuffers && io.id != kIoAsyncBuffers) break;
                 PW_TRACE("port_set_io port %u mix %u id %u mem %u size %u", io.port, io.mix, io.id, io.memId, io.size);
                 Mix& mix = ports_[io.port].mixes[io.mix];
@@ -1352,7 +1367,7 @@ private:
             }
             case kEvPortSetMixInfo: {
                 MixInfo mi;
-                if (!ParseMixInfo(m.data, m.size, mi) || mi.direction != kDirectionOutput || mi.port > 1) break;
+                if (!ParseMixInfo(m.data, m.size, mi) || mi.direction != kDirectionOutput || mi.port >= ports_.size()) break;
                 auto& mixes = ports_[mi.port].mixes;
                 PW_TRACE("mix_info port %u mix %u peer %u", mi.port, mi.mix, mi.peer);
                 if (mi.peer == kInvalid) {
@@ -1384,12 +1399,12 @@ private:
         }
     }
 
-    // Our two output ports' global ids, once the registry has shown them.
-    bool OurPorts(uint32_t out[2]) const {
-        out[0] = out[1] = kInvalid;
+    // Our output ports' global ids, once the registry has shown them all.
+    bool OurPorts(std::vector<uint32_t>& out) const {
+        out.assign(channels_.size(), kInvalid);
         for (const auto& [id, p] : s_.ports)
-            if (p.node == nodeId_ && !p.input && p.portId < 2) out[p.portId] = id;
-        return out[0] != kInvalid && out[1] != kInvalid;
+            if (p.node == nodeId_ && !p.input && p.portId < out.size()) out[p.portId] = id;
+        return std::find(out.begin(), out.end(), kInvalid) == out.end();
     }
 
     uint32_t WantedSink() const {
@@ -1410,7 +1425,7 @@ private:
             if (it == s_.boundIds.end()) return;
             nodeId_ = it->second;
         }
-        uint32_t ours[2];
+        std::vector<uint32_t> ours;
         if (!OurPorts(ours)) return;
         uint32_t sink = WantedSink();
         // The sink's playback ports, by channel.
@@ -1420,11 +1435,12 @@ private:
         std::sort(inputs.begin(), inputs.end(), [&](const auto& a, const auto& b) {
             return s_.ports.at(a.second).portId < s_.ports.at(b.second).portId;
         });
-        uint32_t peer[2] = {kInvalid, kInvalid};
-        for (int c = 0; c < 2; ++c) {
-            const char* want = c == 0 ? "FL" : "FR";
+        // Upmixed channels the sink lacks stay unlinked: the front pair alone still carries everything.
+        std::vector<uint32_t> peer(channels_.size(), kInvalid);
+        for (size_t c = 0; c < channels_.size(); ++c) {
             for (const auto& [ch, id] : inputs)
-                if (ch == want) peer[c] = id;
+                if (ch == channels_[c]) peer[c] = id;
+            if (c >= 2) continue;
             if (peer[c] == kInvalid) {
                 for (const auto& [ch, id] : inputs)
                     if (ch == "MONO") peer[c] = id;
@@ -1432,14 +1448,13 @@ private:
             if (peer[c] == kInvalid && inputs.size() > (size_t)c) peer[c] = inputs[(size_t)c].second;
             if (peer[c] == kInvalid && !inputs.empty()) peer[c] = inputs[0].second;
         }
-        if (sink == linkedSink_ && peer[0] == linkedPorts_[0] && peer[1] == linkedPorts_[1]) return;
+        if (sink == linkedSink_ && peer == linkedPorts_) return;
         for (uint32_t link : links_) s_.Destroy(link);
         links_.clear();
         linkedSink_ = sink;
-        linkedPorts_[0] = peer[0];
-        linkedPorts_[1] = peer[1];
+        linkedPorts_ = peer;
         if (sink == kInvalid || peer[0] == kInvalid) return;
-        for (int c = 0; c < 2; ++c) {
+        for (size_t c = 0; c < channels_.size(); ++c) {
             if (peer[c] == kInvalid) continue;
             uint32_t id = s_.NewId();
             Builder b;
@@ -1507,7 +1522,10 @@ private:
         int64_t delay = Load<int64_t>(pos + clk::kDelay);
         uint32_t cycle = Load<uint32_t>(pos + clk::kCycle);
         uint32_t frames = (uint32_t)std::min<uint64_t>(duration, kMaxFrames);
-        if (flush_.exchange(false)) adapter_.Reset();  // what it held counts as played
+        if (flush_.exchange(false)) {
+            adapter_.Reset();  // what it held counts as played
+            if (upmixer_) upmixer_->Reset();
+        }
 
         if (cb_.timing) {
             double queued = graphRate ? (double)std::max<int64_t>(delay, 0) * params_.rate / graphRate : 0;
@@ -1519,7 +1537,15 @@ private:
                 if (cb_.render) cb_.render(out, n);
                 else memset(out, 0, (size_t)n * 2 * sizeof(float));
             });
-            for (uint32_t c = 0; c < 2; ++c) {
+            // Upmixing runs after the rate adapter, at the graph's rate.
+            const float* frameData = mix_.data();
+            const uint32_t stride = (uint32_t)channels_.size();
+            if (upmixer_) {
+                upmixer_->Configure(upmix_, graphRate ? graphRate : params_.rate);
+                upmixer_->Process(mix_.data(), frames, multi_.data());
+                frameData = multi_.data();
+            }
+            for (uint32_t c = 0; c < stride; ++c) {
                 // The server usually hands the buffers to the port as a whole (mix id SPA_ID_INVALID) and
                 // gives each link its own io area: every mix points at the same buffer, filled once.
                 auto& mixes = ports_[c].mixes;
@@ -1537,7 +1563,7 @@ private:
                         index = owner->next++ % (uint32_t)owner->buffers.size();
                         Buffer& b = owner->buffers[index];
                         uint32_t n = std::min<uint32_t>(frames, b.maxSize / sizeof(float));
-                        for (uint32_t i = 0; i < n; ++i) b.data[i] = mix_[i * 2 + c];
+                        for (uint32_t i = 0; i < n; ++i) b.data[i] = frameData[i * stride + c];
                         uint32_t chunk[3] = {0, n * (uint32_t)sizeof(float), (uint32_t)sizeof(float)};
                         memcpy(b.chunk, chunk, sizeof(chunk));
                         if (owner == portMix) portIndex = (int32_t)index;
@@ -1574,12 +1600,16 @@ private:
     const uint8_t* position_ = nullptr;
     int rtFd_ = -1;
     bool started_ = false;
-    Port ports_[2];
+    std::vector<std::string> channels_;  // the ports' channels, in port order
+    std::vector<Port> ports_;
     std::map<uint32_t, Target> targets_;
     std::vector<uint32_t> links_;
-    uint32_t linkedSink_ = kInvalid, linkedPorts_[2] = {kInvalid, kInvalid};
+    uint32_t linkedSink_ = kInvalid;
+    std::vector<uint32_t> linkedPorts_;
     RateAdapter adapter_;
-    std::vector<float> mix_;
+    std::vector<float> mix_, multi_;
+    SpeakerLayout upmix_;
+    std::unique_ptr<Upmixer> upmixer_;
     uint64_t rendered_ = 0;
     int traced_ = 0;
 };
@@ -1632,7 +1662,13 @@ bool ListSinks(std::vector<sound::Sink>& out) {
     if (!finished && s.nodes.empty()) return false;
     for (const auto& [id, n] : s.nodes) {
         if (n.mediaClass != "Audio/Sink" || n.name.empty()) continue;
-        out.push_back({n.name, n.description.empty() ? n.name : n.description, n.card, n.name == s.defaultSink});
+        sound::Sink sink{n.name, n.description.empty() ? n.name : n.description, n.card, n.name == s.defaultSink, {}};
+        std::vector<std::pair<uint32_t, std::string>> ports;
+        for (const auto& [portId, p] : s.ports)
+            if (p.node == id && p.input && !p.monitor) ports.push_back({p.portId, p.channel});
+        std::sort(ports.begin(), ports.end());
+        for (auto& [order, channel] : ports) sink.channels.push_back(channel);
+        out.push_back(std::move(sink));
     }
     return true;
 }

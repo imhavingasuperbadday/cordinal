@@ -6,10 +6,13 @@
 // Album grouping adds two header rows per album, so a list row is not a view position.
 #include "app.h"
 #include "archive.h"
+#include "column_layout.h"
 #include "peaks.h"
 #include "wind.h"
 
 #include <algorithm>
+#include <deque>
+#include <unordered_map>
 
 namespace app {
 
@@ -442,6 +445,9 @@ void RebuildView(bool preserveSelection) {
 // Selected indices into the active playlist's items (not list rows).
 std::vector<int> SelectedIndices() {
     std::vector<int> result;
+    // The menu bar is built before the window and its list view exist. A message to a missing list
+    // answers 0 rather than -1, which reads as row 0 for ever, so stop before asking it anything.
+    if (!g.list) return result;
     for (int row = -1; (row = ListView_GetNextItem(g.list, row, LVNI_SELECTED)) >= 0;)
         if (int pos = ViewPosOfRow(row); pos >= 0) result.push_back((int)g.view[pos]);
     return result;
@@ -474,15 +480,46 @@ void SetSortArrow(int type, bool ascending) {
     }
 }
 
+// Puts `items` back in the order of `wanted`: what was in the list before its first column sort. Tracks
+// added since come after, in their current order; tracks removed since are skipped. `mapping` is old
+// slot -> new slot, as SortItems makes it.
+static void RestoreOrder(std::vector<TrackId>& items, const std::vector<TrackId>& wanted, std::vector<uint32_t>& mapping) {
+    std::unordered_map<TrackId, std::deque<uint32_t>> slots;
+    for (uint32_t i = 0; i < items.size(); ++i) slots[items[i]].push_back(i);
+    mapping.assign(items.size(), UINT32_MAX);
+    std::vector<TrackId> out;
+    out.reserve(items.size());
+    for (TrackId id : wanted) {
+        auto it = slots.find(id);
+        if (it == slots.end() || it->second.empty()) continue;
+        mapping[it->second.front()] = (uint32_t)out.size();
+        it->second.pop_front();
+        out.push_back(id);
+    }
+    for (uint32_t i = 0; i < items.size(); ++i)
+        if (mapping[i] == UINT32_MAX) {
+            mapping[i] = (uint32_t)out.size();
+            out.push_back(items[i]);
+        }
+    items.swap(out);
+}
+
 void SortByColumn(int subitem) {
     int column = ColumnType(subitem);
-    if (column <= 0) return;
+    // The playing indicator and # are not sort keys. A track number only means something inside
+    // its album, so sorting a whole list by it scatters the albums and hides their headers.
+    if (!ui::SortsBy(column)) return;
     // Capture the live position before the sort. Views restored their last saved position below,
     // so a search box the user had cleared came back with the query saved earlier.
     CapturePlaylistPosition();
-    g.sortAscending = g.sortColumn == column ? !g.sortAscending : true;
-    g.sortColumn = column;
     Playlist& pl = Active();
+    // A third click on the same header goes back to the original order: the library's own for a view,
+    // the order before the first sort for a playlist (when that is still known).
+    const ui::SortState next = ui::NextSort({g.sortColumn, g.sortAscending}, column, pl.IsView() || !pl.presort.empty());
+    const bool clear = next.column < 0;
+    g.sortAscending = next.ascending;
+    column = next.column;
+    g.sortColumn = column;
     pl.sortColumn = column;
     pl.sortAscending = g.sortAscending;
     if (pl.IsView()) {
@@ -491,7 +528,14 @@ void SortByColumn(int subitem) {
     } else {
         std::vector<uint32_t> mapping;
         std::vector<TrackId> before = pl.items;
-        SortItems(pl.items, column, g.sortAscending, &mapping);
+        if (clear) {
+            RestoreOrder(pl.items, pl.presort, mapping);
+            pl.presort.clear();
+            pl.presort.shrink_to_fit();
+        } else {
+            if (pl.presort.empty()) pl.presort = before;
+            SortItems(pl.items, column, g.sortAscending, &mapping);
+        }
         RecordPlaylistEdit(pl, std::move(before), L"sort");
         RemapOccurrences(g.active, mapping);
         auto remap = [&](uint32_t& i) { i = i < mapping.size() ? mapping[i] : UINT32_MAX; };
@@ -658,6 +702,14 @@ void ShowListContextMenu(POINT pt) {
         ClientToScreen(g.list, &pt);
     }
     if (pt.x == -1 && pt.y == -1 && CanvasActive()) GetCursorPos(&pt);
+    HMENU m = BuildListContextMenu();
+    TrackPopupMenu(m, TPM_RIGHTBUTTON, pt.x, pt.y, 0, g.hwnd, nullptr);
+    DestroyMenu(m);
+}
+
+// A row's right-click menu for the selection. Every item has its own access key, so one letter runs
+// it (the self-test checks), and the same command keeps the same name it has in the menu bar.
+HMENU BuildListContextMenu() {
     UINT en = !SelectedTracks().empty() ? MF_ENABLED : MF_GRAYED;
     HMENU m = CreatePopupMenu();
     AppendMenuW(m, MF_STRING | en, IDM_PLAY_SEL, L"&Play");
@@ -667,7 +719,7 @@ void ShowListContextMenu(POINT pt) {
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     PlaylistKind kind = Active().kind;
     if (kind == PlaylistKind::Inbox) {
-        AppendMenuW(m, MF_STRING | en, IDM_INBOX_ACCEPT, L"&Add to library");
+        AppendMenuW(m, MF_STRING | en, IDM_INBOX_ACCEPT, L"Add to &library");
         AppendMenuW(m, MF_STRING | en, IDM_EXCLUDE, L"&Remove from library...");
     } else if (kind == PlaylistKind::Library) {
         AppendMenuW(m, MF_STRING | en, IDM_EXCLUDE, L"&Remove from library...\tDel");
@@ -676,18 +728,23 @@ void ShowListContextMenu(POINT pt) {
         AppendMenuW(m, MF_STRING | en, IDM_CROP, L"&Keep only selected tracks");
     }
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_POPUP | en, (UINT_PTR)RatingMenu(), L"Ra&ting");
-    AppendMenuW(m, MF_STRING | en | (g.rgRunning && !g.rgAuto ? MF_GRAYED : 0), IDM_RG_SCAN_SEL, L"Scan Replay&Gain");
-    AppendMenuW(m, MF_STRING | en | (g.rgRunning && !g.rgAuto ? MF_GRAYED : 0), IDM_RG_WRITE_TAGS, L"Write ReplayGain t&ags");
-    AppendMenuW(m, MF_STRING | en | (g.rgRunning && !g.rgAuto ? MF_GRAYED : 0), IDM_RG_CLEAR, L"&Clear ReplayGain");
-    AppendMenuW(m, MF_STRING | en, IDM_SHOW_IN_EXPLORER, L"Show in &Explorer");
+    AppendMenuW(m, MF_POPUP | en, (UINT_PTR)RatingMenu(), L"Rat&ing");
+    // ReplayGain for the selection, named as in Playback > ReplayGain.
+    HMENU gain = CreatePopupMenu();
+    const UINT rg = g.rgRunning && !g.rgAuto ? MF_GRAYED : 0;
+    AppendMenuW(gain, MF_STRING | rg, IDM_RG_SCAN_SEL, L"&Scan selection");
+    AppendMenuW(gain, MF_STRING | rg, IDM_RG_CLEAR, L"&Clear ReplayGain");
+    AppendMenuW(gain, MF_STRING | rg, IDM_RG_WRITE_TAGS, L"&Write ReplayGain tags");
+    AppendMenuW(m, MF_POPUP | en, (UINT_PTR)gain, L"Replay&Gain");
+    AppendMenuW(m, MF_STRING | en, IDM_SHOW_IN_EXPLORER, L"S&how in Explorer");
     AppendMenuW(m, MF_STRING | en, IDM_ORGANIZE, L"&Organize files...");
     AppendMenuW(m, MF_STRING | (en == MF_ENABLED && !ConvertBusy() ? MF_ENABLED : MF_GRAYED), IDM_CONVERT, L"Con&vert to .cord...");
-    AppendMenuW(m, MF_POPUP | (en == MF_ENABLED && !ConvertBusy() ? MF_ENABLED : MF_GRAYED), (UINT_PTR)CordExportMenu(), L"&Export .cord");
+    AppendMenuW(m, MF_POPUP | (en == MF_ENABLED && !ConvertBusy() ? MF_ENABLED : MF_GRAYED), (UINT_PTR)CordExportMenu(), L"Export .cor&d");
     AppendMenuW(m, MF_STRING | (en == MF_ENABLED && !CopyBusy() ? MF_ENABLED : MF_GRAYED), IDM_COPY_TO, L"Cop&y to folder or device...");
     AppendMenuW(m, MF_STRING | en, IDM_PROPERTIES, L"Edit &tags...\tAlt+Enter");
     AppendMenuW(m, MF_STRING | en, IDM_EDIT_ALBUM_TAGS, L"Edit al&bum tags...");
     AppendMenuW(m, MF_STRING | en, IDM_MAKE_ALBUM, L"&Make album...");
+    AppendMenuW(m, MF_STRING | en, IDM_TAG_ALBUM_MB, L"Tag album from MusicBrain&z...");
     // The cover as a submenu: a file or the clipboard's picture becomes the album's cover at once;
     // only an online search needs the picker window. Dropping an image on a row does the same.
     HMENU cover = CreatePopupMenu();
@@ -699,7 +756,7 @@ void ShowListContextMenu(POINT pt) {
         AppendMenuW(cover, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(cover, MF_STRING, IDM_RESTORE_COVER, L"Restore origi&nal cover");
     }
-    AppendMenuW(m, MF_POPUP | en, (UINT_PTR)cover, L"Co&ver");
+    AppendMenuW(m, MF_POPUP | en, (UINT_PTR)cover, L"&Cover");
     AppendMenuW(m, MF_STRING | en, IDM_ARTIST_INFO, L"Arti&st info...");
     AppendHelperTools(m, en == MF_ENABLED);
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
@@ -707,8 +764,7 @@ void ShowListContextMenu(POINT pt) {
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, IDM_ADD_FILES, L"&Add files...");
     AppendMenuW(m, MF_STRING, IDM_ADD_FOLDER, L"Import &folder once...");
-    TrackPopupMenu(m, TPM_RIGHTBUTTON, pt.x, pt.y, 0, g.hwnd, nullptr);
-    DestroyMenu(m);
+    return m;
 }
 
 void ShowTabContextMenu(POINT pt) {
@@ -717,6 +773,13 @@ void ShowTabContextMenu(POINT pt) {
     ScreenToClient(g.tabs, &hit.pt);
     int index = PlaylistOfTab(TabCtrl_HitTest(g.tabs, &hit));
     if (index >= 0 && index != g.active) ActivatePlaylist(index);
+    HMENU m = BuildTabContextMenu(index);
+    TrackPopupMenu(m, TPM_RIGHTBUTTON, pt.x, pt.y, 0, g.hwnd, nullptr);
+    DestroyMenu(m);
+}
+
+// A playlist tab's right-click menu, for g.playlists[index] (-1: the strip past the last tab).
+HMENU BuildTabContextMenu(int index) {
     HMENU m = CreatePopupMenu();
     UINT en = index >= 0 && g.playlists[index].kind != PlaylistKind::Library &&
               g.playlists[index].kind != PlaylistKind::Inbox ? MF_ENABLED : MF_GRAYED;
@@ -725,15 +788,14 @@ void ShowTabContextMenu(POINT pt) {
     if (index >= 0 && g.playlists[index].kind == PlaylistKind::Auto) AppendMenuW(m, MF_STRING, IDM_EDIT_AUTO, L"&Edit rules...");
     AppendMenuW(m, MF_STRING | en, IDM_RENAME_PL, L"&Rename");
     AppendMenuW(m, MF_STRING | en, IDM_REMOVE_PL, L"&Close\tCtrl+W");
-    AppendMenuW(m, MF_STRING, IDM_DUPLICATE_PL, L"Duplicate\tCtrl+Shift+D");
-    AppendMenuW(m, MF_STRING | (g.closedPlaylists.empty() ? MF_GRAYED : MF_ENABLED), IDM_REOPEN_PL, L"Reopen closed\tCtrl+Shift+T");
-    AppendMenuW(m, MF_STRING | (index > 1 ? MF_ENABLED : MF_GRAYED), IDM_MOVE_PL_LEFT, L"Move left");
-    AppendMenuW(m, MF_STRING | (index > 0 && index + 1 < (int)g.playlists.size() ? MF_ENABLED : MF_GRAYED), IDM_MOVE_PL_RIGHT, L"Move right");
+    AppendMenuW(m, MF_STRING, IDM_DUPLICATE_PL, L"&Duplicate\tCtrl+Shift+D");
+    AppendMenuW(m, MF_STRING | (g.closedPlaylists.empty() ? MF_GRAYED : MF_ENABLED), IDM_REOPEN_PL, L"Re&open closed\tCtrl+Shift+T");
+    AppendMenuW(m, MF_STRING | (index > 1 ? MF_ENABLED : MF_GRAYED), IDM_MOVE_PL_LEFT, L"Move &left");
+    AppendMenuW(m, MF_STRING | (index > 0 && index + 1 < (int)g.playlists.size() ? MF_ENABLED : MF_GRAYED), IDM_MOVE_PL_RIGHT, L"Move ri&ght");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, IDM_EXPORT_M3U, L"&Save as...");
     AppendMenuW(m, MF_STRING | (index >= 0 && !CopyBusy() ? MF_ENABLED : MF_GRAYED), IDM_COPY_PL, L"Cop&y to folder or device...");
-    TrackPopupMenu(m, TPM_RIGHTBUTTON, pt.x, pt.y, 0, g.hwnd, nullptr);
-    DestroyMenu(m);
+    return m;
 }
 
 namespace {
@@ -756,6 +818,9 @@ void CellText(int row, int col, std::wstring& out) {
         else if (int q = QueuePosition(id)) out = L"[" + std::to_wstring(q) + L"]";
         else if (g_lib[id].Failed() || (g_lib[id].flags & Track::kTagFailed)) out = L"⚠";
     } else if (!GroupHidesCell(pos, ColumnType(col), id)) {
+        // Away from the normal rate, Duration and BPM say what is heard (library.h HeardCell). They
+        // skip the cache, which would hold them past the next rate change.
+        if (HeardCell(ColumnType(col), g_lib[id], g.speed * g.tempo, out)) return;
         static uint32_t revision = 0;
         if (revision != g_lib.Revision()) { ClearCellCache(); revision = g_lib.Revision(); }
         uint64_t key = (uint64_t)id * kMaxColumnTypes + ColumnType(col);
@@ -783,6 +848,7 @@ int g_playedWidth = -1;
 // mixed by hand from the row's own background toward the accent, since GDI fills have no alpha.
 // Apollo's Windows 2000 list has none, and turning off Windows' animations turns it off too.
 constexpr UINT_PTR kWindTimer = 0x57D1;
+constexpr UINT_PTR kFitTimer = 0x57D2;  // refits Apollo's columns after the list is resized
 Wind g_wind;
 bool g_windRunning = false;
 ULONGLONG g_windLast = 0;
@@ -980,6 +1046,19 @@ void DrawTrackRow(NMLVCUSTOMDRAW* cd, int row, TrackId id, bool playing) {
         g_playedRow = rc;
         g_playedWidth = ui::PlayedWidth(rc.right - rc.left, g.engine.Position(), CurrentDuration());
         FillSolid(dc, {rc.left, rc.bottom - S(2), rc.left + g_playedWidth, rc.bottom}, Ref(P().playing));
+    } else if (!apollo && !FoobarMode() && g.resumeOn) {
+        // A song left partway underlines, at half strength, how far it had got. Choosing it carries
+        // on from there (app_spots.cpp), which the row never showed; on a list of long mixes it also
+        // shows at a glance which ones you are partway through and how far.
+        for (const auto& [spot, at] : g.spots) {
+            if (spot != id) continue;
+            int width = ui::PlayedWidth(rc.right - rc.left, at, g_lib[id].Duration());
+            COLORREF line = Ref(P().playing);
+            COLORREF dim = RGB((GetRValue(bg) + GetRValue(line)) / 2, (GetGValue(bg) + GetGValue(line)) / 2,
+                               (GetBValue(bg) + GetBValue(line)) / 2);
+            FillSolid(dc, {rc.left, rc.bottom - S(2), rc.left + width, rc.bottom}, dim);
+            break;
+        }
     }
     if (g.showFocusBoxes && (cd->nmcd.uItemState & CDIS_FOCUS) && GetFocus() == g.list &&
         !(SendMessageW(g.list, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS)) {
@@ -1057,6 +1136,7 @@ void MoveTrackBlockImpl(const std::vector<int>& sources, int target) {
     int first = sources.front(), last = sources.back();
     if (last - first + 1 == (int)sources.size() && target >= first && target <= last + 1) return;
     auto& items = Active().items;
+    Active().presort.clear();  // a hand-made order is the new original
     std::vector<TrackId> before = Active().Editable() ? items : std::vector<TrackId>();
     int insert = target;
     for (int s : sources) insert -= s < target ? 1 : 0;
@@ -1180,17 +1260,12 @@ LONG CellTextRight(int row, int sub, LONG right) {
     TrackId id = RowTrack(row);
     int count = Header_GetItemCount(g.header);
     if (pos < 0 || id == kNone || count <= 0) return right;
-    // Reused: this runs for every left-aligned cell of every painted row.
-    static std::vector<int> order;
-    order.resize((size_t)count);
-    if (!Header_GetOrderArray(g.header, count, order.data())) return right;
-    auto at = std::find(order.begin(), order.end(), sub);
-    if (at == order.end()) return right;
-    for (++at; at != order.end(); ++at) {
-        int type = ColumnType(*at);
+    // Subitems run left to right (app_columns.cpp), so the next column is the next subitem.
+    for (int at = sub + 1; at < count; ++at) {
+        int type = ColumnType(at);
         RECT next{};
-        if (*at == 0 || type < 0 || !GroupHidesCell(pos, type, id) || HasBadge(type, id) ||
-            !ListView_GetSubItemRect(g.list, row, *at, LVIR_BOUNDS, &next))
+        if (type <= 0 || !GroupHidesCell(pos, type, id) || HasBadge(type, id) ||
+            !ListView_GetSubItemRect(g.list, row, at, LVIR_BOUNDS, &next))
             break;
         right = next.right;
     }
@@ -1306,7 +1381,20 @@ LRESULT CALLBACK ListSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
     // A Title cell's "MIX" sits at the list's right edge when the column runs past it, so a width
     // change moves it; the list itself repaints only the strip it just uncovered. Repaint the whole
     // list on every size message: a width cache here cost about 197 KB in the packed player.
-    if (msg == WM_SIZE) InvalidateRect(h, nullptr, FALSE);
+    if (msg == WM_SIZE) {
+        InvalidateRect(h, nullptr, FALSE);
+        // Apollo's Title takes the room the other columns leave (app_columns.cpp), so its width follows
+        // the list's. Once the list has finished its own resizing: a column width set inside it (a
+        // scrollbar shown mid-update) left the list's top row at -20. Other lists keep their widths.
+        if (ColumnsFollowListWidth()) SetTimer(h, kFitTimer, 0, nullptr);
+    }
+    if (msg == WM_TIMER && wp == kFitTimer) {
+        KillTimer(h, kFitTimer);
+        FitListColumns();
+        return 0;
+    }
+    // Ctrl+Plus would size every column to its text, outside the layout the header keeps.
+    if (msg == WM_KEYDOWN && wp == VK_ADD && GetKeyState(VK_CONTROL) < 0) return 0;
     if (msg == WM_TIMER && wp == kWindTimer) {
         WindTimer();
         return 0;
@@ -1431,9 +1519,6 @@ LRESULT OnListNotify(NMHDR* hdr) {
             else if (kd->wVKey == 'A' && ctrl) ListView_SetItemState(g.list, -1, LVIS_SELECTED, LVIS_SELECTED);
             break;
         }
-        case LVN_COLUMNCLICK:
-            SortByColumn(reinterpret_cast<NMLISTVIEW*>(hdr)->iSubItem);
-            break;
         case LVN_ITEMCHANGED:
         case LVN_ODSTATECHANGED:
             g.statsDirty = true;

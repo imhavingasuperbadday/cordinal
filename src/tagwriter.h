@@ -28,6 +28,9 @@ struct TagEdit {
     // Listening statistics in the freedesktop FMPS form other players read: a rating from "0.0" to
     // "1.0" and a play count in digits. "" removes. MP3 also gets a POPM frame of cordinal's own.
     std::optional<std::string> rating, playCount;
+    // MusicBrainz release and release-group ids, in the spellings Picard writes for each format
+    // (MUSICBRAINZ_ALBUMID, TXXX "MusicBrainz Album Id", ...). "" removes.
+    std::optional<std::string> musicBrainzRelease, musicBrainzReleaseGroup;
     // True when no field is set, i.e. this edit would change nothing (WriteTags then leaves the file alone).
     bool Empty() const;
 };

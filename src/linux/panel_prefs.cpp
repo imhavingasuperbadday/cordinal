@@ -128,6 +128,11 @@ const Pref kPrefs[] = {
     {"exclusive", "Output", "Exclusive output",
      "Each track plays at its own rate, bit-perfect at 100% volume with the EQ and ReplayGain off.", PrefType::Bool, 0, 1, 0,
      1, [] { return (double)Cfg().exclusive; }, [](double v) { SetExclusive(v != 0); }},
+    {"upmix", "Output", "Upmix to surround",
+     "On a 5.1 or 7.1 device, stereo also plays from the center, subwoofer and surround speakers; the front pair "
+     "keeps the original left and right. Shared output only.",
+     PrefType::Bool, 0, 1, 0, 1, [] { return (double)Cfg().upmix; },
+     [](double v) { Cfg().upmix = v != 0; g.engine.SetUpmix(Cfg().upmix); Saved(); }},
     {"software_volume", "Output", "Volume control in cordinal",
      "Off sends the music at full level and leaves the volume to the system or your amplifier; cordinal's slider "
      "rests and only mute still works. With Exclusive output, that keeps playback bit-perfect at any level.",
@@ -336,6 +341,10 @@ const Pref kPrefs[] = {
      "en.wikipedia.org for the article it names.",
      PrefType::Bool, 0, 1, 0, 1, [] { return (double)online::Config().artistInfo; },
      [](double v) { online::Config().artistInfo = v != 0; Saved(); }},
+    {"online_album_tags", "Online", "Album tags from MusicBrainz",
+     "Sends the album's title and artist to musicbrainz.org when you choose Tag album from MusicBrainz, then the ids of the few releases that match, to read their tracks.",
+     PrefType::Bool, 0, 1, 0, 1, [] { return (double)online::Config().albumTags; },
+     [](double v) { online::Config().albumTags = v != 0; Saved(); }},
     {"group_albums", "View", "Group tracks by album", "The track list shows a header with the cover above each album's tracks.",
      PrefType::Bool, 0, 1, 1, 1, [] { return (double)Cfg().groupAlbums; },
      [](double v) { Cfg().groupAlbums = v != 0; RebuildRows(); Saved(); }},
