@@ -205,6 +205,35 @@ extern "C" __attribute__((noreturn)) void __stack_chk_fail(void) {
     abort();
 }
 
+// What a failed assert calls. cordinal builds with NDEBUG, but the static libstdc++'s float
+// formatting (floating_to_chars.o, behind std::to_chars) keeps its own asserts. Glibc's message
+// without the program name, then the same abort.
+__asm__(".hidden __assert_fail");
+extern "C" __attribute__((noreturn)) void __assert_fail(const char* expression, const char* file, unsigned line,
+                                                        const char* function) {
+    auto put = [](const char* text) {
+        size_t n = 0;
+        while (text && text[n]) ++n;
+        write(2, text, n);
+    };
+    char digits[12];
+    char* d = digits + sizeof(digits);
+    *--d = '\0';
+    do *--d = char('0' + line % 10); while (line /= 10);
+    put(file);
+    put(":");
+    put(d);
+    put(": ");
+    if (function) {
+        put(function);
+        put(": ");
+    }
+    put("Assertion `");
+    put(expression);
+    put("' failed.\n");
+    abort();
+}
+
 // The C++ runtime's key for the handlers it registers. A hosted link takes it from crtbegin, which
 // the static link does not use, so this copy is weak and gives way to crtbegin's where there is one.
 extern "C" {
