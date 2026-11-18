@@ -207,7 +207,7 @@ void InsertPlaylist(int at, Playlist pl) {
     EndRename(true);
     if (!pl.identity) pl.identity = g.nextPlaylistIdentity++;
     g.playlists.insert(g.playlists.begin() + at, std::move(pl));
-    for (int* v : {&g.active, &g.playingPl, &g.shufflePl, &g.resumePl})
+    for (int* v : {&g.active, &g.playingPl, &g.shufflePl, &g.resumePl, &g.picksPl})
         if (*v >= at) ++*v;
     for (auto& [token, info] : g.tokens)
         if (info.pl >= at) ++info.pl;
@@ -241,6 +241,7 @@ void ErasePlaylist(int index) {
     shift(g.playingPl);
     shift(g.shufflePl);
     shift(g.resumePl);
+    shift(g.picksPl);
     for (auto& [token, info] : g.tokens) shift(info.pl);
     if (g.active > index || g.active >= (int)g.playlists.size()) --g.active;
     RefreshTabs();
@@ -276,7 +277,8 @@ void ReorderPlaylist(int from, int to) {
     EndRename(true);
     CapturePlaylistPosition();
     if (!MovePlaylist(g.playlists, from, to)) return;
-    for (int* index : {&g.active, &g.playingPl, &g.shufflePl, &g.resumePl}) *index = RemapPlaylistIndex(*index, from, to);
+    for (int* index : {&g.active, &g.playingPl, &g.shufflePl, &g.resumePl, &g.picksPl})
+        *index = RemapPlaylistIndex(*index, from, to);
     for (auto& [token, info] : g.tokens) info.pl = RemapPlaylistIndex(info.pl, from, to);
     RefreshTabs();
     g.dirty = true;

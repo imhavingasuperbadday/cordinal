@@ -441,6 +441,73 @@ int CheckLinuxPacks() {
         }
     }
 
+    // Group headers and the tray tip, as on Windows; then Make a pack writes the setup back out.
+    check(Write(pack / "keys.ini", "[keys]\nCtrl+Alt+J = Playback > Shuffle\n") &&
+              Write(pack / "groups.ini", "[groups]\nby = one run\ntitle = Run of %group_tracks%\nright = %group_length%!\ncover = no\n") &&
+              Write(pack / "formats.ini", "[formats]\ntray tip = tip %title%\n"),
+          "a pack supplies group headers and a tray tip");
+    g.settings.packsOn = "test";
+    LoadPacks();
+    {
+        // Three tracks of two albums in a list of their own; the real library and lists are put back.
+        Library savedLib = std::move(g_lib);
+        g_lib = Library();
+        const auto savedRows = g.rows;
+        auto savedPlaylists = std::move(g.playlists);
+        const int savedActive = g.active;
+        const TrackId savedPlaying = g.playing;
+        g.playing = kNone;  // the real library's track is not in this one
+        Playlist list{L"Groups"};
+        for (int i = 0; i < 3; ++i) {
+            TrackId id = g_lib.Add(L"/checks/group" + std::to_wstring(i) + L".flac");
+            g_lib[id].album = g_lib.Intern(i < 2 ? "One" : "Two");
+            list.items.push_back(id);
+        }
+        g.playlists = {list};
+        g.active = 0;
+        g.rows = list.items;
+        g.settings.groupAlbums = true;
+        BuildLines();
+        check(GroupLook() && !GroupLook()->cover && g_groups.size() == 1 && g_groups[0].count == 3 &&
+                  GroupHeaderText(GroupLook()->title, g_groups[0]) == L"Run of 3" &&
+                  GroupHeaderText(GroupLook()->right, g_groups[0]) == FormatDuration(g_groups[0].seconds) + L"!" &&
+                  !GroupHidesCell(g_lines[g_lineOfRow[0]], 4),
+              "a pack's `by` format groups matching tracks under its own header lines, keeping their album cells");
+        DrawGroupHeader(g_groups[0], 0, 0, L.rows.R(), CurrentPalette());
+        check(EffectiveFormat(kPackTray, {}) == L"tip %title%", "a pack's tray tip format reaches the tray icon");
+        g.playlists = std::move(savedPlaylists);
+        g.active = savedActive;
+        g.rows = savedRows;
+        g_lib = std::move(savedLib);
+        g.playing = savedPlaying;
+        BuildLines();
+    }
+    TogglePack(0);  // with the real library back: toggling rebuilds the list, queue and now playing state
+    check(!GroupLook() && EffectiveFormat(kPackTray, {}).empty(),
+          "turning the pack off brings album groups and the plain tray tip back");
+    const std::wstring made = MakeStarterPack();
+    Pack mine;
+    {
+        std::vector<PackEntry> files;
+        for (const auto& e : fs::recursive_directory_iterator(fs::path(ToUtf8(made)), error)) {
+            if (!e.is_regular_file()) continue;
+            std::ifstream in(e.path(), std::ios::binary);
+            std::wstring rel = compat::Widen(fs::relative(e.path(), fs::path(ToUtf8(made))).string().c_str());
+            for (auto& c : rel) c = (wchar_t)towlower(c);
+            files.push_back({rel, std::string(std::istreambuf_iterator<char>(in), {})});
+        }
+        mine = ParsePack(L"mine", files);
+    }
+    const Palette& now = CurrentPalette();
+    check(!made.empty() && mine.error.empty() && mine.themes.size() == 1 && mine.themes[0].palette.bg == now.bg &&
+              mine.themes[0].palette.dark == now.dark && mine.formats[kPackWindow] == g.settings.fmtWindow &&
+              mine.layouts.size() == 1 && mine.layouts[0].values.Get(L"menu_bar") && mine.presets.size() == 1 &&
+              mine.columnSets.size() == 1 && !mine.columnSets[0].show.empty() && !mine.groups.any && !mine.functions.empty() &&
+              PackCount() == 2 && !PackAt(0).on,
+          "Make a pack writes the current theme, formats, columns, layout and EQ as a new pack, off, that reads back the same");
+    fs::remove_all(fs::path(ToUtf8(made)), error);
+    LoadPacks();
+
     // A single supplied face still gives headings bold text, and catalog bytes outlive the caller's copy.
     ResetPackFonts();
     {

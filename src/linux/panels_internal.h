@@ -6,6 +6,7 @@
 //   panel_rules.cpp     auto-playlist rules          panel_organize.cpp organize files, copy to device
 //   panel_points.cpp    points, year in review       panel_album.cpp    Edit > Make album
 //   panel_comeback.cpp  songs left partway, rediscoveries and Play history
+//   panel_convert.cpp   Library > Convert...
 //   panel_setup.cpp     title formatting, output device, layout, packs, helpers, scrobbling
 //
 // Panels drawn by other files (headphones_ui.cpp, games.cpp, editions_ui.cpp, coverfetch_ui.cpp,
@@ -18,7 +19,7 @@
 namespace lx::panel {
 
 enum class Kind { None, Eq, Headphones, Tags, Prefs, Rules, Organize, Copy, ListenBrainz, Format, Device, Points, Review,
-                  Palette, Layout, Packs, Helpers, Games, Editions, Covers, Artist, Export, Album, Keys, Comeback, AlbumTag, Duplicates, Count };
+                  Palette, Layout, Packs, Helpers, Games, Editions, Covers, Artist, Export, Album, Keys, Comeback, AlbumTag, Duplicates, Convert, Count };
 extern Kind g_kind;
 extern float g_mx, g_my;  // the mouse, for hover states
 
@@ -37,7 +38,8 @@ struct Ops {
     bool typing = false;        // takes text input, which ClosePanel stops
 };
 extern const Ops kEqOps, kTagsOps, kPrefsOps, kRulesOps, kOrganizeOps, kCopyOps, kListenBrainzOps, kFormatOps,
-    kDeviceOps, kPointsOps, kReviewOps, kPaletteOps, kLayoutOps, kPacksOps, kHelpersOps, kAlbumOps, kKeysOps, kComebackOps, kAlbumTagOps, kDuplicatesOps;
+    kDeviceOps, kPointsOps, kReviewOps, kPaletteOps, kLayoutOps, kPacksOps, kHelpersOps, kAlbumOps, kKeysOps, kComebackOps, kAlbumTagOps, kDuplicatesOps, kConvertOps;
+bool ConvertPanelDirty();  // the Convert panel's count waits to be redone once typing pauses
 
 // --- shared pieces (panels.cpp) -------------------------------------------------------------------------
 Rect OutputRect();

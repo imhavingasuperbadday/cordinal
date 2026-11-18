@@ -169,8 +169,7 @@ HMENU BuildMenu() {
     AppendMenuW(library, MF_STRING, IDM_ORGANIZE, L"&Organize files...");
     AppendMenuW(library, MF_STRING, IDM_ORGANIZE_UNDO, L"&Undo last organize");
     AppendMenuW(library, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(library, MF_STRING, IDM_CONVERT, L"Con&vert to .cord...");
-    AppendMenuW(library, MF_POPUP, (UINT_PTR)CordExportMenu(), L"Export .cor&d");
+    AppendMenuW(library, MF_STRING, IDM_CONVERT, L"Con&vert...");
     AppendMenuW(library, MF_STRING, IDM_CONVERT_UNDO, L"Undo &last conversion");
     AppendMenuW(library, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(library, MF_STRING, IDM_COPY_TO, L"Cop&y to folder or device...");

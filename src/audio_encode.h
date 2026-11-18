@@ -9,5 +9,8 @@
 bool EncodeM4a(const std::wstring& source, const std::wstring& out, unsigned kbps, const std::atomic<bool>& cancel,
                std::wstring& error, const std::string& metadata = {});
 // Emits ADTS or raw MP3 frames, without playback processing. `frames` excludes codec priming/padding.
+// `lead` and `tail` frames of silence go before and after the source (not counted in `frames`), so a
+// gapless header can place the audio exactly.
 bool EncodeLossyAudio(const std::wstring& source, unsigned kbps, bool mp3, const std::atomic<bool>& cancel,
-                      const std::function<bool(const char*, size_t)>& send, uint64_t& frames, std::wstring& error);
+                      const std::function<bool(const char*, size_t)>& send, uint64_t& frames, std::wstring& error,
+                      unsigned lead = 0, unsigned tail = 0);

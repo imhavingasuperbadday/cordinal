@@ -191,6 +191,81 @@ void TestCellCache() {
     ShrinkCellCache();
 }
 
+// Themed checkboxes and radios draw their labels in the theme's own color, which ignores WM_CTLCOLORBTN
+// and was black on dark surfaces (the Convert window's choices). ApplyControlTheme now routes every such
+// button's custom draw, through its parent, to a painter that redraws the label in the palette. The
+// parent here is a bare static with no handler of its own, as a new dialog that forgot one would be.
+void TestChoiceLabels() {
+    using namespace app;
+    testlog::Batch batch;
+    const auto savedTheme = g.themeMode;
+    const auto savedPalette = g.pal;
+    const bool savedDark = g.dark;
+    const HBRUSH savedSurface = g.surfaceBrush;
+    testlog::Cases cases;
+    auto distance = [](COLORREF a, COLORREF b) {
+        return std::abs(GetRValue(a) - GetRValue(b)) + std::abs(GetGValue(a) - GetGValue(b)) + std::abs(GetBValue(a) - GetBValue(b));
+    };
+    for (ThemeMode theme : {ThemeMode::Light, ThemeMode::Dark}) {
+        // The palette alone, as ApplyTheme would set it, without repainting or laying out the main window.
+        g.themeMode = theme; g.pal = &ThemePalette(theme); g.dark = g.pal->dark;
+        g.surfaceBrush = CreateSolidBrush(SurfaceColor());
+        const int width = S(320), height = S(24);
+        HWND parent = CreateWindowExW(0, WC_STATICW, L"", WS_POPUP, 0, 0, width, height * 2, nullptr, nullptr, g.inst, nullptr);
+        for (DWORD type : {(DWORD)BS_AUTOCHECKBOX, (DWORD)BS_AUTORADIOBUTTON, (DWORD)(BS_AUTORADIOBUTTON | BS_PUSHLIKE)}) {
+            const bool pushLike = type & BS_PUSHLIKE;
+            const std::wstring name = std::wstring(theme == ThemeMode::Dark ? L"dark " : L"light ") +
+                                      (pushLike ? L"push-like radio" : type == BS_AUTOCHECKBOX ? L"checkbox" : L"radio");
+            HWND c = CreateWindowExW(0, WC_BUTTONW, L"Copies, and keep the originals", WS_CHILD | WS_VISIBLE | type, 0, 0,
+                                     width, height, parent, (HMENU)(INT_PTR)1, g.inst, nullptr);
+            SendMessageW(c, WM_SETFONT, (WPARAM)g.font, FALSE);
+            ApplyControlTheme(c, g.dark);
+            NMCUSTOMDRAW draw{};
+            draw.hdr = {c, 1, (UINT)NM_CUSTOMDRAW};
+            draw.rc = {0, 0, width, height};
+            draw.dwDrawStage = CDDS_PREPAINT;
+            const LRESULT pre = SendMessageW(parent, WM_NOTIFY, 1, (LPARAM)&draw);
+            if (pushLike) {  // a push-like radio is a button with no separate label: left alone
+                cases.Add(pre != CDRF_NOTIFYPOSTPAINT, name);
+                DestroyWindow(c);
+                continue;
+            }
+            HDC dc = CreateCompatibleDC(nullptr);
+            BITMAPINFO info{};
+            info.bmiHeader = {sizeof(BITMAPINFOHEADER), width, -height, 1, 32, BI_RGB};
+            void* pixels = nullptr;
+            HBITMAP bitmap = dc ? CreateDIBSection(dc, &info, DIB_RGB_COLORS, &pixels, nullptr, 0) : nullptr;
+            bool ink = false;
+            if (bitmap) {
+                HGDIOBJ old = SelectObject(dc, bitmap);
+                RECT all{0, 0, width, height};
+                FillRect(dc, &all, (HBRUSH)GetStockObject(theme == ThemeMode::Dark ? BLACK_BRUSH : WHITE_BRUSH));
+                draw.hdc = dc;
+                draw.dwDrawStage = CDDS_POSTPAINT;
+                SendMessageW(parent, WM_NOTIFY, 1, (LPARAM)&draw);
+                // The label's pixel furthest from the surface is its ink; it must be the palette's text.
+                const COLORREF surface = SurfaceColor(), text = TextColor();
+                COLORREF inkPx = surface;
+                for (int y = 0; y < height; ++y)
+                    for (int x = S(20); x < width; ++x)
+                        if (COLORREF px = GetPixel(dc, x, y); distance(px, surface) > distance(inkPx, surface)) inkPx = px;
+                ink = distance(inkPx, text) <= 96 && distance(inkPx, surface) * 2 > distance(text, surface) &&
+                      GetPixel(dc, width - 2, height / 2) == surface;
+                SelectObject(dc, old);
+                DeleteObject(bitmap);
+            }
+            if (dc) DeleteDC(dc);
+            cases.Add(pre == CDRF_NOTIFYPOSTPAINT && ink, name);
+            DestroyWindow(c);
+        }
+        if (parent) DestroyWindow(parent);
+        DeleteObject(g.surfaceBrush);
+    }
+    g.themeMode = savedTheme; g.pal = savedPalette; g.dark = savedDark; g.surfaceBrush = savedSurface;
+    batch.Next(L"UI: every themed checkbox and radio label is painted in the palette's text color, in light and dark");
+    Check(cases.Passed(), L"UI: every themed checkbox and radio label is painted in the palette's text color%ls", cases.failed.c_str());
+}
+
 void TestPlayerSliders() {
     using namespace app;
     testlog::Batch batch;
@@ -1047,7 +1122,7 @@ void TestMenuAccessKeys() {
             } else {
                 cases.Add(!fixed, where + L" has no access key");
             }
-            // Themes, packs, helpers, speeds, ratings, export formats and the gaps to find are lists of
+            // Themes, packs, helpers, speeds, ratings and the gaps to find are lists of
             // names, where a missing key is no fault.
             if (mi.hSubMenu) {
                 std::wstring name;
@@ -1055,7 +1130,7 @@ void TestMenuAccessKeys() {
                     if (c != L'&') name += c;
                 bool list = false;
                 for (const wchar_t* named : {L"Theme", L"Packs", L"Helpers", L"Run", L"Speed", L"Tempo", L"Rating",
-                                             L"Export .cord", L"Find missing information"})
+                                             L"Find missing information"})
                     list = list || name.rfind(named, 0) == 0;
                 walk(mi.hSubMenu, where, fixed && !list);
             }
@@ -1185,6 +1260,37 @@ void TestUiControls(const std::wstring& scratch) {
               L"UI: the tag editor completes an artist from the library and accepts it");
     }
     {
+        // Library > Convert...: the summary follows the format and the mode, and the copies' folder
+        // row is only for copies. Nothing is converted here (the cord-conversion suite runs it).
+        TrackId song = g_lib.Add(L"C:\\UiChecks\\Convert\\song.flac");
+        ShowConvert({song});
+        HWND window = FindWindowW(L"CordinalConvert", nullptr);
+        HWND format = window ? GetDlgItem(window, 100) : nullptr, replace = window ? GetDlgItem(window, 102) : nullptr;
+        HWND folder = window ? GetDlgItem(window, 104) : nullptr, summary = window ? GetDlgItem(window, 107) : nullptr;
+        HWND go = window ? GetDlgItem(window, IDOK) : nullptr;
+        std::wstring asMp3, asFlac;
+        bool mp3Ready = false, flacBlocked = false, folderOff = false;
+        if (window && format && replace && folder && summary && go) {
+            ShowWindow(window, SW_HIDE);
+            auto choose = [&](CordExport f) {
+                SendMessageW(format, CB_SETCURSEL, (WPARAM)f, 0);
+                SendMessageW(window, WM_COMMAND, MAKEWPARAM(100, CBN_SELCHANGE), (LPARAM)format);
+                return WindowText(summary);
+            };
+            asMp3 = choose(CordExport::Mp3_320);
+            mp3Ready = IsWindowEnabled(go) != FALSE;
+            asFlac = choose(CordExport::Flac);
+            flacBlocked = !IsWindowEnabled(go);
+            SendMessageW(replace, BM_CLICK, 0, 0);
+            folderOff = !IsWindowEnabled(folder);
+        }
+        if (window) DestroyWindow(window);
+        batch.Next(L"UI: the Convert window counts what each format converts and keeps the folder choice to copies");
+        Check(mp3Ready && flacBlocked && folderOff && asMp3 == L"1 song to convert" && asFlac.find(L"already .flac") != std::wstring::npos,
+              L"UI: the Convert window counts what each format converts (MP3: \"%ls\", FLAC: \"%ls\") and keeps the folder choice "
+              L"to copies", asMp3.c_str(), asFlac.c_str());
+    }
+    {
         // A track with no title, artist or number: the editor offers its file name's, shown as the
         // empty fields' hints, and turning the box off takes the hints away (nothing is saved here).
         TrackId bare = g_lib.Add(L"C:\\UiChecks\\07 - Name Band - Name Song.flac");
@@ -1212,6 +1318,7 @@ void TestUiControls(const std::wstring& scratch) {
               L"UI: the tag editor offers an untagged track's title, artist and number from its file name");
     }
     TestPlayerSliders();
+    TestChoiceLabels();
     TestSoftCanvas();
     TestCellCache();
     TestCoverFade();
@@ -2281,6 +2388,37 @@ void TestUiControls(const std::wstring& scratch) {
               L"UI: a snapshot of an unsorted view leaves Now Playing without a sort arrow");
         g.playlists[0].sortColumn = oldLibrarySort;
         g.playlists[0].sortAscending = oldLibraryAscending;
+        // A search that hides the chosen track (Previous from a stopped player starts at the first) snapshots
+        // the whole view, so the index still names a real Now Playing entry instead of one past the end.
+        {
+            const int savedActive = g.active;
+            const std::wstring savedFilter = g.filter;
+            const std::vector<uint32_t> savedView = g.view;
+            g.active = 0;
+            g.filter = L"hidden";
+            g.view = {1};
+            int hiddenIndex = 0;
+            const TrackId hidden = g.playlists[0].items[0];
+            const int hiddenNp = SnapshotToNowPlaying(0, hiddenIndex);
+            const auto& hiddenItems = g.playlists[hiddenNp].items;
+            Check(hiddenIndex >= 0 && hiddenIndex < (int)hiddenItems.size() && hiddenItems[hiddenIndex] == hidden,
+                  L"UI: playing a track the search hides snapshots a valid Now Playing index (%d of %zu)", hiddenIndex,
+                  hiddenItems.size());
+            g.active = savedActive;
+            g.filter = savedFilter;
+            g.view = savedView;
+        }
+        // Taste picks remember the playlist they came from; adding or closing a tab in front of it must not
+        // point them at another list.
+        {
+            const int savedPicks = g.picksPl;
+            g.picksPl = np;
+            InsertPlaylist(1, Playlist{L"Shifted", {}, PlaylistKind::Static});
+            const bool shifted = g.picksPl == np + 1;
+            ErasePlaylist(1);
+            Check(shifted && g.picksPl == np, L"UI: taste picks follow their playlist when tabs move (%d)", g.picksPl);
+            g.picksPl = savedPicks;
+        }
         // Now Playing shows the whole of the playing album, even when playback began from a list that held
         // only one of its tracks (Top rated): the rest joins the list, once, right behind the playing track.
         g.playlists[np].items = {1};

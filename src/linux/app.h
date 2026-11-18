@@ -46,7 +46,6 @@ constexpr UINT WM_APP_THUMB = WM_APP + 15;   // an album header's cover decoded 
 constexpr UINT WM_APP_PEAKS = WM_APP + 16;   // a waveform computed (wParam = request id, peaks.h)
 constexpr UINT WM_APP_RG = WM_APP + 17;      // ReplayGain progress (wParam 1) or results (wParam 2, lParam = RgBatch*)
 constexpr UINT WM_APP_TAGWRITE = WM_APP + 18;  // tag writing progress (wParam 1) or done (wParam 0, lParam = WriteDone*)
-constexpr UINT WM_APP_CORD_EXPORT = WM_APP + 19;  // progress string (0) or export result (1); owned by the UI
 constexpr UINT WM_APP_PLAYLIST_FILE = WM_APP + 20;
 constexpr UINT WM_APP_CHAPTERS = WM_APP + 21;  // chapters read on the tag worker (lParam = ChapterResult*)
 constexpr UINT WM_APP_CONVERT = WM_APP + 22;  // a file converted (wParam 0, lParam = index) or the run finished (wParam 1)
@@ -225,10 +224,16 @@ struct Settings {
     bool npAlbumOnly = true;    // Now Playing lists only the playing song's album, as on Windows
     bool groupAutoTabs = true;  // the auto-playlists share one tab (TabSlots), as on Windows
     bool musicBrainzLookup = false;  // optional online album-edition lookup, cached and rate-limited
-    // Conversion to .cord: originals go to the Recycle Bin or stay (shown in the library or not), and
-    // a conversion can be undone for kConvertMemoryDays[convertMemory].
+    bool steamSoundEffects = false;  // Add Steam soundtracks also takes games' sound-effect folders
+    // Replacements made by Library > Convert...: originals go to the trash or stay (shown in the library
+    // or not), and a conversion can be undone for kConvertMemoryDays[convertMemory].
     bool convertRecycle = true, convertShowOriginals = false;
     uint8_t convertMemory = 3;
+    // The Convert panel's last choices: the CordExport format, replacements or copies, and the copies'
+    // folder (used when convertIntoFolder).
+    uint8_t convertFormat = 1;
+    bool convertReplace = false, convertIntoFolder = false;
+    std::wstring convertFolder;
     // Library > Organize files: the folder last organized into and the naming pattern (empty: the
     // library's first folder and kDefaultOrganizePattern).
     std::wstring organizeFolder, organizePattern;
@@ -449,11 +454,6 @@ uint64_t NewestTagEditTime();
 void OnTagWriteMessage(WPARAM wp, LPARAM lp);
 void FlushDeferredTags();
 void StopTagWriter();
-bool CordExportBusy();
-void ExportCordTracks(std::vector<TrackId> ids, CordExport format);
-void CancelCordExport();
-void OnCordExport(WPARAM wp, LPARAM lp);
-void StopCordExporter();
 bool TagWriteBusy();
 std::wstring TagWriteStatus();
 
@@ -467,12 +467,17 @@ void HoldPendingOpens();  // a user's Stop: opens still being walked add their f
 void OpenFiles(const std::vector<std::wstring>& files, bool play = true);  // main.cpp: into Now Playing, the first plays
 void AddDropped(const std::vector<std::wstring>& files);  // ui.cpp: into the active playlist
 
-// convert_run.cpp: converting lossless files to .cord and undoing it, on a worker.
+// convert_run.cpp: Library > Convert...'s run on a worker, and undoing its replacements. The panel is
+// panel_convert.cpp's (OpenConvert).
 bool ConvertBusy();
 bool CanUndoConversion();
 int EnsureNowPlayingTab();  // playback.cpp: the Now Playing tab's index, made again if it was closed
 void InitConvert();
-void ConvertSelected(std::vector<TrackId> ids);  // the tracks given, or the whole library when there are none
+void OpenConvert(std::vector<TrackId> ids);  // the panel, for the tracks given or the whole library when there are none
+// The tracks as Convert would treat them (the library's codec tells ALAC from AAC; the song playing is
+// left alone), and the run itself: false when nothing would convert or a replacement wasn't confirmed.
+std::vector<ConvertItem> PlanConvertTracks(const std::vector<TrackId>& ids, CordExport format, bool replace, const std::wstring& folder);
+bool StartConvert(std::vector<ConvertItem> plan, CordExport format, bool replace);
 void OnConvertMessage(WPARAM wp, LPARAM lp);
 void UndoConversion();
 void CancelConversion();
@@ -535,6 +540,7 @@ void MprisChanged(bool seeked = false);  // what's playing, the play state or a 
 void MprisSetArt(TrackId id, const std::string& path);
 bool StartsOnLogin();
 void ToggleStartOnLogin();
+void ToggleTopBar();  // cordinal's icon on Waybar's bar (waybar.cpp), with a message when there is no Waybar
 // ListenBrainz (scrobble.cpp): the submission worker, "playing now" and a listen for each counted play.
 void InitScrobble();
 void StopScrobble();
@@ -669,6 +675,8 @@ PackRow PackAt(size_t index);
 void TogglePack(size_t index);
 bool InstallPack(const std::wstring& source);
 void OpenPacksFolder();
+std::wstring MakeStarterPack();  // View > Packs > Make a pack: the current setup as a new pack (off); its folder, or empty
+void ReloadPacks();               // reads the packs folder again, after editing a pack's files
 std::string PackThemeKey(ThemeMode mode);         // the settings.ini key of a pack theme, empty for a built-in one
 const PackTheme* PackThemeFor(ThemeMode mode);    // a pack theme's sounds and the like
 bool PackField(TrackId id, const std::wstring& name, std::wstring& out);  // a pack's %field%
@@ -680,6 +688,7 @@ bool PackKeyDown(const SDL_KeyboardEvent& e);  // a key a pack that is on binds 
 std::vector<EqPreset> AllEqPresets();         // the built-in presets, then those of the packs that are on
 // The pattern for a format slot: a pack that is on and sets it, else the user's own.
 const std::wstring& EffectiveFormat(PackFormatSlot slot, const std::wstring& own);
+const PackGroups* PackGroupLook();  // the group headers of the last pack that is on and sets them, or null
 
 // The lyrics panel (lyrics.cpp).
 bool LyricsShown();

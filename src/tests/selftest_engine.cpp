@@ -259,6 +259,44 @@ void TestSampleConversion() {
               kExclusiveFormats[1] == SampleFormat::Int24In32 && kExclusiveFormats[2] == SampleFormat::Int24 &&
               kExclusiveFormats[3] == SampleFormat::Float32 && kExclusiveFormats[4] == SampleFormat::Int16,
           L"OUTPUT exclusive format order is 32-bit, 24-in-32, packed 24, float, then 16-bit");
+
+    batch.Next(L"OUTPUT DoP frames: marker above the payload, idle past the source, alternation across calls");
+    // 8 frames, 5 of them from the source, so the tail must be DoP idle rather than silence.
+    constexpr size_t kDopFrames = 8, kDopSupplied = 5;
+    std::vector<float> dopPayload(kDopFrames * 2);
+    for (size_t i = 0; i < dopPayload.size(); ++i) dopPayload[i] = (float)(i + 1) / 64;
+    // The 24-bit word the device should see: the marker for that frame above the payload bits.
+    auto dopWord = [&](size_t i, unsigned ch) {
+        const uint32_t bits = i < kDopSupplied ? DopWord(dopPayload[i * 2 + ch]) : 0x6969u;  // two idle bytes
+        return (uint32_t)(i % 2 ? kDopMarkerB : kDopMarkerA) << 16 | bits;
+    };
+    uint8_t dopMarker = kDopMarkerA;
+    std::vector<uint32_t> dop32(kDopFrames * 2, 0), dopFull(kDopFrames * 2, 1);
+    PackDop(dopPayload.data(), kDopFrames, kDopSupplied, SampleFormat::Int24In32, dopMarker, dop32.data());
+    uint8_t dopMarker32 = kDopMarkerA;
+    PackDop(dopPayload.data(), kDopFrames, kDopSupplied, SampleFormat::Int32, dopMarker32, dopFull.data());
+    bool dopOk = dopFull == dop32;
+    for (size_t i = 0; i < kDopFrames; ++i)
+        dopOk &= dop32[i * 2] == dopWord(i, 0) << 8 && dop32[i * 2 + 1] == dopWord(i, 1) << 8;
+    std::vector<uint8_t> dopPacked(kDopFrames * 6, 0);
+    uint8_t dopMarker24 = kDopMarkerA;
+    PackDop(dopPayload.data(), kDopFrames, kDopSupplied, SampleFormat::Int24, dopMarker24, dopPacked.data());
+    for (size_t i = 0; i < kDopFrames; ++i)
+        for (unsigned ch = 0; ch < 2; ++ch) {
+            const uint32_t w = dopWord(i, ch);
+            const uint8_t* b = dopPacked.data() + i * 6 + ch * 3;
+            dopOk &= b[0] == (uint8_t)w && b[1] == (uint8_t)(w >> 8) && b[2] == (uint8_t)(w >> 16);
+        }
+    Check(dopOk, L"OUTPUT DoP words hold the marker above the payload in every 24-bit container, idle past the source");
+    // Eight frames leave the alternation where it started, so the next call continues it.
+    uint32_t after[2] = {0, 0};
+    uint8_t nextMarker = dopMarker;
+    PackDop(dopPayload.data(), 1, 1, SampleFormat::Int24In32, nextMarker, after);
+    Check(dopMarker == kDopMarkerA && dopMarker32 == kDopMarkerA && dopMarker24 == kDopMarkerA &&
+              after[0] == ((uint32_t)kDopMarkerA << 24 | DopWord(dopPayload[0]) << 8) &&
+              after[1] == ((uint32_t)kDopMarkerA << 24 | DopWord(dopPayload[1]) << 8) &&
+              nextMarker == kDopMarkerB,
+          L"OUTPUT the DoP marker alternation continues across calls, both channels sharing it");
 }
 
 // ASIO output's driver listing and sample conversion, which need no driver: registry entries parse
@@ -354,9 +392,105 @@ void TestAsioConversion() {
     double wide[1] = {1};
     WriteAsioChannel(wild, 1, 2, 0, asio::kFloat64LSB, wide, scratch.data());
     Check(wide[0] == 0 && AsioTypeSupported(asio::kInt32LSB18) && !AsioTypeSupported(2 /* Int32MSB */) &&
-              !AsioTypeSupported(32 /* DSD */) && AsioSampleBits(asio::kInt32LSB24) == 24 &&
-              AsioSampleBytes(asio::kInt24LSB) == 3 && AsioTypeIsFloat(asio::kFloat64LSB),
-          L"ASIO a non-finite sample is silence; big-endian and DSD types are refused; widths are reported");
+              AsioTypeSupported(asio::kDsdInt8MSB1) && AsioTypeIsDsd(asio::kDsdInt8LSB1) &&
+              AsioSampleBits(asio::kDsdInt8LSB1) == 1 && !AsioTypeCarriesDop(asio::kDsdInt8LSB1) &&
+              AsioTypeCarriesDop(asio::kInt32LSB24) && !AsioTypeCarriesDop(asio::kInt16LSB) &&
+              AsioSampleBits(asio::kInt32LSB24) == 24 && AsioSampleBytes(asio::kInt24LSB) == 3 &&
+              AsioTypeIsFloat(asio::kFloat64LSB) && _wcsicmp(AsioTypeName(asio::kDsdInt8MSB1), L"DSD") == 0,
+          L"ASIO a non-finite sample is silence; big-endian types are refused; DSD and DoP types are reported");
+
+    batch.Next(L"ASIO DSD: DoP words per channel pair, native bytes with LSB1 reversed, idle past the source");
+    // 8 frames with 5 from the source, so the tail must be DSD idle.
+    constexpr size_t kDsdFrames = 8, kDsdSupplied = 5;
+    std::vector<float> dsd(kDsdFrames * 2);
+    for (size_t i = 0; i < dsd.size(); ++i) dsd[i] = (float)(i + 1) / 32;
+    auto word = [&](size_t i, unsigned ch) {
+        const uint32_t bits = i < kDsdSupplied ? DopWord(dsd[i * 2 + ch]) : 0x6969u;  // two idle bytes
+        return (uint32_t)(i % 2 ? kDopMarkerB : kDopMarkerA) << 16 | bits;
+    };
+    std::vector<uint8_t> left(64), right(64);
+    uint8_t marker = kDopMarkerA;
+    WriteAsioDop(dsd.data(), kDsdFrames, kDsdSupplied, asio::kInt24LSB, marker, left.data(), right.data());
+    bool dop = marker == kDopMarkerA;
+    for (size_t i = 0; i < kDsdFrames; ++i)
+        for (unsigned ch = 0; ch < 2; ++ch) {
+            const uint32_t w = word(i, ch);
+            const uint8_t* b = (ch ? right : left).data() + i * 3;
+            dop &= b[0] == (uint8_t)w && b[1] == (uint8_t)(w >> 8) && b[2] == (uint8_t)(w >> 16);
+        }
+    std::vector<uint32_t> wideLeft(64, 0), wideRight(64, 0);
+    uint8_t wideMarker = kDopMarkerA;
+    WriteAsioDop(dsd.data(), kDsdFrames, kDsdSupplied, asio::kInt32LSB, wideMarker, wideLeft.data(),
+                 wideRight.data());
+    bool aligned = wideMarker == kDopMarkerA;
+    for (size_t i = 0; i < kDsdFrames; ++i)
+        aligned &= wideLeft[i] == word(i, 0) << 8 && wideRight[i] == word(i, 1) << 8;
+    // Int32LSB24 keeps its 24 bits at the low end, sign-extended, as WriteAsioChannel writes PCM.
+    WriteAsioDop(dsd.data(), kDsdFrames, kDsdSupplied, asio::kInt32LSB24, wideMarker, wideLeft.data(),
+                 wideRight.data());
+    for (size_t i = 0; i < kDsdFrames; ++i)
+        aligned &= wideLeft[i] == (uint32_t)((int32_t)(word(i, 0) << 8) >> 8) &&
+                   wideRight[i] == (uint32_t)((int32_t)(word(i, 1) << 8) >> 8);
+    Check(dop && aligned,
+          L"ASIO DoP words: both channels share a marker, in three bytes, the top of 32 bits or the low 24 of Int32LSB24");
+    // Native DSD: a byte a frame, the same bits for MSB1 and back to front for LSB1.
+    auto reverse = [](uint8_t b) {
+        uint8_t r = 0;
+        for (unsigned k = 0; k < 8; ++k) r = (uint8_t)(r << 1 | (b >> k & 1));
+        return r;
+    };
+    std::vector<uint8_t> lsbLeft(64), lsbRight(64);
+    WriteAsioDsd(dsd.data(), kDsdFrames, kDsdSupplied, false, left.data(), right.data());
+    WriteAsioDsd(dsd.data(), kDsdFrames, kDsdSupplied, true, lsbLeft.data(), lsbRight.data());
+    bool native = true;
+    for (size_t i = 0; i < kDsdFrames; ++i) {
+        const uint8_t l = i < kDsdSupplied ? DsdByte(dsd[i * 2]) : kDsdIdle;
+        const uint8_t r = i < kDsdSupplied ? DsdByte(dsd[i * 2 + 1]) : kDsdIdle;
+        native &= left[i] == l && right[i] == r && lsbLeft[i] == reverse(l) && lsbRight[i] == reverse(r);
+    }
+    Check(native,
+          L"ASIO native DSD writes a byte a frame, MSB1 as it comes, LSB1 bit-reversed, idle past the source");
+}
+
+// Native DSD in the renderer: a DSD stream's payload is handed on bit for bit, whatever the volume,
+// EQ, effects and limiter say, and pause stops it at once with DSD idle instead of zeros.
+void TestNativeDsdRender() {
+    testlog::Batch batch;
+    constexpr unsigned kRate = 176400;  // DoP's frame rate for DSD64
+    constexpr size_t kFrames = 1024;
+    // Everything that normally changes a sample is on: a quarter volume, an EQ boost with crossfeed,
+    // reverb and bitcrush, night mode, loudness and the limiter.
+    EqSettings eq;
+    eq.enabled = true;
+    eq.gains[kEqBands / 2] = 9;
+    eq.crossfeed = true;
+    RenderEffects fx;
+    fx.volume = 0.25f;
+    fx.reverb.preset = ReverbPreset::Room;
+    fx.bitcrush.enabled = true;
+    fx.loudness = fx.night = true;
+    batch.Next(L"DSD payload passes the renderer bit for bit with volume, EQ, effects and the limiter on, and "
+               L"pause writes DSD idle");
+    bool exact = true, silent = true;
+    for (DsdTransport t : {DsdTransport::Dop, DsdTransport::AsioNative}) {
+        std::vector<float> bits(kFrames * 2);
+        for (size_t i = 0; i < bits.size(); ++i)
+            bits[i] = t == DsdTransport::Dop ? DopPayload((uint16_t)(i * 7919 + 1))
+                                             : DsdBytePayload((uint8_t)(i * 37 + 3));
+        exact &= RenderDsdPayload(bits.data(), kFrames, kRate, t, eq, &fx) == bits;
+        const auto paused = RenderDsdPayload(bits.data(), kFrames, kRate, t, eq, &fx, true);
+        const float idle = t == DsdTransport::Dop ? DopPayload(0x6969) : DsdBytePayload(kDsdIdle);
+        silent &= paused.size() == bits.size() &&
+                  std::all_of(paused.begin(), paused.end(), [idle](float v) { return v == idle; });
+        // Mute can't scale DSD, so it must turn the stream into idle while it keeps playing.
+        RenderEffects muted = fx;
+        muted.volume = 0;
+        const auto quiet = RenderDsdPayload(bits.data(), kFrames, kRate, t, eq, &muted);
+        silent &= quiet.size() == bits.size() &&
+                  std::all_of(quiet.begin(), quiet.end(), [idle](float v) { return v == idle; });
+    }
+    Check(exact, L"DSD payload passes the renderer bit for bit whatever the volume, EQ, effects and limiter");
+    Check(silent, L"a paused or muted DSD stream writes the transport's own DSD idle, never silence");
 }
 
 // ASIO output through the first installed driver, muted: it plays from the driver's buffer switch,

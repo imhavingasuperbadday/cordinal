@@ -24,13 +24,16 @@ namespace musicbrainz {
 namespace {
 
 using Clock = std::chrono::steady_clock;
+// When an album was last looked up is saved to disk, so it needs wall-clock time: the steady clock counts
+// from boot, which made a reboot stretch or cut every cached answer's lifetime.
+using Wall = std::chrono::system_clock;
 constexpr auto kFoundTtl = std::chrono::hours(24 * 30);
 constexpr auto kMissTtl = std::chrono::minutes(10);
 constexpr auto kInterval = std::chrono::milliseconds(1100);
 
 struct Entry {
     std::string releaseGroup;
-    Clock::time_point checked{};
+    Wall::time_point checked{};
     bool found = false;
 };
 
@@ -43,8 +46,8 @@ std::string Key(const Candidate& candidate) {
 }
 
 bool Fresh(const Entry& entry) {
-    if (entry.checked == Clock::time_point{}) return false;
-    auto age = Clock::now() - entry.checked;
+    if (entry.checked == Wall::time_point{}) return false;
+    auto age = Wall::now() - entry.checked;
     return age < (entry.found ? kFoundTtl : kMissTtl);
 }
 
@@ -128,7 +131,7 @@ void SaveCache() {
     std::string bytes = "1\n";
     {
         std::lock_guard lock(s.mutex);
-        auto cutoff = Clock::now() - std::chrono::hours(24 * 180);
+        auto cutoff = Wall::now() - std::chrono::hours(24 * 180);
         for (const auto& [key, entry] : s.cache) {
             if (entry.checked < cutoff) continue;
             if (key.find('\t') != std::string::npos || key.find('\n') != std::string::npos) continue;
@@ -172,7 +175,7 @@ void LoadCache() {
         Entry entry;
         entry.releaseGroup = line.substr(a + 1, b - a - 1);
         long long seconds = atoll(line.substr(b + 1, c - b - 1).c_str());
-        entry.checked = Clock::time_point(std::chrono::seconds(seconds));
+        entry.checked = Wall::time_point(std::chrono::seconds(seconds));
         entry.found = line.substr(c + 1, 1) == "1";
         if (!line.substr(0, a).empty()) s.cache[line.substr(0, a)] = std::move(entry);
     }
@@ -193,7 +196,7 @@ std::string Fetch(const Candidate& candidate, bool& offline) {
     offline = false;
     std::string query = "releasegroup:\"" + candidate.title + "\" AND artist:\"" + candidate.artist + "\"";
     std::string url = "https://musicbrainz.org/ws/2/release-group?query=" + Encode(query) + "&fmt=json&limit=25";
-    std::string headers = "User-Agent: cordinal/0.1.14 (https://github.com/imhavingasuperbadday/cordinal)\r\n"
+    std::string headers = "User-Agent: cordinal/0.1.15 (https://github.com/imhavingasuperbadday/cordinal)\r\n"
                           "Accept: application/json\r\n";
 #ifdef _WIN32
     void* session = nullptr;
@@ -255,7 +258,7 @@ void Worker() {
             std::lock_guard lock(s.mutex);
             Entry entry;
             entry.releaseGroup = group;
-            entry.checked = Clock::now();
+            entry.checked = Wall::now();
             entry.found = !group.empty();
             s.cache[Key(candidate)] = std::move(entry);
             if (offline) s.nextRequest = Clock::now() + std::chrono::seconds(60);

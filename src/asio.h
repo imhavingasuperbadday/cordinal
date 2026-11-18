@@ -8,11 +8,14 @@
 #include <windows.h>
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "dsd.h"
 
 // --- The driver ABI. A driver is an in-process COM object registered under HKLM\SOFTWARE\ASIO\<name>
 // with a CLSID value; it is created with that CLSID as both class and interface id. Its methods use
@@ -41,6 +44,19 @@ enum : Error {
 enum SampleType : long {
     kInt16LSB = 16, kInt24LSB = 17, kInt32LSB = 18, kFloat32LSB = 19, kFloat64LSB = 20,
     kInt32LSB16 = 24, kInt32LSB18 = 25, kInt32LSB20 = 26, kInt32LSB24 = 27,
+    // 1-bit DSD, 8 samples to a byte: the first sample in the low or the high bit. The third, 8-bit DSD,
+    // is not something this player can feed.
+    kDsdInt8LSB1 = 32, kDsdInt8MSB1 = 33, kDsdInt8NER8 = 40,
+};
+
+// ASIO 2.2's future() selectors that switch a driver between PCM and DSD. ASIOIoFormat is the requested
+// format and 508 unused bytes; a driver that can't do it leaves the format at -1 or fails the call. The
+// switch has to happen before the buffers are created.
+enum : long { kSetIoFormat = 0x23111961, kGetIoFormat = 0x23111983, kCanDoIoFormat = 0x23112004 };
+enum : long { kPcmFormat = 0, kDsdFormat = 1 };
+struct IoFormat {
+    long formatType;
+    char future[512 - sizeof(long)];
 };
 
 // asioMessage selectors (the host answers 1 for "handled" or "supported").
@@ -119,8 +135,10 @@ std::vector<AsioDriverInfo> ListAsioDrivers();
 
 // --- Sample conversion.
 bool AsioTypeSupported(long type);
+bool AsioTypeIsDsd(long type);       // a 1-bit type: one byte of the buffer holds 8 samples
+bool AsioTypeCarriesDop(long type);  // an integer type of 24 bits or more, for DoP over PCM
 int AsioSampleBytes(long type);  // bytes per sample in the driver's buffer; 0 when unsupported
-int AsioSampleBits(long type);   // significant bits (32 for float)
+int AsioSampleBits(long type);   // significant bits (32 for float, 1 for DSD)
 bool AsioTypeIsFloat(long type);
 const wchar_t* AsioTypeName(long type);
 // Channel `channel` of `frames` interleaved frames of `channels` floats into one driver buffer of
@@ -128,6 +146,21 @@ const wchar_t* AsioTypeName(long type);
 // from integers of that width and dither otherwise, as ConvertSamples does for WASAPI.
 void WriteAsioChannel(const float* interleaved, size_t frames, unsigned channels, unsigned channel, long type,
                       void* out, float* scratch);
+// DoP over PCM: one 24-bit word per frame in each of the two output buffers, `marker` (dsd.h) in the top
+// byte and DopWord(payload) below, so both channels of a frame share a marker and the alternation
+// continues across calls. Frames past `supplied` are DoP idle. 32-bit types take the word in their top
+// bits; kInt24LSB gets three bytes each.
+void WriteAsioDop(const float* interleaved, size_t frames, size_t supplied, long type, uint8_t& marker,
+                  void* left, void* right);
+// Native ASIO DSD: one byte per frame in each of the two output buffers (DsdByte, dsd.h); frames past
+// `supplied` are DSD idle. `lsbFirst` reverses the eight bits of each byte, which kDsdInt8LSB1 wants and
+// kDsdInt8MSB1 must not have.
+void WriteAsioDsd(const float* interleaved, size_t frames, size_t supplied, bool lsbFirst, void* left,
+                  void* right);
+
+// What a stream is playing: PCM (including DoP, which looks like PCM to the driver), or native DSD, where
+// the driver's rate is the DSD bit rate and every buffer sample is one DSD bit.
+enum class AsioDsd : uint8_t { None, Native, Dop };
 
 // --- One loaded driver, playing.
 // The driver lives on a single-threaded-apartment thread of its own that also pumps its window
@@ -136,8 +169,9 @@ void WriteAsioChannel(const float* interleaved, size_t frames, unsigned channels
 class AsioStream {
 public:
     // Fills `frames` interleaved stereo frames. Runs on the driver's real-time thread: it must not lock,
-    // allocate or block.
-    using RenderFn = std::function<void(float* stereo, size_t frames)>;
+    // allocate or block. Returns how many came from the source; native DSD fills the rest with idle
+    // itself, PCM leaves silence there.
+    using RenderFn = std::function<size_t(float* stereo, size_t frames)>;
     // The driver asked to be set up again (a reset request, a new buffer size, a new rate).
     using ResetFn = std::function<void()>;
 
@@ -147,10 +181,12 @@ public:
     AsioStream& operator=(const AsioStream&) = delete;
 
     // Loads `driver` (when not already loaded), runs it at `rate` (0 keeps the driver's own), and starts
-    // it. False with `error` set when it can't play; the driver is then unloaded.
-    bool Open(const AsioDriverInfo& driver, unsigned rate, RenderFn render, ResetFn reset, std::wstring& error);
+    // it. `dsd` Native runs it in DSD mode at the DSD bit rate, and `dsd` Dop plays DoP at a PCM rate in
+    // a type that can carry it. False with `error` set when it can't play; the driver is then unloaded.
+    bool Open(const AsioDriverInfo& driver, unsigned rate, AsioDsd dsd, RenderFn render, ResetFn reset,
+              std::wstring& error);
     // Sets the stream up again at `rate` without reloading the driver. False like Open.
-    bool Restart(unsigned rate, std::wstring& error);
+    bool Restart(unsigned rate, AsioDsd dsd, std::wstring& error);
     // Opens the driver's own settings window (buffer size, clock). Returns at once; the window runs on
     // the driver's thread.
     void ShowPanel();
@@ -165,11 +201,12 @@ public:
     // A rate the driver can't do is replaced by its own; this says so (empty otherwise).
     const std::wstring& Problem() const { return problem_; }
     const CLSID& Clsid() const { return clsid_; }
+    AsioDsd Dsd() const { return dsd_; }  // what the stream is playing
 
 private:
     struct Thread;
     void Call(const std::function<void()>& work);  // runs `work` on the driver's thread and waits
-    bool Setup(unsigned rate, std::wstring& error);  // on the driver's thread
+    bool Setup(unsigned rate, AsioDsd dsd, std::wstring& error);  // on the driver's thread
     void Teardown();                                 // on the driver's thread
     void Unload();                                   // on the driver's thread
     void Switch(long index);                         // the driver's real-time thread
@@ -188,6 +225,9 @@ private:
     std::vector<float> stereo_, scratch_;
     std::atomic<unsigned> rate_{0};
     long type_ = 0;
+    AsioDsd dsd_ = AsioDsd::None;
+    bool dsdLsb_ = false;                // the driver wants the first DSD sample in the low bit
+    uint8_t dopMarker_ = kDopMarkerA;    // DoP marker for the next frame; driver thread only
     unsigned bufferFrames_ = 0, latency_ = 0;
     std::wstring driverName_, problem_;
 };

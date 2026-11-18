@@ -320,6 +320,39 @@ int TestTagWriterMp3Mp4(const std::wstring& fixtures, const std::wstring& scratc
         if (RunFFmpegForTest(args + QuoteArg(out)) && FileSize(out)) files.push_back(out);
         else LogSkipped(log, name);
     }
+    // FFmpeg keeps a track total it can't put in TRCK as TXXX:TRACKTOTAL, and ID3v1 holds a genre byte and
+    // a track byte: editing the track number must keep that total, and a cleared genre must stay cleared
+    // rather than come back from ID3v1.
+    {
+        std::wstring txxx = dir + L"\\txxx.mp3";
+        if (RunFFmpegForTest(L"-i " + src + L" -c copy -map_metadata -1 -metadata track=3 -metadata TRACKTOTAL=12 "
+                             L"-metadata genre=Rock -write_id3v1 1 " + QuoteArg(txxx)) && FileSize(txxx)) {
+            TagData made;
+            ReadTags(txxx, made);
+            if (Ready(made.track == 3 && made.trackTotal == 12 && made.genre == "Rock",
+                      L"an MP3 with TXXX:TRACKTOTAL and an ID3v1 genre is made")) {
+                TagEdit trackOnly;
+                trackOnly.track = 5;
+                std::wstring error;
+                TagData after;
+                const bool wrote = WriteTags(txxx, trackOnly, error);
+                ReadTags(txxx, after);
+                testlog::Check(wrote && after.track == 5 && after.trackTotal == 12,
+                               L"MP3 track edit keeps a TXXX track total (track %u of %u) %ls", after.track,
+                               after.trackTotal, error.c_str());
+                TagEdit noGenre;
+                noGenre.genre = "";
+                TagData cleared;
+                const bool clearedOk = WriteTags(txxx, noGenre, error);
+                ReadTags(txxx, cleared);
+                testlog::Check(clearedOk && cleared.genre.empty() && cleared.track == 5,
+                               L"MP3 cleared genre stays cleared with an ID3v1 tag (genre '%hs', track %u) %ls",
+                               cleared.genre.c_str(), cleared.track, error.c_str());
+            }
+        } else {
+            LogSkipped(log, L"txxx.mp3");
+        }
+    }
     TestTagWriterFiles(files, log, L"tag writing: MP3 and MP4");
     DeleteTestFolder(dir);
     return testlog::Failures() - before;

@@ -354,6 +354,10 @@ unsigned AudioOutput::RequestRate(unsigned rate) {
     return rate_;
 }
 
+// DSD stays PCM on Linux: the sound server takes float, so a DSD stream would need a converter of its
+// own before it could be played. The engine keeps converting it to PCM.
+DsdTransport AudioOutput::RequestDsd(unsigned, bool) { return DsdTransport::None; }
+
 void AudioOutput::SetUpmix(bool upmix) {
     if (wantedUpmix_.exchange(upmix) == upmix || !state_) return;
     std::string why;

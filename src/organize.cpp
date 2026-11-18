@@ -137,9 +137,17 @@ std::vector<OrganizeMove> PlanOrganize(const std::vector<TrackId>& ids, const st
         if (textcase::Path(m.to) == textcase::Path(m.from)) {
             m.skip = L"already in place";
         } else {
-            for (int n = 2; (taken.count(textcase::Path(m.to)) || Exists(m.to)) && n <= 99; ++n)
+            for (int n = 2; (taken.count(textcase::Path(m.to)) || Exists(m.to)) && n <= 99; ++n) {
                 m.to = dir + name + L" (" + std::to_wstring(n) + L")." + ext;
-            if (taken.count(textcase::Path(m.to)) || Exists(m.to)) m.skip = L"a file with that name already exists";
+                // The file's own numbered name is free for it: without this, "Intro (2)" moved to
+                // "Intro (3)" on one run and back to "(2)" on the next.
+                if (textcase::Path(m.to) == textcase::Path(m.from) && !taken.count(textcase::Path(m.to))) {
+                    m.skip = L"already in place";
+                    break;
+                }
+            }
+            if (m.skip.empty() && (taken.count(textcase::Path(m.to)) || Exists(m.to)))
+                m.skip = L"a file with that name already exists";
         }
         taken.insert(textcase::Path(m.to));
         plan.push_back(std::move(m));

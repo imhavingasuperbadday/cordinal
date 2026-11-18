@@ -226,9 +226,10 @@ void MaybeOfferSteamSoundtracks() {
     if (g.settings.steamOffered || g_steamOfferWorker.joinable()) return;
     auto request = std::make_unique<PlaylistFile>();
     request->watchedFolders = g.settings.folders;
+    request->steamSoundEffects = g.settings.steamSoundEffects;
     g_steamOfferCancel = false;
     g_steamOfferWorker = std::thread([request = std::move(request)]() mutable {
-        request->paths = NewSteamFolders(request->watchedFolders, g_steamOfferCancel);
+        request->paths = NewSteamFolders(request->watchedFolders, g_steamOfferCancel, nullptr, request->steamSoundEffects);
         request->cancelled = g_steamOfferCancel;
         auto* result = request.release();
         if (!PostMessageW(nullptr, WM_APP_PLAYLIST_FILE, 2, (LPARAM)result)) delete result;
@@ -262,7 +263,7 @@ void OnPlaylistFile(WPARAM kind, LPARAM value) {
                     request->save ? L"Saving playlist..." : L"Opening playlist...");
         g_playlistFileWorker = std::thread([request = std::move(request)]() mutable {
             if (request->findSteam) {
-                request->steam.folders = FindSteamMusicFolders(&g_playlistFileCancel);
+                request->steam.folders = FindSteamMusicFolders(&g_playlistFileCancel, request->steamSoundEffects);
                 request->ok = PrepareSteamImport(request->steam, std::move(request->steamSongs), &g_playlistFileCancel);
                 request->paths = NewSteamFolders(request->watchedFolders, g_playlistFileCancel, &request->steam.folders);
                 request->cancelled = g_playlistFileCancel;

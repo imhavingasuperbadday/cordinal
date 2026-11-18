@@ -992,6 +992,8 @@ struct Server::Impl {
                     artworkBytes -= artwork.begin()->second.bytes.size();
                     artwork.erase(artwork.begin());
                 }
+                // Another request may have cached the same cover meanwhile; count its bytes once.
+                if (auto it = artwork.find(cacheKey); it != artwork.end()) artworkBytes -= it->second.bytes.size();
                 artworkBytes += entry.bytes.size();
                 artwork[cacheKey] = entry;
             }

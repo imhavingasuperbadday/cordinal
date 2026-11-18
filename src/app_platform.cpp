@@ -36,11 +36,12 @@ void StartSteamDiscovery(bool offer) {
     g_steamCancel = false;
     const HWND hwnd = g.hwnd;
     auto known = offer ? std::vector<SteamSong>() : SnapshotSteamSongs(g_lib);
-    g_steamWorker = std::thread([hwnd, offer, known = std::move(known)]() mutable {
+    const bool soundEffects = g.steamSoundEffects;
+    g_steamWorker = std::thread([hwnd, offer, soundEffects, known = std::move(known)]() mutable {
         auto result = std::make_unique<SteamImport>();
         WPARAM state = offer ? 1 : 0;
         try {
-            result->folders = FindSteamMusicFolders(&g_steamCancel);
+            result->folders = FindSteamMusicFolders(&g_steamCancel, soundEffects);
             if (!offer && !PrepareSteamImport(*result, std::move(known), &g_steamCancel)) state |= 2;
         } catch (...) {
             state |= 2;

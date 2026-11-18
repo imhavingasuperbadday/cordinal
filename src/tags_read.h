@@ -32,8 +32,13 @@ inline uint32_t Syncsafe(sv s, size_t i) {
     return (U8(s, i) & 0x7F) << 21 | (U8(s, i + 1) & 0x7F) << 14 | (U8(s, i + 2) & 0x7F) << 7 | (U8(s, i + 3) & 0x7F);
 }
 inline sv Sub(sv s, size_t pos, size_t n = sv::npos) { return pos >= s.size() ? sv() : s.substr(pos, n); }
-// Kilobits a second over the whole file, as most formats report it.
-inline uint32_t Kbps(uint64_t bytes, double seconds) { return (uint32_t)(bytes * 8 / seconds / 1000 + 0.5); }
+// Kilobits a second over the whole file, as most formats report it. A damaged header's duration can
+// be tiny, zero or not a number; a rate beyond uint32_t would be undefined to convert, and is no rate
+// at all, so it reads as unknown (0).
+inline uint32_t Kbps(uint64_t bytes, double seconds) {
+    const double kbps = (double)bytes * 8 / seconds / 1000 + 0.5;
+    return kbps >= 0 && kbps < 4294967296.0 ? (uint32_t)kbps : 0;
+}
 
 // Random-access reader over one file. Reads are bounds-checked against the real size and capped
 // at 64 MB, so a corrupt length in a tag header can't become a huge allocation.

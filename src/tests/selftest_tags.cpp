@@ -135,6 +135,72 @@ void TestShortTagHeaders(const std::wstring& scratch) {
     }
     Check(shortFiles.Passed(), L"short media headers fail safely for tags, covers, lyrics, chapters and loops%ls",
           shortFiles.failed.c_str());
+
+    // Matroska stores the duration and the sampling frequency as floats. A damaged file's may be NaN,
+    // infinite or out of range, which converted to the sample rate was undefined (found by fuzz-tags)
+    // and as the duration reached the library. Each reads as unknown instead.
+    auto element = [](std::string_view id, const std::string& body) {
+        return std::string(id) + (char)(0x80 | body.size()) + body;  // a one-byte size: bodies stay short
+    };
+    auto float8 = [](double value) {
+        uint64_t bits;
+        memcpy(&bits, &value, 8);
+        std::string out;
+        for (int i = 7; i >= 0; --i) out += (char)(bits >> 8 * i);
+        return out;
+    };
+    testlog::Cases badFloats;
+    const std::wstring mka = scratch + L"\\bad-float.mka";
+    const double kDamaged[] = {std::nan(""), HUGE_VAL, -HUGE_VAL, -1.0, 1e20};
+    for (double value : kDamaged) {
+        const std::string info = element("\x15\x49\xA9\x66", element("\x44\x89", float8(value)));
+        const std::string audio = element("\xE1", element("\xB5", float8(value)) + element("\x9F", "\x02"));
+        const std::string tracks = element("\x16\x54\xAE\x6B", element("\xAE", element("\x83", "\x02") + audio));
+        const std::string file = element("\x1A\x45\xDF\xA3", "") + element("\x18\x53\x80\x67", info + tracks);
+        if (!Ready(WriteTestBytes(mka, file), L"the Matroska file with a damaged float is prepared")) return;
+        TagData tags;
+        const bool ok = ReadTags(mka, tags);
+        // 1e20 is out of the rate's range, but as a duration only absurd: it stays, finite.
+        const bool durationOk = std::isfinite(value) && value > 0 ? std::isfinite(tags.duration) : tags.duration == 0;
+        badFloats.Add(ok && tags.sampleRate == 0 && tags.channels == 2 && durationOk,
+                      std::to_wstring(value) + L": rate " + std::to_wstring(tags.sampleRate) + L", duration " +
+                          std::to_wstring(tags.duration));
+    }
+    // AIFF's rate is an 80-bit float: the largest exponent is infinity, and 2^40 is out of range.
+    const std::wstring aiff = scratch + L"\\bad-rate.aiff";
+    for (uint16_t exponent : {(uint16_t)0x7FFF, (uint16_t)(16383 + 40)}) {
+        std::string comm("\0\x02\0\0\0\x10\0\x10", 8);  // two channels, 16 frames, 16 bits
+        comm += (char)(exponent >> 8);
+        comm += (char)exponent;
+        comm += std::string("\x80\0\0\0\0\0\0\0", 8);
+        const std::string file = std::string("FORM\0\0\0\x1E" "AIFFCOMM\0\0\0\x12", 16) + comm;
+        if (!Ready(WriteTestBytes(aiff, file), L"the AIFF file with a damaged rate is prepared")) return;
+        TagData tags;
+        ReadTags(aiff, tags);  // a file with no sound data may count as unreadable; only the rate matters
+        badFloats.Add(tags.sampleRate == 0 && tags.duration == 0,
+                      L"AIFF exponent " + std::to_wstring(exponent) + L": rate " + std::to_wstring(tags.sampleRate));
+    }
+    // An MP4 movie lasting one 4294967295th of a second: its bitrate over the file would be beyond
+    // uint32_t (found by fuzz-aac), so it reads as unknown.
+    {
+        auto box = [](std::string_view type, const std::string& body) {
+            const uint32_t size = (uint32_t)(8 + body.size());
+            std::string out{(char)(size >> 24), (char)(size >> 16), (char)(size >> 8), (char)size};
+            return out + std::string(type) + body;
+        };
+        std::string mvhd(100, '\0');
+        mvhd[12] = mvhd[13] = mvhd[14] = mvhd[15] = (char)0xFF;  // timescale 4294967295
+        mvhd[19] = 1;                                            // duration 1
+        const std::wstring mp4 = scratch + L"\\tiny-duration.m4a";
+        const std::string file = box("ftyp", std::string("M4A \0\0\0\0", 8)) + box("moov", box("mvhd", mvhd));
+        if (!Ready(WriteTestBytes(mp4, file), L"the MP4 file with a tiny duration is prepared")) return;
+        TagData tags;
+        const bool ok = ReadTags(mp4, tags);
+        badFloats.Add(ok && tags.duration > 0 && tags.bitrate == 0,
+                      L"MP4 of " + std::to_wstring(tags.duration) + L" s: " + std::to_wstring(tags.bitrate) + L" kbps");
+    }
+    Check(badFloats.Passed(), L"a Matroska duration, a Matroska or AIFF sample rate or a bitrate that is NaN, infinite or out of range reads as unknown%ls",
+          badFloats.failed.c_str());
 }
 
 // MP4 text atoms say whether they are UTF-8 (1), UTF-16BE (2) or implicit; mdta metadata refers
@@ -334,8 +400,12 @@ void TestSteam(const std::wstring& scratch) {
     const std::wstring stray = lib + L"\\steamapps\\common\\Lone Game";
     const std::wstring placeholders = game + L"\\loadedsoundeffects";
     const std::wstring emptyMusic = stray + L"\\Music";
+    // Real clips in effects folders whose names alone give them away (Project Zomboid's media\sound,
+    // Rain World's loadedsoundeffects\<group>): left out unless sound effects are asked for.
+    const std::wstring sound = game + L"\\media\\sound";
+    const std::wstring effectGroup = placeholders + L"\\Ambient";
     std::error_code ec;
-    for (const std::wstring& d : {album, ost, sfx, stray, placeholders, emptyMusic})
+    for (const std::wstring& d : {album, ost, sfx, stray, placeholders, emptyMusic, sound, effectGroup})
         std::filesystem::create_directories(d, ec);
     const std::string wav = MakeSineWav(0.01, 0.5);
     bool wrote = WriteTestBytes(album + L"\\song.wav", wav) && WriteTestBytes(ost + L"\\track1.wav", wav) &&
@@ -344,6 +414,8 @@ void TestSteam(const std::wstring& scratch) {
     for (int i = 0; i < 8; ++i) {
         wrote &= WriteTestBytes(placeholders + L"\\" + std::to_wstring(i) + L".wav", "");
         wrote &= WriteTestBytes(sfx + L"\\" + std::to_wstring(i) + L".wav", wav);
+        wrote &= WriteTestBytes(sound + L"\\" + std::to_wstring(i) + L".wav", wav);
+        wrote &= WriteTestBytes(effectGroup + L"\\" + std::to_wstring(i) + L".wav", wav);
     }
     if (!Ready(wrote, L"STEAM fixture written")) {
         DeleteTestFolder(lib);
@@ -358,8 +430,13 @@ void TestSteam(const std::wstring& scratch) {
     };
     Check(has(lib + L"\\steamapps\\music") && has(lib + L"\\steamapps\\common\\Some Game\\Soundtrack"),
           L"STEAM library: found music album root and in-game soundtrack (%zu roots)", found.size());
-    Check(!has(sfx) && !has(stray) && !has(placeholders) && !has(emptyMusic) && found.size() == 2,
+    Check(!has(sfx) && !has(sound) && !has(effectGroup) && !has(stray) && !has(placeholders) && !has(emptyMusic) &&
+              found.size() == 2,
           L"STEAM library: effects, empty placeholders and stray wavs are not soundtracks (%zu roots)", found.size());
+    found = FindSteamMusicFoldersIn(lib, nullptr, true);
+    Check(has(sfx) && has(sound) && has(effectGroup) && !has(placeholders) && !has(stray) && found.size() == 5,
+          L"STEAM library with sound effects: effects folders with real clips join the soundtracks (%zu roots)",
+          found.size());
     std::atomic<bool> cancelled{true};
     Check(FindSteamMusicFoldersIn(lib, &cancelled).empty(), L"STEAM cancellation discards all discovered roots");
     std::vector<ScanFile> files;
@@ -473,7 +550,7 @@ void TestCrashDump(const std::wstring& scratch) {
 void TestListenBrainz(const std::wstring& scratch) {
     using namespace listenbrainz;
     const std::string info = "\"media_player\":\"cordinal\",\"submission_client\":\"cordinal\","
-                             "\"submission_client_version\":\"0.1.14\"";
+                             "\"submission_client_version\":\"0.1.15\"";
 
     Listen a;
     a.listenedAt = 1700000000;

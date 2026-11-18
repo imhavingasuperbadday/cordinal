@@ -560,6 +560,8 @@ void OpenCopy(const std::vector<TrackId>& ids, const std::wstring& playlist) {
     CopyFocus(0);
 }
 
-bool PanelReplanPending() { return (g_kind == Kind::Organize && g_org.dirty) || (g_kind == Kind::Copy && g_copy.dirty); }
+bool PanelReplanPending() {
+    return (g_kind == Kind::Organize && g_org.dirty) || (g_kind == Kind::Copy && g_copy.dirty) || ConvertPanelDirty();
+}
 
 }  // namespace lx

@@ -5,7 +5,8 @@
 // bar and now playing patterns replace the user's own (which stay saved), its title functions ($define ...)
 // and fields join the built-in ones, and its themes with their sounds, auto-playlists, key bindings and EQ
 // presets are offered. Columns and column sets join the header menu; layout presets join Customize layout.
-// Fonts load privately while their pack is on; global keys use the desktop shortcut portal.
+// Its group headers and tray tip apply as on Windows (the last pack that sets them wins). Fonts load
+// privately while their pack is on; global keys use the desktop shortcut portal.
 #include "alternate_ui.h"
 #include "ui_internal.h"
 #include "dbus.h"
@@ -635,6 +636,7 @@ void ApplyAll() {
     ApplyColumns();
     AlternateThemeChanged();
     ClearTextCache();
+    MprisChanged();  // a pack's tray tip
     g.redraw = true;
 }
 
@@ -807,6 +809,13 @@ const std::wstring& EffectiveFormat(PackFormatSlot slot, const std::wstring& own
     return owner ? owner->formats[slot] : own;
 }
 
+const PackGroups* PackGroupLook() {
+    const PackGroups* look = nullptr;
+    for (auto& p : g_packs)
+        if (p->on && p->pack.groups.any) look = &p->pack.groups;
+    return look;
+}
+
 const wchar_t* PackOwningFormat(PackFormatSlot slot) {
     const Pack* owner = FormatOwner(slot);
     return owner ? owner->name.c_str() : nullptr;
@@ -921,6 +930,74 @@ bool InstallPack(const std::wstring& source) {
     LoadPacks();
     ShowMessage(L"Installed the pack. Turn it on in View > Packs.");
     return true;
+}
+
+// View > Packs > Make a pack, as on Windows (app_packs.cpp, MakeStarterPack): the current theme, formats,
+// columns, EQ, layout and auto-playlists as a new pack (off), with an example of every other file. It is
+// written into a hidden folder and renamed into place, so a failure leaves no half-made pack.
+std::wstring MakeStarterPack() {
+    std::error_code ec;
+    fs::create_directories(PacksDir(), ec);
+    std::string id = "My pack";
+    for (int n = 2; fs::exists(PacksDir() / id, ec) || fs::exists(PacksDir() / (id + ".cordpack"), ec); ++n)
+        id = "My pack " + std::to_string(n);
+    const fs::path temp = PacksDir() / (".new-" + id), dest = PacksDir() / id;
+    fs::remove_all(temp, ec);
+    const Theme& theme = ThemeInfo(g.settings.theme);
+    StarterSetup setup;
+    setup.name = compat::Widen(id.c_str());
+    setup.palette = CurrentPalette();
+    setup.font = theme.font;
+    setup.fontPx = theme.fontPx;
+    setup.playingMark = theme.playingMark;
+    setup.ratingMark = theme.ratingMark;
+    const std::wstring* formats[] = {&g.settings.fmtWindow, &g.settings.fmtStatus, &g.settings.fmtTitle, &g.settings.fmtSub};
+    for (int i = 0; i < 4; ++i) setup.formats[i] = *formats[i];
+    for (int c : ActiveColumnTypes()) {  // as ApplyPackColumnSet matches them
+        if (c <= 0 || c >= ColumnTotal()) continue;
+        std::wstring name = c < ui::kColumnCount ? std::wstring(ColumnAt(c).name) : g_columns[c - ui::kColumnCount].key;
+        setup.columns += (setup.columns.empty() ? L"" : L", ") + name;
+    }
+    setup.eq = g.settings.eq.gains;
+    const WindowLayout& l = g.settings.layout;
+    const wchar_t* docks[] = {L"top", L"bottom", L"left", L"right"};
+    const wchar_t* sizes[] = {L"slim", L"medium", L"tall"};
+    const wchar_t* parts[] = {L"transport", L"order", L"waveform", L"times", L"volume",
+                              L"now_playing", L"tabs", L"search", L"view_buttons", L"status_bar"};
+    auto bit = [](bool on) { return std::wstring(on ? L"1" : L"0"); };
+    setup.layout = L"player = " + std::wstring(docks[std::clamp(l.dock, 0, 3)]) + L"\nwaveform size = " +
+                   sizes[std::clamp(l.waveSize, 0, 2)] + L"\nwaveform row = " + bit(l.waveOwnRow) +
+                   L"\nside panels left = " + bit(l.panelsLeft) + L"\n";
+    for (unsigned i = 0; i < std::size(parts); ++i)
+        setup.layout += std::wstring(parts[i]) + L" = " + bit(!(l.hiddenParts >> i & 1)) + L"\n";
+    const std::pair<const wchar_t*, bool> flags[] = {{L"large_cover", l.largeCover}, {L"points", l.points}, {L"up_next", l.upNext},
+        {L"menu_bar", l.menuBar}, {L"tab_counts", l.tabCounts}, {L"status_details", l.statusDetails}, {L"hints", l.hints}};
+    for (const auto& [key, on] : flags) setup.layout += std::wstring(key) + L" = " + bit(on) + L"\n";
+    for (const auto& pl : g.playlists)
+        if (pl.kind == PlaylistKind::Auto) setup.autoPlaylists.push_back({pl.name, pl.rules});
+    bool ok = fs::create_directories(temp / "sounds", ec) && !ec;
+    for (const auto& [file, text] : StarterPackFiles(setup)) {
+        if (!ok) break;
+        fs::path path = temp / ToUtf8(file);
+        fs::create_directories(path.parent_path(), ec);
+        std::ofstream out(path, std::ios::binary);
+        std::string bytes = ToUtf8(text);
+        ok = out && out.write(bytes.data(), (std::streamsize)bytes.size()) && (out.close(), !out.fail());
+    }
+    if (ok) fs::rename(temp, dest, ec);
+    if (!ok || ec) {
+        fs::remove_all(temp, ec);
+        ShowMessage(L"Couldn't make a pack in " + compat::Widen(PacksDir().string().c_str()) + L".");
+        return L"";
+    }
+    LoadPacks();
+    ShowMessage(L"Made the pack \"" + setup.name + L"\" from your setup. Edit its files, then turn it on in View > Packs.");
+    return compat::Widen(dest.string().c_str());
+}
+
+void ReloadPacks() {
+    LoadPacks();
+    ShowMessage(L"Reloaded " + std::to_wstring(PackCount()) + (PackCount() == 1 ? L" pack." : L" packs."));
 }
 
 void OpenPacksFolder() {

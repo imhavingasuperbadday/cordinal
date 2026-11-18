@@ -108,17 +108,26 @@ bool SortKeepsAlbums(int column) {  // #, Artist, Album, Year, Album artist, Dis
     return column <= 0 || column == 1 || column == 3 || column == 4 || column == 5 || column == 10 || column == 13;
 }
 
-// The album groups and display lines for g.rows.
+const PackGroups* GroupLook() { return g.settings.theme == ThemeMode::Foobar ? nullptr : PackGroupLook(); }
+
+// The album groups and display lines for g.rows. A pack's `by` format groups runs of two or more
+// tracks whose formatted text matches instead of albums (app_groups.cpp, BuildRows).
 void BuildLines() {
     g_groups.clear();
     g_lines.clear();
     g_lineOfRow.assign(g.rows.size(), 0);
     bool grouping = g.settings.groupAlbums && !g.playlists.empty() && SortKeepsAlbums(Active().sortColumn);
     int n = (int)g.rows.size();
+    const PackGroups* look = grouping ? GroupLook() : nullptr;
+    std::vector<std::wstring> keys;
+    if (look && !look->by.empty())
+        for (int p = 0; p < n; ++p) keys.push_back(FormatTitle(look->by, Lookup(g.rows[p], false)));
     for (int p = 0; p < n;) {
         const Track& first = g_lib[g.rows[p]];
         int q = p + 1;
-        if (grouping && first.album)
+        if (!keys.empty())
+            while (q < n && keys[q] == keys[p]) ++q;
+        else if (grouping && first.album)
             while (q < n && SameAlbum(first, g_lib[g.rows[q]])) ++q;
         if (q - p >= 2) {
             Group gr;
@@ -148,9 +157,20 @@ void BuildLines() {
     }
 }
 
+std::wstring GroupHeaderText(const std::wstring& format, const Group& gr) {
+    FieldLookup track = Lookup(g.rows[gr.first], false);
+    return FormatTitle(format, [&](const std::wstring& name, std::wstring& out) {
+        if (name == L"group_tracks") out = std::to_wstring(gr.count);
+        else if (name == L"group_length") out = FormatDuration(gr.seconds);
+        else return track(name, out);
+        return true;
+    });
+}
+
 // What a grouped track's cell leaves to its header: the album, and the artist and year that match.
 bool GroupHidesCell(const Line& line, int column) {
     if (line.group < 0) return false;
+    if (const PackGroups* look = GroupLook(); look && !look->by.empty()) return false;  // not album groups
     const Group& gr = g_groups[line.group];
     const Track& t = g_lib[g.rows[line.row]];
     switch (column) {
@@ -350,13 +370,14 @@ void AddSteamSoundtracks() {
     auto request = std::make_unique<PlaylistFile>();
     request->findSteam = true;
     request->watchedFolders = g.settings.folders;
+    request->steamSoundEffects = g.settings.steamSoundEffects;
     request->steamSongs = SnapshotSteamSongs(g_lib);
     OnPlaylistFile(0, (LPARAM)request.release());
 }
 
 std::vector<std::wstring> NewSteamFolders(const std::vector<std::wstring>& folders, const std::atomic<bool>& cancel,
-                                        const std::vector<std::wstring>* discovered) {
-    auto roots = discovered ? *discovered : FindSteamMusicFolders(&cancel);
+                                        const std::vector<std::wstring>* discovered, bool soundEffects) {
+    auto roots = discovered ? *discovered : FindSteamMusicFolders(&cancel, soundEffects);
     std::vector<std::wstring> watched, result;
     for (const auto& folder : folders) {
         if (cancel) return {};

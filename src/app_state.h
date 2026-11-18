@@ -192,12 +192,11 @@ enum : int {
     IDM_SPEED_BASE = 3510,       // + kSpeeds index
     IDM_TEMPO_BASE = 3520,       // + kTempos index
     IDM_LOUDNESS_COMP = 3530, IDM_NIGHT_MODE, IDM_RG_ESTIMATE, IDM_BITCRUSH,
-    // Converting to .cord (app_convert.cpp).
+    // Library > Convert... and undoing its replacements (app_convert.cpp).
     IDM_CONVERT = 3540, IDM_CONVERT_UNDO, IDM_CONVERT_CANCEL, IDM_CONVERT_RECYCLE, IDM_CONVERT_SHOW_ORIGINALS,
     IDM_CONVERT_MEMORY_BASE = 3550,  // + kConvertMemoryDays index
     // Copy to folder or device (app_copy.cpp): the selection or playlist, the playlist tab's, Cancel.
     IDM_COPY_TO = 3560, IDM_COPY_PL, IDM_COPY_CANCEL,
-    IDM_EXPORT_BASE = 3570,  // + CordExport, excluding None
     // Packs (app_packs.cpp): View > Packs, one item per pack, and the pack themes in View > Theme.
     IDM_PACK_BASE = 3600,        // + pack index, up to kMaxPacks
     IDM_PACKS_FOLDER = 3680, IDM_PACKS_RELOAD, IDM_PACKS_REPORT, IDM_PACKS_NEW,
@@ -444,6 +443,7 @@ struct App {
     std::wstring asioDriver; // ASIO output's driver by its registry name; empty is the first installed
     std::string networkSpeaker;  // the network speaker playing instead of this computer (speakers::DeviceId), or empty
     bool upmix = false;      // spread stereo over a surround device's speakers (shared output)
+    bool nativeDsd = false;  // play DSF/DSDIFF as DSD (DoP, or ASIO's native mode) on exclusive or ASIO output
     bool soundEffects = false;
     bool taskbarProgress = true;
     bool showFocusBoxes = false;
@@ -535,6 +535,7 @@ struct App {
     bool rgOn = true;        // ReplayGain (see RgGainFor in app_workers.cpp)
     bool rgAutoScan = true;  // measure tracks without ReplayGain in the background
     bool musicBrainzLookup = false;  // optional background album-edition lookup (MusicBrainz)
+    bool steamSoundEffects = false;  // Add Steam soundtracks also takes games' sound-effect folders
     float rgPreamp = 0, rgPreampNoInfo = 0;
     float rgHeadphoneHeadroom = 0;  // explicit per-output reserve for EQ performed inside a headset
     float rgKeep = 0.4f;  // the share of a loud album's cut that is skipped, so loud songs stay louder

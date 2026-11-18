@@ -235,16 +235,29 @@ std::vector<std::wstring> Subdirs(const std::wstring& dir) {
     return out;
 }
 
+std::wstring LowerName(const std::wstring& dir) {
+    std::wstring name = FileNameOf(dir);
+    for (wchar_t& c : name) c = (wchar_t)towlower(c);
+    return name;
+}
+
+// Folders games keep their sound effects in ("sfx", "SoundEffects", Rain World's
+// "loadedsoundeffects", Project Zomboid's "sound"). They hold thousands of short clips that
+// pass the audio-count test below, so they stay out unless the user asked for effects too.
+bool IsEffectsDir(const std::wstring& dir) {
+    std::wstring name = LowerName(dir);
+    for (const wchar_t* part : {L"sfx", L"soundeffect", L"sound effect", L"sound_effect"})
+        if (name.find(part) != std::wstring::npos) return true;
+    return name == L"sound" || name == L"sounds";
+}
+
 // A game subfolder counts as a soundtrack when its name says so, or when it is a pile of audio
 // (>= 6 files) that outnumbers every other file in it. The name test catches "Soundtrack"/"OST";
 // the count test catches "Bonus Tracks" style folders, while a handful of stray SFX do not.
 bool LooksLikeSoundtrackDir(const std::wstring& dir, const std::atomic<bool>* cancel) {
-    std::wstring name = FileNameOf(dir);
-    for (wchar_t& c : name) c = (wchar_t)towlower(c);
+    std::wstring name = LowerName(dir);
     if (name.find(L"soundtrack") != std::wstring::npos || name == L"ost" || name == L"music")
         return HasContent(dir, kGameScanDepth, cancel);
-    if (name == L"sfx" || name == L"soundeffects" || name == L"sound effects" || name == L"loadedsoundeffects")
-        return false;
 
     int audio = 0, other = 0;
     WIN32_FIND_DATAW fd;
@@ -259,13 +272,15 @@ bool LooksLikeSoundtrackDir(const std::wstring& dir, const std::atomic<bool>* ca
     return audio >= 6 && audio > other;
 }
 
-// Looks for soundtrack folders inside one game's install folder, down to depthLeft levels.
-void ScanGameForSoundtracks(const std::wstring& game, int depthLeft, std::vector<std::wstring>& out,
+// Looks for soundtrack folders inside one game's install folder, down to depthLeft levels. Without
+// sound effects, an effects folder's subfolders (Rain World sorts its clips into them) stay out too.
+void ScanGameForSoundtracks(const std::wstring& game, int depthLeft, bool soundEffects, std::vector<std::wstring>& out,
                             const std::atomic<bool>* cancel) {
     for (const std::wstring& sub : Subdirs(game)) {
         if (Cancelled(cancel)) return;
+        if (!soundEffects && IsEffectsDir(sub)) continue;
         if (LooksLikeSoundtrackDir(sub, cancel)) out.push_back(sub);
-        if (depthLeft > 1) ScanGameForSoundtracks(sub, depthLeft - 1, out, cancel);
+        if (depthLeft > 1) ScanGameForSoundtracks(sub, depthLeft - 1, soundEffects, out, cancel);
     }
 }
 
@@ -524,7 +539,8 @@ std::vector<std::wstring> ParseSteamLibraryFolders(const std::string& vdf) {
     return folders;
 }
 
-std::vector<std::wstring> FindSteamMusicFoldersIn(const std::wstring& libraryPath, const std::atomic<bool>* cancel) {
+std::vector<std::wstring> FindSteamMusicFoldersIn(const std::wstring& libraryPath, const std::atomic<bool>* cancel,
+                                                   bool soundEffects) {
     if (Cancelled(cancel)) return {};
     std::wstring lib = NormalizePath(libraryPath);
     if (lib.empty()) return {};
@@ -540,7 +556,7 @@ std::vector<std::wstring> FindSteamMusicFoldersIn(const std::wstring& libraryPat
     std::wstring common = lib + kSep + L"steamapps" + kSep + L"common";
     for (const std::wstring& game : Subdirs(common)) {
         if (Cancelled(cancel)) break;
-        ScanGameForSoundtracks(game, kGameScanDepth, roots, cancel);
+        ScanGameForSoundtracks(game, kGameScanDepth, soundEffects, roots, cancel);
     }
 
 #ifndef _WIN32
@@ -554,7 +570,7 @@ std::vector<std::wstring> FindSteamMusicFoldersIn(const std::wstring& libraryPat
     return roots;
 }
 
-std::vector<std::wstring> FindSteamMusicFolders(const std::atomic<bool>* cancel) {
+std::vector<std::wstring> FindSteamMusicFolders(const std::atomic<bool>* cancel, bool soundEffects) {
     if (Cancelled(cancel)) return {};
     std::wstring steam = DiscoverSteamRoot();
     if (steam.empty()) return {};
@@ -577,7 +593,7 @@ std::vector<std::wstring> FindSteamMusicFolders(const std::atomic<bool>* cancel)
     std::vector<std::wstring> roots;
     for (const std::wstring& lib : libraries) {
         if (Cancelled(cancel)) break;
-        for (const std::wstring& r : FindSteamMusicFoldersIn(lib, cancel)) roots.push_back(r);
+        for (const std::wstring& r : FindSteamMusicFoldersIn(lib, cancel, soundEffects)) roots.push_back(r);
     }
     KeepOutermost(roots);
     return roots;

@@ -61,7 +61,8 @@ std::string Moov(const std::vector<uint32_t>& sizes, uint64_t frames, uint32_t m
 }  // namespace
 
 bool EncodeLossyAudio(const std::wstring& source, unsigned kbps, bool mp3, const std::atomic<bool>& cancel,
-                      const std::function<bool(const char*, size_t)>& send, uint64_t& frames, std::wstring& error) {
+                      const std::function<bool(const char*, size_t)>& send, uint64_t& frames, std::wstring& error,
+                      unsigned lead, unsigned tail) {
     auto decoder = OpenTrackDecoder(source, 48000, error);
     if (!decoder || !decoder->Rate()) {
         if (error.empty()) error = L"Couldn't decode this file.";
@@ -77,7 +78,8 @@ bool EncodeLossyAudio(const std::wstring& source, unsigned kbps, bool mp3, const
     std::vector<float> input(4096 * 2), output;
     std::vector<char> pcm;
     frames = 0;
-    bool ok = true;
+    const std::vector<char> lead0((size_t)lead * 4, 0), tail0((size_t)tail * 4, 0);
+    bool ok = lead0.empty() || encoder.Write(lead0.data(), lead0.size(), send, cancel);
     for (bool last = false; ok && !last && !cancel;) {
         output.clear();
         if (const size_t n = decoder->Read(input.data(), 4096)) resampler.Push(input.data(), n, output);
@@ -96,7 +98,8 @@ bool EncodeLossyAudio(const std::wstring& source, unsigned kbps, bool mp3, const
         frames += output.size() / 2;
         if (!pcm.empty()) ok = encoder.Write(pcm.data(), pcm.size(), send, cancel);
     }
-    ok = ok && !cancel && frames && encoder.Finish(send, cancel);
+    ok = ok && !cancel && frames && (tail0.empty() || encoder.Write(tail0.data(), tail0.size(), send, cancel)) &&
+         encoder.Finish(send, cancel);
     if (!ok && error.empty()) error = cancel ? L"Cancelled." : L"The audio encoder couldn't finish this file.";
     return ok;
 }

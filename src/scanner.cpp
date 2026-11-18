@@ -445,7 +445,7 @@ void FolderScanner::Run() {
                 up[i] = reachable;
             }
         }
-        if (dirty.empty() || now - lastChange < kScanQuietMs) continue;
+        if (dirty.empty() || now - lastChange < quietMs_) continue;
         SortObjects(dirty.begin(), dirty.end());
         dirty.erase(std::unique(dirty.begin(), dirty.end()), dirty.end());
         std::vector<std::wstring> scopes;

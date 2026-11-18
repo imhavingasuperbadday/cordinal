@@ -116,3 +116,20 @@ struct Pack {
 Pack ParsePack(const std::wstring& id, const std::vector<PackEntry>& files);
 // What a pack holds, in words: "a theme with 3 sounds, 2 columns and the window title".
 std::wstring PackSummary(const Pack& pack);
+
+// The setup View > Packs > Make a pack writes out, gathered by each platform's player.
+struct StarterSetup {
+    std::wstring name;  // the new pack's folder and name
+    Palette palette{};
+    const wchar_t* font = nullptr;  // the theme's face, or null for the system's
+    int fontPx = 0;
+    std::wstring playingMark, ratingMark;
+    std::wstring formats[4];  // window title, status bar, now playing and its second line
+    std::wstring columns;     // the shown columns' titles, comma-separated
+    std::array<float, 10> eq{};
+    std::wstring layout;      // layout.ini's lines for the current layout
+    std::vector<std::pair<std::wstring, std::string>> autoPlaylists;  // name and rules
+};
+// Every file of a starter pack: the setup as a pack, with a commented example of each other file.
+// Paths use '/'; ParsePack reads the result back as the same setup (the packs suite checks this).
+std::vector<std::pair<std::wstring, std::wstring>> StarterPackFiles(const StarterSetup& setup);

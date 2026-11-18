@@ -9,6 +9,7 @@
 #include "metadata_fetch.h"
 #include "musicbrainz.h"
 #include "textcase.h"
+#include "waybar.h"
 
 #include <array>
 #include <cstring>
@@ -302,6 +303,11 @@ const Pref kPrefs[] = {
      "Results are cached; browsing and playback never wait for or require the network.", PrefType::Bool, 0, 1, 0, 1,
      [] { return (double)Cfg().musicBrainzLookup; },
      [](double v) { Cfg().musicBrainzLookup = v != 0; musicbrainz::SetEnabled(v != 0); Saved(); }},
+    {"steam_sound_effects", "Library", "Include game sound effects",
+     "Library > Add Steam soundtracks also adds folders where games keep their sound effects, such as sfx or sound. "
+     "Off, it adds only music. Folders already in the library stay until you remove them in Library folders.",
+     PrefType::Bool, 0, 1, 0, 1, [] { return (double)Cfg().steamSoundEffects; },
+     [](double v) { Cfg().steamSoundEffects = v != 0; Saved(); }},
     // Online sources, as on Windows: each says exactly what it sends, and all are off until chosen.
     {"online_covers_deezer", "Online", "Covers from Deezer",
      "Sends the album's artist and title to api.deezer.com "
@@ -388,6 +394,11 @@ const Pref kPrefs[] = {
      [](double v) { Cfg().roboticSounds = v != 0; Saved(); if (v != 0) MessageBlip(); }},
     {nullptr, "Startup", "Start on login", "Opens cordinal when you log in (an entry in ~/.config/autostart).", PrefType::Bool,
      0, 1, 0, 1, [] { return (double)StartsOnLogin(); }, [](double v) { if ((v != 0) != StartsOnLogin()) ToggleStartOnLogin(); }},
+    {nullptr, "Startup", "Show on the top bar",
+     "Puts cordinal's icon on Waybar, the top bar of Omarchy and other Hyprland or Sway desktops, while cordinal runs: "
+     "click it to show cordinal, right-click to pause, middle-click for the next song. This adds a module to your "
+     "Waybar config (~/.config/waybar) and turning it off takes it out again.", PrefType::Bool,
+     0, 1, 0, 1, [] { return (double)waybar::Shown(); }, [](double v) { if ((v != 0) != waybar::Shown()) ToggleTopBar(); }},
     // Lightweight mode (lightweight.cpp), the Windows build's lightweight.* rows.
     {"lightweight_shows", "Lightweight mode", "What stays on screen",
      "In Lightweight mode: nothing but the tray icon (click it to pick a song), the round mini player, or the compact "
@@ -425,10 +436,10 @@ const Pref kPrefs[] = {
      "Turns on the web server whenever cordinal starts, so a paired phone or browser can play your library.", PrefType::Bool,
      0, 1, 0, 1, [] { return (double)Cfg().webStart; }, [](double v) { Cfg().webStart = v != 0; Saved(); }},
     {"convert_recycle", "Conversion", "Send converted originals to the Recycle Bin",
-     "After converting to .cord, the original files go to the Recycle Bin instead of staying where they are.", PrefType::Bool,
+     "When Convert replaces songs, their original files go to the Recycle Bin instead of staying where they are.", PrefType::Bool,
      0, 1, 1, 1, [] { return (double)Cfg().convertRecycle; }, [](double v) { Cfg().convertRecycle = v != 0; Saved(); }},
     {"convert_show_originals", "Conversion", "Show kept originals in the library",
-     "Originals kept after a conversion appear in the library beside their .cord copies.", PrefType::Bool,
+     "Originals kept after Convert replaced them appear in the library beside the new files.", PrefType::Bool,
      0, 1, 0, 1, [] { return (double)Cfg().convertShowOriginals; }, [](double v) { SetConvertShowOriginals(v != 0); Saved(); }},
     {"convert_undo_days", "Conversion", "Conversions can be undone for",
      "How long cordinal remembers a conversion so it can put the originals back.", PrefType::Choice,

@@ -332,6 +332,7 @@ void LoadSettings() {
     s.npAlbumOnly = ToInt(v, "now_playing_album", 1) != 0;
     s.groupAutoTabs = ToInt(v, "group_auto_tabs", 1) != 0;
     s.musicBrainzLookup = ToInt(v, "musicbrainz_lookup", 0) != 0;
+    s.steamSoundEffects = ToInt(v, "steam_sound_effects", 0) != 0;
     // Online sources keep the Windows names (Preferences > Online); every one is off by default.
     online::Settings& net = online::Config();
     net.covers[0] = ToInt(v, "online_covers_deezer", 0) != 0;
@@ -347,6 +348,10 @@ void LoadSettings() {
     s.convertRecycle = ToInt(v, "convert_recycle", 1) != 0;
     s.convertShowOriginals = ToInt(v, "convert_show_originals", 0) != 0;
     s.convertMemory = (uint8_t)std::clamp(ToInt(v, "convert_undo_days", 3), 0, (int)std::size(kConvertMemoryDays) - 1);
+    s.convertFormat = (uint8_t)std::clamp(ToInt(v, "convert_format", 1), 0, (int)CordExport::Count - 1);
+    s.convertReplace = ToInt(v, "convert_replace", 0) != 0;
+    s.convertIntoFolder = ToInt(v, "convert_into_folder", 0) != 0;
+    if (auto it = v.find("convert_folder"); it != v.end()) s.convertFolder = compat::Widen(it->second.c_str());
     if (auto it = v.find("organize_folder"); it != v.end()) s.organizeFolder = compat::Widen(it->second.c_str());
     if (auto it = v.find("organize_pattern"); it != v.end()) s.organizePattern = compat::Widen(it->second.c_str());
     if (auto it = v.find("copy_folder"); it != v.end()) s.copyFolder = compat::Widen(it->second.c_str());
@@ -476,6 +481,7 @@ void SaveSettings() {
     text += "now_playing_album=" + std::to_string(s.npAlbumOnly) + "\n";
     text += "group_auto_tabs=" + std::to_string(s.groupAutoTabs) + "\n";
     text += "musicbrainz_lookup=" + std::to_string(s.musicBrainzLookup) + "\n";
+    text += "steam_sound_effects=" + std::to_string(s.steamSoundEffects) + "\n";
     const online::Settings& net = online::Config();
     text += "online_covers_deezer=" + std::to_string(net.covers[0]) + "\nonline_covers_itunes=" +
             std::to_string(net.covers[1]) + "\nonline_covers_musicbrainz=" + std::to_string(net.covers[2]) +
@@ -536,7 +542,9 @@ void SaveSettings() {
             "\nformat_window=" + ToUtf8(s.fmtWindow) + "\n";
     text += "sound_effects=" + std::to_string(s.soundEffects) + "\nrobotic_sounds=" + std::to_string(s.roboticSounds) + "\n";
     text += "convert_recycle=" + std::to_string(s.convertRecycle) + "\nconvert_show_originals=" + std::to_string(s.convertShowOriginals) +
-            "\nconvert_undo_days=" + std::to_string(s.convertMemory) + "\n";
+            "\nconvert_undo_days=" + std::to_string(s.convertMemory) + "\nconvert_format=" + std::to_string(s.convertFormat) +
+            "\nconvert_replace=" + std::to_string(s.convertReplace) + "\nconvert_into_folder=" + std::to_string(s.convertIntoFolder) +
+            "\nconvert_folder=" + compat::Narrow(s.convertFolder.c_str()) + "\n";
     text += "organize_folder=" + compat::Narrow(s.organizeFolder.c_str()) + "\norganize_pattern=" +
             compat::Narrow(s.organizePattern.c_str()) + "\n";
     text += "copy_folder=" + compat::Narrow(s.copyFolder.c_str()) + "\ncopy_pattern=" + compat::Narrow(s.copyPattern.c_str()) +
@@ -585,19 +593,31 @@ void LoadLibraryFile() {
     std::wstring preserved;
     bool loaded = LoadLibrary(g.libraryPath, g.playlists, &preserved);
     bool fromBackup = false;
-    if (!loaded && GetFileAttributesW((g.libraryPath + L".bak").c_str()) != INVALID_FILE_ATTRIBUTES) {
+    const bool hadBackup = GetFileAttributesW((g.libraryPath + L".bak").c_str()) != INVALID_FILE_ATTRIBUTES;
+    if (!loaded && hadBackup) {
         g_lib = Library();
         g.playlists.clear();
         std::wstring backupPreserved;
         fromBackup = LoadLibrary(g.libraryPath + L".bak", g.playlists, &backupPreserved);
         loaded = fromBackup;
-        if (!fromBackup && !backupPreserved.empty()) preserved = std::move(backupPreserved);
+        if (!fromBackup && preserved.empty()) preserved = std::move(backupPreserved);
     }
-    if (hadOriginal && !loaded) {
+    // Last, the newest dated copy in library-history, as on Windows (app_settings.cpp, LoadState).
+    std::wstring fromSnapshot;
+    if (!loaded && (hadOriginal || hadBackup)) {
+        g_lib = Library();
+        g.playlists.clear();
+        fromSnapshot = LoadNewestSnapshot(g.libraryPath, g.playlists);
+        loaded = !fromSnapshot.empty();
+        if (loaded) g.libraryDirty = true;  // write it back as library.cdb
+    }
+    if (hadOriginal && (!loaded || fromBackup || !fromSnapshot.empty())) {
         // The unreadable file is kept beside itself by LoadLibrary; say where it went instead of
         // silently starting with an empty library.
         g.message = fromBackup ? L"Couldn't read library.cdb; using the previous save. "
-                               : L"Couldn't read library.cdb; the library starts empty. ";
+                  : !fromSnapshot.empty() ? L"library.cdb and its backup couldn't be read; using the copy saved " +
+                                                FileNameOf(fromSnapshot).substr(8, 10) + L". "
+                                          : L"Couldn't read library.cdb; the library starts empty. ";
         g.message += preserved.empty() ? L"The file is still in place."
                                        : L"The unreadable file was kept as " + FileNameOf(preserved) + L".";
         g.messageUntil = SDL_GetTicks() + 15000;
@@ -638,7 +658,10 @@ void LoadLibraryFile() {
 
 void SaveLibraryFile(bool force) {
     if (!force && !g.libraryDirty) return;
-    if (SaveLibrary(g.libraryPath, g.playlists)) g.libraryDirty = false;
+    if (SaveLibrary(g.libraryPath, g.playlists)) {
+        g.libraryDirty = false;
+        KeepLibrarySnapshot(g.libraryPath);  // once a day; a failed copy only skips that day
+    }
     g.lastSave = SDL_GetTicks();
 }
 

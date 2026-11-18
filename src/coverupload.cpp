@@ -172,6 +172,10 @@ std::string Run(const std::wstring& imagePath) {
         ::close(ends[0]);
         return {};
     }
+    // ReadAvailable drains until EAGAIN: a blocking pipe would wait on a stalled tool past the deadline and
+    // past CancelAll, holding the player open at exit.
+    ::fcntl(ends[0], F_SETFL, ::fcntl(ends[0], F_GETFL) | O_NONBLOCK);
+    bool reaped = false;
     std::string output;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kTimeoutMs);
     for (;;) {
@@ -183,14 +187,21 @@ std::string Run(const std::wstring& imagePath) {
             break;
         }
         if (::waitpid(child, nullptr, WNOHANG) == child) {
+            reaped = true;
             ReadAvailable(ends[0], output);  // whatever it printed before exiting
             break;
         }
-        if (std::chrono::steady_clock::now() > deadline || g_generation.load() != generation) {
-            ::kill(child, SIGKILL);
-            ::waitpid(child, nullptr, 0);
-            break;
-        }
+        if (std::chrono::steady_clock::now() > deadline || g_generation.load() != generation) break;
+    }
+    // Every way out reaps the tool, so no upload leaves a zombie process behind. One that closed its output
+    // gets until the deadline to exit by itself; a cancelled or late one is killed.
+    while (!reaped && std::chrono::steady_clock::now() <= deadline && g_generation.load() == generation) {
+        if (::waitpid(child, nullptr, WNOHANG) == child) reaped = true;
+        else ::poll(nullptr, 0, 20);
+    }
+    if (!reaped) {
+        ::kill(child, SIGKILL);
+        ::waitpid(child, nullptr, 0);
     }
     ::close(ends[0]);
     return FirstAddress(output);

@@ -127,6 +127,14 @@ std::vector<AsioDriverInfo> ListAsioDrivers() {
 
 bool AsioTypeSupported(long type) { return AsioSampleBytes(type) != 0; }
 
+bool AsioTypeIsDsd(long type) {
+    return type == asio::kDsdInt8LSB1 || type == asio::kDsdInt8MSB1 || type == asio::kDsdInt8NER8;
+}
+
+bool AsioTypeCarriesDop(long type) {
+    return type == asio::kInt24LSB || type == asio::kInt32LSB || type == asio::kInt32LSB24;
+}
+
 int AsioSampleBytes(long type) {
     switch (type) {
         case asio::kInt16LSB: return 2;
@@ -134,6 +142,7 @@ int AsioSampleBytes(long type) {
         case asio::kInt32LSB: case asio::kFloat32LSB: case asio::kInt32LSB16: case asio::kInt32LSB18:
         case asio::kInt32LSB20: case asio::kInt32LSB24: return 4;
         case asio::kFloat64LSB: return 8;
+        case asio::kDsdInt8LSB1: case asio::kDsdInt8MSB1: case asio::kDsdInt8NER8: return 1;
         default: return 0;
     }
 }
@@ -145,6 +154,7 @@ int AsioSampleBits(long type) {
         case asio::kInt32LSB20: return 20;
         case asio::kInt24LSB: case asio::kInt32LSB24: return 24;
         case asio::kFloat64LSB: return 64;
+        case asio::kDsdInt8LSB1: case asio::kDsdInt8MSB1: case asio::kDsdInt8NER8: return 1;
         default: return 32;
     }
 }
@@ -162,6 +172,7 @@ const wchar_t* AsioTypeName(long type) {
         case asio::kInt32LSB18: return L"18-bit in 32";
         case asio::kInt32LSB20: return L"20-bit in 32";
         case asio::kInt32LSB24: return L"24-bit in 32";
+        case asio::kDsdInt8LSB1: case asio::kDsdInt8MSB1: case asio::kDsdInt8NER8: return L"DSD";
         default: return type >= 0 && type < 16 ? L"big-endian" : L"unknown";
     }
 }
@@ -206,11 +217,82 @@ void WriteAsioChannel(const float* interleaved, size_t frames, unsigned channels
     }
 }
 
+namespace {
+// The eight bits of a byte back to front: kDsdInt8LSB1 puts the first of the eight DSD samples in the
+// low bit. Three swaps, which is less work than a lookup and costs no table.
+uint8_t ReverseBits(uint8_t b) {
+    b = (uint8_t)(b >> 4 | b << 4);
+    b = (uint8_t)((b & 0xCC) >> 2 | (b & 0x33) << 2);
+    return (uint8_t)((b & 0xAA) >> 1 | (b & 0x55) << 1);
+}
+}  // namespace
+
+void WriteAsioDop(const float* interleaved, size_t frames, size_t supplied, long type, uint8_t& marker,
+                  void* left, void* right) {
+    uint32_t top = (uint32_t)marker << 16;
+    auto* l32 = static_cast<int32_t*>(left);
+    auto* r32 = static_cast<int32_t*>(right);
+    auto* l8 = static_cast<uint8_t*>(left);
+    auto* r8 = static_cast<uint8_t*>(right);
+    for (size_t i = 0; i < frames; ++i) {
+        const uint32_t l = top | (i < supplied ? DopWord(interleaved[i * 2]) : 0x6969u);
+        const uint32_t r = top | (i < supplied ? DopWord(interleaved[i * 2 + 1]) : 0x6969u);
+        top ^= 0xFF0000u;  // 0x05 <-> 0xFA, the alternation a DoP receiver locks onto
+        if (type == asio::kInt24LSB) {
+            l8[i * 3] = (uint8_t)l;
+            l8[i * 3 + 1] = (uint8_t)(l >> 8);
+            l8[i * 3 + 2] = (uint8_t)(l >> 16);
+            r8[i * 3] = (uint8_t)r;
+            r8[i * 3 + 1] = (uint8_t)(r >> 8);
+            r8[i * 3 + 2] = (uint8_t)(r >> 16);
+        } else if (type == asio::kInt32LSB24) {  // 24 bits in the low end, sign-extended as WriteAsioChannel does
+            l32[i] = (int32_t)(l << 8) >> 8;
+            r32[i] = (int32_t)(r << 8) >> 8;
+        } else {
+            l32[i] = (int32_t)(l << 8);  // the 24-bit word in the top of a 32-bit sample
+            r32[i] = (int32_t)(r << 8);
+        }
+    }
+    marker = (uint8_t)(top >> 16);
+}
+
+void WriteAsioDsd(const float* interleaved, size_t frames, size_t supplied, bool lsbFirst, void* left,
+                  void* right) {
+    auto* l = static_cast<uint8_t*>(left);
+    auto* r = static_cast<uint8_t*>(right);
+    const uint8_t idle = lsbFirst ? ReverseBits(kDsdIdle) : kDsdIdle;
+    size_t i = 0;
+    for (; i < supplied && i < frames; ++i) {
+        l[i] = DsdByte(interleaved[i * 2]);
+        r[i] = DsdByte(interleaved[i * 2 + 1]);
+        if (lsbFirst) {
+            l[i] = ReverseBits(l[i]);
+            r[i] = ReverseBits(r[i]);
+        }
+    }
+    for (; i < frames; ++i) {
+        l[i] = idle;
+        r[i] = idle;
+    }
+}
+
 // --- The host.
 
 namespace {
 // The stream the driver's callbacks belong to. A process hosts one ASIO driver at a time.
 std::atomic<AsioStream*> g_active{nullptr};
+
+// Switches the driver between PCM and DSD. CanDo is asked first, because a driver that doesn't implement
+// DSD never gets half switched. Going back to PCM always succeeds: a driver without the extension is
+// already there.
+bool SetIoFormat(asio::IAsio* driver, long format) {
+    asio::IoFormat probe{};
+    probe.formatType = format;
+    if (driver->future(asio::kCanDoIoFormat, &probe) != asio::kSuccess) return format == asio::kPcmFormat;
+    asio::IoFormat want{};
+    want.formatType = format;
+    return driver->future(asio::kSetIoFormat, &want) == asio::kSuccess;
+}
 }  // namespace
 
 struct AsioCallbacks {
@@ -324,7 +406,8 @@ void AsioStream::Call(const std::function<void()>& work) {
     thread_->doneCv.wait(lock, [&] { return thread_->finished; });
 }
 
-bool AsioStream::Open(const AsioDriverInfo& driver, unsigned rate, RenderFn render, ResetFn reset, std::wstring& error) {
+bool AsioStream::Open(const AsioDriverInfo& driver, unsigned rate, AsioDsd dsd, RenderFn render, ResetFn reset,
+                      std::wstring& error) {
     bool ok = false;
     Call([&] {
         if (driver_ && !IsEqualCLSID(clsid_, driver.clsid)) Unload();
@@ -355,20 +438,20 @@ bool AsioStream::Open(const AsioDriverInfo& driver, unsigned rate, RenderFn rend
             driverName_ = Widen(name);
             if (driverName_.empty()) driverName_ = driver.name;
         }
-        ok = Setup(rate, error);
+        ok = Setup(rate, dsd, error);
         if (!ok) Unload();
     });
     return ok;
 }
 
-bool AsioStream::Restart(unsigned rate, std::wstring& error) {
+bool AsioStream::Restart(unsigned rate, AsioDsd dsd, std::wstring& error) {
     bool ok = false;
     Call([&] {
         if (!driver_) {
             error = L"the driver isn't loaded";
             return;
         }
-        ok = Setup(rate, error);
+        ok = Setup(rate, dsd, error);
         if (!ok) Unload();
     });
     return ok;
@@ -379,7 +462,7 @@ void AsioStream::ShowPanel() {
     SetEvent(thread_->wake);
 }
 
-bool AsioStream::Setup(unsigned rate, std::wstring& error) {
+bool AsioStream::Setup(unsigned rate, AsioDsd dsd, std::wstring& error) {
     Teardown();
     problem_.clear();
     long inputs = 0, outputs = 0;
@@ -387,7 +470,18 @@ bool AsioStream::Setup(unsigned rate, std::wstring& error) {
         error = L"the driver has no outputs";
         return false;
     }
+    if (dsd != AsioDsd::None && outputs < 2) {
+        error = L"the driver has one output, and DSD needs two";
+        return false;
+    }
     outputs_ = outputs >= 2 ? 2 : 1;
+
+    // DSD goes through the driver's own DSD mode, with its sample rate set to the DSD bit rate and its
+    // data to one bit a sample. The switch has to happen before the buffers are created.
+    if (dsd == AsioDsd::Native && !SetIoFormat(driver_, asio::kDsdFormat)) {
+        error = L"the driver can't play native DSD";
+        return false;
+    }
 
     // The rate: the track's when the driver can do it (no resampling), else the driver's own.
     asio::SampleRate current = 0;
@@ -398,7 +492,13 @@ bool AsioStream::Setup(unsigned rate, std::wstring& error) {
         if (std::lround(current) != (long)rate)
             problem_ = L"the driver can't play " + std::to_wstring(rate) + L" Hz";
     }
-    if (!(current >= 8000 && current <= 768000)) {
+    if (dsd != AsioDsd::None) {
+        // A DSD stream is only DSD at its own rate; another one would be played as if it were that rate.
+        if (!rate || (unsigned)std::lround(current) != rate) {
+            error = L"the driver can't play DSD at " + std::to_wstring(rate) + L" bits a second";
+            return false;
+        }
+    } else if (!(current >= 8000 && current <= 768000)) {
         // A driver that hasn't been given a rate yet can report 0.
         for (double r : {48000.0, 44100.0})
             if (driver_->canSampleRate(r) == asio::kOk && driver_->setSampleRate(r) == asio::kOk) {
@@ -434,13 +534,25 @@ bool AsioStream::Setup(unsigned rate, std::wstring& error) {
             return false;
         }
         if (ch == 0) type = info.type;
-        else if (info.type != type) outputs_ = 1;  // a pair of mixed types: play mono on the first
+        else if (info.type != type) {
+            if (dsd != AsioDsd::None) {
+                error = L"the driver's two outputs have different sample types";
+                return false;
+            }
+            outputs_ = 1;  // a pair of mixed types: play mono on the first
+        }
     }
-    if (!AsioTypeSupported(type)) {
+    // The type has to be one this host can write, and one the requested transport can carry.
+    if (!AsioTypeSupported(type) || (dsd == AsioDsd::None && AsioTypeIsDsd(type)) ||
+        (dsd == AsioDsd::Dop && !AsioTypeCarriesDop(type)) ||
+        (dsd == AsioDsd::Native && type != asio::kDsdInt8MSB1 && type != asio::kDsdInt8LSB1)) {
         error = std::wstring(L"the driver takes ") + AsioTypeName(type) + L" samples";
         return false;
     }
     type_ = type;
+    dsd_ = dsd;
+    dsdLsb_ = type == asio::kDsdInt8LSB1;
+    dopMarker_ = kDopMarkerA;
     bufferFrames_ = (unsigned)size;
     stereo_.assign((size_t)size * 2, 0.0f);
     scratch_.assign((size_t)size, 0.0f);
@@ -453,12 +565,28 @@ bool AsioStream::Setup(unsigned rate, std::wstring& error) {
         return false;
     }
     buffers_ = true;
-    for (unsigned ch = 0; ch < outputs_; ++ch)
-        for (void* half : infos_[ch].buffers)
-            if (half) memset(half, 0, (size_t)size * AsioSampleBytes(type));
+    // A native DSD buffer is counted in DSD samples (bits), so it holds an eighth as many bytes.
+    const size_t dsdBytes = ((size_t)size + 7) / 8;
+    for (unsigned half = 0; half < 2; ++half) {
+        void* left = infos_[0].buffers[half];
+        void* right = infos_[1].buffers[half];
+        if (dsd_ == AsioDsd::Native) {
+            if (left) memset(left, kDsdIdle, dsdBytes);
+            if (right) memset(right, kDsdIdle, dsdBytes);
+        } else if (dsd_ == AsioDsd::Dop && left && right) {
+            // The driver plays one half before the first buffer switch: DoP idle, not zeros, or a DoP DAC
+            // would drop out of DSD mode. The marker carries on into the first buffer switch.
+            WriteAsioDop(stereo_.data(), (size_t)size, 0, type_, dopMarker_, left, right);
+        } else {
+            if (left) memset(left, 0, (size_t)size * AsioSampleBytes(type_));
+            if (right) memset(right, 0, (size_t)size * AsioSampleBytes(type_));
+        }
+    }
     long inLatency = 0, outLatency = 0;
     driver_->getLatencies(&inLatency, &outLatency);
     latency_ = (unsigned)std::max<long>(outLatency, size);
+    // In native DSD the driver counts DSD samples (bits) while the render counts payload bytes.
+    if (dsd_ == AsioDsd::Native) latency_ = (latency_ + 7) / 8;
     // A driver that supports outputReady plays a buffer as soon as it is filled, saving one buffer of
     // latency; asking is how a host finds out.
     outputReady_ = driver_->outputReady() == asio::kOk;
@@ -477,6 +605,9 @@ void AsioStream::Teardown() {
     running_ = false;
     if (buffers_) driver_->disposeBuffers();
     buffers_ = false;
+    // Back to PCM, which has to happen with no buffers: the next stream may be a PCM one.
+    if (dsd_ != AsioDsd::None) SetIoFormat(driver_, asio::kPcmFormat);
+    dsd_ = AsioDsd::None;
 }
 
 void AsioStream::Unload() {
@@ -489,17 +620,28 @@ void AsioStream::Unload() {
 
 void AsioStream::Switch(long index) {
     if (!running_ || (index != 0 && index != 1)) return;
-    const size_t frames = bufferFrames_;
-    if (render_) render_(stereo_.data(), frames);
-    else std::fill(stereo_.begin(), stereo_.end(), 0.0f);
-    unsigned channels = 2;
+    // Native DSD buffers are counted in DSD samples (bits) while one payload float carries 8 of them, so
+    // a buffer takes an eighth as many frames as it has samples.
+    const bool native = dsd_ == AsioDsd::Native;
+    const size_t frames = native ? (size_t)(bufferFrames_ + 7) / 8 : bufferFrames_;
+    size_t supplied = 0;
+    if (render_) supplied = render_(stereo_.data(), frames);
+    else std::fill(stereo_.begin(), stereo_.begin() + (ptrdiff_t)frames * 2, 0.0f);
     if (outputs_ == 1) {
-        // One output: both channels, at half level so a full-scale pair can't clip.
+        // One output: both channels, at half level so a full-scale pair can't clip. DSD needs two, so
+        // this is always PCM.
         for (size_t i = 0; i < frames; ++i) stereo_[i] = 0.5f * (stereo_[i * 2] + stereo_[i * 2 + 1]);
-        channels = 1;
+        WriteAsioChannel(stereo_.data(), frames, 1, 0, type_, infos_[0].buffers[index], scratch_.data());
+    } else if (native) {
+        WriteAsioDsd(stereo_.data(), frames, supplied, dsdLsb_, infos_[0].buffers[index],
+                     infos_[1].buffers[index]);
+    } else if (dsd_ == AsioDsd::Dop) {
+        WriteAsioDop(stereo_.data(), frames, supplied, type_, dopMarker_, infos_[0].buffers[index],
+                     infos_[1].buffers[index]);
+    } else {
+        for (unsigned ch = 0; ch < outputs_; ++ch)
+            WriteAsioChannel(stereo_.data(), frames, 2, ch, type_, infos_[ch].buffers[index], scratch_.data());
     }
-    for (unsigned ch = 0; ch < outputs_; ++ch)
-        WriteAsioChannel(stereo_.data(), frames, channels, ch, type_, infos_[ch].buffers[index], scratch_.data());
     if (outputReady_) driver_->outputReady();
 }
 

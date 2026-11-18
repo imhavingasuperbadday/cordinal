@@ -1,5 +1,5 @@
-// Converting lossless files to .cord (convert.h): the plan, the tags carried over, the conversion
-// with its read-back check, independent FLAC exports, undo logs and the Recycle Bin both ways. No UI.
+// Convert (convert.h): the plan, the tags carried over, the run with its replacements' undo logs, and
+// the Recycle Bin both ways. The files themselves are written and checked by cord_export.cpp. No UI.
 #include "convert.h"
 
 #include "cord.h"
@@ -11,6 +11,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cwctype>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace {
 
@@ -240,30 +243,111 @@ void RewriteLog(const std::wstring& path, const std::vector<LogEntry>& left) {
 
 }  // namespace
 
-std::vector<ConvertItem> PlanConvert(const std::vector<std::pair<TrackId, std::wstring>>& tracks, CordExport format) {
+bool ReadsExactly(const std::wstring& path, Codec codec) {
+    const std::wstring ext = ExtOf(path);
+    for (const wchar_t* exact : {L"flac", L"fla", L"wav", L"wave", L"aif", L"aiff", L"aifc", L"au", L"snd", L"cord", L"wv", L"ape", L"tta"})
+        if (ext == exact) return true;
+    // MP4 holds ALAC or AAC, and CAF PCM, ALAC or lossy codecs.
+    if (ext == L"m4a" || ext == L"mp4" || ext == L"m4b") return codec == Codec::Unknown || codec == Codec::ALAC;
+    if (ext == L"caf") return codec == Codec::Unknown || codec == Codec::ALAC || codec == Codec::PCM;
+    return false;
+}
+
+namespace {
+
+std::wstring FolderOf(const std::wstring& path) {
+    const size_t slash = path.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash);
+}
+
+std::wstring Folded(std::wstring s) {
+    for (wchar_t& c : s) c = (wchar_t)std::towupper(c);
+    return s;
+}
+
+// The names in each folder an output may go to, listed once a folder: a library's worth of outputs
+// is far quicker to check this way than file by file. A folder that doesn't exist lists nothing.
+class FolderNames {
+public:
+    bool Has(const std::wstring& path) {
+        const std::wstring folder = FolderOf(path);
+        if (folder.empty()) return Exists(path);
+        auto [at, added] = names_.try_emplace(Folded(folder));
+        if (added) {
+            WIN32_FIND_DATAW found{};
+            HANDLE h = FindFirstFileW((folder + kPathSep + L"*").c_str(), &found);
+            if (h != INVALID_HANDLE_VALUE) {
+                do at->second.insert(Folded(found.cFileName));
+                while (FindNextFileW(h, &found));
+                FindClose(h);
+            }
+        }
+        return at->second.count(Folded(path.substr(folder.size() + 1))) != 0;
+    }
+
+private:
+    std::unordered_map<std::wstring, std::unordered_set<std::wstring>> names_;
+};
+
+// The folder every source sits under; when they all share one folder, its parent, so that folder's
+// name comes along into the destination.
+std::wstring CommonRoot(const std::vector<std::pair<TrackId, std::wstring>>& tracks) {
+    std::wstring root;
+    bool first = true, one = true;
+    for (const auto& track : tracks) {
+        const std::wstring dir = FolderOf(track.second);
+        if (first) { root = dir; first = false; continue; }
+        if (SamePath(dir, root)) continue;
+        one = false;
+        while (!root.empty() && !(dir.size() >= root.size() && SamePath(dir.substr(0, root.size()), root) &&
+                                  (dir.size() == root.size() || dir[root.size()] == L'\\' || dir[root.size()] == L'/')))
+            root = FolderOf(root);
+    }
+    return one ? FolderOf(root) : root;
+}
+
+}  // namespace
+
+std::vector<ConvertItem> PlanConvert(const std::vector<std::pair<TrackId, std::wstring>>& tracks, CordExport format,
+                                     ConvertMode mode, const std::wstring& folder, const std::function<Codec(TrackId)>& codec) {
     std::vector<ConvertItem> plan;
     if (format >= CordExport::Count) return plan;
-    const bool exporting = format != CordExport::None;
+    const std::wstring target = kCordExports[(unsigned)format].extension;
+    const bool lossless = !kCordExports[(unsigned)format].kbps;
+    const bool replace = mode == ConvertMode::Replace || (mode == ConvertMode::Auto && format == CordExport::None);
+    std::wstring dest = replace ? std::wstring() : folder, root;
+    while (!dest.empty() && (dest.back() == L'\\' || dest.back() == L'/')) dest.pop_back();
+    if (!dest.empty()) root = CommonRoot(tracks);
+    std::unordered_set<std::wstring> planned;
+    FolderNames existing;
+    plan.reserve(tracks.size());
     for (const auto& [id, path] : tracks) {
         ConvertItem item;
         item.id = id;
         item.from = path;
         item.format = format;
+        item.replace = replace;
         const std::wstring ext = ExtOf(path);
         const size_t dot = path.find_last_of(L'.');
+        const bool same = ext == target || (format == CordExport::Flac && ext == L"fla") ||
+                          (format == CordExport::Wav && ext == L"wave");
         if (path.find(L'|') != std::wstring::npos) item.skip = L"part of a cue sheet";
-        else if (exporting && ext != L"cord") item.skip = L"not a .cord file";
-        else if (exporting) item.to = path.substr(0, dot) + L"." + kCordExports[(unsigned)format].extension;
-        else if (ext == L"cord") item.skip = L"already .cord";
-        else if (ext != L"flac" && ext != L"fla" && ext != L"wav" && ext != L"wave" && ext != L"aif" && ext != L"aiff" && ext != L"aifc" &&
-                 ext != L"au" && ext != L"snd" && ext != L"caf")
+        else if (same) item.skip = L"already ." + target;
+        else if (lossless && !ReadsExactly(path, codec ? codec(id) : Codec::Unknown))
             item.skip = L"not lossless audio cordinal can read exactly";
+        else if (dest.empty()) item.to = path.substr(0, dot) + L"." + target;
         else {
-            item.to = path.substr(0, dot) + L".cord";
+            // Below the common folder; a source elsewhere (no common folder at all) keeps only its name.
+            std::wstring rest = path.substr(0, dot);
+            if (!root.empty() && rest.size() > root.size() && SamePath(rest.substr(0, root.size()), root)) rest.erase(0, root.size());
+            else rest = rest.substr(rest.find_last_of(L"\\/") + 1);
+            while (!rest.empty() && (rest.front() == L'\\' || rest.front() == L'/')) rest.erase(0, 1);
+            item.to = dest + kPathSep + rest + L"." + target;
         }
         if (!item.to.empty()) {
-            if (Exists(item.to) ||
-                std::any_of(plan.begin(), plan.end(), [&](const ConvertItem& o) { return o.skip.empty() && SamePath(o.to, item.to); }))
+            // Outputs already planned, compared as SamePath does (ignoring case) through a set: the
+            // Convert window replans the whole library on every change.
+            if (existing.Has(item.to) || !planned.insert(Folded(item.to)).second)
                 item.skip = L"a ." + std::wstring(kCordExports[(unsigned)format].extension) + L" file of that name already exists";
         }
         plan.push_back(std::move(item));
@@ -336,22 +420,12 @@ ConvertResult ExecuteConvert(const std::vector<ConvertItem>& plan, const Convert
         }
         if (progress) progress(i);
         std::wstring error;
-        if (item.format != CordExport::None) {
-            if (ExportCordAudio(item.from, item.to, item.format, error, cancel)) result.done.push_back({item.id, item.from, item.to, false});
-            else if (cancel) { result.cancelled = true; break; }
-            else result.failed.push_back({item.from, error});
-            continue;
-        }
-        auto source = OpenPcmReader(item.from, error);
-        if (!source) {
-            result.failed.push_back({item.from, error});
-            continue;
-        }
-        cord::EncodeOptions options;
-        options.threads = settings.threads;
-        options.background = true;
-        options.meta = CordTagsFrom(item.from, options.pictures);
-        if (!cord::Encode(*source, item.to, error, &cancel, options)) {
+        // A copy's folders below the destination are made as needed.
+        for (size_t at = item.to.find_first_of(L"\\/", 3); at != std::wstring::npos; at = item.to.find_first_of(L"\\/", at + 1))
+            CreateDirectoryW(item.to.substr(0, at).c_str(), nullptr);
+        // The new file is read back and checked before it appears (cord_export.cpp); only then does
+        // anything happen to the original.
+        if (!ExportAudio(item.from, item.to, item.format, error, cancel, settings.threads)) {
             if (cancel) {
                 result.cancelled = true;
                 break;
@@ -359,23 +433,8 @@ ConvertResult ExecuteConvert(const std::vector<ConvertItem>& plan, const Convert
             result.failed.push_back({item.from, error});
             continue;
         }
-        // The new file is read back in full: its length and its own MD5 must hold, and its samples
-        // must hash the same as the source's. Only then does anything happen to the original.
-        bool same = false;
-        if (auto back = OpenPcmReader(item.to, error)) {
-            std::vector<int32_t> block(4096 * (size_t)std::max(1u, back->Format().channels));
-            while (back->Read(block.data(), 4096) && !cancel) {}
-            const PcmFormat &a = source->Format(), &b = back->Format();
-            same = !cancel && !back->Damaged() && back->Digest() == source->Digest() && b.frames == a.frames &&
-                   b.channels == a.channels && b.bits == a.bits && b.rate == a.rate;
-        }
-        if (!same) {
-            DeleteFileW(item.to.c_str());  // never verified, never used: the original is untouched
-            if (cancel) {
-                result.cancelled = true;
-                break;
-            }
-            result.failed.push_back({item.from, L"The new file didn't read back identical to the original, so it was removed."});
+        if (!item.replace) {
+            result.done.push_back({item.id, item.from, item.to, false});
             continue;
         }
         const bool wantRecycle = settings.recycle;
@@ -437,4 +496,68 @@ void PruneConvertLogs(const std::wstring& logDir, unsigned days) {
             ((uint64_t)a.ftCreationTime.dwHighDateTime << 32 | a.ftCreationTime.dwLowDateTime) < limit)
             DeleteFileW(log.c_str());
     }
+}
+
+namespace {
+std::wstring Songs(size_t n) { return std::to_wstring(n) + (n == 1 ? L" song" : L" songs"); }
+}  // namespace
+
+std::wstring ConvertSummary(const std::vector<ConvertItem>& plan) {
+    size_t ready = 0;
+    std::vector<std::pair<std::wstring, size_t>> reasons;
+    for (const ConvertItem& item : plan) {
+        if (item.skip.empty()) { ++ready; continue; }
+        auto it = std::find_if(reasons.begin(), reasons.end(), [&](const auto& r) { return r.first == item.skip; });
+        if (it == reasons.end()) reasons.push_back({item.skip, 1});
+        else ++it->second;
+    }
+    std::stable_sort(reasons.begin(), reasons.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    std::wstring s = ready ? Songs(ready) + L" to convert" : L"Nothing to convert";
+    if (!reasons.empty()) {
+        s += L"  \x2022  " + std::to_wstring(plan.size() - ready) + L" won't: ";
+        for (size_t i = 0; i < reasons.size() && i < 3; ++i)
+            s += (i ? L", " : L"") + reasons[i].first + (reasons.size() > 1 ? L" (" + std::to_wstring(reasons[i].second) + L")" : L"");
+        if (reasons.size() > 3) s += L"...";
+    }
+    return s;
+}
+
+std::wstring ReplaceQuestion(const std::vector<ConvertItem>& plan, bool recycle, bool showOriginals, unsigned days) {
+    size_t ready = 0, lossless = 0;
+    CordExport format = CordExport::None;
+    for (const ConvertItem& item : plan)
+        if (item.skip.empty()) {
+            ++ready;
+            format = item.format;
+            lossless += ReadsExactly(item.from);
+        }
+    const CordExportInfo& info = kCordExports[(unsigned)format];
+    std::wstring q = L"Replace " + Songs(ready) + L" with " + info.label + L"?\n\nEach new file is read back and checked" +
+                     (info.kbps ? L"" : L", sample for sample,") + L" before the library switches to it, keeping its plays, "
+                     L"ratings and playlists. ";
+    q += recycle ? L"The originals then go to the Recycle Bin."
+                 : showOriginals ? L"The originals stay where they are, and in the library."
+                                 : L"The originals stay where they are, left out of the library.";
+    q += L"\nLibrary > Undo last conversion brings them back for " +
+         (days == 1 ? std::wstring(L"a day") : days % 7 ? std::to_wstring(days) + L" days"
+                      : days == 7 ? std::wstring(L"a week") : std::to_wstring(days / 7) + L" weeks") + L".";
+    if (info.kbps && lossless)
+        q += L"\n\n" + Songs(lossless) + (lossless == 1 ? L" is" : L" are") + L" lossless now. " + info.label +
+             L" can't hold all of the original sound, so keep the originals (or a backup) if you may want it back later.";
+    return q;
+}
+
+std::wstring ConvertDoneText(const ConvertResult& r, CordExport format, bool replaced, bool recycle) {
+    std::wstring done = r.done.empty() ? std::wstring(L"Nothing was converted")
+                                       : (replaced ? L"Converted " : L"Made ") + Songs(r.done.size()) + (replaced ? L" into " : L" as ") +
+                                             kCordExports[(unsigned)format].label;
+    done += r.cancelled ? L"; the rest was cancelled." : L".";
+    if (!replaced && !r.done.empty()) done += L" The originals were kept.";
+    if (replaced && recycle) {
+        const size_t kept = (size_t)std::count_if(r.done.begin(), r.done.end(), [](const ConvertDone& d) { return !d.recycled; });
+        if (kept)
+            done += L" " + Songs(kept) + (kept == 1 ? L" was" : L" were") + L" kept: " +
+                    (r.logError.empty() ? L"the Recycle Bin wasn't available there." : r.logError + L".");
+    }
+    return done;
 }

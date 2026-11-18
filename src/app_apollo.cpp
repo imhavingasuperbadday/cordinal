@@ -684,12 +684,16 @@ void PaintScope(HDC dc, RECT rc) {
     Sunken(dc, rc);
     SIZE cells = VisCells(kScopeBox);
     int u = VisUnit(), left = rc.left + 2, top = rc.top + 2;
-    int frames = (int)ap.wave.size() / 2, cols = std::min((int)cells.cx, frames / 4), rows = cells.cy;
+    // One sample every fourth frame, or every second or frame when the box is wider than the wave
+    // holds at that spacing, so the trace always runs to the box's right edge.
+    int frames = (int)ap.wave.size() / 2, rows = cells.cy;
+    int step = std::clamp(cells.cx > 0 ? frames / (int)cells.cx : 4, 1, 4);
+    int cols = std::min((int)cells.cx, frames / step);
     if (cols <= 0 || rows <= 1) return;
     std::vector<float> dark((size_t)cols * rows, 0);
-    int first = frames - cols * 4;
+    int first = frames - cols * step;
     for (int x = 0; x < cols; ++x) {
-        int at = (first + x * 4) * 2;
+        int at = (first + x * step) * 2;
         float v = (ap.wave[at] + ap.wave[at + 1]) * 0.5f;
         float y = std::clamp((rows - 1) / 2.0f - v * rows, 0.0f, (float)(rows - 1));
         int y0 = (int)y;

@@ -13,6 +13,8 @@
 #include <string>
 #include <vector>
 
+struct PcmFormat;
+
 class Decoder {
 public:
     virtual ~Decoder() = default;
@@ -37,6 +39,11 @@ public:
     // Why it failed, when it can say more than that the audio is damaged: a helper program that
     // stopped (helpers.h) says what it printed. Empty otherwise.
     virtual std::wstring Problem() const { return {}; }
+    // A lossless decoder whose output is its exact integer samples scaled by 2^(1-bits), mono as two
+    // equal channels and stereo as is, fills in the stream's rate, bit depth (24 at most), channels
+    // and length; OpenPcmReader then reads those integers back exactly. False for anything else:
+    // lossy or hybrid streams, float samples, more than two channels, or deeper than 24 bits.
+    virtual bool LosslessFormat(PcmFormat&) const { return false; }
 };
 
 // A sub-track path ("file.flac|3") opens the real file; OpenRange limits its extent.
@@ -104,8 +111,9 @@ inline size_t PcmReader::Read(int32_t* out, size_t frames) {
     return 0;
 }
 
-// Opens a file for exact reading: FLAC, integer PCM in WAV, RF64, Wave64 and AIFF, and cordinal's
-// own format. Float, ADPCM, G.711 and lossy streams are refused. On failure `error` is set to a
+// Opens a file for exact reading: FLAC, integer PCM in WAV, RF64, Wave64 and AIFF, cordinal's own
+// format, and mono or stereo ALAC, WavPack, Monkey's Audio and TTA up to 24 bits (through
+// Decoder::LosslessFormat). Float, ADPCM, G.711, hybrid WavPack and lossy streams are refused. On failure `error` is set to a
 // user-readable line.
 std::unique_ptr<PcmReader> OpenPcmReader(const std::wstring& path, std::wstring& error);
 

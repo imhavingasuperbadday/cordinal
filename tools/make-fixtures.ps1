@@ -91,6 +91,7 @@ $sineWav = "$media\sine.wav"
 FFmpeg @('-i', $sineWav, '-c:a', 'pcm_s16be', "$native\sine.au")
 FFmpeg @('-i', $sineWav, '-c:a', 'pcm_s24le', "$native\sine.caf")
 FFmpeg @('-i', $sineWav, '-c:a', 'alac', "$native\alac.caf")
+FFmpeg @('-i', $sineWav, '-c:a', 'wavpack', "$native\pcm16.wv")  # integer WavPack; sine.wv above is float
 FFmpeg @('-i', $sineWav, '-c:a', 'flac', "$native\sine.oga")
 FFmpeg @('-i', $sineWav, '-c:a', 'pcm_s16le', "$native\sine.voc")
 FFmpeg @('-i', $sineWav, '-c:a', 'pcm_mulaw', "$native\ulaw.au")

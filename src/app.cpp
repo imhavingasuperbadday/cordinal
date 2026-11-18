@@ -140,6 +140,7 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int showCmd) {
         if (ListenBrainzDialogMessage(&msg)) continue;
         if (OrganizeDialogMessage(&msg)) continue;
         if (CopyDialogMessage(&msg)) continue;
+        if (ConvertDialogMessage(&msg)) continue;
         if (IpodDialogMessage(&msg)) continue;
         if (CoverSearchDialogMessage(&msg)) continue;
         if (ArtistInfoDialogMessage(&msg)) continue;

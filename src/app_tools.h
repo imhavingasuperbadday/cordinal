@@ -22,10 +22,10 @@ bool OrganizeUsing(TrackId id);
 void OnOrganizeDone(LPARAM lp);
 void UndoOrganize();
 void StopOrganizer();
-// Converting to .cord and exporting .cord to other formats (app_convert.cpp).
+// Library > Convert... (app_convert.cpp): the window, the run, and undo for replacements.
 void InitConvert();
-void ConvertTracks(const std::vector<TrackId>& ids, CordExport format = CordExport::None);
-HMENU CordExportMenu();
+bool ConvertDialogMessage(MSG* msg);
+void ShowConvert(const std::vector<TrackId>& ids);
 bool ConvertBusy();
 bool ConvertUsing(TrackId id);
 void OnConvertMessage(WPARAM wp, LPARAM lp);

@@ -11,6 +11,7 @@
 //   Damaged      `token` failed while reading (TakeError(token) says where); queued playback continues
 #pragma once
 #include "dsp.h"
+#include "dsd.h"
 
 #include <windows.h>
 
@@ -82,6 +83,11 @@ public:
     // Exclusive output plays each track at its own sample rate with nothing in between (no
     // Windows mixer, no resampling); bit-perfect at 100% volume with EQ and ReplayGain off.
     void SetExclusive(bool exclusive);
+    // Plays DSF and DSDIFF files as their own 1-bit stream (DoP in exclusive mode, ASIO's native DSD
+    // when the driver has it) on exclusive or ASIO output; off converts them to PCM as before.
+    // Applies to tracks opened after the call. A DSD stream is never scaled, faded, equalised,
+    // limited or clipped, so the volume, EQ, effects and ReplayGain don't reach it.
+    void SetNativeDsd(bool on);
 #ifdef _WIN32
     // Shared, exclusive or ASIO output. ASIO plays through the driver named `asioDriver` (its registry
     // name; empty is the first installed), at each track's own rate like exclusive output.
@@ -107,6 +113,8 @@ public:
         std::wstring problem;  // why exclusive or ASIO output isn't (fully) in use
         std::string upmix;     // the speaker layout stereo is upmixed to ("5.1"), empty for none
         std::wstring speaker;  // the network speaker chosen as output, empty for this computer
+        unsigned dsdRate = 0;  // the DSD stream playing (2822400 = DSD64), 0 for PCM
+        bool dsdNative = false;  // ASIO native DSD rather than DoP over a PCM stream
     };
     OutputInfo Output() const;
     void SetEq(const EqSettings& eq);
@@ -181,6 +189,12 @@ struct RenderEffects {
 std::vector<float> RenderPlayerPcm(const float* stereo, size_t frames, unsigned rate,
                                  const EqSettings& eq, bool replayGainLimiter, float trackGain = 1,
                                  float outputHeadroomDb = 0, const RenderEffects* effects = nullptr);
+// Offline DSD payload through the production renderer, with the volume, EQ, effects and limiter
+// switched on: the payload must come out bit for bit, and a paused block must be DSD idle
+// (dsd.h), never zeros. Empty when the arguments can't render. For the engine suite.
+std::vector<float> RenderDsdPayload(const float* stereo, size_t frames, unsigned rate, DsdTransport transport,
+                                    const EqSettings& eq, const RenderEffects* effects = nullptr,
+                                    bool paused = false);
 // Offline crossfade through the production decode-side mixer: `a` then `b` (interleaved stereo at
 // `rate`), with the last `seconds` of a mixed into the start of b at the gains given (b's gain is
 // applied later by the renderer, so a's samples are scaled by gainA / gainB). For the engine suite.

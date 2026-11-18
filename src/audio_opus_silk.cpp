@@ -9,6 +9,7 @@
 #include <cstring>
 #include <numbers>
 #include <type_traits>
+#include <utility>
 #include <emmintrin.h>
 #ifdef CORDINAL_CODEC_TRACE
 #include <cstdio>
@@ -389,21 +390,31 @@ struct OpusSilk::State {
     std::array<std::array<int16_t,7>,2> delay{};
     unsigned inputDelay=0,ratio=0;
     double concealGain=1;
+    // The first frame after a stereo packet is mono: its right output still goes through channel
+    // 1's resampler, whose state continues from the stereo frames (libopus's stereo_to_mono).
+    bool collapse=false;
 };
 struct OpusSilk::Impl : State {
     // Reused by Resample for the upsampled working buffer; not part of the saved state.
     std::vector<int16_t> upScratch_;
 
-    // Reconfigures the decoder when the sample rate or channel count changes;
-    // a rate change discards everything, a channel-count change keeps channel 0.
+    // Reconfigures the decoder when the sample rate or channel count changes, as libopus's
+    // silk_Decode does: a rate change discards everything. A channel-count change keeps channel 0
+    // and the mid history (mono output is the mid signal one sample late, so clearing it would put
+    // a click in the first frame after the switch). Mono to stereo starts the side channel, its
+    // history and the prediction weights afresh, and its resampler from channel 0's; stereo to mono
+    // drops the weights and side history, which mono does not use.
     void Setup(unsigned hz,unsigned count) {
         if (rate!=hz) {
             *this=Impl{};rate=hz;
             ratio=48000/hz;inputDelay=hz==8000?0:hz==12000?4:7;
         }
         if (coded!=count) {
-            channels[1]=Channel{};weights={};mid1=mid2=side1=0;
-            if (coded) { allpass[1]=allpass[0];fir[1]=fir[0];delay[1]=delay[0]; }
+            weights={};side1=0;
+            if (count==2) {
+                channels[1]=Channel{};collapse=false;
+                if (coded) { allpass[1]=allpass[0];fir[1]=fir[0];delay[1]=delay[0]; }
+            } else collapse=coded==2;
             coded=count;
         }
     }
@@ -547,7 +558,7 @@ struct OpusSilk::Impl : State {
 #ifdef CORDINAL_CODEC_TRACE
             fprintf(stderr,"silk %u %u %u %u %08x\n",hz,count,midParameters.type,r.Tell(),r.FinalRange());
 #endif
-            Resample(left,right,out,count==1);
+            Resample(left,right,out,count==1 && !std::exchange(collapse,false));
         }
         // SILK reads a fixed number of bounded symbols and permits arithmetic
         // zero extension at the end of a frame. CELT enforces its own bit budget.
@@ -575,7 +586,7 @@ struct OpusSilk::Impl : State {
             mid2=mid1;mid1=values[0];side1=values[1];
             concealGain*=decay;
         }
-        Resample(left,right,out,count==1);return true;
+        Resample(left,right,out,count==1 && !std::exchange(collapse,false));return true;
     }
 };
 

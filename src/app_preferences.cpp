@@ -156,12 +156,6 @@ LRESULT CALLBACK ReviewProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_CTLCOLORSTATIC:
         case WM_CTLCOLORBTN:
             return SurfaceControlColor((HDC)wp, TextColor());
-        case WM_NOTIFY: {
-            auto* draw = (NMCUSTOMDRAW*)lp;
-            if (draw->hdr.code != NM_CUSTOMDRAW || GetDlgCtrlID(draw->hdr.hwndFrom) < 100 ||
-                GetDlgCtrlID(draw->hdr.hwndFrom) > 106) break;
-            return ChoiceLabelCustomDraw(draw, review.font, D(16));
-        }
         case WM_COMMAND:
             if (LOWORD(wp) == IDCANCEL) DestroyWindow(h);
             else if (LOWORD(wp) == IDOK && review.policy) {

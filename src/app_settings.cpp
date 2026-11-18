@@ -215,14 +215,41 @@ void RememberOutputEq(bool remember) {
     if (!remember) { g.eq = g.globalEq; EqApply(); }
 }
 
+// library.cdb when LoadState could neither read it nor move it aside (a sync client or scanner held it):
+// the library started empty, and a save must not replace the user's real library with that. The file is
+// moved aside first, once it can be; until then nothing is saved over it.
+static std::wstring g_unreadLibrary;
+
+static bool SetAsideUnreadLibrary() {
+    if (g_unreadLibrary.empty()) return true;
+    if (GetFileAttributesW(g_unreadLibrary.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        g_unreadLibrary.clear();
+        return true;
+    }
+    const std::wstring kept = g_unreadLibrary + L".bad-" + std::to_wstring(UnixNow()) + L"-" +
+                              std::to_wstring(GetCurrentProcessId());
+    if (!MoveFileExW(g_unreadLibrary.c_str(), kept.c_str(), 0)) return false;
+    g_unreadLibrary.clear();
+    ShowMessage(L"The library file that couldn't be read was kept as " + FileNameOf(kept) + L".");
+    return true;
+}
+
 // Saves the library, keeping g.dirty set on failure so the autosave retries after a
 // temporary file lock or unavailable profile folder.
 void SaveLibraryNow() {
+    if (!SetAsideUnreadLibrary()) {
+        g.dirty = true;  // still locked: try again with the next autosave
+        g.ticksSinceSave = 0;
+        return;
+    }
     if (g.hwnd && IsWindow(g.list)) CapturePlaylistPosition();
     std::wstring error;
     bool saved = SaveLibrary(g.libraryPath, g.playlists, &error);
     if (!saved) ShowMessage(L"Couldn't save the library to " + g.libraryPath + L". " + error);
-    else DeleteFileW(UnsavedLibraryPath().c_str());  // library.cdb now holds everything it held
+    else {
+        DeleteFileW(UnsavedLibraryPath().c_str());  // library.cdb now holds everything it held
+        KeepLibrarySnapshot(g.libraryPath);          // once a day; a failed copy only skips that day
+    }
     g.dirty = !saved;  // keep retrying after a temporary lock or unavailable profile folder
     g.ticksSinceSave = 0;
 }
@@ -233,6 +260,9 @@ std::wstring UnsavedLibraryPath() { return g.libraryPath + L".unsaved"; }
 // changes go beside it rather than being lost with the process. The new copy is written first; the
 // old one only goes once the new one is safely on disk.
 bool KeepUnsavedLibrary() {
+    // A copy of the empty library that replaced an unread one would win over library.cdb at the next
+    // start; keeping nothing leaves the real library to be read again.
+    if (!SetAsideUnreadLibrary()) return true;
     const std::wstring unsaved = UnsavedLibraryPath();
     if (!SaveLibrary(unsaved, g.playlists)) return false;
     DeleteFileW((unsaved + L".bak").c_str());  // the previous copy, now superseded
@@ -378,26 +408,47 @@ void LoadState() {
     std::wstring preserved, failedUnsaved;
     const bool restored = RestoreUnsavedLibrary(&failedUnsaved);
     bool loaded = restored || LoadLibrary(g.libraryPath, g.playlists, &preserved);
+    g_unreadLibrary.clear();
+    if (!loaded && hadOriginal && preserved.empty() &&
+        GetFileAttributesW(g.libraryPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+        g_unreadLibrary = g.libraryPath;
     bool fromBackup = false;
-    if (!loaded && GetFileAttributesW((g.libraryPath + L".bak").c_str()) != INVALID_FILE_ATTRIBUTES) {
+    const bool hadBackup = GetFileAttributesW((g.libraryPath + L".bak").c_str()) != INVALID_FILE_ATTRIBUTES;
+    if (!loaded && hadBackup) {
         g_lib = Library();
         std::wstring backupPreserved;
         fromBackup = LoadLibrary(g.libraryPath + L".bak", g.playlists, &backupPreserved);
         if (fromBackup) loaded = true;
-        else if (!backupPreserved.empty()) preserved = std::move(backupPreserved);
+        else if (preserved.empty()) preserved = std::move(backupPreserved);  // name library.cdb's copy first
+    }
+    // Last, the newest dated copy (library-history): only when there was a library to lose, so deleting
+    // library.cdb and its backup on purpose still starts fresh.
+    std::wstring fromSnapshot;
+    if (!loaded && (hadOriginal || hadBackup)) {
+        g_lib = Library();
+        g.playlists.clear();
+        fromSnapshot = LoadNewestSnapshot(g.libraryPath, g.playlists);
+        if (!fromSnapshot.empty()) {
+            loaded = true;
+            g.dirty = true;  // write it back as library.cdb
+        } else {
+            g_lib = Library();
+            g.playlists.clear();
+        }
     }
     std::wstring warning;
     if (!failedUnsaved.empty())
         warning = L"The changes kept from the last close couldn't be read; they were kept as " +
                   FileNameOf(failedUnsaved) + L". ";
-    if (!restored && !loaded) {
-        if (fromBackup) warning += L"Couldn't read library.cdb; using the previous save. ";
-        else if (hadOriginal) warning += L"Couldn't read library.cdb; the library starts empty. ";
+    if (!loaded) {
+        if (hadOriginal) warning += L"Couldn't read library.cdb; the library starts empty. ";
         else if (!failedUnsaved.empty() || !preserved.empty()) warning += L"The library starts empty. ";
         if (!preserved.empty()) warning += L"The unreadable file was kept as " + FileNameOf(preserved) + L".";
         else if (hadOriginal && failedUnsaved.empty()) warning += L"The file is still in place.";
-    } else if (fromBackup) {
-        warning += L"library.cdb couldn't be read; using the previous save. ";
+    } else if (fromBackup || !fromSnapshot.empty()) {
+        warning += fromBackup ? L"library.cdb couldn't be read; using the previous save. "
+                              : L"library.cdb and its backup couldn't be read; using the copy saved " +
+                                    FileNameOf(fromSnapshot).substr(8, 10) + L". ";
         if (!preserved.empty()) warning += L"The unreadable file was kept as " + FileNameOf(preserved) + L".";
     } else if (!preserved.empty()) {
         warning += L"The unreadable library file was kept as " + FileNameOf(preserved) + L".";

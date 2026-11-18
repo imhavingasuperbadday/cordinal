@@ -8,12 +8,15 @@
 //   varint count, then count playlists (kind, name, rules, varint n + n track indices)
 //   version 2 only: sections, each varint tag, varint byte length, payload; tag 0 ends the list
 //     1 = the play log (playlog.cpp), 2 = cordinal points (points.cpp), 8 = album groups and
-//     editions (album_editions.h), 9 = explicit group-cover choices, 10 = taste mood sketches and
-//     11 = taste part bins (taste.cpp). Readers skip unknown tags.
+//     editions (album_editions.h), 9 = explicit group-cover choices, 10 = taste mood sketches,
+//     11 = taste part bins (taste.cpp) and 12 = a CRC-32 (4 bytes, little-endian) of every byte before
+//     its tag, written last. Readers skip unknown tags, so older versions still read a sealed file.
 //
 // Integers are LEB128 varints (signed ones zigzag-encoded) so typical libraries stay small.
 // Saving writes a temp file and swaps it in with ReplaceFile, keeping the previous file as
-// library.cdb.bak. A file that fails to parse is set aside instead of being overwritten.
+// library.cdb.bak. A file that fails to parse, or whose checksum no longer matches (a disk that
+// flipped a bit years after the save), is set aside instead of being overwritten. Dated copies in
+// library-history beside it (KeepLibrarySnapshot) outlast a bad save that .bak alone would not.
 #include "album_editions.h"
 #include "library.h"
 #include "library_archive.h"
@@ -21,6 +24,7 @@
 #include "points.h"
 #include "sections.h"
 #include "taste.h"
+#include "inflate.h"
 #include "streamfile.h"
 #include <climits>
 
@@ -37,6 +41,9 @@ constexpr uint64_t kMaxSectionBytes = 1ull << 30;
 // The payloads of the sections a file carries, copied out of the file.
 struct Sections {
     std::string playLog, points, audioHash, views, loudness, albums, firstPlayed, albumEditions, albumArt, taste, tasteParts;
+    bool hasChecksum = false;
+    uint32_t checksum = 0;
+    uint64_t checkedBytes = 0;  // the bytes the checksum covers: everything before its tag
     bool hasPlayLog = false, hasPoints = false, hasAudioHash = false, hasViews = false, hasLoudness = false,
          hasAlbums = false, hasFirstPlayed = false, hasAlbumEditions = false, hasAlbumArt = false, hasTaste = false,
          hasTasteParts = false;
@@ -306,6 +313,15 @@ public:
             if (used_ == buf_.size()) Flush();
         }
     }
+    // Ends the section list with a CRC-32 of every byte written so far, then the end tag.
+    void Seal() {
+        Flush();
+        const uint32_t crc = crc_;
+        const char bytes[4] = {(char)(crc & 0xFF), (char)(crc >> 8 & 0xFF), (char)(crc >> 16 & 0xFF), (char)(crc >> 24)};
+        U(kSectionChecksum);
+        Bytes(std::string_view(bytes, 4));
+        U(kSectionEnd);
+    }
     bool Commit() {
         Flush();
         if (!ok_) return false;
@@ -313,11 +329,17 @@ public:
         CloseHandle(handle_);
         handle_ = INVALID_HANDLE_VALUE;
         // A failed replacement must not bypass backup creation.
-        if (GetFileAttributesW(file_.c_str()) != INVALID_FILE_ATTRIBUTES)
+        if (GetFileAttributesW(file_.c_str()) != INVALID_FILE_ATTRIBUTES) {
             ok_ = ReplaceFileW(file_.c_str(), temp_.c_str(), (file_ + L".bak").c_str(), REPLACEFILE_IGNORE_MERGE_ERRORS,
                                nullptr, nullptr) != FALSE;
-        else
+            // ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: the old file already became the .bak but the new one
+            // couldn't take its name. Deleting it below would leave no library.cdb and lose this save.
+            if (!ok_ && GetFileAttributesW(file_.c_str()) == INVALID_FILE_ATTRIBUTES &&
+                GetFileAttributesW(temp_.c_str()) != INVALID_FILE_ATTRIBUTES)
+                ok_ = MoveFileExW(temp_.c_str(), file_.c_str(), MOVEFILE_WRITE_THROUGH) != FALSE;
+        } else {
             ok_ = MoveFileExW(temp_.c_str(), file_.c_str(), MOVEFILE_WRITE_THROUGH) != FALSE;
+        }
         if (!ok_) {
             Fail(L"Couldn't replace the library file and its backup");
             DeleteFileW(temp_.c_str());
@@ -338,6 +360,7 @@ private:
     void Flush() {
         DWORD written = 0;
         if (ok_ && used_) {
+            crc_ = Crc32((const unsigned char*)buf_.data(), used_, crc_);
             if (!WriteFile(handle_, buf_.data(), (DWORD)used_, &written, nullptr)) Fail(L"Couldn't write the library file");
             else if (written != used_) {
                 error_ = L"Couldn't write the complete library file.";
@@ -351,6 +374,7 @@ private:
     HANDLE handle_ = INVALID_HANDLE_VALUE;
     std::array<char, 64 * 1024> buf_;
     size_t used_ = 0;
+    uint32_t crc_ = 0;
     bool ok_ = false;
 };
 
@@ -393,6 +417,7 @@ public:
         if (!ok || n > Remaining()) Fail();
         else p_ += (size_t)n;
     }
+    size_t Position() const { return p_; }
     std::string_view Raw(size_t n) {
         if (!ok || n > Remaining()) return Fail(), std::string_view();
         if (!n) return {};
@@ -437,13 +462,23 @@ void CompactSortedHandles(std::vector<StringPool::Handle>& strings, size_t& sort
 // Reads the section list after the playlists. Each payload is copied out before the next read.
 bool ReadSections(Reader& r, Sections& out) {
     for (;;) {
+        const size_t at = r.Position();
         uint64_t tag = r.U();
         if (!r.ok) return false;
         if (tag == kSectionEnd) return true;
+        if (out.hasChecksum) return false;  // the checksum seals the file: nothing may follow it
         uint64_t length = r.U(r.Remaining());
         if (!r.ok || length > kMaxSectionBytes) return false;
         std::string_view body = r.Raw((size_t)length);
         if (!r.ok) return false;
+        if (tag == kSectionChecksum) {
+            if (body.size() != 4) return false;
+            out.hasChecksum = true;
+            out.checksum = (uint32_t)(uint8_t)body[0] | (uint32_t)(uint8_t)body[1] << 8 |
+                           (uint32_t)(uint8_t)body[2] << 16 | (uint32_t)(uint8_t)body[3] << 24;
+            out.checkedBytes = at;
+            continue;
+        }
         // A repeated tag is malformed; the first copy wins.
         if ((tag == kSectionPlayLog && out.hasPlayLog) || (tag == kSectionPoints && out.hasPoints) ||
             (tag == kSectionAudioHash && out.hasAudioHash) || (tag == kSectionPlaylistViews && out.hasViews) ||
@@ -540,6 +575,18 @@ bool ValidateLibrary(FileSource& input, uint64_t& stringCount, uint64_t& trackCo
     if (version >= 2) {
         Sections sections;
         if (!ReadSections(r, sections)) return false;
+        // Files saved before the checksum existed have none and are read as before.
+        if (sections.hasChecksum) {
+            uint32_t crc = 0;
+            std::string chunk;
+            for (uint64_t at = 0; at < sections.checkedBytes;) {
+                const size_t n = (size_t)std::min<uint64_t>(sections.checkedBytes - at, 1u << 20);
+                if (!input.Read(at, n, chunk) || chunk.size() != n) return false;
+                crc = Crc32((const unsigned char*)chunk.data(), n, crc);
+                at += n;
+            }
+            if (crc != sections.checksum) return false;
+        }
         std::vector<PlayEvent> log;
         PointsState points;
         if (sections.hasPlayLog && !DecodePlayLog(sections.playLog, trackCount, nullptr, log)) return false;
@@ -683,7 +730,7 @@ static bool WriteDatabase(const std::wstring& file, const Library& library,
     w.Bytes(EncodeTaste(taste, newId));
     w.U(kSectionTasteParts);
     w.Bytes(EncodeTasteParts(taste, newId));
-    w.U(kSectionEnd);
+    w.Seal();
     std::vector<uint32_t>().swap(newId);
     return w.Commit();
 }
@@ -873,4 +920,93 @@ bool LoadLibrary(const std::wstring& file, std::vector<Playlist>& playlists, std
     else ResetPoints();
     SetTaste(std::move(data.taste));
     return true;
+}
+
+// --- Dated copies -----------------------------------------------------------------------------------
+// library.cdb.bak only reaches one save back, so a save that lost data (a bug, a library emptied by
+// mistake) becomes the backup with the next save. Once a day the saved file is also copied to
+// library-history\library-YYYY-MM-DD.cdb (UTC dates): the last kDailyCopies days, plus the first copy
+// of each of the last kMonthlyCopies months, so a long-time user can always go back a few months.
+namespace {
+
+constexpr size_t kDailyCopies = 7, kMonthlyCopies = 3;
+
+std::wstring HistoryDir(const std::wstring& file) {
+    const size_t slash = file.find_last_of(L"\\/");
+    return (slash == std::wstring::npos ? std::wstring() : file.substr(0, slash + 1)) + L"library-history";
+}
+
+// "library-2026-11-18.cdb" for a UnixNow() time (days from civil, H. Hinnant's algorithm).
+std::wstring SnapshotName(uint32_t now) {
+    const int64_t days = now / 86400 + 719468;
+    const int64_t era = days / 146097, doe = days - era * 146097;
+    const int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100), mp = (5 * doy + 2) / 153;
+    const int64_t day = doy - (153 * mp + 2) / 5 + 1, month = mp < 10 ? mp + 3 : mp - 9;
+    const int64_t year = yoe + era * 400 + (month <= 2);
+    wchar_t name[32];
+    swprintf(name, 32, L"library-%04d-%02d-%02d.cdb", (int)year, (int)month, (int)day);
+    return name;
+}
+
+bool IsSnapshotName(std::wstring_view name) {
+    if (name.size() != 22 || name.substr(0, 8) != L"library-" || name.substr(18) != L".cdb") return false;
+    for (size_t i = 8; i < 18; ++i)
+        if ((i == 12 || i == 15) ? name[i] != L'-' : (name[i] < L'0' || name[i] > L'9')) return false;
+    return true;
+}
+
+}  // namespace
+
+std::vector<std::wstring> LibrarySnapshots(const std::wstring& file) {
+    const std::wstring dir = HistoryDir(file);
+    std::vector<std::wstring> names;
+    WIN32_FIND_DATAW found;
+    HANDLE h = FindFirstFileW((dir + kPathSep + L"library-*.cdb").c_str(), &found);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && IsSnapshotName(found.cFileName))
+                names.push_back(found.cFileName);
+        } while (FindNextFileW(h, &found));
+        FindClose(h);
+    }
+    std::sort(names.rbegin(), names.rend());  // the dates sort as text: newest first
+    for (auto& name : names) name = dir + kPathSep + name;
+    return names;
+}
+
+bool KeepLibrarySnapshot(const std::wstring& file, uint32_t now) {
+    const std::wstring dir = HistoryDir(file);
+    CreateDirectoryW(dir.c_str(), nullptr);
+    const std::wstring target = dir + kPathSep + SnapshotName(now);
+    if (GetFileAttributesW(target.c_str()) != INVALID_FILE_ATTRIBUTES) return true;  // today's copy exists
+    // Copied beside it first, so a copy cut short never carries a dated name.
+    const std::wstring temp = target + L".tmp";
+    if (!CopyFileW(file.c_str(), temp.c_str(), FALSE) ||
+        !MoveFileExW(temp.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(temp.c_str());
+        return false;
+    }
+    std::vector<std::wstring> all = LibrarySnapshots(file);  // newest first
+    std::vector<bool> keep(all.size(), false);
+    for (size_t i = 0; i < all.size() && i < kDailyCopies; ++i) keep[i] = true;
+    // The first copy of a month is the last one listed with that month, the list being newest first.
+    size_t months = 0;
+    for (size_t i = 0; i < all.size() && months < kMonthlyCopies; ++i) {
+        const std::wstring month = all[i].substr(all[i].size() - 14, 7);
+        const bool firstOfMonth = i + 1 == all.size() || all[i + 1].substr(all[i + 1].size() - 14, 7) != month;
+        if (firstOfMonth) {
+            keep[i] = true;
+            ++months;
+        }
+    }
+    for (size_t i = 0; i < all.size(); ++i)
+        if (!keep[i]) DeleteFileW(all[i].c_str());
+    return true;
+}
+
+std::wstring LoadNewestSnapshot(const std::wstring& file, std::vector<Playlist>& playlists) {
+    for (const std::wstring& copy : LibrarySnapshots(file))
+        if (LoadLibrary(copy, playlists)) return copy;
+    return {};
 }

@@ -119,6 +119,11 @@ public:
             !channels_ || channels_>8 || !rate || rate>768000 || rate!=media_.rate) return false;
         return Ready(rate,true);
     }
+    bool LosslessFormat(PcmFormat& f) const override {
+        if (channels_>2 || bits_>24) return false;
+        f.rate=rate_;f.channels=channels_;f.bits=bits_;f.frames=(uint64_t)std::llround(Duration()*rate_);
+        return true;
+    }
 private:
     // Decode residuals with an adaptive Golomb parameter; runs of zeros are coded at once.
     template<class T> bool Residuals(Bits& b,std::vector<T>& values,unsigned width,unsigned factor) {

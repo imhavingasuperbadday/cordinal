@@ -15,6 +15,11 @@
 namespace aac {
 using Sender = std::function<bool(const char*, size_t)>;
 constexpr unsigned kEncoderDelay = 3072;  // priming and MDCT overlap, trimmed by the M4A writer
+// The MP3 encoder's input sample n decodes as sample n + kMp3Latency of a decoder's raw output, which
+// includes the 529 samples every MP3 decoder adds (measured by cross-correlation; the gapless check
+// in the cord-conversion suite holds it). A LAME header records the rest as the encoder delay, and
+// gapless copies end with kMp3Latency samples of silence so the last real sample is encoded.
+constexpr unsigned kMp3Latency = 1057, kMp3Delay = kMp3Latency - 529;
 
 class Encoder {
 public:

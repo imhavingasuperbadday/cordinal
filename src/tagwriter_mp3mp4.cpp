@@ -250,8 +250,11 @@ bool WriteMp3(const std::wstring& path, const TagEdit& e, std::wstring& error) {
     if (e.grouping) dropTxxx({"GROUPING", "CONTENTGROUP"});
     if (e.label) dropTxxx({"LABEL", "PUBLISHER", "ORGANIZATION"});
     if (e.lyrics) dropTxxx({"LYRICS", "UNSYNCEDLYRICS"});
-    if (e.track || e.trackTotal) dropTxxx({"TRACKTOTAL", "TOTALTRACKS"});
-    if (e.disc || e.discTotal) dropTxxx({"DISCNUMBER", "DISCTOTAL", "TOTALDISCS"});
+    // A total or number kept in TXXX stays unless that very field is edited: pair() below only carries
+    // over what TRCK and TPOS hold, so a track-number edit would otherwise lose a TXXX track total.
+    if (e.trackTotal) dropTxxx({"TRACKTOTAL", "TOTALTRACKS"});
+    if (e.disc) dropTxxx({"DISCNUMBER"});
+    if (e.discTotal) dropTxxx({"DISCTOTAL", "TOTALDISCS"});
     if (e.bpm) dropTxxx({"BPM"});
     if (e.compilation) dropTxxx({"COMPILATION"});
     auto text = [&](const char* id, const std::optional<std::string>& v) {
@@ -352,10 +355,11 @@ bool WriteMp3(const std::wstring& path, const TagEdit& e, std::wstring& error) {
     std::string newTag = header + body;
     std::string().swap(body);
 
-    // A trailing ID3v1 tag gets the edited title, artist, album and year too.
+    // A trailing ID3v1 tag gets the edited title, artist, album, year, track and genre too: the reader
+    // falls back to it for fields ID3v2 lacks, so a cleared field would otherwise come back.
     std::string v1;
     uint64_t v1At = input.Size();
-    if (input.Size() >= 128 && (e.title || e.artist || e.album || e.date)) {
+    if (input.Size() >= 128 && (e.title || e.artist || e.album || e.date || e.track || e.genre)) {
         if (!input.Read(input.Size() - 128, 128, v1)) {
             error = L"Couldn't read the trailing ID3 tag.";
             return false;
@@ -372,6 +376,10 @@ bool WriteMp3(const std::wstring& path, const TagEdit& e, std::wstring& error) {
         if (e.artist) v1.replace(33, 30, Latin1Field(*e.artist, 30));
         if (e.album) v1.replace(63, 30, Latin1Field(*e.album, 30));
         if (e.date) v1.replace(93, 4, Latin1Field(e.date->substr(0, 4), 4));
+        // ID3v1.1 keeps the track in byte 126 behind a zero at 125; the genre is an index, so an edited
+        // genre becomes "none" (255) and ID3v2's TCON speaks for it.
+        if (e.track && v1[125] == 0) v1[126] = (char)(*e.track < 256 ? *e.track : 0);
+        if (e.genre) v1[127] = '\xFF';
     }
     FileRewrite out(path, input, error);
     return out.Write(newTag) && out.Zeros(padBytes) && out.Copy(tag.size, v1At - tag.size) && out.Write(v1) && out.Commit();
@@ -607,6 +615,9 @@ bool ValidateContainers(sv s, size_t begin, size_t end, int depth) {
     if (!ListAtoms(s, begin, end, kids)) return false;
     for (auto& k : kids) {
         size_t child = k.Body();
+        // WriteMp4 rebuilds these with 8-byte headers; a 64-bit header would be read as a child atom
+        // and every tag inside lost, so refuse it and leave the file untouched.
+        if ((k.type == "udta" || k.type == "meta" || k.type == "ilst") && k.header != 8) return false;
         if (k.type == "meta") {
             // The writer rebuilds ISO full-box meta (4 bytes of version/flags). Reject a
             // QuickTime-style meta rather than rebuilding it with the wrong layout.

@@ -124,6 +124,7 @@ void TestSpeakers();
 void TestHls();
 void TestExclusive(const std::wstring& root, HWND hwnd);
 void TestAsioConversion();
+void TestNativeDsdRender();
 void TestAsio(const std::wstring& root, HWND hwnd);
 void TestFadeRamp();
 void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const std::wstring& media);

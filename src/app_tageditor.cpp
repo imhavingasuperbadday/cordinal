@@ -422,7 +422,8 @@ void Save() {
         }
         if (!item.Empty()) items.emplace_back(e.ids[i], std::move(item));
     }
-    if (!items.empty()) SubmitTagWrites(items, true, true);
+    // A write still running refuses the new one; keep the editor open so the typed values survive.
+    if (!items.empty() && !SubmitTagWrites(items, true, true)) return;
     DestroyWindow(e.hwnd);
 }
 
@@ -722,6 +723,11 @@ bool SubmitTagWrites(const std::vector<std::pair<TrackId, TagEdit>>& items, bool
         MessageBoxW(g.hwnd, L"Tags are still being written; try again in a moment.", kAppName, MB_OK | MB_ICONINFORMATION);
         return false;
     }
+    // Moving files under a running write would lose the edit or the file (Linux checks this too).
+    if (OrganizeBusy()) {
+        MessageBoxW(g.hwnd, L"Files are being organized; try again in a moment.", kAppName, MB_OK | MB_ICONINFORMATION);
+        return false;
+    }
     WriteJob job{{}, {}, announce, undoable ? TagUndoDir() : std::wstring(), std::move(journalAfter)};
     size_t deferred = 0, unsupported = 0;
     bool cueSkipped = false;
@@ -902,7 +908,6 @@ bool FlushDeferredTagWrites(std::wstring& error) {
             ++failed;
             if (error.empty()) error = done.failed.front().second;
         }
-        if (!done.journalFile.empty() && done.failed.empty()) DeleteTagJournal(done.journalFile);
         if (!done.written.empty()) {
             g_lib[d.id].flags &= ~Track::kLoaded;  // the tags on disk changed; read them again next start
             g.dirty = true;

@@ -51,7 +51,7 @@ void Worker(std::vector<TrackPath> items, std::vector<std::pair<uint64_t, uint64
 
 // Whether other work that touches the same files is under way.
 bool BackgroundBusy() {
-    if (g.scanning || TagWriteBusy() || CordExportBusy()) return true;
+    if (g.scanning || TagWriteBusy() || ConvertBusy()) return true;
     std::lock_guard lock(g.tagMx);
     return !g.tagQueue.empty() || g.tagBusy;
 }

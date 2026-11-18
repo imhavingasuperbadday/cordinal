@@ -9,6 +9,7 @@
 #include "app.h"
 #include "dbus.h"
 #include "radio_ui.h"
+#include "waybar.h"
 
 #include <fcntl.h>
 #include <poll.h>
@@ -55,6 +56,7 @@ struct Snapshot {
     bool lightweight = false;  // Lightweight mode (lightweight.cpp)
     bool canNext = false, canPrevious = false;
     std::string output;
+    std::string tip;  // a pack's tray tip format over what plays, or empty for "artist - title"
 };
 std::mutex g_mx;
 Snapshot g_snap;
@@ -201,7 +203,26 @@ constexpr dbus::Property kPlayerProperties[] = {
     {"Metadata", "a{sv}"},   {"Volume", "d", true},     {"Position", "x"},   {"MinimumRate", "d"},
     {"MaximumRate", "d"},    {"CanGoNext", "b"},        {"CanGoPrevious", "b"}, {"CanPlay", "b"},
     {"CanPause", "b"},       {"CanSeek", "b"},          {"CanControl", "b"}};
-constexpr dbus::Method kAppMethods[] = {{"Open", "as", "", OpenMethod}};
+// What plays, in a line or two: the tray icon's tooltip and the Waybar module's (waybar.cpp).
+std::string TipBody(const Snapshot& s) {
+    std::string body;
+    if (s.id != kNone && s.status != "Stopped") {
+        body = !s.tip.empty() ? s.tip : s.artist.empty() ? s.title : s.artist + " - " + s.title;
+        if (s.status == "Paused") body += " (paused)";
+    }
+    if (!s.output.empty()) body += (body.empty() ? "" : "\n") + s.output;
+    return body;
+}
+
+// io.github.cordinal.Bar() -> (state, tooltip) for `cordinal --waybar`; BarChanged says when to ask again.
+void BarMethod(dbus::Call& c) {
+    Snapshot s = Snap();
+    c.out.S(s.status);
+    c.out.S(TipBody(s));
+}
+
+constexpr dbus::Method kAppMethods[] = {{"Open", "as", "", OpenMethod}, {"Bar", "", "ss", BarMethod}};
+constexpr dbus::SignalInfo kAppSignals[] = {{"BarChanged", ""}};
 
 // --- the tray icon (StatusNotifierItem) and its menu (dbusmenu) ------------------------------------------
 enum MenuId {
@@ -339,13 +360,7 @@ void SniProperty(std::string_view p, Writer& w) {
     else if (p == "ItemIsMenu") w.B(false);
     else if (p == "Menu") w.O(kMenuPath);
     else if (p == "ToolTip") {
-        Snapshot s = Snap();
-        std::string body;
-        if (s.id != kNone && s.status != "Stopped") {
-            body = s.artist.empty() ? s.title : s.artist + " - " + s.title;
-            if (s.status == "Paused") body += " (paused)";
-        }
-        if (!s.output.empty()) body += (body.empty() ? "" : "\n") + s.output;
+        std::string body = TipBody(Snap());
         w.Align(8);
         w.S("cordinal");
         w.Close(w.Open(8));  // no pixmaps
@@ -381,7 +396,7 @@ constexpr dbus::Property kMenuProperties[] = {{"Version", "u"}, {"TextDirection"
 const dbus::Interface kObjects[] = {
     {kPath, kRoot, kRootMethods, kRootProperties, {}, GetProperty},
     {kPath, kPlayer, kPlayerMethods, kPlayerProperties, kPlayerSignals, GetProperty, SetProperty},
-    {kPath, kApp, kAppMethods, {}, {}},
+    {kPath, kApp, kAppMethods, {}, kAppSignals},
     {kSniPath, kSni, kSniMethods, kSniProperties, kSniSignals, SniProperty},
     {kMenuPath, kMenu, kMenuMethods, kMenuProperties, kMenuSignals, MenuProperty}};
 
@@ -466,6 +481,9 @@ void Run() {
         }
         if (now.status != last.status || now.id != last.id || now.output != last.output)
             Emit(kObjects[3], "NewToolTip", "", {});
+        if (now.status != last.status || now.id != last.id || now.title != last.title || now.artist != last.artist ||
+            now.output != last.output)
+            Emit(kObjects[2], "BarChanged", "", {});
         last = std::move(now);
         g_bus->Flush();
     }
@@ -491,11 +509,11 @@ bool ForwardToRunning(const std::vector<std::string>& args) {
     if (!has || has->type != dbus::kReturn || has->sig != "b" || !has->Body().B()) return false;
     static const std::pair<const char*, const char*> kCommands[] = {
         {"--play-pause", "PlayPause"}, {"--play", "Play"}, {"--pause", "Pause"}, {"--stop", "Stop"},
-        {"--next", "Next"},            {"--previous", "Previous"}, {"--quit", "Quit"}};
+        {"--next", "Next"},            {"--previous", "Previous"}, {"--quit", "Quit"}, {"--show", "Raise"}};
     if (args.size() == 1)
         for (auto& [arg, method] : kCommands)
             if (args[0] == arg) {
-                bus->CallSync({kBusName, kPath, !strcmp(method, "Quit") ? kRoot : kPlayer, method}, "", {}, 25000);
+                bus->CallSync({kBusName, kPath, !strcmp(method, "Quit") || !strcmp(method, "Raise") ? kRoot : kPlayer, method}, "", {}, 25000);
                 return true;
             }
     Writer list;
@@ -581,6 +599,8 @@ void MprisChanged(bool seeked) {
         int index = 0;
         if (SplitSubtrack(path, file, index)) path = file;
         s.url = "file://" + compat::Narrow(path.c_str());
+        static const std::wstring kOwn;  // no tray tip format of the user's own, as on Windows
+        if (const std::wstring& tip = EffectiveFormat(kPackTray, kOwn); !tip.empty()) s.tip = ToUtf8(FormatForTrack(tip, id, true));
     }
     s.at = SDL_GetTicks();
     s.rate = g.settings.speed * g.settings.tempo;
@@ -632,6 +652,14 @@ void ToggleStartOnLogin() {
         }
     }
     MprisChanged();
+}
+
+void ToggleTopBar() {
+    bool shown = waybar::Shown();
+    if (!waybar::SetShown(!shown))
+        ShowMessage(waybar::ConfigPath().empty() ? L"No Waybar config found in ~/.config/waybar"
+                                                  : L"Couldn't change the Waybar config");
+    MprisChanged();  // menus re-read the state
 }
 
 }  // namespace lx

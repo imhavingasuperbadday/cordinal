@@ -9,6 +9,7 @@
 #include "audio_output.h"
 #include "audio_live.h"
 #include "decoder.h"
+#include "native_audio.h"
 #include "peaks.h"
 #include "tags.h"
 
@@ -46,6 +47,10 @@ struct Marker {
     PlayItem item;
     double stretch = 1;  // track seconds per output second: speed times tempo
     bool glide = false;  // the gain came from a quick estimate: move to it slowly (see Render)
+    // A DSD stream's payload travels through the ring unchanged (dsd.h): the renderer must hand it
+    // on bit for bit, with no gain, fade, EQ, effects, limiter, clipping or scope, and silence it
+    // with DSD idle rather than zeros. None is ordinary PCM.
+    DsdTransport dsd = DsdTransport::None;
 };
 
 struct Command {
@@ -91,6 +96,23 @@ std::unique_ptr<Decoder> OpenItem(const PlayItem& item, unsigned rate, int loops
         return d;
     if (d->Duration() > 0 && (double)loopEnd > d->Duration() * d->Rate()) return d;  // points past the end: ignored
     return OpenLooped(std::move(d), loopStart, loopEnd, loops, fade);
+}
+
+// DSD's silent pattern as the float payload the engine carries (dsd.h): two idle bytes for DoP, one
+// for ASIO native. A DoP DAC that is fed zeros or nothing drops out of DSD mode and clicks.
+inline float DsdIdle(DsdTransport t) {
+    return t == DsdTransport::AsioNative ? DsdBytePayload(kDsdIdle) : DopPayload(0x6969);
+}
+
+// The real file behind a "file|N" sub-track (a CUE track or a game song) and whether it is DSD.
+// A Windows file name can't hold |, so the last one always starts the index.
+bool DsdPath(const std::wstring& path, std::wstring& file) {
+    file = path;
+    if (const size_t bar = file.rfind(L'|'); bar != std::wstring::npos) file.resize(bar);
+    const size_t dot = file.rfind(L'.');
+    if (dot == std::wstring::npos) return false;
+    const std::wstring ext = file.substr(dot + 1);
+    return _wcsicmp(ext.c_str(), L"dsf") == 0 || _wcsicmp(ext.c_str(), L"dff") == 0;
 }
 
 // The decode-side crossfade (Engine::SetCrossfade). While the decoding track is in its last seconds,
@@ -301,6 +323,7 @@ struct Engine::Impl {
     std::atomic<int> loopCount{2};       // loop points: passes through the loop (0 = off), see SetLoops
     std::atomic<double> loopFade{8.0};   // seconds of fade-out after the last pass
     std::atomic<double> crossfadeSeconds{0};  // see SetCrossfade
+    std::atomic<bool> nativeDsd{false};       // play DSF/DSDIFF as DSD (SetNativeDsd)
     CrossfadeTail xf;
     std::vector<float> xfBuf;  // the mix or spill being written
     double curDuration = 0;    // the decoding track's length in its own seconds, 0 if unknown
@@ -308,6 +331,10 @@ struct Engine::Impl {
     std::unique_ptr<Decoder> waiting;  // exclusive output: the next track, held until the device can switch rate
     PlayItem waitingItem;
     PlayItem curItem;
+    // The decoding track's DSD transport (None for PCM), and the look-ahead track's, so a track
+    // boundary can tell a gapless join from a device switch.
+    DsdTransport curDsd = DsdTransport::None, waitDsd = DsdTransport::None;
+    unsigned waitDsdRate = 0;
     Resampler rs;
     std::vector<float> readBuf, rsOut, tsOut;
     // Speed is the resampler's ratio (pitch follows); tempo is the stretch before it (pitch kept).
@@ -346,6 +373,8 @@ struct Engine::Impl {
     bool StartOutput(std::wstring& error) {
         std::lock_guard<std::mutex> lock(outputMx);
         if (outputStarted) return true;
+        // A re-open the output did on its own (a new default device, or a DSD stream the device
+        // dropped) comes back through Reopen, which re-opens the track at the heard position.
         if (!out.Start([this](float* samples, size_t n, unsigned long long& pos) { return Render(samples, n, pos); },
                        [this](unsigned newRate) { rate = newRate; Enqueue({Command::Reopen}); }, error)) {
             out.Stop();
@@ -433,11 +462,51 @@ struct Engine::Impl {
         const float vol = volume.load();
         const bool paused = pauseReq.load();
         size_t n = 0;
+        bool bits = false;  // this block carried DSD payload: no processing may touch it
         {
             std::lock_guard<std::mutex> lock(ringMx);
             unsigned long long segEnd = 0;
             const Marker* m = nullptr;
             for (size_t i = 0; i < frames; ++i) {
+                if (readPos >= segEnd) {  // a track boundary (or the first one): look up its marker
+                    m = MarkerAt(readPos);
+                    segEnd = ~0ull;
+                    for (const Marker& k : markers)
+                        if (k.pos > readPos) { segEnd = k.pos; break; }
+                }
+                if (m && m->dsd != DsdTransport::None) {
+                    // DSD payload goes out exactly as it came in. Pause and a seek's hold stop it at
+                    // once, with DSD idle in place of what isn't consumed, so the DAC stays locked.
+                    const DsdTransport dsd = m->dsd;
+                    bits = true;
+                    playingGain = 1.0f;
+                    if (paused || holdReq) {
+                        if (holdReq && !held) {
+                            held = true;
+                            rampCv.notify_all();
+                        }
+                        // The ramp's state still drives Housekeeping's idle release, which lets the
+                        // device go while nothing plays; DSD itself is never faded.
+                        if (paused) ramp = 0.0f;
+                        dst[i * 2] = dst[i * 2 + 1] = DsdIdle(dsd);
+                        continue;
+                    }
+                    if (readPos >= writePos) {  // starved: the output layer fills idle past the count
+                        dst[i * 2] = dst[i * 2 + 1] = DsdIdle(dsd);
+                        continue;
+                    }
+                    const size_t at = (size_t)(readPos % cap);
+                    const size_t count = (size_t)std::min<unsigned long long>(
+                        {frames - i, writePos - readPos, segEnd - readPos, cap - at});
+                    // DSD can't be turned down, but mute (volume 0) must still silence it: the stream
+                    // keeps moving and the DAC hears idle.
+                    if (vol == 0.0f) std::fill_n(dst + i * 2, count * 2, DsdIdle(dsd));
+                    else memcpy(dst + i * 2, ring.data() + at * 2, count * 2 * sizeof(float));
+                    readPos += count;
+                    n += count;
+                    i += count - 1;
+                    continue;
+                }
                 const float target = paused || holdReq ? 0.0f : 1.0f;
                 const bool consume = readPos < writePos && !(paused && ramp <= 0.0f);
                 if (consume || ramp > target) ramp = StepFade(ramp, target, step);
@@ -448,12 +517,6 @@ struct Engine::Impl {
                 if (!consume) {
                     dst[i * 2] = dst[i * 2 + 1] = 0.0f;
                     continue;
-                }
-                if (readPos >= segEnd) {  // a track boundary (or the first one): look up its marker
-                    m = MarkerAt(readPos);
-                    segEnd = ~0ull;
-                    for (const Marker& k : markers)
-                        if (k.pos > readPos) { segEnd = k.pos; break; }
                 }
                 const float gain = m ? m->gain : 1.0f;
                 playingGain = gain;
@@ -485,6 +548,7 @@ struct Engine::Impl {
             }
             sourcePos = readPos;
         }
+        if (bits) return n;  // a DSD stream: no EQ, effects, limiter, clipping or scope may touch it
         const bool quiet = ramp <= 0.0f;  // faded out (paused, seeking, idle) before this block
         eq.Process(dst, frames);
         eqActive = eq.Active();
@@ -597,6 +661,8 @@ struct Engine::Impl {
             curItem.loopEnd > curItem.loopStart || nextState == Next::None ||
             (nextState == Next::Known && (!nextItem.crossfade || nextItem.live)))
             return;
+        // A DSD stream never fades: its payload can't be scaled, so a DSD track joins gaplessly.
+        if (curDsd != DsdTransport::None || DsdItem(nextItem)) return;
         if (curDuration - decodedTo > fade * Stretch()) return;
         xf.state = CrossfadeTail::Holding;
         xf.limit = (size_t)std::llround(fade * rate);
@@ -752,6 +818,76 @@ struct Engine::Impl {
     // Exclusive and ASIO output both run the device at each track's own rate.
     bool Exclusive() const { return out.WantedMode() != OutputMode::Shared; }
 
+    // True for an item that can play as its own DSD bitstream: a DSF or DSDIFF file (or a range of
+    // one), on exclusive or ASIO output, with nothing in the way that would scale or reshape the
+    // payload (a live stream, a loop fade, speed or tempo).
+    bool DsdItem(const PlayItem& item) const {
+        if (!nativeDsd.load() || !Exclusive() || item.live || item.loopEnd > item.loopStart) return false;
+        if (speedReq.load() != 1.0 || tempoReq.load() != 1.0) return false;
+        std::wstring file;
+        return DsdPath(item.path, file);
+    }
+
+    // Opens `item` as a DSD stream when the output can carry it, else as PCM (OpenItem).
+    // `connect` sets the device up for the stream, which re-opens it; a look-ahead open passes false
+    // and only reports what the track would use, so a run of DSD tracks stays gapless.
+    std::unique_ptr<Decoder> OpenStream(const PlayItem& item, DsdTransport& transport, unsigned& dsdRate,
+                                        bool connect, std::wstring& error) {
+        transport = DsdTransport::None;
+        dsdRate = 0;
+        std::wstring file;
+        if (!DsdItem(item) || !DsdPath(item.path, file))
+            return OpenItem(item, rate, loopCount, loopFade, error);
+        // A range (a CUE track) plays through OpenRange, which only bounds reads and seeks.
+        auto stream = [&](unsigned bytes, unsigned& hz) {
+            std::unique_ptr<Decoder> d = OpenDsdStream(file, bytes, hz);
+            if (d && (item.start > 0 || item.end > 0)) d = OpenRange(std::move(d), item.start, item.end);
+            return d;
+        };
+        unsigned hz = 0;
+        std::unique_ptr<Decoder> d = stream(out.Dsd() == DsdTransport::AsioNative ? 1 : 2, hz);
+        if (d && out.Dsd() != DsdTransport::None && out.DsdRate() == hz) {  // already carrying this rate
+            transport = out.Dsd();
+            dsdRate = hz;
+            return d;
+        }
+        if (!connect) {  // look-ahead: only say which transport and rate this track would take
+            if (!d) return OpenItem(item, rate, loopCount, loopFade, error);  // too many channels, say
+            transport = out.Dsd() != DsdTransport::None ? out.Dsd()
+                        : out.WantedMode() == OutputMode::Asio ? DsdTransport::AsioNative
+                                                               : DsdTransport::Dop;
+            dsdRate = hz;
+            return d;
+        }
+        d.reset();
+        if (out.WantedMode() == OutputMode::Asio) {  // the driver's own DSD mode first, if it has one
+            unsigned native = 0;
+            std::unique_ptr<Decoder> stream1 = stream(1, native);
+            if (stream1) {
+                const DsdTransport t = out.RequestDsd(native, true);
+                if (t == DsdTransport::AsioNative) {
+                    transport = t;
+                    dsdRate = native;
+                    return stream1;
+                }
+                if (t == DsdTransport::Dop) {  // the driver took DoP: two DSD bytes a frame instead
+                    transport = t;
+                    dsdRate = native;
+                    if ((d = stream(2, hz))) return d;
+                    return OpenItem(item, rate, loopCount, loopFade, error);
+                }
+                return OpenItem(item, rate, loopCount, loopFade, error);  // plays as PCM
+            }
+        }
+        d = stream(2, hz);
+        if (d && out.RequestDsd(hz, false) == DsdTransport::Dop) {
+            transport = DsdTransport::Dop;
+            dsdRate = hz;
+            return d;
+        }
+        return OpenItem(item, rate, loopCount, loopFade, error);  // no DoP: the PCM decoder as before
+    }
+
     // Exclusive output runs the device at the track's rate: switching it means a new ring (and
     // a fresh resampler, which is then a pass-through).
     void SwitchRate(unsigned trackRate) {
@@ -771,7 +907,7 @@ struct Engine::Impl {
         if (waiting && waitingItem.token == nextItem.token) return true;
         std::wstring error;
         waitingItem = nextItem;
-        waiting = OpenItem(waitingItem, rate, loopCount, loopFade, error);
+        waiting = OpenStream(waitingItem, waitDsd, waitDsdRate, false, error);
         if (waiting) return true;
         PlayItem failed = waitingItem;
         nextState = Next::Unknown;
@@ -781,7 +917,12 @@ struct Engine::Impl {
     }
 
     void OpenTrack(const PlayItem& item, double start, bool flush, std::unique_ptr<Decoder> opened = nullptr,
-                   bool crossfade = false) {
+                   bool crossfade = false, DsdTransport openedDsd = DsdTransport::None,
+                   unsigned openedDsdRate = 0) {
+        if (flush && openedDsd != DsdTransport::None) {  // a boundary switch re-opens and re-connects
+            openedDsd = DsdTransport::None;
+            opened.reset();
+        }
         if (flush) {
             if (!cap) AllocateRing();
             if (readBuf.empty()) readBuf.resize(2048 * 2);
@@ -793,7 +934,9 @@ struct Engine::Impl {
         nextState = Next::Unknown;
         idle = false;
         std::wstring error;
-        dec = opened ? std::move(opened) : OpenItem(item, rate, loopCount, loopFade, error);
+        DsdTransport dsd = opened ? openedDsd : DsdTransport::None;
+        unsigned dsdRate = opened ? openedDsdRate : 0;
+        dec = opened ? std::move(opened) : OpenStream(item, dsd, dsdRate, flush, error);
         if (!dec) {
             Fail(item, error);
             return;
@@ -805,20 +948,35 @@ struct Engine::Impl {
             return;
         }
         decodedTo = std::max(0.0, start);
+        curDsd = dsd;
         unsigned inRate = dec->Rate();
         // The mix starts before the old resampler's last samples come out, so they fade with the tail.
         if (crossfade) {
             xf.state = CrossfadeTail::Mixing;
             xf.at = 0;
         }
-        if (flush && Exclusive() && inRate != rate) SwitchRate(inRate);
+        if (flush) {
+            if (dsd != DsdTransport::None) {
+                // The DSD request already put the device at the payload's frame rate. Leaving a
+                // DSD stream behind (a failed request) needs RequestRate, which clears DSD mode.
+                const unsigned actual = out.Rate();
+                if (actual != rate) {
+                    rate = actual;
+                    AllocateRing();
+                    rs = Resampler{};
+                    eqDirty = true;
+                }
+            } else if (Exclusive() && (inRate != rate || out.Dsd() != DsdTransport::None)) {
+                SwitchRate(inRate);
+            }
+        }
         if (flush || Effective(inRate) != rs.InRate() || tempoReq.load() != stretch.Tempo()) {
             if (!flush) WriteTail();  // finish the previous track's tail at its own rate
             InitRates(inRate);
         }
         estimator.reset();
         estimateToken = 0;
-        if (item.estimate) {
+        if (item.estimate && dsd == DsdTransport::None) {  // DSD payload isn't audio for a loudness meter
             estimator = std::make_unique<LoudnessMeter>(inRate);
             estimateToken = item.token;
             estimateFrames = 0;
@@ -829,7 +987,7 @@ struct Engine::Impl {
         {
             std::lock_guard<std::mutex> lock(ringMx);
             auto g = gains.find(item.token);
-            const float gain = g != gains.end() ? g->second : item.gain;
+            const float gain = dsd != DsdTransport::None ? 1.0f : g != gains.end() ? g->second : item.gain;
             // A crossfade's marker is where the mix starts: the renderer plays the whole overlap at the
             // incoming track's gain, so the tail is scaled from the outgoing one's.
             unsigned long long pos = crossfade ? writePos : writePos + (unsigned long long)std::llround(PendingOutput());
@@ -840,6 +998,7 @@ struct Engine::Impl {
             }
             markers.push_back({pos, item.token, start, gain, duration, item});
             markers.back().stretch = Stretch();
+            markers.back().dsd = dsd;
         }
         curItem = item;
         drained = false;
@@ -884,6 +1043,7 @@ struct Engine::Impl {
             markers.push_back({writePos, m.token, seconds, m.gain, m.duration, m.item});
             markers.back().stretch = Stretch();
             markers.back().glide = m.glide;
+            markers.back().dsd = m.dsd;
         }
         drained = false;
         endedPosted = false;
@@ -919,6 +1079,8 @@ struct Engine::Impl {
             }
             dec.reset();
             waiting.reset();
+            waitDsd = DsdTransport::None;
+            waitDsdRate = 0;
             estimator.reset();
             estimateToken = 0;
             rs = Resampler{};
@@ -929,7 +1091,11 @@ struct Engine::Impl {
         }
         nextState = c.hasItem ? Next::Known : Next::None;
         if (c.hasItem) nextItem = c.item;
-        else waiting.reset();
+        else {
+            waiting.reset();
+            waitDsd = DsdTransport::None;
+            waitDsdRate = 0;
+        }
         if (replaced || c.hasItem || !drained) {
             drained = false;  // a previously empty next choice may have started draining already
             endedPosted = false;
@@ -968,6 +1134,8 @@ struct Engine::Impl {
                 FlushAll();
                 dec.reset();
                 curItem = nextItem = waitingItem = PlayItem{};
+                curDsd = waitDsd = DsdTransport::None;
+                waitDsdRate = 0;
                 {
                     std::lock_guard<std::mutex> lock(ringMx);
                     std::vector<float>().swap(ring);
@@ -984,6 +1152,8 @@ struct Engine::Impl {
                 estimator.reset();
                 decodingToken = 0;
                 idle = true;
+                // A stopped player lets DSD go: an idle DoP stream would keep a DAC claimed for nothing.
+                if (Exclusive() && out.Dsd() != DsdTransport::None) rate = out.RequestRate(rate.load());
                 out.SetPaused(false);
                 pauseReq = false;
                 break;
@@ -992,7 +1162,7 @@ struct Engine::Impl {
                 havePendingNext = false;
                 DoSeek(c.seconds, c.hasItem ? &c.item : nullptr);
                 break;
-            case Command::Reopen: {  // the output's rate changed
+            case Command::Reopen: {  // the output's rate changed, or it lost DSD
                 havePendingNext = false;
                 double pos = Position();
                 Marker m;
@@ -1004,6 +1174,8 @@ struct Engine::Impl {
                 AllocateRing();
                 rs = Resampler{};
                 eqDirty = true;
+                // A DSD stream the device dropped comes back as DSD if the new device carries it and
+                // as PCM otherwise: OpenStream asks again and plays the PCM decoder when refused.
                 if (any && !idle) OpenTrack(m.item, m.item.live ? 0 : pos, true);
                 break;
             }
@@ -1107,15 +1279,17 @@ struct Engine::Impl {
                 }
                 if (xf.state == CrossfadeTail::Held && nextState != Next::Unknown) {
                     const bool fade = nextState == Next::Known && nextItem.crossfade && !nextItem.live &&
-                                      crossfadeSeconds.load() > 0;
+                                      crossfadeSeconds.load() > 0 && curDsd == DsdTransport::None &&
+                                      !DsdItem(nextItem);
                     if (fade && !Exclusive()) {
                         PlayItem next = nextItem;
                         OpenTrack(next, 0, false, nullptr, true);
                         busy = true;
                     } else if (fade && OpenWaiting()) {
-                        if (waiting->Rate() == rate || rs.InRate() == Effective(waiting->Rate())) {
+                        if ((waiting->Rate() == rate || rs.InRate() == Effective(waiting->Rate())) &&
+                            waitDsd == curDsd) {
                             PlayItem next = waitingItem;
-                            OpenTrack(next, 0, false, std::move(waiting), true);
+                            OpenTrack(next, 0, false, std::move(waiting), true, waitDsd, waitDsdRate);
                             busy = true;
                         } else xf.state = CrossfadeTail::Draining;  // a rate switch can't overlap
                     } else if (!fade) xf.state = CrossfadeTail::Draining;
@@ -1130,12 +1304,13 @@ struct Engine::Impl {
             }
             if (!dec && !idle && !drained && xf.state == CrossfadeTail::None) {
                 if (nextState == Next::Known && Exclusive()) {
-                    // A gapless join needs one rate. When the next track's differs, let this one
-                    // play out, then switch the device and start the next track fresh.
+                    // A gapless join needs one transport and one rate. A DSD track next to a PCM one,
+                    // or at another DSD rate, plays out and then switches the device like a rate change.
                     if (!OpenWaiting()) continue;
-                    if (waiting->Rate() == rate || rs.InRate() == Effective(waiting->Rate())) {
+                    if ((waiting->Rate() == rate || rs.InRate() == Effective(waiting->Rate())) &&
+                        waitDsd == curDsd) {
                         PlayItem next = waitingItem;
-                        OpenTrack(next, 0, false, std::move(waiting));
+                        OpenTrack(next, 0, false, std::move(waiting), false, waitDsd, waitDsdRate);
                         busy = true;
                     } else {
                         bool tailWritten = rs.InRate() == 0;
@@ -1150,7 +1325,7 @@ struct Engine::Impl {
                         }
                         if (out.PlayedPosition() >= write) {  // everything before has been heard
                             PlayItem next = waitingItem;
-                            OpenTrack(next, 0, true, std::move(waiting));
+                            OpenTrack(next, 0, true, std::move(waiting), false, waitDsd, waitDsdRate);
                             busy = true;
                         }
                     }
@@ -1246,6 +1421,40 @@ std::vector<float> RenderPlayerPcm(const float* stereo, size_t frames, unsigned 
     return output;
 }
 
+// Offline DSD payload through the production renderer, with everything that could touch a sample
+// switched on: the payload must come out bit for bit, and a paused block must be DSD idle.
+std::vector<float> RenderDsdPayload(const float* stereo, size_t frames, unsigned rate, DsdTransport transport,
+                                    const EqSettings& eq, const RenderEffects* effects, bool paused) {
+    if (!stereo || !frames || !rate || transport == DsdTransport::None) return {};
+    Engine::Impl pipeline;
+    pipeline.rate = rate;
+    pipeline.AllocateRing();
+    pipeline.ramp = 1;
+    pipeline.markers.push_back({0, 1, 0, 1.0f, 0, {}});
+    pipeline.markers.back().dsd = transport;
+    pipeline.eqPending = eq;
+    pipeline.eqDirty = true;
+    pipeline.limiterOn = true;
+    pipeline.loudnessOn = true;
+    if (effects) {
+        pipeline.reverbPending = effects->reverb;
+        pipeline.reverbDirty = true;
+        pipeline.crushPending = effects->bitcrush;
+        pipeline.crushDirty = true;
+        pipeline.volume = effects->volume;
+    }
+    pipeline.pauseReq = paused;
+    std::vector<float> output(frames * 2);
+    for (size_t at = 0; at < frames;) {
+        const size_t count = std::min<size_t>(137, frames - at);
+        if (!paused) pipeline.WriteRing(stereo + at * 2, count);
+        unsigned long long position = 0;
+        if (pipeline.Render(output.data() + at * 2, count, position) != (paused ? 0 : count)) return {};
+        at += count;
+    }
+    return output;
+}
+
 bool BenchmarkPlayerPipeline(const std::wstring& path,unsigned outputRate,unsigned passes,PipelineTiming& result) {
     std::wstring error;auto decoder=OpenDecoder(path,outputRate,error);
     if (!decoder || !passes) return false;
@@ -1335,6 +1544,8 @@ void Engine::Shutdown() {
     d.dec.reset();
     d.waiting.reset();
     d.curItem = d.nextItem = d.waitingItem = PlayItem{};
+    d.curDsd = d.waitDsd = DsdTransport::None;
+    d.waitDsdRate = 0;
     std::vector<float>().swap(d.readBuf);
     std::vector<float>().swap(d.rsOut);
     d.rs = Resampler{};
@@ -1414,6 +1625,8 @@ void Engine::SetExclusive(bool exclusive) {
     impl_->out.SetMode(exclusive ? OutputMode::Exclusive : OutputMode::Shared);
 }
 
+void Engine::SetNativeDsd(bool on) { impl_->nativeDsd = on; }
+
 #ifdef _WIN32
 void Engine::SetOutputMode(OutputMode mode, const std::wstring& asioDriver) {
     std::lock_guard<std::mutex> lock(impl_->outputMx);
@@ -1461,12 +1674,16 @@ Engine::OutputInfo Engine::Output() const {
     o.problem = d.out.Problem();
     o.upmix = d.out.UpmixLabel();
     o.speaker = d.out.SpeakerName();
+    o.dsdRate = d.out.DsdRate();
+    o.dsdNative = d.out.Dsd() == DsdTransport::AsioNative;
     // Nothing between the decoder and the device: no resampling, gain, EQ or limiter, and a
     // device format that holds 24-bit samples. ReplayGain on puts the limiter in the path (it
     // delays the output and can hold peaks down), so that is not bit-perfect even at unity gain.
-    o.bitPerfect = (o.exclusive || o.asio) && d.inputRate.load() == o.rate && d.volume.load() == 1.0f && d.playingGain.load() == 1.0f &&
-                   !d.eqActive.load() && !d.limiterOn.load() && !d.effectsActive.load() && d.speedReq.load() == 1.0 &&
-                   d.tempoReq.load() == 1.0 && (o.floatFormat || o.bits >= 24);
+    // A DSD stream has none of that in its path at all: it always arrives bit for bit.
+    o.bitPerfect = o.dsdRate != 0 ||
+                   ((o.exclusive || o.asio) && d.inputRate.load() == o.rate && d.volume.load() == 1.0f && d.playingGain.load() == 1.0f &&
+                    !d.eqActive.load() && !d.limiterOn.load() && !d.effectsActive.load() && d.speedReq.load() == 1.0 &&
+                    d.tempoReq.load() == 1.0 && (o.floatFormat || o.bits >= 24));
     return o;
 }
 
@@ -1554,6 +1771,7 @@ void Engine::SetScope(bool on) {
 size_t Engine::VisualSamples(float* out, size_t frames, double& time) const {
     Impl& d = *impl_;
     std::fill_n(out, frames * 2, 0.0f);
+    if (d.out.Dsd() != DsdTransport::None) return 0;  // DSD payload isn't audio to draw
     std::lock_guard<std::mutex> lock(d.ringMx);
     unsigned rate = d.rate.load();
     if (!rate || !d.cap || !d.writePos) return 0;
@@ -1576,6 +1794,7 @@ bool Engine::WaveformPeaks(uint8_t* out, size_t buckets) const {
     if (!out || !buckets || buckets > 4096) return false;
     std::fill_n(out, buckets, uint8_t{});
     Impl& d = *impl_;
+    if (d.out.Dsd() != DsdTransport::None) return false;  // DSD payload would read as noise
     std::lock_guard<std::mutex> lock(d.ringMx);
     unsigned rate = d.rate.load();
     if (!rate || !d.cap || !d.writePos) return false;
@@ -1622,6 +1841,7 @@ bool Engine::WaveformBands(float* energy, size_t buckets) const {
     if (!energy || !buckets || buckets > 4096) return false;
     std::fill_n(energy, buckets * kMoodBands, 0.0f);
     Impl& d = *impl_;
+    if (d.out.Dsd() != DsdTransport::None) return false;  // DSD payload would read as noise
     std::lock_guard<std::mutex> lock(d.ringMx);
     unsigned rate = d.rate.load();
     if (!rate || !d.cap || !d.writePos) return false;
@@ -1652,6 +1872,10 @@ bool Engine::WaveformBands(float* energy, size_t buckets) const {
 
 size_t Engine::Scope(float* out, size_t frames) const {
     Impl& d = *impl_;
+    if (d.out.Dsd() != DsdTransport::None) {  // DSD has no waveform to show
+        std::fill_n(out, frames * 2, 0.0f);
+        return 0;
+    }
     std::lock_guard<std::mutex> lock(d.scopeMx);
     const size_t capacity = d.scope.size() / 2;
     frames = std::min(frames, capacity);

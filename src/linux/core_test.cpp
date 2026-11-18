@@ -4,7 +4,7 @@
 //   cordinal-core-test play FILE [SECONDS]    play FILE through the engine and the sound server
 //   cordinal-core-test replaygain FILE...     measure the files' ReplayGain as one album
 //   cordinal-core-test tags FILE DIR          edit FILE's tags with an undo journal in DIR, then undo
-//   cordinal-core-test convert FILE DIR       convert FILE to .cord with its log in DIR, then undo the conversion
+//   cordinal-core-test convert FILE DIR       copy FILE as MP3 into DIR/copies, convert it to .cord (log in DIR), undo
 //   cordinal-core-test organize FILE ROOT     organize FILE (and its folder's cover) under ROOT, then undo it
 //   cordinal-core-test copy FILE DEST         copy FILE to DEST, find it again, then replace it with AAC
 //   cordinal-core-test collection DIR         export a small library made in DIR as a collection, then import it
@@ -13,6 +13,7 @@
 //   cordinal-core-test resampler              check treble fidelity, alias rejection and output length
 //   cordinal-core-test waveform               check live notes and whole-track peak previews
 //   cordinal-core-test weighted-shuffle       check that skip-aware shuffle keeps every occurrence
+//   cordinal-core-test waybar                 add cordinal's module to Waybar configs and take it out again
 //   cordinal-core-test tagsuggest             check the tag editor's completion values
 //   cordinal-core-test chapters FILE          list FILE's chapters: the first, the last and the next start
 //   cordinal-core-test library FILE           list a saved library.cdb: files, titles and ReplayGain
@@ -26,6 +27,11 @@
 //   cordinal-core-test steam [cancel]         list discovered Steam soundtrack folders; "cancel" lists none
 //   cordinal-core-test away DIR               the away-from-home pieces: JSON, STUN, keys, certificates and HTTPS
 //   cordinal-core-test tls                    SHA-256, HLS's AES, and the DER, PEM and time readers, offline
+//   cordinal-core-test libc DIR               cordinal's own C library (src/linux/libc), using DIR
+//   cordinal-core-test libc-bench             its memory and string functions timed against glibc's
+//   cordinal-core-test math-bench             its math functions timed against glibc's
+//   cordinal-core-test malloc-bench           its allocator's speed and memory against glibc's
+//   cordinal-core-test time-bench             its clocks and local time against glibc's
 //   cordinal-core-test tls-hosts              HTTPS to real hosts: good certificates load, bad ones are refused
 //   cordinal-core-test web DIR CONTROL        serve DIR over HTTP; CONTROL gets the port and pairing code
 //   cordinal-core-test fonts DIR              the font index and matcher on fonts and a configuration made in DIR,
@@ -45,6 +51,7 @@
 #include "audio_output.h"
 #include "backup.h"
 #include "collection.h"
+#include "linux/libc/checks.h"
 #include "tests/discord_checks.h"
 #include "tests/fontmatch_checks.h"
 #include "tests/text_checks.h"
@@ -71,6 +78,7 @@
 #include "scanner.h"
 #include "sfx.h"
 #include "steam.h"
+#include "linux/waybar.h"
 #include "tags.h"
 #include "tagwriter.h"
 #include "tagundo.h"
@@ -452,9 +460,10 @@ int CollectionRoundTrip(const char* dirArg) {
     return 0;
 }
 
-// Converts FILE (FLAC, WAV or AIFF) to .cord with its log in LOGDIR, verified before the original
-// goes to the Recycle Bin, then undoes the conversion: the original must come back and the .cord
-// must go. Works on FILE itself: pass a copy, and an XDG_DATA_HOME on the same drive.
+// Copies FILE (FLAC, WAV or AIFF) as an MP3 into LOGDIR/copies, which must leave it and the logs alone;
+// then converts it to .cord with its log in LOGDIR, verified before the original goes to the Recycle
+// Bin, and undoes that: the original must come back and the .cord must go. Works on FILE itself: pass
+// a copy, and an XDG_DATA_HOME on the same drive.
 int ConvertRoundTrip(const char* file, const char* logDir) {
     std::wstring path = Wide(file), error;
     const auto plan = PlanConvert({{0, path}});
@@ -464,6 +473,17 @@ int ConvertRoundTrip(const char* file, const char* logDir) {
     }
     std::atomic<bool> cancel{false};
     ConvertSettings settings;
+    // First a copy: an MP3 into a new folder, which leaves the original and the undo logs alone.
+    const std::wstring copies = Wide(logDir) + L"/copies";
+    const auto copyPlan = PlanConvert({{0, path}}, CordExport::Mp3_192, ConvertMode::Copy, copies);
+    const ConvertResult copied = ExecuteConvert(copyPlan, settings, Wide(logDir), cancel, [](size_t) {});
+    for (const auto& [from, why] : copied.failed) fprintf(stderr, "%s: %s\n", Narrow(from).c_str(), Narrow(why).c_str());
+    if (copied.done.size() != 1 || !copied.log.empty() || GetFileAttributesW(copied.done[0].to.c_str()) == INVALID_FILE_ATTRIBUTES ||
+        copied.done[0].to.rfind(copies + L"/", 0) != 0 || GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES ||
+        CanUndoConvert(Wide(logDir))) {
+        fprintf(stderr, "the MP3 copy wasn't made beside an untouched original\n");
+        return 10;
+    }
     const ConvertResult result = ExecuteConvert(plan, settings, Wide(logDir), cancel, [](size_t) {});
     for (const auto& [from, why] : result.failed) fprintf(stderr, "%s: %s\n", Narrow(from).c_str(), Narrow(why).c_str());
     if (result.done.size() != 1) return 3;
@@ -481,7 +501,7 @@ int ConvertRoundTrip(const char* file, const char* logDir) {
     if (undone.size() != 1 || GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return 7;
     if (GetFileAttributesW(cord.c_str()) != INVALID_FILE_ATTRIBUTES) return 8;
     if (CanUndoConvert(Wide(logDir))) return 9;
-    printf("converted \"%s\" to .cord and undid it\n", Narrow(path).c_str());
+    printf("copied \"%s\" as MP3, converted it to .cord and undid that\n", Narrow(path).c_str());
     return 0;
 }
 
@@ -711,6 +731,44 @@ int ListPlaylists(const char* file) {
                (g_lib[id].flags & Track::kTagFailed) != 0);
     }
     return 0;
+}
+
+// The Waybar config edit (waybar.cpp): in Omarchy's layout, inline, in an empty list and a config of
+// several bars, the module goes in once, its commands are quoted, and taking it out restores every byte.
+int CheckWaybar() {
+    const std::string omarchy =
+        "{\n  \"layer\": \"top\",\n  \"modules-left\": [\"custom/omarchy\"],\n  \"modules-right\": [\n    \"group/tray-expander\",\n"
+        "    \"bluetooth\"\n  ],\n  // a comment of the user's\n  \"tray\": { \"icon-size\": 12 }\n}\n";
+    const std::string configs[] = {
+        omarchy,
+        "{\"modules-left\": [\"a\", \"b\"], \"height\": 26}",
+        "{\n\t\"modules-center\": []\n}\n",
+        "[\n  {\n    \"modules-right\": [\"clock\"]\n  },\n  {\n    \"output\": \"HDMI-1\"\n  }\n]\n",
+    };
+    int failures = 0;
+    auto check = [&](bool ok, const char* what) {
+        printf("%s %s\n", ok ? "ok  " : "FAIL", what);
+        failures += !ok;
+    };
+    for (const std::string& config : configs) {
+        std::optional<std::string> added = lx::waybar::Add(config, "'/opt/it'\\''s/cordinal'");
+        check(added && lx::waybar::Has(*added) && !lx::waybar::Has(config), "the module goes in");
+        if (!added) continue;
+        check(lx::waybar::Add(*added, "x") == added, "adding twice changes nothing");
+        check(added->find("\"exec\": \"'/opt/it'\\\\''s/cordinal' --waybar\"") != std::string::npos, "the command is quoted");
+        size_t entry = added->find("\"custom/cordinal\"");
+        size_t key = added->find("\"custom/cordinal\":");
+        check(entry != std::string::npos && key != std::string::npos && added->find("\"custom/cordinal\"", key + 1) != std::string::npos,
+              "listed and defined");
+        check(lx::waybar::Remove(*added) == config, "taking it out restores the config");
+        check(lx::waybar::Remove(config) == config, "a config without it is left alone");
+    }
+    check(!lx::waybar::Add("{\"height\": 26}", "x"), "no modules list: nothing is added");
+    // In Omarchy's config the icon comes first on the right, beside the tray expander.
+    std::optional<std::string> added = lx::waybar::Add(omarchy, "c");
+    check(added && added->find("\"modules-right\": [\n    \"custom/cordinal\",\n    \"group/tray-expander\"") != std::string::npos,
+          "first on the right, in the list's layout");
+    return failures ? 1 : 0;
 }
 
 int CheckWeightedShuffle() {
@@ -1242,6 +1300,25 @@ int CheckIpod(const char* root) {
 int main(int argc, char** argv) {
     if (argc >= 2 && !strcmp(argv[1], "weighted-shuffle")) return CheckWeightedShuffle();
     if (argc >= 2 && !strcmp(argv[1], "tls")) return CheckTls();
+    if (argc >= 3 && !strcmp(argv[1], "libc")) return libc_checks::Check(argv[2]);
+#ifdef CORDINAL_OWN_LIBC
+#if defined(CORDINAL_STATIC)
+    // Each of the four benches times cordinal's functions against glibc's own copies, which dlsym
+    // reaches in the dynamic build and a static program does not have at all.
+    if (argc >= 2 && (!strcmp(argv[1], "libc-bench") || !strcmp(argv[1], "math-bench") ||
+                      !strcmp(argv[1], "time-bench") || !strcmp(argv[1], "malloc-bench"))) {
+        printf("skip: a bench compares with glibc's functions, which a static program does not have\n");
+        return 0;
+    }
+#else
+    if (argc >= 2 && !strcmp(argv[1], "libc-bench")) return libc_checks::Bench();
+    if (argc >= 2 && !strcmp(argv[1], "math-bench")) return libc_checks::MathBench();
+    if (argc >= 2 && !strcmp(argv[1], "time-bench")) return libc_checks::TimeBench();
+#ifndef CORDINAL_GLIBC_MALLOC
+    if (argc >= 2 && !strcmp(argv[1], "malloc-bench")) return libc_checks::MallocBench();
+#endif
+#endif
+#endif
     if (argc >= 2 && !strcmp(argv[1], "tls-hosts")) return CheckTlsHosts();
     if (argc >= 2 && !strcmp(argv[1], "tagsuggest")) {  // tests/tag_suggest_checks.h, shared with the Windows self-test
         int failures = 0;
@@ -1296,6 +1373,7 @@ int main(int argc, char** argv) {
         return sound_checks::ComparePattern(argv[2], argc >= 4 ? (unsigned)atoi(argv[3]) : 48000, argc >= 5 ? atof(argv[4]) : 1.0,
                                              argc >= 6 && !strcmp(argv[5], "gaps"));
     if (argc >= 3 && !strcmp(argv[1], "away")) return CheckAway(argv[2]);
+    if (argc >= 2 && !strcmp(argv[1], "waybar")) return CheckWaybar();
     if (argc >= 3 && !strcmp(argv[1], "fonts")) return fontmatch_checks::Check(argv[2]);
     if (argc >= 2 && !strcmp(argv[1], "fonts-match")) return fontmatch_checks::CheckInstalled(argc >= 3 ? argv[2] : nullptr);
     if (argc >= 3 && !strcmp(argv[1], "text")) return text_checks::Check(argv[2], argc - 3, argv + 3);
@@ -1314,6 +1392,6 @@ int main(int argc, char** argv) {
     if (argc >= 3 && !strcmp(argv[1], "decode")) return Decode(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "play")) return Play(argv[2], argc >= 4 ? atof(argv[3]) : 5);
     fprintf(stderr, "usage: cordinal-core-test scan DIR | decode FILE | play FILE [SECONDS] | replaygain FILE... | "
-                    "tags FILE DIR | convert FILE DIR | organize FILE ROOT | copy FILE DEST | collection DIR | ipod DIR | eq | resampler | waveform | helpers DIR | devices | sfx | listenbrainz DIR | weighted-shuffle | tagsuggest | chapters FILE | library FILE | history FILE | playlists FILE | steam [cancel] | away DIR | tls | tls-hosts | web DIR CONTROL | fonts DIR | fonts-match [FILE] | text DIR [FONT...] | bidi FILE\n");
+                    "tags FILE DIR | convert FILE DIR | organize FILE ROOT | copy FILE DEST | collection DIR | ipod DIR | eq | resampler | waveform | helpers DIR | devices | sfx | listenbrainz DIR | weighted-shuffle | waybar | tagsuggest | chapters FILE | library FILE | history FILE | playlists FILE | steam [cancel] | away DIR | tls | tls-hosts | web DIR CONTROL | fonts DIR | fonts-match [FILE] | text DIR [FONT...] | bidi FILE\n");
     return 2;
 }

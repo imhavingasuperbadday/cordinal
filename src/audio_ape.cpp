@@ -322,6 +322,10 @@ public:
     unsigned Rate() const override { return rate_; }
     bool Failed() const override { return failed_; }
     double Duration() const override { return (double)frames_/rate_; }
+    bool LosslessFormat(PcmFormat& f) const override {
+        f.rate=rate_;f.channels=channels_;f.bits=bits_;f.frames=frames_;
+        return true;
+    }
 private:
     // Per-quality FIR orders and weight precisions; index 0 is "fast" (no filters).
     // The filters depend only on the file, so they are reset between frames instead of

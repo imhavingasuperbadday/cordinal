@@ -377,15 +377,15 @@ void LayoutKey(const SDL_KeyboardEvent& e) {
 constexpr int kPackRows = 8;
 struct PacksPanel {
     int selected = 0, first = 0;
-    Rect panel, list, install, installFolder, folder, close;
+    Rect panel, list, install, installFolder, folder, close, make, reload;
 } g_packsUi;
 
 void DrawPacks(const Palette& p) {
     Rect panel = g_packsUi.panel = DrawFrame(p, S(640), S(540), "Packs");
     const float pad = S(16), x0 = panel.x + pad, w = panel.w - 2 * pad, rowH = S(30);
     const size_t count = PackCount();
-    DrawText(Font::Normal, count ? "A pack adds formats and title functions. Turn one on to use it."
-                                 : "No packs yet. Install a .cordpack file, or a folder with a pack.ini in it.",
+    DrawText(Font::Normal, count ? "A pack adds themes, columns, formats, keys, presets and more. Turn one on to use it."
+                                 : "No packs yet. Install one, or make one from your setup to edit.",
              x0, panel.y + S(48), p.sub, w);
     g_packsUi.list = {x0, panel.y + S(76), w, rowH * kPackRows};
     Fill(g_packsUi.list, p.surface2);
@@ -400,7 +400,7 @@ void DrawPacks(const Palette& p) {
         DrawCheck({r.x + S(8), r.y, r.w - S(16), r.h}, label, pack.on, p);
     }
     float y = g_packsUi.list.B() + S(10);
-    const float limit = panel.B() - pad - S(40);
+    const float limit = panel.B() - pad - S(76);
     if (g_packsUi.selected >= 0 && g_packsUi.selected < (int)count) {
         PackRow pack = PackAt(g_packsUi.selected);
         std::string text = pack.error.empty() ? Utf8(pack.summary) : "Can't be used: " + Utf8(pack.error);
@@ -418,6 +418,10 @@ void DrawPacks(const Palette& p) {
     g_packsUi.folder = {g_packsUi.close.x - S(8) - S(130), by, S(130), S(28)};
     g_packsUi.installFolder = {g_packsUi.folder.x - S(8) - S(150), by, S(150), S(28)};
     g_packsUi.install = {g_packsUi.installFolder.x - S(8) - S(120), by, S(120), S(28)};
+    g_packsUi.make = {x0, by - S(36), S(200), S(28)};
+    g_packsUi.reload = {g_packsUi.make.R() + S(8), by - S(36), S(130), S(28)};
+    DrawButton(g_packsUi.make, "Make a pack from my setup", p);
+    DrawButton(g_packsUi.reload, "Reload packs", p);
     DrawButton(g_packsUi.install, "Install file...", p);
     DrawButton(g_packsUi.installFolder, "Install folder...", p);
     DrawButton(g_packsUi.folder, "Open the folder", p);
@@ -432,6 +436,11 @@ void PacksMouseDown(float x, float y) {
     }
     if (g_packsUi.installFolder.In(x, y)) return PickFolder(kFilePack);
     if (g_packsUi.folder.In(x, y)) return OpenPacksFolder();
+    if (g_packsUi.make.In(x, y)) {
+        if (!MakeStarterPack().empty()) OpenPacksFolder();
+        return;
+    }
+    if (g_packsUi.reload.In(x, y)) return ReloadPacks();
     if (g_packsUi.list.In(x, y)) {
         int row = g_packsUi.first + (int)((y - g_packsUi.list.y - 1) / S(30));
         if (row < 0 || row >= (int)PackCount()) return;

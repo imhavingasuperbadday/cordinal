@@ -217,7 +217,7 @@ void Play(Sfx sound, int arg, bool ducked, float gain) {
         std::lock_guard lock(g_mx);
         if (g_suppressed) return;
         static std::mt19937 seeds{std::random_device{}()};
-        g_pending.push_back({sound, arg, ducked, gain, seeds()});
+        g_pending.push_back({sound, arg, ducked, gain, (uint32_t)seeds()});
     }
     EnsureRunning();
 }

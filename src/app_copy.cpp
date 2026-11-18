@@ -1,6 +1,6 @@
 // The Copy to folder or device window (the track and playlist tab menus, and Library): a
 // destination, an Organize naming pattern with a live preview, a format, and the copy itself on a
-// worker with progress in the status bar and Cancel in the menus, like Convert to .cord. The
+// worker with progress in the status bar and Cancel in the menus, like Convert. The
 // destination can be a folder or a phone's folder, which has no drive letter and is reached through
 // the shell. The work itself is devicecopy.cpp's; originals are only read.
 #include "app.h"

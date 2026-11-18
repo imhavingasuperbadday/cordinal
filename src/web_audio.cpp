@@ -119,7 +119,7 @@ std::string DownloadName(const Track& track, unsigned number) {
         name = prefix + name;
     }
     std::string extension = track.title.empty() ? std::string() : Extension(track);
-    return SafeFileName(name.substr(0, 120)) + extension;
+    return SafeFileName(std::move(name)) + extension;  // it cuts long names without splitting a character
 }
 // A stored (uncompressed) ZIP built while it is sent: music is compressed already, and the size is
 // known before the first byte, so the phone shows real progress. Each entry's CRC follows its data

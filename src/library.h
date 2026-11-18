@@ -403,6 +403,12 @@ bool SaveLibrary(const std::wstring& file, const std::vector<Playlist>& playlist
 // Replaces the library and playlists only after the entire file has been validated. An unreadable
 // file is kept beside itself as <file>.bad-... and its name is returned in `preserved`.
 bool LoadLibrary(const std::wstring& file, std::vector<Playlist>& playlists, std::wstring* preserved = nullptr);
+// Dated copies of a saved library in library-history beside it (librarydb.cpp says which are kept).
+// KeepLibrarySnapshot copies `file` once per UTC day, after a successful save of the live library;
+// LoadNewestSnapshot loads the newest copy that reads, returning its path (empty when none did).
+bool KeepLibrarySnapshot(const std::wstring& file, uint32_t now = UnixNow());
+std::vector<std::wstring> LibrarySnapshots(const std::wstring& file);  // newest first
+std::wstring LoadNewestSnapshot(const std::wstring& file, std::vector<Playlist>& playlists);
 bool LoadPlaylists(const std::wstring& file, std::vector<Playlist>& playlists);
 // Reads an M3U, M3U8 or PLS playlist (by extension) into audio paths.
 bool ImportM3U(const std::wstring& file, std::vector<std::wstring>& paths);

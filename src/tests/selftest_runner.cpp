@@ -77,7 +77,8 @@ std::vector<Suite> Suites(const std::wstring& root) {
             [root](const auto& s) { TestMd5(); TestExactPcm(root, s); }},
         {L"cord", L"cordinal format", L"src/tests/selftest_cord.cpp", Media, 0,
             [root](const auto& s) { TestCordFormat(root, s); }},
-        {L"cord-conversion", L".cord conversion and audio export", L"src/tests/selftest_cord.cpp", Media | Tags | Rg, 0,
+        {L"cord-conversion", L"Convert: .cord, FLAC, WAV, MP3 and AAC copies and replacements", L"src/tests/selftest_cord.cpp",
+            Media | Tags | Rg | Native, 0,
             [root](const auto& s) { TestCordConversion(root, s); }},
         {L"gapless", L"gapless decoder joins", L"src/tests/selftest_audio.cpp", Gap, 0,
             [root](const auto&) { TestGapless(root + L"\\gap2"); }},
@@ -141,8 +142,9 @@ std::vector<Suite> Suites(const std::wstring& root) {
             [](const auto& s) { TestCrashDump(s); }},
         {L"listenbrainz", L"native scrobbling, queues, privacy and the Discord status", L"src/tests/selftest_scrobbling.cpp", 0, 0,
             [](const auto& s) { TestListenBrainz(s); TestScrobbling(s); TestDiscord(); }},
-        {L"sample-conversion", L"sample conversion (WASAPI and ASIO) and click-free fades", L"src/tests/selftest_engine.cpp", 0, 0,
-            [](const auto&) { TestSampleConversion(); TestAsioConversion(); TestFadeRamp(); }},
+        {L"sample-conversion", L"sample conversion (WASAPI and ASIO), DSD payloads and click-free fades",
+         L"src/tests/selftest_engine.cpp", 0, 0,
+            [](const auto&) { TestSampleConversion(); TestAsioConversion(); TestNativeDsdRender(); TestFadeRamp(); }},
         {L"engine", L"live playback, seek, pause and gapless timing", L"src/tests/selftest_engine.cpp", Gap | Media, Device,
             [root](const auto& s) {
                 const std::wstring album = s + L"\\cue";

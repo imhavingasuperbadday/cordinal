@@ -446,7 +446,9 @@ public:
                 groups_.push_back({total,h.samples,{}});groupChannels=0;complete=false;
             } else if (complete || groups_.empty() || h.index!=base+groups_.back().frame || h.samples!=groups_.back().samples) return false;
             if (rate!=rate_ || (h.flags&(floating|3))!=stored) return false;
+            if (h.flags&hybrid) hybrid_=true;
             auto& group=groups_.back();group.blocks.push_back(at);groupChannels+=h.Channels();
+            if (group.blocks.size()>1) split_=true;
             if (groupChannels>32 || groups_.size()>8000000) return false;
             if (h.flags&4096) {
                 if (channels_ && groupChannels!=channels_) return false;
@@ -455,7 +457,7 @@ public:
             at+=h.bytes;
         }
         if (!complete || groups_.empty() || !total) return false;
-        frames_=total;return Seek(0);
+        frames_=total;bits_=stored&floating?0:((stored&3)+1)*8;return Seek(0);
     }
     size_t Read(float* out,size_t frames) override {
         if (failed_) return 0;size_t done=0;
@@ -501,9 +503,16 @@ public:
     bool FastSeek() const override { return true; }
     bool Failed() const override { return failed_; }
     double Duration() const override { return (double)frames_/rate_; }
+    // Only pure lossless integer streams with one block a group play their samples unmixed: a
+    // hybrid stream plays its lossy part, and channel groups go through the downmix.
+    bool LosslessFormat(PcmFormat& f) const override {
+        if (hybrid_ || split_ || !bits_ || bits_>24 || channels_>2) return false;
+        f.rate=rate_;f.channels=channels_;f.bits=bits_;f.frames=frames_;
+        return true;
+    }
 private:
     File file_;std::vector<Group> groups_;std::vector<float> pcm_,interleaved_,block_;std::vector<int32_t> values_;
-    size_t next_=0,used_=0;uint64_t frames_=0,position_=0;unsigned channels_=0,rate_=0;bool failed_=false;
+    size_t next_=0,used_=0;uint64_t frames_=0,position_=0;unsigned channels_=0,rate_=0,bits_=0;bool failed_=false,hybrid_=false,split_=false;
 };
 }
 std::unique_ptr<Decoder> OpenWavPackDecoder(const std::wstring& path) {

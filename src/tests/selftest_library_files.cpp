@@ -91,6 +91,21 @@ void TestOrganize(const std::wstring& media, const std::wstring& scratch) {
     Check(r3.moved.size() == 1 && r4.moved.size() == 1 && r3.log != r4.log &&
               !firstLog.empty() && ReadTestBytes(r3.log) == firstLog,
           L"ORGANIZE rapid successive runs preserve distinct undo logs");
+    // Two copies of one song already organized as "name" and "name (2)": a new run leaves both alone
+    // instead of moving the second to "(3)", and back to "(2)" on the run after.
+    batch.Next(L"ORGANIZE leaves a numbered duplicate in place");
+    std::wstring twin = out + L"\\Twins\\";
+    SHCreateDirectoryExW(nullptr, twin.c_str(), nullptr);
+    const std::wstring first = twin + L"Song.flac", second = twin + L"Song (2).flac";
+    CopyFileW((media + L"\\sine.flac").c_str(), first.c_str(), FALSE);
+    CopyFileW((media + L"\\sine.flac").c_str(), second.c_str(), FALSE);
+    g_lib = Library();
+    std::vector<TrackId> twins{g_lib.Add(first), g_lib.Add(second)};
+    auto twinPlan = PlanOrganize(twins, out, L"Twins\\Song");
+    Check(twinPlan.size() == 2 && twinPlan[0].skip == L"already in place" && twinPlan[1].skip == L"already in place",
+          L"ORGANIZE numbered duplicate: %ls (%ls) | %ls (%ls)", twinPlan.size() > 0 ? twinPlan[0].to.c_str() : L"",
+          twinPlan.size() > 0 ? twinPlan[0].skip.c_str() : L"", twinPlan.size() > 1 ? twinPlan[1].to.c_str() : L"",
+          twinPlan.size() > 1 ? twinPlan[1].skip.c_str() : L"");
     SHFILEOPSTRUCTW op{};
     std::wstring from = root + L'\0';
     op.wFunc = FO_DELETE;

@@ -3,6 +3,7 @@
 #include "big_ui.h"
 #include "ui_internal.h"
 #include "playlog.h"
+#include "waybar.h"
 
 namespace lx {
 
@@ -64,16 +65,6 @@ void ShowMissingInformation(size_t field) {
     ShowMessage(!n ? L"No library track is missing " + what + L"."
                    : std::to_wstring(n) + (n == 1 ? L" track is missing " : L" tracks are missing ") + what +
                          L". Select them and press Alt+Enter to fill it in; clear the search to see everything.");
-}
-
-std::vector<MenuItem> CordExportItems() {
-    std::vector<MenuItem> items;
-    for (unsigned f = 1; f < (unsigned)CordExport::Count; ++f) {
-        auto item = Item(ToUtf8(kCordExports[f].label) + "...", kExportCord, {}, false, !CordExportBusy());
-        item.arg = (int)f;
-        items.push_back(std::move(item));
-    }
-    return items;
 }
 
 std::vector<MenuItem> RateItems(const double* rates, size_t count, double selected, int action) {
@@ -227,8 +218,7 @@ std::vector<MenuItem> BarMenu(int m) {
                      std::any_of(g.playlists.begin(), g.playlists.end(), [](const Playlist& p) { return p.kind == PlaylistKind::Inbox; })), Separator(),
                 Item("Organize files...", kOrganize, {}, false, !OrganizeBusy()),
                 Item("Undo last organize", kOrganizeUndo, {}, false, !OrganizeBusy()), Separator(),
-                Item("Convert to .cord...", kConvert, {}, false, !ConvertBusy() && !CordExportBusy() && !TagWriteBusy() && !OrganizeBusy()),
-                Submenu("Export .cord", CordExportItems()),
+                Item("Convert...", kConvert, {}, false, !ConvertBusy() && !TagWriteBusy() && !OrganizeBusy()),
                 Item("Undo last conversion", kConvertUndo, {}, false, CanUndoConversion() && !ConvertBusy()), Separator(),
                 Item("Copy to folder or device...", kCopyTo, {}, false, !CopyBusy()),
                 Item("Sync to iPod...", kIpodSync, {}, false, !IpodBusy()), Separator(),
@@ -254,7 +244,6 @@ std::vector<MenuItem> BarMenu(int m) {
             if (CopyBusy()) items.push_back(Item("Cancel copy", kCancelCopy));
             if (IpodBusy()) items.push_back(Item("Cancel iPod sync", kCancelIpodSync));
             if (CoverFetchBusy()) items.push_back(Item("Cancel cover search", kCancelFetchCovers));
-            if (CordExportBusy()) items.push_back(Item("Cancel export", kCancelExport));
             if (g_checkingSteam && g_playlistFileBusy) items.push_back(Item("Cancel soundtrack search", kCancelSteam));
             return items;
         }
@@ -278,6 +267,9 @@ std::vector<MenuItem> BarMenu(int m) {
                     Separator(), Item("Start on login", kStartOnLogin, {}, StartsOnLogin()), Separator(),
                     Submenu("Games and stats", {Item("Name That Track...", kNameThatTrack), Item("Which Came First...", kWhichCameFirst), Separator(),
                                                 Item("cordinal points...", kPoints), Item("Year in review...", kReview)})};
+            if (!waybar::ConfigPath().empty())  // beside Start on login, only where Waybar is set up
+                view.insert(std::find_if(view.begin(), view.end(), [](const MenuItem& m) { return m.action == kStartOnLogin; }) + 1,
+                            Item("Show on the top bar", kTopBar, {}, waybar::Shown()));
             auto appearance = WaveAppearanceMenu();
             if (!appearance.empty()) view.insert(view.begin() + 4, Submenu("Waveform appearance", std::move(appearance)));
             return view;
@@ -374,8 +366,7 @@ void OpenRowMenu(float x, float y) {
                                            Item("Write ReplayGain tags", kRgWrite, {}, false, !manual)}));
     items.push_back(Item("Open containing folder", kOpenFolder));
     items.push_back(Item("Organize files...", kOrganize, {}, false, !OrganizeBusy()));
-    items.push_back(Item("Convert to .cord...", kConvert, {}, false, !ConvertBusy() && !CordExportBusy() && !TagWriteBusy()));
-    items.push_back(Submenu("Export .cord", CordExportItems()));
+    items.push_back(Item("Convert...", kConvert, {}, false, !ConvertBusy() && !TagWriteBusy()));
     items.push_back(Item("Copy to folder or device...", kCopyTo, {}, false, !CopyBusy()));
     items.push_back(Item("Sync to iPod...", kIpodSync, {}, false, !IpodBusy()));
     items.push_back(Item("Edit tags...", kEditTags, "Alt+Enter"));
@@ -553,9 +544,7 @@ void RunAction(const MenuItem& item) {
         case kSaveLyricsLrc: SaveFetchedLyrics(false); break;
         case kCancelSteam: g_playlistFileCancel = true; break;
         case kWebServer: OpenWebServer(); break;
-        case kExportCord: ExportCordTracks(SelectedTracks(), (CordExport)item.arg); break;
-        case kCancelExport: CancelCordExport(); break;
-        case kConvert: ConvertSelected(SelectedTracks()); break;
+        case kConvert: OpenConvert(SelectedTracks()); break;
         case kConvertUndo: UndoConversion(); break;
         case kOrganize: OpenOrganize(SelectedTracks()); break;
         case kOrganizeUndo: UndoOrganize(); break;
@@ -638,6 +627,7 @@ void RunAction(const MenuItem& item) {
             break;
         }
         case kStartOnLogin: ToggleStartOnLogin(); break;
+        case kTopBar: ToggleTopBar(); break;
         case kAbout: g_aboutOpen = true; break;
         case kNameThatTrack: OpenGames(0); break;
         case kWhichCameFirst: OpenGames(1); break;

@@ -73,9 +73,13 @@
            Suites = @('game-music', 'loops', 'formats', 'nes', 'ym2612') }
         @{ Paths = @('src/inflate.*', 'src/archive.*'); Suites = @('gzip', 'formats') }
         @{ Paths = @('src/audio_dsd.*'); Suites = @('formats') }
+        @{ Paths = @('src/dsd.h'); Suites = @('formats', 'engine') }
         @{ Paths = @('src/cord*', 'src/audio_cord.*', 'src/audio_encode.*', 'src/aac_encoder.*', 'src/encode/*',
                      'src/convert.*', 'src/app_convert.*')
            Suites = @('cord', 'cord-conversion') }
+        # The Convert window, and the decoders Convert reads exactly (Decoder::LosslessFormat).
+        @{ Paths = @('src/app_convert.*'); Suites = @('ui') }
+        @{ Paths = @('src/audio_alac.*', 'src/audio_wavpack.*', 'src/audio_ape.*', 'src/audio_tta.*'); Suites = @('cord-conversion') }
 
         # Radio, web, online services and helpers.
         @{ Paths = @('src/radio*', 'src/app_radio.*', 'src/audio_live.*'); Suites = @('radio', 'live-audio') }
@@ -111,6 +115,8 @@
         @{ Paths = @('tools/test.ps1', 'tools/test-runner.ps1', 'tools/test-map.psd1', 'test.bat')
            Suites = @('harness'); Note = 'Test runner changed: also run pwsh -File tools\test-runner.ps1.' }
         @{ Paths = @('tools/make-fixtures.ps1'); Suites = @('*') }
+        @{ Paths = @('tools/fuzz-*', 'tools/opus-conformance.*')
+           Suites = @(); Note = 'Fuzzers and conformance: run .\linux.bat test -Suite sanitize (and tools\fuzz-parsers.ps1 -BuildOnly on Windows).' }
         @{ Paths = @('tools/publish.ps1', 'tools/release.ps1', 'tools/version-fields.psd1', 'tools/check-updates.ps1')
            Suites = @(); Note = 'Release tooling: no suite covers it; inspect a publish.ps1 -Out export instead.' }
         @{ Paths = @('tools/check-unwind.py')

@@ -430,6 +430,49 @@ void TestLibraryDb(const std::wstring& scratch) {
     Check(badField(6, 1ull << 32) && badField(8, 65536) && badField(14, 256) && badField(15, 255) && badField(16, 101),
           L"LIBRARY DB rejects out-of-range stats, bitrate, channels, codecs and ratings");
 
+    // A save ends with a CRC-32 of the file. One changed letter in a path still parses, so only the
+    // checksum can tell; a file saved before checksums existed (no seal) still loads.
+    batch.Next(L"LIBRARY DB a checksum catches a changed byte, and files without one still load");
+    const std::wstring live = file + L".live";  // the state the checks after these expect, put back below
+    SaveLibrary(live, back);
+    const size_t letter = valid.find("One");
+    std::string flipped = valid;
+    if (letter != std::string::npos) flipped[letter] = 'X';
+    const bool sealed = valid.size() > 7 && valid.substr(valid.size() - 7, 2) == std::string("\x0C\x04", 2) &&
+                        valid.back() == '\0';
+    std::string unsealed = sealed ? valid.substr(0, valid.size() - 7) + '\0' : std::string();
+    Check(letter != std::string::npos && sealed && reject(flipped), L"LIBRARY DB a changed byte fails the checksum");
+    std::vector<Playlist> unsealedLists;
+    Check(sealed && WriteTestBytes(file, unsealed) && LoadLibrary(file, unsealedLists) && unsealedLists.size() == 5,
+          L"LIBRARY DB a file saved before checksums existed still loads");
+    WriteTestBytes(file, valid);
+
+    // Dated copies: one per day, the last seven days plus the first copy of the last three months, and
+    // the newest copy that reads is what a start falls back to.
+    batch.Next(L"LIBRARY DB dated copies are kept, pruned and loaded back");
+    const uint32_t day = 86400, jan1 = 1767225600;  // 2026-01-01 00:00 UTC
+    for (const auto& earlier : LibrarySnapshots(file)) DeleteFileW(earlier.c_str());  // today's, from the saves above
+    bool copied = true;
+    for (uint32_t d = 0; d < 100; ++d) copied &= KeepLibrarySnapshot(file, jan1 + d * day);  // to 2026-04-10
+    copied &= KeepLibrarySnapshot(file, jan1 + 99 * day + 3600);  // a second save that day adds nothing
+    std::vector<std::wstring> copies = LibrarySnapshots(file);
+    std::wstring names;
+    for (const auto& c : copies) names += L" " + FileNameOf(c);
+    const bool pruned = copies.size() == 10 && FileNameOf(copies[0]) == L"library-2026-04-10.cdb" &&
+                        FileNameOf(copies[6]) == L"library-2026-04-04.cdb" &&
+                        FileNameOf(copies[7]) == L"library-2026-04-01.cdb" &&
+                        FileNameOf(copies[8]) == L"library-2026-03-01.cdb" &&
+                        FileNameOf(copies[9]) == L"library-2026-02-01.cdb";
+    Check(copied && pruned, L"LIBRARY DB dated copies kept:%ls", names.c_str());
+    WriteTestBytes(copies.empty() ? file : copies[0], "CDLB\x02\0\0\0\xFF");  // the newest copy is damaged
+    std::vector<Playlist> fromCopy;
+    const std::wstring used = LoadNewestSnapshot(file, fromCopy);
+    Check(!copies.empty() && copies.size() > 1 && used == copies[1] && fromCopy.size() == 5 &&
+              g_lib.Find(pathA) != UINT32_MAX,
+          L"LIBRARY DB a start falls back to the newest dated copy that reads (%ls)", FileNameOf(used).c_str());
+    LoadLibrary(live, back);
+    DeleteFileW(live.c_str());
+
     batch.Next(L"LIBRARY DB corrupt and unreadable files are set aside and named for the user");
     HANDLE h = CreateFileW(file.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
     DWORD written = 0;

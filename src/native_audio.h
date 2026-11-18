@@ -31,6 +31,9 @@ std::unique_ptr<Decoder> OpenMatroskaDecoder(const std::wstring& path);
 std::unique_ptr<Decoder> OpenCordDecoder(const std::wstring& path);
 // DSD in DSF or uncompressed DSDIFF, as PCM near 88.2 kHz.
 std::unique_ptr<Decoder> OpenDsdDecoder(const std::wstring& path);
+// DSF or uncompressed DSDIFF as its own 1-bit stream: bytesPerFrame 2 packs DoP words, 1 packs ASIO
+// native bytes (dsd.h); dsdRate returns the file's rate in bits a second. Null when it can't stream.
+std::unique_ptr<Decoder> OpenDsdStream(const std::wstring& path, unsigned bytesPerFrame, unsigned& dsdRate);
 // CRI ADX game audio (standard encoding), played once through its loop.
 std::unique_ptr<Decoder> OpenAdxDecoder(const std::wstring& path);
 // Creative Voice Files (.voc): 8-bit, 16-bit and G.711 sound blocks with their silences.

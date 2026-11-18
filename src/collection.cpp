@@ -392,8 +392,10 @@ bool ZipWriter::AddFile(std::string_view name, const std::wstring& file, const s
     for (uint64_t left = e.size; whole && left;) {
         const DWORD want = (DWORD)std::min<uint64_t>(left, kChunk);
         DWORD got = 0;
-        if (!ReadFile(in, buffer.get(), want, &got, nullptr) || got != want) {
-            error = got != want && GetLastError() == 0 ? L"The file got shorter while it was being read." : ErrorText(GetLastError());
+        // A successful ReadFile leaves the last error alone, so a short read is told apart by the result.
+        const BOOL read = ReadFile(in, buffer.get(), want, &got, nullptr);
+        if (!read || got != want) {
+            error = read ? L"The file got shorter while it was being read." : ErrorText(GetLastError());
             whole = false;
             break;
         }

@@ -1,8 +1,8 @@
-// Converting to .cord on Linux, as app_convert.cpp does on Windows: the confirmation, the conversion
-// on a worker (folder scanning paused meanwhile, so the new files and the originals leaving aren't
-// mistaken for library changes), progress in the status bar, and the library switched over to each
-// verified file with its plays, ratings and playlists. The work is convert.cpp's. Undo walks back
-// through the conversions still remembered. Exporting .cord files is cord_export.cpp's.
+// Library > Convert...'s run on Linux, as app_convert.cpp's on Windows: the question before replacing,
+// the conversion on a worker (folder scanning paused meanwhile, so new files and originals leaving
+// aren't mistaken for library changes), progress in the status bar, and for replacements the library
+// switched over to each verified file with its plays, ratings and playlists. The work is convert.cpp's;
+// the panel is panel_convert.cpp's. Undo walks back through the replacements still remembered.
 #include "app.h"
 
 #include <algorithm>
@@ -15,6 +15,8 @@ namespace {
 std::thread worker;
 std::atomic<bool> cancel{false};
 bool converting = false;         // a run is in flight
+bool replacing = false;          // the run replaces originals (copies leave the library alone)
+CordExport runFormat = CordExport::None;
 bool stopping = false;           // shutting down: the library is updated, nothing is said
 bool canUndo = false;            // a log is left to undo, kept current instead of listing the folder on every menu update
 std::vector<ConvertItem> plan;   // the running plan, for the progress line
@@ -54,49 +56,30 @@ void InitConvert() {
     canUndo = CanUndoConvert(LogDir());
 }
 
-// The given tracks, or the whole library when there are none.
-void ConvertSelected(std::vector<TrackId> ids) {
-    if (converting) return;
-    if (CordExportBusy() || TagWriteBusy() || OrganizeBusy()) {
-        ShowMessage(L"Wait for the running export, tag write or organize to finish.");
-        return;
-    }
-    if (ids.empty())
-        for (TrackId t = 0; t < (TrackId)g_lib.Count(); ++t)
-            if (g_lib[t].InLibrary()) ids.push_back(t);
-    if (ids.empty()) {
-        ShowMessage(L"Nothing to convert.");
-        return;
-    }
+std::vector<ConvertItem> PlanConvertTracks(const std::vector<TrackId>& ids, CordExport format, bool replace, const std::wstring& folder) {
     std::vector<std::pair<TrackId, std::wstring>> tracks;
+    tracks.reserve(ids.size());
     for (TrackId id : ids) tracks.push_back({id, g_lib.Path(id)});
-    std::vector<ConvertItem> items = PlanConvert(tracks);
-    size_t ready = 0, already = 0, other = 0;
-    for (ConvertItem& item : items) {
+    std::vector<ConvertItem> plan = PlanConvert(tracks, format, replace ? ConvertMode::Replace : ConvertMode::Copy, folder,
+                                                [](TrackId id) { return g_lib[id].codec; });
+    for (ConvertItem& item : plan)
         if (item.skip.empty() && item.id == g.playing) item.skip = L"playing now";
-        if (item.skip.empty()) ++ready;
-        else if (item.skip == L"already .cord") ++already;
-        else ++other;
-    }
-    if (!ready) {
-        ShowMessage(already == items.size() ? L"Those files are .cord already."
-                                            : L"Nothing to convert: only FLAC, WAV and AIFF files convert, and not one that's playing.");
-        return;
-    }
-    const unsigned days = MemoryDays();
-    std::wstring q = L"Convert " + Files(ready) + L" to .cord?\n\nEach new file is read back and compared with its original, sample for "
-                     L"sample, before the library switches to it. ";
-    q += g.settings.convertRecycle ? L"The originals then go to the Recycle Bin."
-                                   : g.settings.convertShowOriginals ? L"The originals stay where they are, and in the library."
-                                                                     : L"The originals stay where they are, left out of the library.";
-    q += L"\nLibrary > Undo last conversion brings them back for " +
-         (days == 1 ? std::wstring(L"a day") : days % 7 ? std::to_wstring(days) + L" days"
-                      : days == 7 ? std::wstring(L"a week") : std::to_wstring(days / 7) + L" weeks") + L".";
-    if (already || other) q += L"\n\n" + Files(already + other) + L" won't convert: lossy, .cord already, playing, or a cue sheet's part.";
-    if (!Confirm(ToUtf8(q), "Convert to .cord")) return;
+    return plan;
+}
 
+bool StartConvert(std::vector<ConvertItem> items, CordExport format, bool replace) {
+    if (converting) return false;
+    if (std::none_of(items.begin(), items.end(), [](const ConvertItem& i) { return i.skip.empty(); })) {
+        ShowMessage(ConvertSummary(items) + L".");
+        return false;
+    }
+    if (replace &&
+        !Confirm(ToUtf8(ReplaceQuestion(items, g.settings.convertRecycle, g.settings.convertShowOriginals, MemoryDays())), "Convert"))
+        return false;
     g.scanner.Stop();
     converting = true;
+    replacing = replace;
+    runFormat = format;
     cancel = false;
     plan = items;
     ordinal.assign(plan.size(), 0);
@@ -108,7 +91,7 @@ void ConvertSelected(std::vector<TrackId> ids) {
     // Half the cores: the conversion runs in the background and never competes with playback.
     settings.threads = std::max(1u, std::thread::hardware_concurrency() / 2);
     if (worker.joinable()) worker.join();
-    worker = std::thread([items, settings, logDir = LogDir()]() {
+    worker = std::thread([items = std::move(items), settings, logDir = LogDir()]() {
         auto* result = new ConvertResult(ExecuteConvert(items, settings, logDir, cancel, [](size_t i) {
             PostMessageW(nullptr, WM_APP_CONVERT, 0, (LPARAM)i);
         }));
@@ -116,16 +99,18 @@ void ConvertSelected(std::vector<TrackId> ids) {
         PostMessageW(nullptr, WM_APP_CONVERT, 1, 0);
     });
     g.redraw = true;
+    return true;
 }
 
-// On the UI thread, from WM_APP_CONVERT: a file starting (progress), or the finished run. Each
-// converted track moves to its .cord file, keeping its id, and a kept original gets a record of its own.
+// On the UI thread, from WM_APP_CONVERT: a file starting (progress), or the finished run. A replaced
+// track moves to its new file, keeping its id, and a kept original gets a record of its own; copies
+// leave the library alone (folder scanning finds them like any new file).
 void OnConvertMessage(WPARAM wp, LPARAM lp) {
     if (!wp) {
         const size_t i = (size_t)lp;
         if (i < plan.size())
-            ShowMessage(L"Converting " + std::to_wstring(ordinal[i]) + L" of " + std::to_wstring(total) + L" to .cord: " +
-                        FileNameOf(plan[i].from));
+            ShowMessage(L"Converting " + std::to_wstring(ordinal[i]) + L" of " + std::to_wstring(total) + L" to " +
+                        kCordExports[(unsigned)runFormat].label + L": " + FileNameOf(plan[i].from));
         return;
     }
     std::unique_ptr<ConvertResult> r(finished);
@@ -137,7 +122,7 @@ void OnConvertMessage(WPARAM wp, LPARAM lp) {
     std::vector<TrackId> reread;
     int64_t saved = 0;
     for (const ConvertDone& d : r->done) {
-        if (!g_lib.Contains(d.id)) continue;
+        if (!replacing || !g_lib.Contains(d.id)) continue;
         const int64_t before = (int64_t)g_lib[d.id].fileSize;
         WIN32_FILE_ATTRIBUTE_DATA a{};
         if (GetFileAttributesExW(d.to.c_str(), GetFileExInfoStandard, &a))
@@ -153,19 +138,16 @@ void OnConvertMessage(WPARAM wp, LPARAM lp) {
         }
     }
     QueueTags(reread);
-    g_lib.Touch();
-    g.libraryDirty = true;
-    RebuildRows();
+    if (replacing) {
+        g_lib.Touch();
+        g.libraryDirty = true;
+        RebuildRows();
+    }
     if (!stopping) StartScanner();
     PruneConvertLogs(LogDir(), MemoryDays());
     canUndo = CanUndoConvert(LogDir());
-    std::wstring done = L"Converted " + Files(r->done.size()) + L" to .cord";
-    if (saved > 0) done += L", " + Megabytes(saved) + L" smaller";
-    done += r->cancelled ? L"; the rest was cancelled." : L".";
-    if (g.settings.convertRecycle) {
-        const size_t kept = (size_t)std::count_if(r->done.begin(), r->done.end(), [](const ConvertDone& d) { return !d.recycled; });
-        if (kept) done += L" " + Files(kept) + (kept == 1 ? L" was" : L" were") + L" kept: the Recycle Bin wasn't available there.";
-    }
+    std::wstring done = ConvertDoneText(*r, runFormat, replacing, g.settings.convertRecycle);
+    if (saved > 0) done += L" They take " + Megabytes(saved) + L" less.";
     g.redraw = true;
     if (stopping) return;
     if (!r->failed.empty()) {
@@ -177,8 +159,8 @@ void OnConvertMessage(WPARAM wp, LPARAM lp) {
     ShowMessage(done);
 }
 
-// Reverses the newest conversion still remembered: the originals come back and the library returns
-// to them, keeping each track's id; the .cord files go to the Recycle Bin.
+// Reverses the newest replacement still remembered: the originals come back and the library returns
+// to them, keeping each track's id; the converted files go to the trash.
 void UndoConversion() {
     if (converting) return;
     if (!canUndo) {
@@ -186,7 +168,7 @@ void UndoConversion() {
         return;
     }
     if (!Confirm("Undo the last conversion?\n\nIts originals come back (from the Recycle Bin, if they went there) and the library "
-                 "returns to them. The .cord files go to the Recycle Bin.",
+                 "returns to them. The converted files go to the trash.",
                  "Undo conversion"))
         return;
     g.scanner.Stop();

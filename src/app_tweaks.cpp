@@ -19,6 +19,7 @@ namespace {
 const wchar_t* const kRgModes[] = {L"Album", L"Track", L"By playback order"};
 const wchar_t* const kOffOn[] = {L"Off", L"On"};
 const wchar_t* const kOutputNames[] = {L"Shared", L"Exclusive", L"ASIO"};  // g.output, an OutputMode
+const wchar_t* const kDsdNames[] = {L"Convert to PCM", L"Native (DoP or ASIO)"};
 const wchar_t* const kLoopNames[] = {L"Ignore loop points", L"Play the loop once, then fade",
                                      L"Play the loop twice, then fade", L"Play the loop three times, then fade"};
 const wchar_t* const kReverbNames[] = {L"Off", L"Room", L"Hall", L"Plate"};
@@ -161,6 +162,13 @@ const Tweak kTweaks[] = {
      L"first two outputs (ASIO driver... picks which).",
      TweakType::Choice, 0, 2, 0, [] { return (double)g.output; }, [](double v) { g.output = (uint8_t)std::clamp((int)v, 0, 2); },
      0, [] { SetOutput(g.output); }, kOutputNames},
+    {"output.dsd", L"Player", L"NativeDsd", L"Native DSD",
+     L"Plays DSF and DSDIFF files as DSD to a DAC that accepts it, over DoP in exclusive mode, or ASIO's own "
+     L"DSD mode when the driver has one. Only with Exclusive or ASIO output. Volume (other than mute), EQ, "
+     L"effects and ReplayGain don't apply to a DSD stream, and a DAC without DoP support plays noise, so leave it off "
+     L"unless the DAC supports DSD.",
+     TweakType::Choice, 0, 1, 0, [] { return (double)g.nativeDsd; }, [](double v) { g.nativeDsd = v != 0; }, 0,
+     [] { g.engine.SetNativeDsd(g.nativeDsd); }, kDsdNames},
     {"output.upmix", L"Player", L"Upmix", L"Upmix to surround",
      L"On a 5.1 or 7.1 device, stereo also plays from the center, subwoofer and surround speakers; the front pair "
      L"keeps the original left and right. Shared output only.",
@@ -411,11 +419,11 @@ const Tweak kTweaks[] = {
      [] { return (double)g.lightweightTrim; }, [](double v) { g.lightweightTrim = v != 0; }, 0,
      LightweightPreferencesChanged},
     {"convert.recycle", L"Convert", L"Recycle", L"Send converted originals to the Recycle Bin",
-     L"After converting to .cord, the original files go to the Recycle Bin instead of staying where they are.",
+     L"When Convert replaces songs, their original files go to the Recycle Bin instead of staying where they are.",
      TweakType::Bool, 0, 1, 1, [] { return (double)g.convertRecycle; }, [](double v) { g.convertRecycle = v != 0; },
      IDM_CONVERT_RECYCLE},
     {"convert.show_originals", L"Convert", L"ShowOriginals", L"Show kept originals in the library",
-     L"Originals kept after a conversion appear in the library beside their .cord copies.", TweakType::Bool, 0, 1, 0,
+     L"Originals kept after Convert replaced them appear in the library beside the new files.", TweakType::Bool, 0, 1, 0,
      [] { return (double)g.convertShowOriginals; }, [](double v) { g.convertShowOriginals = v != 0; },
      IDM_CONVERT_SHOW_ORIGINALS},
     {"convert.undo_days", L"Convert", L"Memory", L"Conversions can be undone for",
@@ -458,6 +466,14 @@ const Tweak kTweaks[] = {
      TweakType::Bool, 0, 1, 0, [] { return (double)g.musicBrainzLookup; },
      [](double v) { g.musicBrainzLookup = v != 0; musicbrainz::SetEnabled(g.musicBrainzLookup); }, 0,
      [] { musicbrainz::SetEnabled(g.musicBrainzLookup); }},
+    {"library.steam_sound_effects", L"Library", L"SteamSoundEffects", L"Include game sound effects",
+     L"Library \x25B8 Add Steam soundtracks also adds folders where games keep their sound effects, such as sfx or "
+     L"sound. Off, it adds only music. Folders already in the library stay until you remove them in Library folders.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)g.steamSoundEffects; },
+     [](double v) { g.steamSoundEffects = v != 0; }, 0, [] {
+         ShowMessage(g.steamSoundEffects ? L"Add Steam soundtracks will include game sound effects."
+                                         : L"Add Steam soundtracks will add only music.");
+     }},
     // Online sources: each says exactly what it sends, and all are off until chosen.
     {"online.covers_deezer", L"Online", L"CoversDeezer", L"Covers from Deezer",
      L"Sends the album's artist and title to api.deezer.com "

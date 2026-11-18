@@ -248,6 +248,54 @@ void ConvertSamples(const float* in, size_t samples, SampleFormat fmt, void* out
     }
 }
 
+namespace {
+// One 24-bit DoP word per frame into the container, with the marker toggling every frame. Split in two
+// passes so the common case (every frame supplied) has no branch in it.
+template <typename Store>
+void DopFrames(const float* in, size_t frames, size_t supplied, uint8_t& marker, const Store& store) {
+    uint32_t top = (uint32_t)marker << 16;
+    size_t i = 0;
+    for (; i < supplied && i < frames; ++i) {
+        store(i, top | DopWord(in[i * 2]), top | DopWord(in[i * 2 + 1]));
+        top ^= 0xFF0000u;
+    }
+    for (; i < frames; ++i) {
+        store(i, top | 0x6969u, top | 0x6969u);  // two idle bytes: DSD silence
+        top ^= 0xFF0000u;
+    }
+    marker = (uint8_t)(top >> 16);
+}
+}  // namespace
+
+void PackDop(const float* in, size_t frames, size_t supplied, SampleFormat fmt, uint8_t& marker, void* out) {
+    switch (fmt) {
+        case SampleFormat::Int24In32:
+        case SampleFormat::Int32: {  // 24 bits in the top of a 32-bit sample, as WASAPI stores 24-in-32
+            auto* o = static_cast<uint32_t*>(out);
+            DopFrames(in, frames, supplied, marker, [o](size_t i, uint32_t l, uint32_t r) {
+                o[i * 2] = l << 8;
+                o[i * 2 + 1] = r << 8;
+            });
+            break;
+        }
+        case SampleFormat::Int24: {  // three little-endian bytes each
+            auto* o = static_cast<uint8_t*>(out);
+            DopFrames(in, frames, supplied, marker, [o](size_t i, uint32_t l, uint32_t r) {
+                uint8_t* f = o + i * 6;
+                f[0] = (uint8_t)l;
+                f[1] = (uint8_t)(l >> 8);
+                f[2] = (uint8_t)(l >> 16);
+                f[3] = (uint8_t)r;
+                f[4] = (uint8_t)(r >> 8);
+                f[5] = (uint8_t)(r >> 16);
+            });
+            break;
+        }
+        default:
+            break;  // float and 16-bit cannot carry DoP, and RequestDsd never picks them
+    }
+}
+
 // The WASAPI output; the Linux build has its own (linux/audio_linux.cpp).
 #ifdef _WIN32
 using Microsoft::WRL::ComPtr;
@@ -295,10 +343,14 @@ struct Device {
     unsigned rate = 0;
     bool exclusive = false;
     SampleFormat format = SampleFormat::Float32;
+    DsdTransport dsd = DsdTransport::None;  // DoP, or native DSD through ASIO
+    unsigned dsdRate = 0;                   // its DSD bit rate
     SpeakerLayout upmix;  // the device's speakers when the stereo render is upmixed; empty otherwise
     std::shared_ptr<AsioStream> asio;  // ASIO output: the driver renders from its own callback instead
     std::wstring asioName;             // the registry name it was opened by
     bool Open() const { return client || asio; }
+    // The frames per second the engine renders: DSD takes several DSD bits to a frame.
+    unsigned FrameRate() const { return dsd == DsdTransport::None ? rate : DsdFrameRate(dsdRate, dsd); }
 };
 
 // The nearest WASAPI sample format to an ASIO sample type, for Format().
@@ -549,15 +601,15 @@ bool FindAsioDriver(const std::wstring& wanted, AsioDriverInfo& out, std::wstrin
     return true;
 }
 
-// ASIO output at `rate` (0 keeps the driver's own). On success the driver is already playing from
-// `render`.
-bool OpenAsio(const std::wstring& wanted, unsigned rate, AsioStream::RenderFn render, AsioStream::ResetFn reset,
-              Device& d, std::wstring& problem) {
+// ASIO output at `rate` (0 keeps the driver's own), PCM or DSD (native at the bit rate, DoP at bit
+// rate/16). On success the driver is already playing from `render`.
+bool OpenAsio(const std::wstring& wanted, unsigned rate, AsioDsd dsd, AsioStream::RenderFn render,
+              AsioStream::ResetFn reset, Device& d, std::wstring& problem) {
     AsioDriverInfo info;
     std::wstring why;
     if (FindAsioDriver(wanted, info, why)) {
         auto stream = std::make_shared<AsioStream>();
-        if (stream->Open(info, rate, std::move(render), std::move(reset), why)) {
+        if (stream->Open(info, rate, dsd, std::move(render), std::move(reset), why)) {
             d.asio = std::move(stream);
             d.asioName = info.name;
             d.rate = d.asio->Rate();
@@ -571,6 +623,53 @@ bool OpenAsio(const std::wstring& wanted, unsigned rate, AsioStream::RenderFn re
     return false;
 }
 
+// The containers DoP can use in an exclusive stream, widest first: 24 bits is all a DoP frame needs, and
+// float or 16-bit have nowhere to put the marker.
+constexpr SampleFormat kDopFormats[] = {SampleFormat::Int24In32, SampleFormat::Int32, SampleFormat::Int24};
+
+// Opens a DSD stream: native DSD on the ASIO driver when allowed and ASIO is the mode, else DoP at bit
+// rate/16. `problem` says why when it can't.
+HRESULT OpenDsd(IMMDeviceEnumerator* enumerator, HANDLE event, OutputMode mode, unsigned dsdRate, bool allowNative,
+                Device& d, std::wstring& problem, const std::wstring& asioDriver, AsioStream::RenderFn asioRender,
+                AsioStream::ResetFn asioReset) {
+    d = Device{};
+    problem.clear();
+    const unsigned dopRate = dsdRate / 16;
+    if (mode == OutputMode::Asio) {
+        if (allowNative && OpenAsio(asioDriver, dsdRate, AsioDsd::Native, asioRender, asioReset, d, problem)) {
+            d.dsd = DsdTransport::AsioNative;
+            d.dsdRate = dsdRate;
+            return S_OK;
+        }
+        if (OpenAsio(asioDriver, dopRate, AsioDsd::Dop, std::move(asioRender), std::move(asioReset), d, problem)) {
+            d.dsd = DsdTransport::Dop;
+            d.dsdRate = dsdRate;
+            return S_OK;
+        }
+        problem = L"The ASIO driver can't play DSD; DSD plays as PCM.";
+        return E_FAIL;
+    }
+    ComPtr<IMMDevice> device;
+    HRESULT hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+    if (FAILED(hr)) return hr;
+    HRESULT last = E_FAIL;
+    for (SampleFormat f : kDopFormats) {
+        Device attempt;
+        last = OpenExclusiveFormat(device.Get(), event, dopRate, f, attempt);
+        if (SUCCEEDED(last)) {
+            attempt.dsd = DsdTransport::Dop;
+            attempt.dsdRate = dsdRate;
+            d = attempt;
+            return S_OK;
+        }
+        if (last == AUDCLNT_E_DEVICE_IN_USE || last == AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED) break;
+    }
+    wchar_t buf[160];
+    swprintf_s(buf, L"This device can't play DSD over PCM at %g kHz; DSD plays as PCM.", dopRate / 1000.0);
+    problem = buf;
+    return last;
+}
+
 // Opens the default device: shared, or exclusive at `rate` (else at another rate it supports,
 // else shared), or the ASIO driver `asioDriver` (else shared). `problem` says why exclusive or ASIO
 // output isn't exactly what was asked for.
@@ -579,7 +678,8 @@ HRESULT OpenDevice(IMMDeviceEnumerator* enumerator, HANDLE event, OutputMode mod
                    AsioStream::ResetFn asioReset = {}) {
     d = Device{};
     problem.clear();
-    if (mode == OutputMode::Asio && OpenAsio(asioDriver, rate, std::move(asioRender), std::move(asioReset), d, problem))
+    if (mode == OutputMode::Asio && OpenAsio(asioDriver, rate, AsioDsd::None, std::move(asioRender),
+                                              std::move(asioReset), d, problem))
         return S_OK;
     ComPtr<IMMDevice> device;
     HRESULT hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
@@ -654,6 +754,7 @@ void AudioOutput::SetMode(OutputMode mode) {
 
 void AudioOutput::SetUpmix(bool upmix) {
     if (wantedUpmix_.exchange(upmix) == upmix) return;
+    if (upmix) wantedDsdRate_ = 0;  // a surround device plays DSD as PCM
     if (thread_.joinable()) reopen_ = true;
     wake();
 }
@@ -693,7 +794,8 @@ bool AudioOutput::ShowAsioPanel() {
 unsigned AudioOutput::RequestRate(unsigned rate) {
     // A network speaker plays one rate whatever the mode: the engine resamples, as for shared output.
     if (wantedMode_ == OutputMode::Shared || !thread_.joinable() || !SpeakerId().empty()) return rate_;
-    if (rate == rate_ && mode_ == wantedMode_) return rate_;
+    wantedDsdRate_ = 0;  // PCM: leave DSD mode (the re-open below does it)
+    if (rate == rate_ && mode_ == wantedMode_ && dsd_ == DsdTransport::None) return rate_;
     wantedRate_ = rate;
     ResetEvent(rateDone_);
     rateRequest_ = true;
@@ -701,6 +803,24 @@ unsigned AudioOutput::RequestRate(unsigned rate) {
     wake();
     WaitForSingleObject(rateDone_, 4000);
     return rate_;
+}
+
+DsdTransport AudioOutput::RequestDsd(unsigned dsdRate, bool allowNative) {
+    // Only what can carry DSD bit for bit: shared output mixes and resamples, a network speaker does the
+    // same, and upmix has no place for DSD over a surround device.
+    if (wantedMode_ == OutputMode::Shared || !thread_.joinable() || wantedUpmix_ || !SpeakerId().empty() ||
+        !dsdRate)
+        return DsdTransport::None;
+    if (mode_ == wantedMode_ && dsdRate == dsdRate_ && (dsd_ == DsdTransport::AsioNative || !allowNative))
+        return dsd_;
+    wantedDsdNative_ = allowNative;
+    wantedDsdRate_ = dsdRate;
+    ResetEvent(rateDone_);
+    rateRequest_ = true;
+    reopen_ = true;
+    wake();
+    WaitForSingleObject(rateDone_, 4000);
+    return dsd_;
 }
 
 std::wstring AudioOutput::Problem() const {
@@ -785,6 +905,9 @@ void AudioOutput::RunSpeaker(unsigned long long& sourcePos) {
     mode_ = OutputMode::Shared;
     format_ = SampleFormat::Int16;
     asioType_ = -1;
+    dsd_ = DsdTransport::None;
+    dsdRate_ = 0;
+    wantedDsdRate_ = 0;  // a network speaker plays PCM
     holding_ = true;
     waiting_ = false;
     {
@@ -869,14 +992,17 @@ void AudioOutput::Run() {
             played_ = sourcePos;
         }
         if (paused_) {
+            // Nothing comes from the source: PCM gets silence, and DSD is left to the stream, which fills
+            // everything past the returned count with DSD idle.
             memset(out, 0, frames * 2 * sizeof(float));
-            return;
+            return size_t(0);
         }
         const size_t audio = render_(out, frames, sourcePos);
         asioClock.Push(frames, sourcePos, audio);
         // What the speakers play now went into the driver one buffer and its output latency ago.
         const unsigned long long queued = frames + asioLatency.load(std::memory_order_relaxed);
         played_ = asioClock.Played(asioClock.written > queued ? asioClock.written - queued : 0, sourcePos);
+        return audio;
     };
     AsioStream::ResetFn asioReset = [this] {
         reopen_ = true;
@@ -884,6 +1010,23 @@ void AudioOutput::Run() {
     };
     auto open = [&](Device& d) {
         asioClockReset = true;
+        if (wantedMode_ == OutputMode::Shared) wantedDsdRate_ = 0;  // shared output can't carry DSD
+        const unsigned dsdRate = wantedDsdRate_;
+        if (dsdRate) {
+            const bool allowNative = wantedDsdNative_;
+            if (SUCCEEDED(OpenDsd(enumerator.Get(), event_, wantedMode_, dsdRate, allowNative, d, problem,
+                                  AsioDriver(), asioRender, asioReset)))
+                return S_OK;
+            // The device can't carry this DSD stream: play it as PCM, keeping the reason for Problem().
+            const std::wstring why = problem;
+            wantedDsdRate_ = 0;
+            dsdRate_ = 0;
+            dsd_ = DsdTransport::None;
+            HRESULT hr2 = OpenDevice(enumerator.Get(), event_, wantedMode_, wantedRate_, wantedUpmix_, d, problem,
+                                     AsioDriver(), asioRender, asioReset);
+            if (SUCCEEDED(hr2)) problem = problem.empty() ? why : why + L" " + problem;
+            return hr2;
+        }
         return OpenDevice(enumerator.Get(), event_, wantedMode_, wantedRate_, wantedUpmix_, d, problem, AsioDriver(),
                           asioRender, asioReset);
     };
@@ -897,13 +1040,19 @@ void AudioOutput::Run() {
         return;
     }
     std::unique_ptr<Upmixer> upmixer;  // made the first time a surround device is upmixed
+    std::vector<float> convert;  // render buffer when the device doesn't take float, or is upmixed
     auto applyDevice = [&] {
         mode_ = dev.asio ? OutputMode::Asio : dev.exclusive ? OutputMode::Exclusive : OutputMode::Shared;
         format_ = dev.format;
         asioType_ = dev.asio ? dev.asio->Type() : -1;
         asioLatency = dev.asio ? dev.asio->Latency() : 0;
+        dsd_ = dev.dsd;
+        dsdRate_ = dev.dsdRate;
+        dopMarker_ = kDopMarkerA;  // a new DoP stream starts its alternation afresh
         holding_ = true;
         waiting_ = false;
+        if (dev.dsd != DsdTransport::None && dev.client)
+            convert.assign((size_t)dev.bufferFrames * 2, 0.0f);  // nothing to allocate on the render path
         if (dev.upmix.count) {
             if (!upmixer) upmixer = std::make_unique<Upmixer>();
             upmixer->Configure(dev.upmix, dev.rate);
@@ -917,7 +1066,7 @@ void AudioOutput::Run() {
     applyDevice();
     auto* notifier = new DeviceNotifier(this);
     enumerator->RegisterEndpointNotificationCallback(notifier);
-    rate_ = dev.rate;
+    rate_ = dev.FrameRate();
     ok_ = true;
     SetEvent(ready_);
 
@@ -930,7 +1079,6 @@ void AudioOutput::Run() {
     std::vector<Chunk> chunks;
     chunks.reserve(16);
     size_t chunkHead = 0;
-    std::vector<float> convert;  // render buffer when the device doesn't take float, or is upmixed
     unsigned long long deviceWritten = 0;
     bool running = false;
     ULONGLONG idleSince = 0;  // when a paused output started sitting on the device
@@ -953,7 +1101,10 @@ void AudioOutput::Run() {
         // AUDCLNT_E_DEVICE_IN_USE). Shared mode lets go too, so a laptop or Bluetooth endpoint can
         // really idle. RequestRate is waiting on the device, so that keeps it open.
         bool wantDevice = !paused_ || rateRequest_;
-        if (dev.client && paused_ && running) {
+        const bool dsd = dev.dsd != DsdTransport::None;
+        // A paused DSD stream keeps feeding idle frames instead of stopping: a DoP DAC that sees silence
+        // or nothing drops out of DSD mode and clicks. It still gives the device back after the idle wait.
+        if (dev.client && paused_ && running && !dsd) {
             dev.client->Stop();
             running = false;
         }
@@ -963,6 +1114,7 @@ void AudioOutput::Run() {
             else if (now - idleSince >= kIdleReleaseMs) {
                 dev = Device{};  // the claim goes with the client (or the ASIO driver)
                 holding_ = false;
+                running = false;
             }
         } else {
             idleSince = 0;
@@ -981,7 +1133,7 @@ void AudioOutput::Run() {
                 played_ = sourcePos;
                 if (upmixer) upmixer->Reset();
             }
-            if (!paused_) {
+            if (!paused_ || dsd) {
                 UINT32 padding = 0;
                 hr = dev.client->GetCurrentPadding(&padding);
                 if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
@@ -997,6 +1149,10 @@ void AudioOutput::Run() {
                             convert.resize((size_t)avail * 2);
                             audio = render_(convert.data(), avail, sourcePos);
                             upmixer->Process(convert.data(), avail, reinterpret_cast<float*>(data));
+                        } else if (dsd) {
+                            convert.resize((size_t)avail * 2);
+                            audio = paused_ ? 0 : render_(convert.data(), avail, sourcePos);
+                            PackDop(convert.data(), avail, audio, dev.format, dopMarker_, data);
                         } else if (dev.format == SampleFormat::Float32) {
                             audio = render_(reinterpret_cast<float*>(data), avail, sourcePos);
                         } else {
@@ -1041,6 +1197,7 @@ void AudioOutput::Run() {
             if (running && dev.client) dev.client->Stop();
             running = false;
             bool requested = rateRequest_.exchange(false);  // RequestRate is waiting: no reset callback
+            const DsdTransport wasDsd = dsd_;                // a DSD stream reopens as the same transport
             Device fresh;
             HRESULT opened = E_FAIL;
             // The same ASIO driver is set up again in place (a new rate, a reset from its panel): loading
@@ -1050,7 +1207,15 @@ void AudioOutput::Run() {
                 (wantedDriver.empty() || !_wcsicmp(dev.asioName.c_str(), wantedDriver.c_str()))) {
                 std::wstring why;
                 asioClockReset = true;
-                if (dev.asio->Restart(wantedRate_, why)) {
+                // In DSD the driver's rate is the bit rate, or the DoP frame rate, not the PCM rate.
+                const AsioDsd asioDsd = wasDsd == DsdTransport::AsioNative ? AsioDsd::Native
+                                        : wasDsd == DsdTransport::Dop      ? AsioDsd::Dop
+                                                                           : AsioDsd::None;
+                unsigned restartRate = wantedRate_.load();
+                const unsigned dsdRate = wantedDsdRate_.load();
+                if (asioDsd == AsioDsd::Native) restartRate = dsdRate;
+                else if (asioDsd == AsioDsd::Dop) restartRate = dsdRate / 16;
+                if (dev.asio->Restart(restartRate, asioDsd, why)) {
                     fresh = dev;
                     fresh.rate = dev.asio->Rate();
                     fresh.format = FormatForAsio(dev.asio->Type());
@@ -1070,9 +1235,14 @@ void AudioOutput::Run() {
                 chunkHead = 0;
                 if (!dev.asio) played_ = sourcePos;  // a driver's buffer switch keeps it itself
                 applyDevice();
-                if (dev.rate != rate_) {
-                    rate_ = dev.rate;
-                    if (!requested && reset_) reset_(dev.rate);
+                const unsigned frameRate = dev.FrameRate();
+                if (frameRate != rate_) {
+                    rate_ = frameRate;
+                    if (!requested && reset_) reset_(rate_);
+                } else if (dsd_ != wasDsd && !requested && reset_) {
+                    // The transport changed at the same rate (DSD dropped to PCM, say): the engine has to
+                    // know, because what it renders for this stream just changed.
+                    reset_(rate_);
                 }
                 if (requested) SetEvent(rateDone_);
             } else {

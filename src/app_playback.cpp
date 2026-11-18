@@ -345,7 +345,11 @@ int SnapshotToNowPlaying(int pl, int& index) {
         // What's on screen: the search narrows the snapshot too.
         TrackId id = src.items[index];
         for (uint32_t i : g.view) items.push_back(src.items[i]);
-        index = (int)(std::find(items.begin(), items.end(), id) - items.begin());
+        auto found = std::find(items.begin(), items.end(), id);
+        // A track the search hides (Previous from a stopped player starts at the first item) plays from
+        // the whole view instead, so the index always names a real Now Playing entry.
+        if (found != items.end()) index = (int)(found - items.begin());
+        else items = src.items;
     } else {
         items = src.items;
     }
@@ -711,6 +715,7 @@ void ReopenLastTrack() {
     InvalidateRect(g.list, nullptr, FALSE);
     LibViewInvalidate();
     InvalidateRect(g.tabs, nullptr, FALSE);
+    if (ApolloMode()) ApolloTick();  // Apollo's status window shows the song from the first paint
 }
 
 // Stopped with nothing selected, Play continues where playback stopped.
@@ -1087,6 +1092,13 @@ void UpdateStatus() {
                 swprintf_s(out, L"No audio output; waiting");
             else if (!o.ready)
                 swprintf_s(out, L"%ls (idle)", g.output == 2 ? L"ASIO" : g.output ? L"Exclusive" : L"Shared");
+            else if (o.dsdRate) {  // a DSD stream: the engine hands the DAC the file's bits unchanged
+                const bool volumeIgnored = g.softwareVolume && g.volumePercent < 100;
+                swprintf_s(out, L"%ls %ls %ls%ls%ls", o.asio ? L"ASIO" : L"Exclusive", DsdRateName(o.dsdRate),
+                           o.dsdNative ? L"native" : L"(DoP)",
+                           active && o.bitPerfect && helper.empty() ? L" \x2022 bit-perfect" : L"",
+                           active && volumeIgnored ? L" \x2022 volume doesn't apply" : L"");
+            }
             else if (o.asio)
                 swprintf_s(out, L"ASIO %.48ls %g kHz %d-bit%ls%ls", o.device.c_str(), o.rate / 1000.0, o.bits,
                            o.floatFormat ? L" float" : L"", active && o.bitPerfect && helper.empty() ? L" \x2022 bit-perfect" : L"");

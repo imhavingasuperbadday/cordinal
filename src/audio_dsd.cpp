@@ -1,10 +1,13 @@
-// DSD: DSF (Sony) and uncompressed DSDIFF (Philips .dff) 1-bit streams, turned into PCM by one
-// linear-phase low-pass FIR evaluated a byte at a time. The decimation keeps the output near
-// 88.2 kHz (DSD64 / 32, DSD128 / 64, ...), and the filter, 32 taps per decimation step, passes
-// the audio band flat and removes DSD's rising noise before the output's Nyquist frequency. The
-// filter is centred on each output sample and has no state, so seeking is exact. DST-compressed
-// DSDIFF is not read.
+// DSD: DSF (Sony) and uncompressed DSDIFF (Philips .dff) 1-bit streams. The PCM path turns them
+// into audio with one linear-phase low-pass FIR evaluated a byte at a time. The decimation keeps
+// the output near 88.2 kHz (DSD64 / 32, DSD128 / 64, ...), and the filter, 32 taps per decimation
+// step, passes the audio band flat and removes DSD's rising noise before the output's Nyquist
+// frequency. The filter is centred on each output sample and has no state, so seeking is exact.
+// The bitstream path (OpenDsdStream) instead hands the file's own bits on unchanged, packed as DoP
+// words or ASIO native bytes (dsd.h), for a DAC that takes DSD. DST-compressed DSDIFF is not read.
+// Both paths share the container parsers and Gather.
 #include "audio_file.h"
+#include "dsd.h"
 #include "native_audio.h"
 
 #include <cmath>
@@ -15,6 +18,7 @@ using namespace nativeaudio;
 
 constexpr uint8_t kSilence = 0x69;  // the idle pattern: equal ones and zeros
 constexpr size_t kChunk = 1024;     // output frames per filter pass
+constexpr size_t kBits = 4096;      // payload frames per gather-and-pack pass
 constexpr double kPi = 3.14159265358979323846;
 
 uint8_t Reverse(uint8_t b) {
@@ -35,8 +39,10 @@ double BesselI0(double x) {
 
 class DsdDecoder final : public Decoder {
 public:
-    bool Open(const std::wstring& path) {
+    // bytesPerFrame 0 keeps the PCM path; 1 or 2 selects that many payload bytes per DSD frame.
+    bool Open(const std::wstring& path, unsigned bytesPerFrame) {
         if (!file_.Open(path) || file_.Size() < 16) return false;
+        pack_ = bytesPerFrame;
         file_.Sequential();
         const uint8_t* h = file_.View(0, 16);
         if (!h) return false;
@@ -47,6 +53,7 @@ public:
 
     size_t Read(float* out, size_t frames) override {
         frames = (size_t)std::min<uint64_t>(frames, frames_ - pos_);
+        if (pack_) return ReadBits(out, frames);
         size_t done = 0;
         while (done < frames) {
             const size_t n = std::min(kChunk, frames - done);
@@ -62,8 +69,11 @@ public:
         pos_ = std::min<uint64_t>(frames_, (uint64_t)std::llround(std::max(0.0, seconds) * rate_));
         return true;
     }
+    // A payload stream is just an offset into the file's bits, so a seek is a move to a frame.
+    bool FastSeek() const override { return pack_ != 0; }
     double Duration() const override { return (double)frames_ / rate_; }
     unsigned Rate() const override { return rate_; }
+    unsigned DsdRate() const { return dsdRate_; }
 
 private:
     bool OpenDsf() {
@@ -109,7 +119,8 @@ private:
             if (Is(c, "FS  ") && len >= 4) dsdRate_ = U32(body, true);
             else if (Is(c, "CHNL") && len >= 2) {
                 channels_ = U16(body, true);
-                if (len < 2 + 4ull * channels_) return false;
+                // The loop reads only the viewed bytes (at most 4096); Setup rejects more than 8 channels anyway.
+                if (len < 2 + 4ull * channels_ || 2 + 4ull * channels_ > 4096) return false;
                 for (unsigned i = 0; i < channels_; ++i) {
                     const uint8_t* id = body + 2 + i * 4;
                     layout += Is(id, "SLFT") || Is(id, "MLFT") ? 'L' : Is(id, "SRGT") || Is(id, "MRGT") ? 'R'
@@ -132,6 +143,7 @@ private:
     // Mixing weights from the layout, the decimation and the filter tables.
     bool Setup(const std::string& layout) {
         if (dsdRate_ < 1000000 || dsdRate_ > 50000000 || !channels_ || channels_ > 8 || layout.size() != channels_) return false;
+        if (pack_) return SetupBitstream(layout);
         decimation_ = 8;
         while (dsdRate_ / (2 * decimation_) >= 88200) decimation_ *= 2;
         rate_ = dsdRate_ / decimation_;
@@ -173,6 +185,54 @@ private:
                 table_[t * 256 + b] = (float)(v / sum);
             }
         return frames_ > 0;
+    }
+
+    // The bitstream mode: the file's bits go out as DoP words (2 bytes) or ASIO native bytes (1).
+    // Only stereo and mono map onto the engine's two channels, the frame rate must be a whole
+    // number, and the L and R channels come from the layout the parsers read.
+    bool SetupBitstream(const std::string& layout) {
+        if (channels_ > 2) return false;
+        rate_ = dsdRate_ / (8 * pack_);
+        if (!rate_ || dsdRate_ % (8 * pack_)) return false;
+        frames_ = bytes_ / pack_;
+        li_ = ri_ = -1;
+        for (unsigned i = 0; i < channels_; ++i) {
+            const char ch = layout[i];
+            if (ch == 'M') li_ = ri_ = (int)i;
+            else if (ch == 'L') li_ = (int)i;
+            else if (ch == 'R') ri_ = (int)i;
+        }
+        return li_ >= 0 && ri_ >= 0 && frames_ > 0;
+    }
+
+    // Gathers each channel's bytes for the block and packs two payload floats per frame. Both
+    // channels share one buffer that keeps its storage, so no read after the first allocates.
+    size_t ReadBits(float* out, size_t frames) {
+        size_t done = 0;
+        while (done < frames) {
+            const size_t n = std::min(kBits, frames - done);
+            const size_t span = n * pack_;
+            bits_.resize(span * 2);
+            Gather((unsigned)li_, (int64_t)((pos_ + done) * pack_), span, bits_.data());
+            Gather((unsigned)ri_, (int64_t)((pos_ + done) * pack_), span, bits_.data() + span);
+            const uint8_t* l = bits_.data();
+            const uint8_t* r = l + span;
+            float* o = out + done * 2;
+            if (pack_ == 2) {  // DoP: 16 bits a sample, first in time as the word's MSB
+                for (size_t k = 0; k < n; ++k, l += 2, r += 2, o += 2) {
+                    o[0] = DopPayload((uint16_t)(l[0] << 8 | l[1]));
+                    o[1] = DopPayload((uint16_t)(r[0] << 8 | r[1]));
+                }
+            } else {  // ASIO native: one byte a sample, first in time as the MSB
+                for (size_t k = 0; k < n; ++k, o += 2) {
+                    o[0] = DsdBytePayload(l[k]);
+                    o[1] = DsdBytePayload(r[k]);
+                }
+            }
+            done += n;
+        }
+        pos_ += frames;
+        return frames;
     }
 
     // Channel c's bytes [first, first + n), MSB first, with silence outside the stream.
@@ -225,18 +285,29 @@ private:
 
     File file_;
     unsigned channels_ = 0, dsdRate_ = 0, rate_ = 0, decimation_ = 0, block_ = 0;
+    unsigned pack_ = 0;  // 0: PCM path; 1 or 2: payload bytes per DSD frame
+    int li_ = -1, ri_ = -1;  // the payload's left and right channel
     size_t step_ = 0, taps_ = 0;
     bool lsbFirst_ = false;
     uint64_t data_ = 0, bytes_ = 0;  // bytes_: per channel
     uint64_t frames_ = 0, pos_ = 0;
     std::vector<float> weights_, table_;
-    std::vector<uint8_t> bytes1_;
+    std::vector<uint8_t> bytes1_, bits_;  // gather buffers of the PCM and payload paths
 };
 
 }  // namespace
 
 std::unique_ptr<Decoder> OpenDsdDecoder(const std::wstring& path) {
     auto d = std::make_unique<DsdDecoder>();
-    if (!d->Open(path)) return nullptr;
+    if (!d->Open(path, 0)) return nullptr;
+    return d;
+}
+
+std::unique_ptr<Decoder> OpenDsdStream(const std::wstring& path, unsigned bytesPerFrame, unsigned& dsdRate) {
+    dsdRate = 0;
+    if (bytesPerFrame != 1 && bytesPerFrame != 2) return nullptr;
+    auto d = std::make_unique<DsdDecoder>();
+    if (!d->Open(path, bytesPerFrame)) return nullptr;
+    dsdRate = d->DsdRate();
     return d;
 }

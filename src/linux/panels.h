@@ -20,7 +20,8 @@ enum FilePurpose : int {
     kFileCover = 1, kFileAutoEq = 2, kFileOrganizeRoot = 3, kFileCopyDest = 4, kFilePack = 5, kFileHelper = 6,
     kFileCoverPick = 7,  // the cover picker's From file...
     kFileCoverDirect = 8,  // the track menu's Cover > Choose image file...
-    kFileAlbumCover = 9    // the album maker's Choose cover...
+    kFileAlbumCover = 9,   // the album maker's Choose cover...
+    kFileConvertDest = 10  // the Convert panel's Browse...
 };
 
 void OpenEqualizer();
@@ -84,7 +85,7 @@ void OpenOrganize(std::vector<TrackId> ids);  // the tracks given, or the whole 
 // Library > Copy to folder or device: `playlist` names the playlist the tracks are (its .m3u8, and the
 // copies it owns), empty for a selection.
 void OpenCopy(const std::vector<TrackId>& ids, const std::wstring& playlist);
-bool PanelReplanPending();  // the organize preview waits to be replanned once typing pauses
+bool PanelReplanPending();  // the organize, copy or convert preview waits to be replanned once typing pauses
 // coverfetch_ui.cpp: covers, as app_coverfetch.cpp does on Windows. The picker (Change cover...) and
 // the review of Library > Fetch missing covers are panels; the tag editor opens the picker over
 // itself and gets the chosen image back. The picker takes a file chosen for it and a dropped file,

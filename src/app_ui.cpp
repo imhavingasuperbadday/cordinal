@@ -28,14 +28,16 @@ LRESULT SurfaceControlColor(HDC dc, COLORREF text) {
     return (LRESULT)g.surfaceBrush;
 }
 
-// Explorer's dark checkbox/radio theme draws its label black whatever WM_CTLCOLORBTN says. Keep the
-// native glyph, input and accessibility, but repaint the label after it in the palette's text color.
-// `glyph` is the width the box or circle and its gap take before the label.
-LRESULT ChoiceLabelCustomDraw(const NMCUSTOMDRAW* draw, HFONT font, int glyph) {
+// A themed checkbox or radio draws its label in the theme's color whatever WM_CTLCOLORBTN says (black,
+// even on a dark surface). Keep the native glyph, input and accessibility, but repaint the label after
+// it in the palette's text color. ApplyControlTheme sends every such button here (SetChoiceLabelPainter).
+LRESULT ChoiceLabelCustomDraw(const NMCUSTOMDRAW* draw) {
     if (draw->dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYPOSTPAINT;
     if (draw->dwDrawStage == CDDS_POSTPAINT) {
+        HFONT font = (HFONT)SendMessageW(draw->hdr.hwndFrom, WM_GETFONT, 0, 0);
+        if (!font) font = g.font;
         RECT r = draw->rc;
-        r.left += glyph;
+        r.left += MulDiv(16, (int)GetDpiForWindow(draw->hdr.hwndFrom), 96);  // the box or circle and its gap
         FillRect(draw->hdc, &r, g.surfaceBrush);
         ++r.left;
         HGDIOBJ old = SelectObject(draw->hdc, font);
@@ -100,6 +102,7 @@ void CreateFonts() {
         if (theme.fontPx) lf.lfHeight = -S(theme.fontPx);
     }
     g.font = CreateFontIndirectW(&lf);
+    SetChoiceLabelPainter(ChoiceLabelCustomDraw);
     lf.lfWeight = FW_BOLD;
     g.fontBold = CreateFontIndirectW(&lf);
     g.fontTitle = CreateFontIndirectW(&lf);  // compact: now-playing title is just the bold UI font

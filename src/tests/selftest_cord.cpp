@@ -531,7 +531,7 @@ void TestCordConversion(const std::wstring& root, const std::wstring& scratch) {
         cord::PutEntry(tags.meta, cord::kArtist, {}, "Second artist");
         cord::PutEntry(tags.meta, cord::kFreeForm, "MUSICBRAINZ_TRACKID", "keep this id");
         const bool encoded = cord::Encode(pcm, from, error, nullptr, tags);
-        const bool saved = encoded && ExportCordFlac(from, to, error, cancel);
+        const bool saved = encoded && ExportFlac(from, to, error, cancel);
         const Exact back = ReadAll(to);
         const std::string flacBytes = ReadTestBytes(to);
         formats.Add(saved && back.opened && !back.damaged && back.samples == samples && back.format.bits == bits && back.format.rate == rate &&
@@ -541,7 +541,7 @@ void TestCordConversion(const std::wstring& root, const std::wstring& scratch) {
                         (!mask || flacBytes.find("WAVEFORMATEXTENSIBLE_CHANNEL_MASK=0x3f") != std::string::npos),
                     name + L" " + error);
         const std::wstring wav = dir + L"\\export-" + name + L".wav";
-        const bool waveSaved = ExportCordAudio(from, wav, CordExport::Wav, error, cancel);
+        const bool waveSaved = ExportAudio(from, wav, CordExport::Wav, error, cancel);
         const Exact waveBack = ReadAll(wav);
         formats.Add(waveSaved && waveBack.opened && !waveBack.damaged && waveBack.samples == samples && waveBack.format.bits == bits &&
                         waveBack.format.rate == rate && waveBack.format.channels == channels && waveBack.format.channelMask == mask &&
@@ -553,7 +553,7 @@ void TestCordConversion(const std::wstring& root, const std::wstring& scratch) {
             for (const auto target : {CordExport::Mp3_192, CordExport::Mp3_320, CordExport::Aac128, CordExport::Aac192}) {
                 const auto& info = kCordExports[(unsigned)target];
                 const auto transientCopy = dir + L"\\transients-" + std::to_wstring((unsigned)target) + L"." + info.extension;
-                const bool made = ExportCordAudio(from, transientCopy, target, error, cancel);
+                const bool made = ExportAudio(from, transientCopy, target, error, cancel);
                 const std::string output = ReadTestBytes(transientCopy);
                 formats.Add(made && output.find("MUSICBRAINZ_TRACKID") != output.npos && output.find("Björk") != output.npos &&
                                 output.find("Second artist") != output.npos, std::wstring(info.label) + L" transients " + error);
@@ -617,7 +617,7 @@ void TestCordConversion(const std::wstring& root, const std::wstring& scratch) {
         const auto& info = kCordExports[(unsigned)target];
         const std::wstring output = dir + L"\\copy-" + std::to_wstring((unsigned)target) + L"." + info.extension;
         const auto exportPlan = PlanConvert({{1, cord}}, target);
-        const bool made = ExportCordAudio(cord, output, target, error, cancel);
+        const bool made = ExportAudio(cord, output, target, error, cancel);
         TagData tags;
         std::string image, words;
         ReadTags(output, tags);
@@ -633,9 +633,9 @@ void TestCordConversion(const std::wstring& root, const std::wstring& scratch) {
                    std::wstring(info.label) + L" " + error);
         const std::string bytes = ReadTestBytes(output);
         cancel = true;
-        const bool stopped = !ExportCordAudio(cord, output + L".cancelled", target, error, cancel);
+        const bool stopped = !ExportAudio(cord, output + L".cancelled", target, error, cancel);
         cancel = false;
-        copies.Add(stopped && !ExportCordAudio(cord, output, target, error, cancel) && ReadTestBytes(output) == bytes,
+        copies.Add(stopped && !ExportAudio(cord, output, target, error, cancel) && ReadTestBytes(output) == bytes,
                    std::wstring(info.label) + L" cancellation and collision");
     }
     Check(copies.Passed(), L"WAV, MP3 and AAC copies keep tags, lyrics and covers, decode completely and never overwrite files%ls", copies.failed.c_str());
@@ -646,27 +646,205 @@ void TestCordConversion(const std::wstring& root, const std::wstring& scratch) {
     const std::wstring safe = dir + L"\\safe.flac", damaged = dir + L"\\damaged.cord";
     const std::string preserved = ReadTestBytes(cord), existing = ReadTestBytes(tagged);
     const auto collision = PlanConvert({{1, cord}, {2, tagged}, {3, cord + L"|1"}}, CordExport::Flac);
-    const bool noOverwrite = !ExportCordFlac(cord, tagged, error, cancel) && ReadTestBytes(tagged) == existing &&
+    const bool noOverwrite = !ExportFlac(cord, tagged, error, cancel) && ReadTestBytes(tagged) == existing &&
                              !collision[0].skip.empty() && !collision[1].skip.empty() && !collision[2].skip.empty();
     cancel = true;
-    const bool cancelled = !ExportCordFlac(cord, safe, error, cancel) && GetFileAttributesW(safe.c_str()) == INVALID_FILE_ATTRIBUTES;
+    const bool cancelled = !ExportFlac(cord, safe, error, cancel) && GetFileAttributesW(safe.c_str()) == INVALID_FILE_ATTRIBUTES;
     cancel = false;
     WriteTestBytes(damaged, preserved.substr(0, preserved.size() - 1));
-    const bool rejected = !ExportCordFlac(damaged, safe, error, cancel) && GetFileAttributesW(safe.c_str()) == INVALID_FILE_ATTRIBUTES;
+    const bool rejected = !ExportFlac(damaged, safe, error, cancel) && GetFileAttributesW(safe.c_str()) == INVALID_FILE_ATTRIBUTES;
     // Valid container, corrupt audio: verification must also catch damage found after opening it.
     std::string corrupt = preserved;
     corrupt.back() ^= 1;
     WriteTestBytes(damaged, corrupt);
-    const bool badAudio = !ExportCordFlac(damaged, safe, error, cancel) && GetFileAttributesW(safe.c_str()) == INVALID_FILE_ATTRIBUTES;
+    const bool badAudio = !ExportFlac(damaged, safe, error, cancel) && GetFileAttributesW(safe.c_str()) == INVALID_FILE_ATTRIBUTES;
     const std::vector<int32_t> tiny{0, -1, 0, -1};
     MemoryPcm tooNarrow(tiny, 1, 1);
     const bool narrow = cord::Encode(tooNarrow, dir + L"\\one-bit.cord", error) &&
-                        !ExportCordFlac(dir + L"\\one-bit.cord", safe, error, cancel) &&
+                        !ExportFlac(dir + L"\\one-bit.cord", safe, error, cancel) &&
                         GetFileAttributesW(safe.c_str()) == INVALID_FILE_ATTRIBUTES;
     WIN32_FIND_DATAW found{};
     HANDLE temporary = FindFirstFileW((dir + L"\\*.cordinal-tmp-*").c_str(), &found);
     if (temporary != INVALID_HANDLE_VALUE) FindClose(temporary);
     Check(noOverwrite && cancelled && rejected && badAudio && narrow && ReadTestBytes(cord) == preserved && temporary == INVALID_HANDLE_VALUE,
           L"FLAC export leaves sources and existing files intact, and removes cancelled or damaged exports");
+
+    batch.Next(L"converted copies start from any format: exact FLAC and WAV from FLAC or WAV with every tag, "
+               L"AAC from FLAC or MP3, and nothing lossless from a lossy file or into the source's own format");
+
+    const auto anyFlac = PlanConvert({{1, tagged}, {2, dir + L"\\song.wav"}, {3, lossy}}, CordExport::Flac);
+    const auto anyAac = PlanConvert({{1, tagged}, {2, lossy}, {3, dir + L"\\song.m4a"}}, CordExport::Aac128);
+    testlog::Cases any;
+    any.Add(anyFlac.size() == 3 && anyFlac[0].skip == L"already .flac" && anyFlac[1].skip.empty() &&
+                anyFlac[1].to == dir + L"\\song.flac" && !anyFlac[2].skip.empty() && anyFlac[2].to.empty(),
+            L"lossless plan");
+    any.Add(anyAac.size() == 3 && anyAac[0].skip.empty() && anyAac[0].to == dir + L"\\tagged.m4a" && anyAac[1].skip.empty() &&
+                anyAac[2].skip == L"already .m4a",
+            L"lossy plan");
+    const std::string flacBefore = ReadTestBytes(tagged), mp3Before = ReadTestBytes(lossy);
+    // FLAC -> WAV -> FLAC keeps every sample, and the WAV keeps the FLAC's tags, cover and lyrics. (The
+    // FLAC is the one exported from .cord above; the original WAV is gone by now.)
+    const std::wstring flacWave = dir + L"\\tagged.wav", waveFlac = dir + L"\\from-wave.flac";
+    const bool madeWave = ExportAudio(tagged, flacWave, CordExport::Wav, error, cancel);
+    const std::wstring waveError = error;
+    const bool madeFlac = ExportAudio(flacWave, waveFlac, CordExport::Flac, error, cancel);
+    const std::wstring flacError = error;
+    const Exact source = ReadAll(tagged), asWave = ReadAll(flacWave), asFlac = ReadAll(waveFlac);
+    TagData waveTags;
+    ReadTags(flacWave, waveTags);
+    std::string waveArt, waveLyrics;
+    any.Add(madeWave && asWave.opened && !asWave.damaged && asWave.samples == source.samples && waveTags.title == "Convert me" &&
+                waveTags.composer == a.composer && waveTags.track == a.track && ReadEmbeddedArt(flacWave, waveArt) && waveArt == cover &&
+                ReadLyrics(flacWave, waveLyrics) && waveLyrics == "La la la",
+            L"FLAC to WAV " + waveError);
+    any.Add(madeFlac && asFlac.opened && !asFlac.damaged && !asFlac.samples.empty() && asFlac.samples == source.samples,
+            L"WAV to FLAC " + flacError);
+    // AAC from FLAC (exact source) and from MP3 (decoded source): tags and a complete decode.
+    for (const auto& [from, to] : {std::pair{tagged, dir + L"\\tagged.m4a"}, std::pair{lossy, dir + L"\\lossy.m4a"}}) {
+        const bool made = ExportAudio(from, to, CordExport::Aac128, error, cancel);
+        TagData fromTags, toTags;
+        ReadTags(from, fromTags);
+        ReadTags(to, toTags);
+        unsigned fromRate = 0, toRate = 0;
+        const auto original = DecodeAll(from, fromRate), copy = DecodeAll(to, toRate);
+        const double want = fromRate ? (double)(original.size() / 2) / fromRate : -1, got = toRate ? (double)(copy.size() / 2) / toRate : -2;
+        std::string copyArt;
+        any.Add(made && !copy.empty() && std::fabs(want - got) < 0.01 && toTags.title == fromTags.title && toTags.artist == fromTags.artist &&
+                    (from != tagged || (ReadEmbeddedArt(to, copyArt) && copyArt == cover)),
+                FileNameOf(from) + L" to AAC " + error);
+    }
+    any.Add(!ExportAudio(lossy, dir + L"\\lossy.flac", CordExport::Flac, error, cancel) &&
+                GetFileAttributesW((dir + L"\\lossy.flac").c_str()) == INVALID_FILE_ATTRIBUTES,
+            L"no lossless copy of a lossy file");
+    any.Add(ReadTestBytes(tagged) == flacBefore && ReadTestBytes(lossy) == mp3Before,
+            L"sources untouched");
+    Check(any.Passed(), L"converted copies start from any format, keep tags and samples, and leave their sources alone%ls",
+          any.failed.c_str());
+
+    batch.Next(L"MP3 copies are gapless: through the LAME header's delay and padding the copy lines up with the "
+               L"original to the sample and is exactly as long");
+    // Tones that swell and fade over 1.5 s (an odd length, so the last frame is partial). The lag at
+    // which the copy best matches the original must be 0, and its length the same: this holds
+    // aac::kMp3Latency to the encoder. A click would not do: the encoder's lowpass smears it.
+    constexpr size_t kGapFrames = 72001;
+    std::vector<int32_t> tonal(kGapFrames * 2);
+    for (size_t i = 0; i < kGapFrames; ++i) {
+        const double t = (double)i / 48000, swell = std::sin(3.14159265358979 * t / 1.5);
+        const double v = swell * (6000 * std::sin(2 * 3.14159265358979 * 440 * t) + 3000 * std::sin(2 * 3.14159265358979 * 1250 * t) +
+                                  2000 * std::sin(2 * 3.14159265358979 * 3100 * t * (1 + t)));
+        tonal[i * 2] = tonal[i * 2 + 1] = (int32_t)std::lround(v);
+    }
+    MemoryPcm tonalPcm(tonal, 2, 16, 0, 48000);
+    const std::wstring tonalCord = dir + L"\\tonal.cord";
+    // The lag in [-limit, limit] at which `decoded` (left channel) best matches the source.
+    auto bestLag = [&](const std::vector<float>& decoded, int limit) {
+        int best = 0;
+        double top = -1e300;
+        for (int lag = -limit; lag <= limit; ++lag) {
+            double sum = 0;
+            for (size_t i = 4000; i + 4000 < kGapFrames; i += 3) {
+                const int64_t j = (int64_t)i + lag;
+                if (j >= 0 && (size_t)j < decoded.size() / 2) sum += tonal[i * 2] * (double)decoded[(size_t)j * 2];
+            }
+            if (sum > top) { top = sum; best = lag; }
+        }
+        return best;
+    };
+    testlog::Cases gapless;
+    const bool tonalMade = cord::Encode(tonalPcm, tonalCord, error);
+    for (const auto target : {CordExport::Mp3_192, CordExport::Mp3_320}) {
+        const std::wstring mp3 = dir + L"\\tonal-" + std::to_wstring((unsigned)target) + L".mp3";
+        const bool made = tonalMade && ExportAudio(tonalCord, mp3, target, error, cancel);
+        unsigned rate = 0;
+        const auto decoded = DecodeAll(mp3, rate);
+        const int lag = bestLag(decoded, 64);
+        const std::string bytes = ReadTestBytes(mp3);
+        gapless.Add(made && rate == 48000 && decoded.size() / 2 == kGapFrames && lag == 0 && bytes.find("LAMEcord1") != bytes.npos,
+                    std::wstring(kCordExports[(unsigned)target].label) + L": " + std::to_wstring(decoded.size() / 2) + L" frames, lag " +
+                        std::to_wstring(lag) + L" " + error);
+    }
+    Check(gapless.Passed(), L"MP3 copies line up with the original to the sample and are exactly as long%ls", gapless.failed.c_str());
+
+    batch.Next(L"ALAC, WavPack and TTA read exactly and convert losslessly; copies go into another folder with "
+               L"their albums apart, or as .cord; a replacement to FLAC is logged and undone");
+    testlog::Cases more;
+    // alac.caf is sine.wav through FFmpeg's ALAC encoder, so their samples must match exactly.
+    const Exact alac = ReadAll(root + L"\\native\\alac.caf"), pcm16 = ReadAll(root + L"\\media\\sine.wav");
+    more.Add(alac.opened && !alac.damaged && !alac.samples.empty() && alac.samples == pcm16.samples && alac.format.bits == pcm16.format.bits,
+             L"ALAC reads exactly");
+    for (const wchar_t* name : {L"pcm16.wv", L"sine.tta", L"alac.caf"}) {
+        const std::wstring from = dir + L"\\lossless-" + name, toFlac = from + L".flac";
+        CopyFileW((root + L"\\native\\" + name).c_str(), from.c_str(), FALSE);
+        const Exact exact = ReadAll(from);
+        const bool made = ExportAudio(from, toFlac, CordExport::Flac, error, cancel);
+        const Exact flacBack = ReadAll(toFlac);
+        more.Add(exact.opened && !exact.damaged && !exact.samples.empty() && made && flacBack.samples == exact.samples &&
+                     flacBack.format.bits == exact.format.bits && flacBack.format.channels == exact.format.channels &&
+                     (wcscmp(name, L"pcm16.wv") || exact.samples == pcm16.samples),
+                 std::wstring(name) + L" to FLAC " + error);
+    }
+    // sine.wv holds float samples, which no integer format keeps exactly: refused, not rounded.
+    more.Add(!ReadAll(root + L"\\native\\sine.wv").opened, L"float WavPack is not read as exact");
+    // MP4 holds ALAC or AAC: the library's codec decides without opening the file.
+    const auto aacOrAlac = PlanConvert({{1, dir + L"\\a.m4a"}, {2, dir + L"\\b.m4a"}}, CordExport::Flac, ConvertMode::Copy, {},
+                                       [](TrackId id) { return id == 1 ? Codec::AAC : Codec::ALAC; });
+    more.Add(aacOrAlac.size() == 2 && !aacOrAlac[0].skip.empty() && aacOrAlac[1].skip.empty(), L"ALAC or AAC in .m4a");
+    // Copies into a folder keep the folders below the selection's common folder; one folder's songs
+    // keep that folder's name.
+    const std::wstring out = dir + L"\\out";
+    const auto spread = PlanConvert({{1, dir + L"\\a\\x\\one.flac"}, {2, dir + L"\\b\\two.flac"}}, CordExport::Mp3_192,
+                                    ConvertMode::Copy, out + L"\\");
+    const auto together = PlanConvert({{1, dir + L"\\a\\x\\one.flac"}, {2, dir + L"\\a\\x\\two.flac"}}, CordExport::Mp3_192,
+                                      ConvertMode::Copy, out);
+    more.Add(spread.size() == 2 && spread[0].to == out + L"\\a\\x\\one.mp3" && spread[1].to == out + L"\\b\\two.mp3" &&
+                 together.size() == 2 && together[0].to == out + L"\\x\\one.mp3" && together[1].to == out + L"\\x\\two.mp3" &&
+                 !spread[0].replace,
+             L"copies keep their folders below the common one");
+    // A .cord copy into a new folder: made, its folders created, nothing logged, the source kept.
+    const std::wstring wv = dir + L"\\lossless-pcm16.wv";
+    const auto cordCopy = PlanConvert({{1, wv}}, CordExport::None, ConvertMode::Copy, out);
+    ConvertSettings keep;
+    keep.recycle = false;
+    const ConvertResult copied = ExecuteConvert(cordCopy, keep, logDir, cancel, nullptr);
+    const Exact copiedBack = ReadAll(out + L"\\cord-convert\\lossless-pcm16.cord"), wvBack = ReadAll(wv);
+    more.Add(cordCopy.size() == 1 && cordCopy[0].skip.empty() && !cordCopy[0].replace && copied.done.size() == 1 && copied.log.empty() &&
+                 copiedBack.samples == wvBack.samples && !wvBack.samples.empty(),
+             L".cord copy into a folder");
+    // Replacing TTA with FLAC: logged, the original kept (by preference), and undo brings it back
+    // as the library's file while the FLAC stays (undo without recycling).
+    const std::wstring tta = dir + L"\\lossless-sine.tta", replaced = dir + L"\\lossless-sine.flac";
+    const auto replacePlan = PlanConvert({{1, tta}}, CordExport::Flac, ConvertMode::Replace);
+    const ConvertResult swapped = ExecuteConvert(replacePlan, keep, logDir, cancel, nullptr);
+    const bool logged = CanUndoConvert(logDir);
+    const auto back = UndoLastConvert(logDir, false, error);
+    more.Add(replacePlan.size() == 1 && replacePlan[0].replace && replacePlan[0].to == replaced && swapped.done.size() == 1 &&
+                 !swapped.log.empty() && logged && back.size() == 1 && back[0].original == tta && back[0].cord == replaced &&
+                 !CanUndoConvert(logDir) && GetFileAttributesW(tta.c_str()) != INVALID_FILE_ATTRIBUTES &&
+                 ReadAll(replaced).samples == ReadAll(tta).samples,
+             L"replacement to FLAC and its undo " + error);
+    Check(more.Passed(), L"lossless sources, folders, .cord copies and replacements%ls", more.failed.c_str());
+
+    batch.Next(L"planning 100,000 songs takes under 2 seconds, so the Convert window's count keeps up with a whole library");
+    // The window replans everything it was opened for on each change, on the UI thread. A library of
+    // 100,000 songs in albums of twelve (docs/memory.md's size), planned as copies into a folder and
+    // as replacements; outputs that would collide are found without comparing every pair.
+    std::vector<std::pair<TrackId, std::wstring>> library;
+    library.reserve(100000);
+    for (TrackId i = 0; i < 100000; ++i)
+        library.push_back({i, dir + L"\\library\\Artist " + std::to_wstring(i / 1200) + L"\\Album " + std::to_wstring(i / 12) + L"\\" +
+                                  std::to_wstring(i % 12 + 1) + L" Song.flac"});
+    library.push_back({100000, library[5].second});  // the same file twice: its second output collides
+    using Clock = std::chrono::steady_clock;
+    const Clock::time_point t0 = Clock::now();
+    const auto asCopies = PlanConvert(library, CordExport::Mp3_320, ConvertMode::Copy, dir + L"\\copies");
+    const Clock::time_point t1 = Clock::now();
+    const auto asReplacements = PlanConvert(library, CordExport::None, ConvertMode::Replace);
+    const Clock::time_point t2 = Clock::now();
+    const double copiesSeconds = std::chrono::duration<double>(t1 - t0).count(),
+                 replaceSeconds = std::chrono::duration<double>(t2 - t1).count();
+    const size_t copyReady = (size_t)std::count_if(asCopies.begin(), asCopies.end(), [](const ConvertItem& i) { return i.skip.empty(); });
+    Check(asCopies.size() == 100001 && copyReady == 100000 && !asCopies.back().skip.empty() && asReplacements.size() == 100001 &&
+              asCopies[0].to == dir + L"\\copies\\Artist 0\\Album 0\\1 Song.mp3" && copiesSeconds < 2 && replaceSeconds < 2,
+          L"planning 100,000 songs: copies in %.2f s, replacements in %.2f s (target under 2 s each)", copiesSeconds, replaceSeconds);
     DeleteTestFolder(dir);
 }

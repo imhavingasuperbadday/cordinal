@@ -9,7 +9,7 @@
 #   --uninstall       remove cordinal; the library and settings stay
 #   --self-test       check this script's own checks, then stop (used by CI)
 #
-# The published program needs only glibc 2.36 or newer (Debian 12, Ubuntu 24.04 and anything
+# The published program needs only glibc 2.31 or newer (Debian 11, Ubuntu 20.04 and anything
 # newer): windows (X11 and Wayland), drawing, HTTPS, font matching, text layout and the PipeWire
 # and PulseAudio clients are compiled in, and so is the C++ runtime. The one package it may install
 # is a font, from repositories already configured on the machine, when the system has none. The
@@ -284,8 +284,8 @@ pick_pkg() {
 
 libs_help() {
     cat <<'EOF'
-cordinal needs no libraries from the distribution beyond glibc 2.36 or newer on
-64-bit x86 (Debian 12, Ubuntu 24.04, Fedora 37 and newer systems), plus at least
+cordinal needs no libraries from the distribution beyond glibc 2.31 or newer on
+64-bit x86 (Debian 11, Ubuntu 20.04, Fedora 32 and newer systems), plus at least
 one TrueType or OpenType font. It runs on X11 and on Wayland. Alpine and other
 musl systems cannot run this build.
 EOF
@@ -412,7 +412,7 @@ program_loads() {
         cat "$err" >&2
         grep "not found" "$out" >&2 || true
         if grep -q "GLIBC_" "$err"; then
-            say "This system's glibc is older than 2.36 (Debian 12), the oldest the published build runs on."
+            say "This system's glibc is older than 2.31 (Debian 11), the oldest the published build runs on."
         fi
         libs_help >&2
         fail "cordinal cannot load here, so it was not installed over any copy already present."
@@ -529,7 +529,7 @@ self_test() {
     if [ ! -e /run/ostree-booted ]; then (KIND=apt; read_only_system) && fail "apt systems are not read-only"; fi
     (KIND=alpine; refuse_special) 2>/dev/null && fail "alpine accepted"
     (KIND=steamos; refuse_special) || fail "steamos refused"
-    libs_help | grep -q "glibc 2.36" || fail "libs_help names the glibc it needs"
+    libs_help | grep -q "glibc 2.31" || fail "libs_help names the glibc it needs"
     libs_help | grep -q SDL3 && fail "libs_help still asks for SDL3"
     member_name_ok "cordinal/cordinal" || fail "member"
     member_name_ok "cordinal/../../etc/passwd" && fail "traversal accepted"

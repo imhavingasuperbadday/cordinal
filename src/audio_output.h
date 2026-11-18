@@ -12,6 +12,9 @@
 // ASIO mode (Windows): an ASIO driver chosen by name (asio.h) plays the first two of its outputs at the
 // rate the engine asks for, in the driver's own sample type and buffer size, bypassing Windows audio.
 // Bit-perfect like exclusive mode. Falls back to shared output when the driver can't be opened.
+// DSD (exclusive or ASIO only): the engine renders DSD payloads instead of audio (dsd.h) and this layer
+// sends them either as native ASIO DSD bytes or as DoP, 16 DSD bits in the low bits of a 24-bit sample
+// with a marker in the top byte. Shared mode, a network speaker and upmix play PCM.
 #pragma once
 #include <windows.h>
 
@@ -23,6 +26,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#include "dsd.h"
 
 enum class OutputMode { Shared, Exclusive, Asio };
 
@@ -77,6 +82,15 @@ void ConvertSamples(const float* in, size_t samples, SampleFormat fmt, void* out
 int SampleBytes(SampleFormat fmt);
 int SampleBits(SampleFormat fmt);  // significant bits (32 for float)
 
+// DoP frame packing, the exclusive-mode DSD transport. `in` holds `frames` interleaved stereo floats that
+// are DSD payloads (dsd.h); each becomes the low 16 bits of one 24-bit sample per channel, with `marker`
+// in the top byte. Frames past `supplied` are DoP idle (payload 0x6969), never silence: a DoP DAC would
+// drop out of DSD mode and click. `marker` is the state between calls: it alternates kDopMarkerA and
+// kDopMarkerB every frame, both channels alike, and continues where it left off, so a stream stays
+// continuous across render calls, silence, pause and flush. `fmt` must be one of the 24-bit containers,
+// Int24In32, Int32 or Int24; the others cannot carry a marker and write nothing.
+void PackDop(const float* in, size_t frames, size_t supplied, SampleFormat fmt, uint8_t& marker, void* out);
+
 // One render thread owns the device. The methods below only set atomic flags and wake that
 // thread, except RequestRate and Stop, which block until it has responded. RenderFn runs on the
 // render thread at device priority: it must not lock, allocate or block.
@@ -122,6 +136,14 @@ public:
     // it runs at, which differs when the device can't do `rate`. Shared mode: returns Rate().
     unsigned RequestRate(unsigned rate);
     SampleFormat Format() const { return format_; }
+    // Re-opens the device for a DSD stream of `dsdRate` bits per second per channel (2822400 = DSD64),
+    // blocking like RequestRate. Tries ASIO native DSD first when `allowNative` and ASIO output is in
+    // use, then DoP (exclusive or ASIO, at dsdRate/16 with a 24- or 32-bit integer format). Returns the
+    // transport set up; None means the device can't, and output is left as it was (the caller plays
+    // PCM). Rate() is then DsdFrameRate(dsdRate, transport).
+    DsdTransport RequestDsd(unsigned dsdRate, bool allowNative);
+    DsdTransport Dsd() const { return dsd_; }      // the transport in use, None for PCM
+    unsigned DsdRate() const { return dsdRate_; }  // its DSD bit rate, 0 for PCM
     // Spreads stereo over every speaker of a surround device in shared mode (re-opens the device).
     void SetUpmix(bool upmix);
     // The layout being upmixed to ("5.1"), or empty while playing plain stereo.
@@ -185,6 +207,11 @@ private:
     std::atomic<bool> holding_{false};
     std::atomic<bool> waiting_{false};  // lost device, retrying the open
     std::atomic<SampleFormat> format_{SampleFormat::Float32};
+    std::atomic<DsdTransport> dsd_{DsdTransport::None};  // the DSD transport in use
+    std::atomic<unsigned> dsdRate_{0};                   // its DSD bit rate
+    std::atomic<unsigned> wantedDsdRate_{0};             // requested, kept for a re-open
+    std::atomic<bool> wantedDsdNative_{false};
+    uint8_t dopMarker_ = kDopMarkerA;  // DoP marker for the next frame; render thread only
 #ifdef _WIN32
     std::atomic<long> asioType_{-1};
     std::atomic<bool> panel_{false};

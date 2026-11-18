@@ -19,6 +19,7 @@
 #include "peaks.h"
 #include "text.h"
 #include "ui.h"
+#include "waybar.h"
 
 
 #include <clocale>
@@ -54,7 +55,6 @@ void Dispatch(const Message& m) {
         case WM_APP + 30: OnFoldersChosen(reinterpret_cast<std::vector<std::wstring>*>(m.lp)); break;
         case WM_APP_RG: FinishReplayGain(m.wp, m.lp); break;
         case WM_APP_TAGWRITE: OnTagWriteMessage(m.wp, m.lp); break;
-        case WM_APP_CORD_EXPORT: OnCordExport(m.wp, m.lp); break;
         case WM_APP_CONVERT: OnConvertMessage(m.wp, m.lp); break;
         case WM_APP_EXPAND: OnExpanded(); break;
         case WM_APP_ORGANIZE: OnOrganizeDone(); break;
@@ -191,6 +191,8 @@ int Run(int argc, char** argv) {
     // One cordinal at a time: hand files or a command to the one running.
     // The parity checks run on their own, without a display or another cordinal: an offscreen window
     // at scale 1, the Windows build's default size.
+    // Waybar's module (waybar.cpp): a process of its own that only watches the running cordinal.
+    if (argc == 2 && !strcmp(argv[1], "--waybar")) return waybar::RunModule();
     std::string captureDir;
     bool checkLayout = argc == 2 && !strcmp(argv[1], "--check-layout");
     if (argc == 3 && !strcmp(argv[1], "--capture-ui")) captureDir = argv[2];
@@ -219,7 +221,7 @@ int Run(int argc, char** argv) {
         if (!full.empty()) paths.push_back(full);
     }
 
-    SDL_SetAppMetadata("cordinal", "0.1.14", "cordinal");
+    SDL_SetAppMetadata("cordinal", "0.1.15", "cordinal");
     SDL_SetHint(SDL_HINT_VIDEO_WAYLAND_PREFER_LIBDECOR, "1");
     if (parity) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
@@ -425,7 +427,6 @@ int Run(int argc, char** argv) {
     SaveSettings();
     StopPlaylistFiles();
     StopMigration();
-    StopCordExporter();
     StopConverter();
     StopOrganizer();
     StopCopier();

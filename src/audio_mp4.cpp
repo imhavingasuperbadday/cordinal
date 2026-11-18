@@ -50,7 +50,7 @@ Bytes DecoderConfig(Bytes esds) {
     if (!Descriptor(data,tag,value) || tag != 3 || value.size() < 3) return {};
     size_t skip = 3; uint8_t flags = value[2];
     if (flags&128) skip += 2;
-    if (flags&64) { if (skip == value.size()) return {}; skip += 1+value[skip]; }
+    if (flags&64) { if (skip >= value.size()) return {}; skip += 1+value[skip]; }
     if (flags&32) skip += 2;
     if (skip > value.size()) return {};
     data = value.subspan(skip);

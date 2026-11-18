@@ -189,16 +189,6 @@ void LayoutSaveChoices(HWND (&radios)[3], int x, int y) {
     ReleaseDC(radios[0], dc);
 }
 
-// The save choices' labels in the palette's colors; false for any other control's notification.
-bool SaveChoiceDraw(LPARAM lp, LRESULT& result) {
-    auto* draw = reinterpret_cast<NMCUSTOMDRAW*>(lp);
-    if (draw->hdr.code != NM_CUSTOMDRAW) return false;
-    int id = GetDlgCtrlID(draw->hdr.hwndFrom);
-    if (std::find(std::begin(kSaveIds), std::end(kSaveIds), id) == std::end(kSaveIds)) return false;
-    result = ChoiceLabelCustomDraw(draw, g.font, ChoiceGlyph());
-    return true;
-}
-
 // The hairline that sets a dialog's footer apart from its content.
 void PaintDivider(HDC dc, const RECT& client, int y) {
     const int pad = S(14);
@@ -871,11 +861,6 @@ LRESULT CALLBACK PickerProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_CTLCOLORSTATIC:
         case WM_CTLCOLORBTN:
             return SurfaceControlColor((HDC)wp, (HWND)lp == pk.status ? SubColor() : TextColor());
-        case WM_NOTIFY: {
-            LRESULT result;
-            if (SaveChoiceDraw(lp, result)) return result;
-            break;
-        }
         case WM_CTLCOLOREDIT:
             return FieldControlColor((HDC)wp);
         case WM_COMMAND:
@@ -1199,11 +1184,6 @@ LRESULT CALLBACK ReviewProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_CTLCOLORSTATIC:
         case WM_CTLCOLORBTN:
             return SurfaceControlColor((HDC)wp, TextColor());
-        case WM_NOTIFY: {
-            LRESULT result;
-            if (SaveChoiceDraw(lp, result)) return result;
-            break;
-        }
         case WM_COMMAND:
             switch (LOWORD(wp)) {
                 case IDOK:

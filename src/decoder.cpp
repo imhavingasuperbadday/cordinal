@@ -241,15 +241,67 @@ bool IgnoresWavPackCorrection(const std::wstring& path) {
     return ExtOf(file) == L"wv" && GetFileAttributesW((file + L"c").c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
+// The integers behind a lossless decoder's float output (Decoder::LosslessFormat). Each value must
+// come back as a whole number in range, and a mono stream's two channels must agree; anything else
+// marks the stream damaged rather than passing off rounded audio as exact.
+class LosslessExact final : public PcmReader {
+public:
+    LosslessExact(std::unique_ptr<Decoder> decoder, const PcmFormat& format) : decoder_(std::move(decoder)) {
+        format_ = format;
+        scale_ = std::ldexp(1.0, (int)format.bits - 1);
+    }
+
+protected:
+    size_t Next(int32_t* out, size_t frames) override {
+        buffer_.resize(std::min<size_t>(frames, 4096) * 2);
+        const size_t n = decoder_->Read(buffer_.data(), buffer_.size() / 2);
+        if (decoder_->Failed()) {
+            damaged_ = true;
+            return 0;
+        }
+        const unsigned channels = format_.channels;
+        for (size_t i = 0; i < n; ++i)
+            for (unsigned c = 0; c < channels; ++c) {
+                const double v = (double)buffer_[i * 2 + c] * scale_;
+                if (v != std::floor(v) || v < -scale_ || v >= scale_ || (channels == 1 && buffer_[i * 2] != buffer_[i * 2 + 1])) {
+                    damaged_ = true;
+                    return 0;
+                }
+                out[i * channels + c] = (int32_t)v;
+            }
+        return n;
+    }
+
+private:
+    std::unique_ptr<Decoder> decoder_;
+    std::vector<float> buffer_;
+    double scale_ = 1;
+};
+
+std::unique_ptr<PcmReader> OpenLosslessExact(std::unique_ptr<Decoder> decoder) {
+    PcmFormat f;
+    if (!decoder || !decoder->LosslessFormat(f) || !f.rate || !f.channels || f.channels > 2 || f.bits < 4 || f.bits > 24)
+        return nullptr;
+    return std::make_unique<LosslessExact>(std::move(decoder), f);
+}
+
 std::unique_ptr<PcmReader> OpenPcmReader(const std::wstring& path, std::wstring& error) {
     error.clear();
     const std::wstring ext = ExtOf(path);
     std::unique_ptr<PcmReader> r;
-    if (ext == L"flac" || ext == L"fla") r = OpenFlacExact(path);
+    if (path.find(L'|') != std::wstring::npos) {}  // a cue sheet's part is never a whole stream
+    else if (ext == L"flac" || ext == L"fla") r = OpenFlacExact(path);
     else if (ext == L"wav" || ext == L"wave" || ext == L"aif" || ext == L"aiff" || ext == L"aifc" || ext == L"au" ||
-             ext == L"snd" || ext == L"caf") r = OpenPcmExact(path);
-    else if (ext == L"cord") r = OpenCordExact(path);
-    if (!r) error = L"Couldn't read the exact samples of " + FileNameOf(path) + L": only FLAC, integer WAV, "
-                    L"AIFF, AU or CAF and cordinal's own format can be read exactly, and the file must not be damaged.";
+             ext == L"snd" || ext == L"caf") {
+        r = OpenPcmExact(path);
+        if (!r && ext == L"caf") r = OpenLosslessExact(OpenAlacDecoder(path));
+    } else if (ext == L"cord") r = OpenCordExact(path);
+    else if (ext == L"m4a" || ext == L"mp4" || ext == L"m4b") r = OpenLosslessExact(OpenAlacDecoder(path));
+    else if (ext == L"wv") r = OpenLosslessExact(OpenWavPackDecoder(path));
+    else if (ext == L"ape") r = OpenLosslessExact(OpenApeDecoder(path));
+    else if (ext == L"tta") r = OpenLosslessExact(OpenTtaDecoder(path));
+    if (!r) error = L"Couldn't read the exact samples of " + FileNameOf(path) + L": only FLAC, integer WAV, AIFF, AU "
+                    L"or CAF, cordinal's own format, and mono or stereo ALAC, WavPack, Monkey's Audio or TTA up to 24 "
+                    L"bits can be read exactly, and the file must not be damaged.";
     return r;
 }

@@ -30,13 +30,20 @@ HttpReply HttpFetch(void* session, const std::string& url, const char* method, c
                     const std::string& headers = {}, unsigned timeoutMs = 10000, size_t maxBody = 1u << 20);
 
 // A small JSON reader for ACME replies: objects, arrays, strings, numbers and literals.
+struct JsonMember;
 struct JsonValue {
     enum class Kind { Null, Bool, Number, String, Array, Object } kind = Kind::Null;
     std::string text;  // a string's value, or a number's or literal's spelling
     std::vector<JsonValue> items;
-    std::vector<std::pair<std::string, JsonValue>> members;
+    std::vector<JsonMember> members;
     const JsonValue& operator[](std::string_view key) const;
     const std::string& String(std::string_view key) const { return (*this)[key].text; }
+};
+// An object's name and value. Not std::pair: a pair holding the type being defined sends clang's
+// check of pair's constructors round in a circle (libstdc++ 16), and the build fails.
+struct JsonMember {
+    std::string first;
+    JsonValue second;
 };
 bool ParseJson(std::string_view text, JsonValue& value);
 std::string Base64Url(std::string_view bytes);

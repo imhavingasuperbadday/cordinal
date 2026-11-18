@@ -15,6 +15,12 @@ static double Extended80(sv b, size_t i) {
     return std::ldexp((double)mant, exp);
 }
 
+// A sample rate stored as a float (AIFF's 80-bit one, Matroska's): converting one outside uint32_t's
+// range, NaN or infinite as a damaged file's may be, is undefined, so those read as unknown (0).
+static uint32_t RateFrom(double rate) {
+    return rate >= 1 && rate < 4294967296.0 ? (uint32_t)rate : 0;
+}
+
 bool ReadRiff(const File& f, TagData& t, ArtSink& art) {
     std::string h = f.Read(0, 12);
     bool avi = Sub(h, 8, 4) == "AVI ";  // a file of 4 to 7 bytes has no form type
@@ -106,7 +112,7 @@ bool ReadAiff(const File& f, TagData& t, ArtSink& art) {
             uint64_t frames = BE32(c, 2), bits = BE16(c, 6);
             // AIFF-C counts IMA4 in packets of 64 frames, 34 bytes a channel.
             if (len >= 22 && f.Read(8, 4) == "AIFC" && Sub(c, 18, 4) == "ima4") { frames *= 64; bits = 34 * 8 / 64; }
-            t.sampleRate = (uint32_t)Extended80(c, 8);
+            t.sampleRate = RateFrom(Extended80(c, 8));
             if (t.sampleRate) t.duration = (double)frames / t.sampleRate;
             t.bitrate = (uint32_t)(t.sampleRate * t.channels * bits / 1000);
         } else if ((id == "ID3 " || id == "id3 ") && len < (64u << 20)) {
@@ -303,20 +309,19 @@ static uint64_t EbmlUInt(sv v) {
     return r;
 }
 
+// A damaged file's float may be NaN or infinite, which no duration or rate can be: read it as 0.
 static double EbmlFloat(sv v) {
+    double d = 0;
     if (v.size() == 4) {
         uint32_t u = (uint32_t)EbmlUInt(v);
         float f;
         memcpy(&f, &u, 4);
-        return f;
-    }
-    if (v.size() == 8) {
+        d = f;
+    } else if (v.size() == 8) {
         uint64_t u = EbmlUInt(v);
-        double d;
         memcpy(&d, &u, 8);
-        return d;
     }
-    return 0;
+    return std::isfinite(d) ? d : 0;
 }
 
 static void WalkMatroska(sv b, TagData& t, uint64_t& scale, double& duration, int depth) {
@@ -347,7 +352,7 @@ static void WalkMatroska(sv b, TagData& t, uint64_t& scale, double& duration, in
             case 0x7BA9: if (t.title.empty()) t.title = std::string(v); break;
             case 0x83: trackType = (int)EbmlUInt(v); break;
             case 0x86: codecId = std::string(v); break;
-            case 0xB5: if (!t.sampleRate) t.sampleRate = (uint32_t)EbmlFloat(v); break;
+            case 0xB5: if (!t.sampleRate) t.sampleRate = RateFrom(EbmlFloat(v)); break;
             case 0x9F: if (!t.channels) t.channels = (uint32_t)EbmlUInt(v); break;
             case 0x1F43B675: return;  // Cluster: metadata is over
         }
@@ -384,6 +389,7 @@ bool ReadMatroska(const File& f, TagData& t) {
     e.p += (size_t)size;
     WalkMatroska(sv(head).substr(e.p), t, scale, duration, 0);
     t.duration = duration * scale / 1e9;
+    if (!std::isfinite(t.duration) || t.duration < 0) t.duration = 0;  // a huge scale or a negative duration
     if (t.duration > 0) t.bitrate = Kbps(f.Size(), t.duration);
     return true;
 }

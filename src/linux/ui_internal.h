@@ -121,7 +121,7 @@ enum Action {
     kPlayPause, kStopAction, kMute, kPrevAction, kNextAction, kShuffleAction, kShuffleAlbumsAction, kRadio, kTaste, kRepeatSet, kStopAfter, kSpots, kPlayHistory, kSpeed, kTempo, kShared, kExclusive,
     kNewPl, kRenamePl, kClosePl, kDuplicatePl, kReopenPl, kMovePlLeft, kMovePlRight, kNextPl, kPrevPl, kReveal,
     kFolders, kRescan, kAcceptInbox, kAcceptAllInbox, kExcludeLibrary, kDuplicateAudio,
-    kSteam, kCancelSteam, kWebServer, kExportCord, kCancelExport, kConvert, kConvertUndo, kCancelConvert, kOrganize, kOrganizeUndo, kCopyTo, kCancelCopy,
+    kSteam, kCancelSteam, kWebServer, kConvert, kConvertUndo, kCancelConvert, kOrganize, kOrganizeUndo, kCopyTo, kCancelCopy,
     kIpodSync, kCancelIpodSync,
     kTheme, kOpenRadio, kGroupAlbums, kStartOnLogin, kNameThatTrack, kWhichCameFirst, kPoints, kReview, kPalette, kLyrics, kLayout, kViewSize, kBigPanel, kBigReset, kMini, kLightweight, kPickSong, kVolumeUp, kVolumeDown, kSeekBack, kSeekForward, kKeyboard, kPacks, kPackPlaylist, kHelpers, kHelperTool, kHelperCancel,
     kAbout,
@@ -131,7 +131,7 @@ enum Action {
     kNewAuto, kEditAuto, kChoice, kGroupEditions, kPreferredEdition, kRemoveEdition, kSplitEditions,
     kAlbumEditions, kEditionVersions, kRgScanAll, kFindCover, kFetchCovers, kCancelFetchCovers, kRecentAdditions,
     kSaveLyricsTags, kSaveLyricsLrc, kArtistInfo, kRestoreCover,
-    kCoverFile, kCoverPaste, kEditAlbumTags, kMissingInfo, kQueuePanel, kQueueEdit, kMakeAlbum, kTagAlbum,
+    kCoverFile, kCoverPaste, kEditAlbumTags, kMissingInfo, kQueuePanel, kQueueEdit, kMakeAlbum, kTagAlbum, kTopBar,
 };
 extern std::function<void(int)> g_choicePick;  // the choice a panel's OpenChoice menu is for
 struct MenuItem {
@@ -159,6 +159,7 @@ extern uint64_t g_nextPlaylistIdentity;
 struct PlaylistFile {
     bool save = false, ok = false, failed = false, addToExisting = false, checkDead = false;
     bool findSteam = false, cancelled = false;
+    bool steamSoundEffects = false;  // copied from the setting on the UI thread for the worker
     std::wstring path;
     std::vector<M3UExportEntry> entries;
     std::vector<std::wstring> paths;
@@ -271,7 +272,6 @@ MenuItem Item(std::string label, int action, std::string shortcut = {}, bool che
 MenuItem Separator();
 MenuItem Radio(std::string label, int action, int arg, bool on, std::string shortcut = {});
 MenuItem Submenu(std::string label, std::vector<MenuItem> items);
-std::vector<MenuItem> CordExportItems();
 std::vector<MenuItem> RateItems(const double* rates, size_t count, double selected, int action);
 void Circle(float cx, float cy, float r, uint32_t rgb);
 std::vector<SDL_FPoint> RoundPath(const Rect& r, float rad);
@@ -293,6 +293,10 @@ std::vector<TrackId> PlaylistTracks(const Playlist& pl);
 void SortPlaylistTracks(std::vector<TrackId>& tracks, const Playlist& pl);
 bool SortKeepsAlbums(int column);
 void BuildLines();
+// A pack's group headers (groups.ini), as on Windows; the foobar2000 theme keeps its own.
+const PackGroups* GroupLook();
+// One of a pack's header lines over the group's first track, with %group_tracks% and %group_length%.
+std::wstring GroupHeaderText(const std::wstring& format, const Group& gr);
 bool GroupHidesCell(const Line& line, int column);
 float ColumnWidth(int column);
 std::vector<ui::ColumnSpec> ColumnSpecs();
@@ -364,7 +368,7 @@ void UndoLatest();
 void RemoveDuplicateTracks();
 void CheckDeadItems();
 void AddSteamSoundtracks();
-std::vector<std::wstring> NewSteamFolders(const std::vector<std::wstring>& folders, const std::atomic<bool>& cancel, const std::vector<std::wstring>* discovered = nullptr);
+std::vector<std::wstring> NewSteamFolders(const std::vector<std::wstring>& folders, const std::atomic<bool>& cancel, const std::vector<std::wstring>* discovered = nullptr, bool soundEffects = false);
 void SetTheme(ThemeMode mode);
 void RevealPlaying();
 void FilesChosen(void* data, const char* const* list, int);

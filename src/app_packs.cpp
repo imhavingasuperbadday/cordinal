@@ -787,79 +787,26 @@ std::wstring MakeStarterPack(bool open) {
     if (!ec) ec = fs::CreateDirectories(temp + L"\\autoplaylists");
     if (!ec) ec = fs::CreateDirectories(temp + L"\\sounds");
     bool ok = !ec;
-    auto write = [&](const std::wstring& file, const std::wstring& text) { ok = ok && WriteUtf8File(temp + L"\\" + file, text); };
-    auto hex = [](Rgb c) {
-        wchar_t b[8];
-        swprintf_s(b, L"#%06X", c);
-        return std::wstring(b);
-    };
-    const Palette& p = P();
     const Theme& theme = ThemeInfo(g.themeMode);
-    write(L"pack.ini",
-          L"; About this pack. Edit any file here, then View > Packs > Reload packs. The README's Packs\n"
-          L"; section lists every file and key. Delete the files you don't need: each one is optional.\n"
-          L"[pack]\nformat = 1\nname = " + id + L"\nversion = 1.0\nauthor =\ndescription = Made from my cordinal setup.\n");
-    std::wstring palette;
-    const struct { const wchar_t* key; Rgb Palette::*field; } roles[] = {
-        {L"bg", &Palette::bg}, {L"surface", &Palette::surface}, {L"surface2", &Palette::surface2}, {L"border", &Palette::border},
-        {L"text", &Palette::text}, {L"sub", &Palette::sub}, {L"faint", &Palette::faint}, {L"accent", &Palette::accent},
-        {L"accent2", &Palette::accent2}, {L"hover", &Palette::hover}, {L"select", &Palette::select},
-        {L"selectText", &Palette::selectText}, {L"playing", &Palette::playing}, {L"error", &Palette::error},
-        {L"amber", &Palette::amber}, {L"ok", &Palette::ok}};
-    for (const auto& r : roles) palette += std::wstring(r.key) + L" = " + hex(p.*r.field) + L"\n";
-    std::wstring sounds;
-    for (int i = 0; i < (int)Sfx::CardinalSong; ++i) sounds += L"; " + std::wstring(PackSoundName((Sfx)i)) + L" = sounds/" + PackSoundName((Sfx)i) + L".wav\n";
-    write(L"theme.ini",
-          L"; A theme for View > Theme: your current colours. It must stay readable: body text at 7:1 against\n"
-          L"; bg and surface, sub and selectText at 4.5:1, accent and the status colours at 3:1.\n"
-          L"[theme]\nname = My theme\nbase = " + std::wstring(p.dark ? L"dark" : L"light") + L"\n" +
-          (theme.font ? L"font = " + std::wstring(theme.font) + L"\n" : L"; font = Segoe UI\n") +
-          (theme.fontPx ? L"size = " + std::to_wstring(theme.fontPx) + L"\n" : L"; size = 13\n") +
-          L"playing mark = " + theme.playingMark + L"\n; message prefix = \"> \"\nrating mark = " + theme.ratingMark +
-          L"\n\n[palette]\n" + palette +
-          L"\n; The waveform's colours; without them it uses accent for what has played.\n[waveform]\n; played = " +
-          hex(p.accent) + L"\n; unplayed = " + hex(g.dark ? p.faint : p.border) + L"\n" +
-          L"\n; Sounds in place of cordinal's sound effects, as WAV or FLAC files in this pack (at most ten\n"
-          L"; seconds each). A file at sounds/<name>.wav is used without a line here.\n[sounds]\n" + sounds);
-    write(L"formats.ini",
-          L"; Title formats while the pack is on: your current ones. Title formatting (Preferences > View) lists the fields.\n"
-          L"[formats]\nwindow title = " + g.fmtWindow + L"\nstatus bar = " + g.fmtStatus + L"\nnow playing = " + g.fmtTitle +
-          L"\nnow playing 2 = " + g.fmtSub + L"\n; the notification area icon's tooltip\n; tray tip = [%artist% - ]%title%\n");
-    write(L"fields.ini",
-          L"; Fields of your own: %decade% then works in columns, formats, group headers and sorting.\n"
-          L"[fields]\ndecade = $if(%year%,$div(%year%,10)0s)\n");
-    std::wstring shown;
+    StarterSetup setup;
+    setup.name = id;
+    setup.palette = P();
+    setup.font = theme.font;
+    setup.fontPx = theme.fontPx;
+    setup.playingMark = theme.playingMark;
+    setup.ratingMark = theme.ratingMark;
+    const std::wstring* formats[] = {&g.fmtWindow, &g.fmtStatus, &g.fmtTitle, &g.fmtSub};
+    for (int i = 0; i < 4; ++i) setup.formats[i] = *formats[i];
     for (int t : g.columns)
-        if (t > 0) shown += (shown.empty() ? L"" : L", ") + PackColumnTitle(t);
-    write(L"columns.ini",
-          L"; Track list columns: right-click the list's header to show one. Each section is a column.\n"
-          L"[stars]\ntitle = Stars\nformat = $stars(%rating_value%)\nsort = [$num(%rating_value%,3)]\nwidth = 80\n\n"
-          L"; [bitrate]\n; title = kbps\n; format = [%bitrate%]\n; align = right\n; width = 60\n\n"
-          L"; A column set: the header's right-click menu > Column sets shows these columns, left to right.\n"
-          L"[set.mine]\nname = My columns\nshow = " + shown + L"\n");
-    write(L"functions.tf",
-          L"// Your own title-format functions. Inside the body, %n% is the argument called n.\n"
-          L"$define(stars, n, $repeat(\x2605, $div(%n%, 20)))\n");
-    write(L"groups.ini",
-          L"; Album group headers. Remove the ; in front of a line to use it.\n[groups]\n"
-          L"; by = %album artist%|%album%\n; title = %album%\n; subtitle = [%album artist%][  \x00B7  %year%]\n"
-          L"; right = %group_tracks% tracks  \x00B7  %group_length%\n; cover = yes\n");
-    write(L"keys.ini",
-          L"; Shortcuts: a key, then a command as the command palette (Ctrl+Shift+P) names it. Letters need\n"
-          L"; Ctrl or Alt; F-keys and media keys can stand alone.\n[keys]\n; Ctrl+Alt+N = Playback > Next\n; F9 = Shuffle\n\n"
-          L"; Global keys work while another program is in front.\n[global keys]\n; Ctrl+Alt+Right = Playback > Next\n"
-          L"; Ctrl+Alt+Space = Play or pause\n");
-    std::wstring bands;
-    for (int i = 0; i < kEqBands; ++i) bands += (i ? L", " : L"") + F2S(g.eq.gains[i]);
-    write(L"eq.ini", L"; Equalizer presets: ten gains in dB, 31 Hz to 16 kHz.\n[my eq]\nname = My EQ\nbands = " + bands + L"\n");
-    write(L"layout.ini", L"; A Customize layout preset: your current layout. 1 shows a part, 0 hides it.\n[layout]\nname = My layout\n" +
-                             LayoutIniText(g.layout));
-    for (const auto& pl : g.playlists) {
-        if (pl.kind != PlaylistKind::Auto || !ok) continue;
-        std::wstring file = pl.name;
+        if (t > 0) setup.columns += (setup.columns.empty() ? L"" : L", ") + PackColumnTitle(t);
+    for (int i = 0; i < kEqBands; ++i) setup.eq[i] = g.eq.gains[i];
+    setup.layout = LayoutIniText(g.layout);
+    for (const auto& pl : g.playlists)
+        if (pl.kind == PlaylistKind::Auto) setup.autoPlaylists.push_back({pl.name, pl.rules});
+    for (auto [file, text] : StarterPackFiles(setup)) {
         for (auto& c : file)
-            if (wcschr(L"\\/:*?\"<>|", c)) c = L'_';
-        write(L"autoplaylists\\" + file + L".txt", L"name " + pl.name + L"\n" + FromUtf8(pl.rules));
+            if (c == L'/') c = L'\\';
+        ok = ok && WriteUtf8File(temp + L"\\" + file, text);
     }
     if (ok) ec = fs::Move(temp, dest);
     if (!ok || ec) {

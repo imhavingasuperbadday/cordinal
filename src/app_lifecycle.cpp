@@ -40,6 +40,7 @@ void CreateMainWindow(HWND hwnd) {
     ApplyEffects();
     g.engine.SetLimiter(g.rgOn, g.rgHeadphoneHeadroom);
     if (g.output) g.engine.SetOutputMode((OutputMode)g.output, g.asioDriver);
+    g.engine.SetNativeDsd(g.nativeDsd);
     if (!g.networkSpeaker.empty()) g.engine.SetSpeaker(g.networkSpeaker);
     if (g.upmix) g.engine.SetUpmix(true);
     SetVolumePercent(g.volumePercent);

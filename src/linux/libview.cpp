@@ -369,6 +369,43 @@ bool BrowserKey(const SDL_KeyboardEvent& e) {
     }
 }
 
+// The type-to-jump's comparison: both sides are UTF-8, and each code point folds with towlower,
+// which is the loaded locale's wide table. An accented letter typed in either case finds its row,
+// exactly as the section bucketing (SectionLetter's iswalnum/towupper) files it under its own
+// letter. A byte that is not part of a sequence stands for itself.
+wchar_t FoldedAt(std::string_view text, size_t& at) {
+    const unsigned char lead = (unsigned char)text[at];
+    const size_t length = lead < 0x80 ? 1
+                          : (lead & 0xE0) == 0xC0 ? 2
+                          : (lead & 0xF0) == 0xE0 ? 3
+                          : (lead & 0xF8) == 0xF0 ? 4
+                                                  : 0;
+    if (length == 0 || at + length > text.size()) {
+        ++at;
+        return (wchar_t)lead;
+    }
+    unsigned value = length == 1 ? lead : length == 2 ? (lead & 0x1F) : length == 3 ? (lead & 0x0F) : (lead & 0x07);
+    for (size_t k = 1; k < length; ++k) {
+        const unsigned char next = (unsigned char)text[at + k];
+        if ((next & 0xC0) != 0x80) {
+            ++at;
+            return (wchar_t)lead;
+        }
+        value = (value << 6) | (next & 0x3F);
+    }
+    at += length;
+    return (wchar_t)towlower((wint_t)value);
+}
+
+bool StartsWithFolded(std::string_view value, std::string_view typed) {
+    size_t at = 0, typedAt = 0;
+    while (typedAt < typed.size()) {
+        if (at >= value.size()) return false;
+        if (FoldedAt(value, at) != FoldedAt(typed, typedAt)) return false;
+    }
+    return true;
+}
+
 // Type to jump: the first value starting with what was typed in the last second.
 void BrowserText(const char* text) {
     if (!BrowserFocused() || !text) return;
@@ -377,13 +414,9 @@ void BrowserText(const char* text) {
     if (now - g_typedTick > 1000) g_typed.clear();
     g_typed += text;
     g_typedTick = now;
-    auto lower = [](unsigned char c) { return (char)(c < 128 ? std::tolower(c) : c); };
     for (int i = 0; i < (int)pane.values.size(); ++i) {
         std::string_view v = pane.values[i] ? g_lib.View(pane.values[i]) : std::string_view();
-        if (v.size() < g_typed.size()) continue;
-        bool match = true;
-        for (size_t k = 0; k < g_typed.size() && match; ++k) match = lower(v[k]) == lower(g_typed[k]);
-        if (!match) continue;
+        if (!StartsWithFolded(v, g_typed)) continue;
         MovePaneCursor(pane, i + 1, false);
         break;
     }

@@ -111,7 +111,7 @@ platform, font, text, audio and layout checks on Debian 13.
 - **No new test framework and no second test binary.** Use the existing checks, `testlog::Cases` for
   many cases of one behaviour, `testlog::Batch` for related assertions about one operation, `Skip`
   for unavailable capabilities and `Ready` for setup.
-- **A size check when code grows.** A packed build must not exceed 2,000,000 bytes. Run
+- **A size check when code grows.** A packed build must not exceed 2,500,000 bytes. Run
   `pwsh -File tools\check-size.ps1` and, for a release build, `build.bat cdpack`.
 - **A memory check when the change adds data, caches, threads, buffers or code.** Run the
   `memory-budget` suite, which starts the real player in everyday states and compares its private

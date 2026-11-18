@@ -975,6 +975,21 @@ void TestTweaks(const std::wstring& scratch) {
               L"output is Shared, Exclusive or ASIO, persists, reads an older exclusive profile, and the Output page "
               L"links the ASIO driver picker");
     } else Check(false, L"Preferences includes the output choice");
+    // Native DSD is its own opt-in beside the output choice: off converts DSF and DSDIFF to PCM.
+    if (const Tweak* dsd = FindTweak("output.dsd")) {
+        const bool off = dsd->type == TweakType::Choice && dsd->max == 1 && dsd->def == 0 && dsd->choices &&
+                         !wcscmp(dsd->choices[0], L"Convert to PCM") && !wcscmp(TweakPage(*dsd), L"Output");
+        SetTweak(*dsd, 1);
+        const bool applied = g.nativeDsd;
+        g.nativeDsd = false;
+        LoadPreferences();
+        const bool kept = applied && g.nativeDsd && IniRead(L"Player", L"NativeDsd", L"") == L"1";
+        SetTweak(*dsd, dsd->def);
+        g.nativeDsd = true;
+        LoadPreferences();
+        Check(off && kept && !g.nativeDsd && IniRead(L"Player", L"NativeDsd", L"") == L"0",
+              L"native DSD is off by default, persists, and returns to converting to PCM");
+    } else Check(false, L"Preferences includes the native DSD choice");
     const Tweak* colors = FindTweak("view.mood_colors");
     const Tweak* smooth = FindTweak("view.smooth_seek");
     if (colors && smooth) {

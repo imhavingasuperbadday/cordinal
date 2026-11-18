@@ -258,8 +258,26 @@ const std::wstring* IniSection::Get(const wchar_t* key) const {
 }
 
 std::wstring DecodePackText(const std::string& bytes) {
-    if (bytes.size() >= 2 && (uint8_t)bytes[0] == 0xFF && (uint8_t)bytes[1] == 0xFE)
-        return std::wstring((const wchar_t*)(bytes.data() + 2), (bytes.size() - 2) / 2);
+    if (bytes.size() >= 2 && (uint8_t)bytes[0] == 0xFF && (uint8_t)bytes[1] == 0xFE) {
+        // UTF-16LE, as Notepad saves "Unicode". Read unit by unit: wchar_t is 32 bits on Linux, where a
+        // surrogate pair becomes one character.
+        std::wstring out;
+        for (size_t i = 2; i + 1 < bytes.size(); i += 2) {
+            unsigned u = (uint8_t)bytes[i] | (uint8_t)bytes[i + 1] << 8;
+            if constexpr (sizeof(wchar_t) == 4) {
+                if (u >= 0xD800 && u < 0xDC00 && i + 3 < bytes.size()) {
+                    unsigned lo = (uint8_t)bytes[i + 2] | (uint8_t)bytes[i + 3] << 8;
+                    if (lo >= 0xDC00 && lo < 0xE000) {
+                        out += (wchar_t)(0x10000 + ((u - 0xD800) << 10) + (lo - 0xDC00));
+                        i += 2;
+                        continue;
+                    }
+                }
+            }
+            out += (wchar_t)u;
+        }
+        return out;
+    }
     if (bytes.size() >= 3 && bytes.compare(0, 3, "\xEF\xBB\xBF") == 0) return Utf8(bytes.substr(3));
     return Utf8(bytes);
 }
@@ -491,4 +509,89 @@ std::wstring PackSummary(const Pack& p) {
     for (size_t i = 0; i < parts.size(); ++i)
         out += (i == 0 ? L"" : i + 1 == parts.size() ? L" and " : L", ") + parts[i];
     return out.empty() ? L"nothing cordinal can use" : out;
+}
+std::vector<std::pair<std::wstring, std::wstring>> StarterPackFiles(const StarterSetup& s) {
+    std::vector<std::pair<std::wstring, std::wstring>> files;
+    auto hex = [](Rgb c) {
+        wchar_t b[8];
+        swprintf(b, std::size(b), L"#%06X", (unsigned)c);
+        return std::wstring(b);
+    };
+    const Palette& p = s.palette;
+    files.push_back({L"pack.ini",
+        L"; About this pack. Edit any file here, then View > Packs > Reload packs. The README's Packs\n"
+        L"; section lists every file and key. Delete the files you don't need: each one is optional.\n"
+        L"[pack]\nformat = 1\nname = " + s.name + L"\nversion = 1.0\nauthor =\ndescription = Made from my cordinal setup.\n"});
+    std::wstring palette;
+    const struct { const wchar_t* key; Rgb Palette::*field; } roles[] = {
+        {L"bg", &Palette::bg}, {L"surface", &Palette::surface}, {L"surface2", &Palette::surface2}, {L"border", &Palette::border},
+        {L"text", &Palette::text}, {L"sub", &Palette::sub}, {L"faint", &Palette::faint}, {L"accent", &Palette::accent},
+        {L"accent2", &Palette::accent2}, {L"hover", &Palette::hover}, {L"select", &Palette::select},
+        {L"selectText", &Palette::selectText}, {L"playing", &Palette::playing}, {L"error", &Palette::error},
+        {L"amber", &Palette::amber}, {L"ok", &Palette::ok}};
+    for (const auto& r : roles) palette += std::wstring(r.key) + L" = " + hex(p.*r.field) + L"\n";
+    std::wstring sounds;
+    for (int i = 0; i < (int)Sfx::CardinalSong; ++i)
+        if (const wchar_t* name = PackSoundName((Sfx)i)) sounds += L"; " + std::wstring(name) + L" = sounds/" + name + L".wav\n";
+    files.push_back({L"theme.ini",
+        L"; A theme for View > Theme: your current colours. It must stay readable: body text at 7:1 against\n"
+        L"; bg and surface, sub and selectText at 4.5:1, accent and the status colours at 3:1.\n"
+        L"[theme]\nname = My theme\nbase = " + std::wstring(p.dark ? L"dark" : L"light") + L"\n" +
+        (s.font ? L"font = " + std::wstring(s.font) + L"\n" : L"; font = Segoe UI\n") +
+        (s.fontPx ? L"size = " + std::to_wstring(s.fontPx) + L"\n" : L"; size = 13\n") +
+        L"playing mark = " + s.playingMark + L"\n; message prefix = \"> \"\nrating mark = " + s.ratingMark +
+        L"\n\n[palette]\n" + palette +
+        L"\n; The waveform's colours; without them it uses accent for what has played.\n[waveform]\n; played = " +
+        hex(p.accent) + L"\n; unplayed = " + hex(p.dark ? p.faint : p.border) + L"\n" +
+        L"\n; Sounds in place of cordinal's sound effects, as WAV or FLAC files in this pack (at most ten\n"
+        L"; seconds each). A file at sounds/<name>.wav is used without a line here.\n[sounds]\n" + sounds});
+    files.push_back({L"formats.ini",
+        L"; Title formats while the pack is on: your current ones. Title formatting (Preferences > View) lists the fields.\n"
+        L"[formats]\nwindow title = " + s.formats[0] + L"\nstatus bar = " + s.formats[1] + L"\nnow playing = " + s.formats[2] +
+        L"\nnow playing 2 = " + s.formats[3] + L"\n; the notification area icon's tooltip\n; tray tip = [%artist% - ]%title%\n"});
+    files.push_back({L"fields.ini",
+        L"; Fields of your own: %decade% then works in columns, formats, group headers and sorting.\n"
+        L"[fields]\ndecade = $if(%year%,$div(%year%,10)0s)\n"});
+    files.push_back({L"columns.ini",
+        L"; Track list columns: right-click the list's header to show one. Each section is a column.\n"
+        L"[stars]\ntitle = Stars\nformat = $stars(%rating_value%)\nsort = [$num(%rating_value%,3)]\nwidth = 80\n\n"
+        L"; [bitrate]\n; title = kbps\n; format = [%bitrate%]\n; align = right\n; width = 60\n\n"
+        L"; A column set: the header's right-click menu > Column sets shows these columns, left to right.\n"
+        L"[set.mine]\nname = My columns\nshow = " + s.columns + L"\n"});
+    files.push_back({L"functions.tf",
+        L"// Your own title-format functions. Inside the body, %n% is the argument called n.\n"
+        L"$define(stars, n, $repeat(\x2605, $div(%n%, 20)))\n"});
+    files.push_back({L"groups.ini",
+        L"; Album group headers. Remove the ; in front of a line to use it.\n[groups]\n"
+        L"; by = %album artist%|%album%\n; title = %album%\n; subtitle = [%album artist%][  \x00B7  %year%]\n"
+        L"; right = %group_tracks% tracks  \x00B7  %group_length%\n; cover = yes\n"});
+    files.push_back({L"keys.ini",
+        L"; Shortcuts: a key, then a command as the command palette (Ctrl+Shift+P) names it. Letters need\n"
+        L"; Ctrl or Alt; F-keys and media keys can stand alone.\n[keys]\n; Ctrl+Alt+N = Playback > Next\n; F9 = Shuffle\n\n"
+        L"; Global keys work while another program is in front.\n[global keys]\n; Ctrl+Alt+Right = Playback > Next\n"
+        L"; Ctrl+Alt+Space = Play or pause\n"});
+    std::wstring bands;
+    for (size_t i = 0; i < s.eq.size(); ++i) {
+        wchar_t b[32];
+        swprintf(b, std::size(b), L"%.2f", s.eq[i]);
+        bands += (i ? L", " : L"") + std::wstring(b);
+    }
+    files.push_back({L"eq.ini", L"; Equalizer presets: ten gains in dB, 31 Hz to 16 kHz.\n[my eq]\nname = My EQ\nbands = " + bands + L"\n"});
+    files.push_back({L"layout.ini",
+        L"; A Customize layout preset: your current layout. 1 shows a part, 0 hides it.\n[layout]\nname = My layout\n" + s.layout});
+    std::vector<std::wstring> used;
+    for (const auto& [name, rules] : s.autoPlaylists) {
+        std::wstring file = name;
+        for (auto& c : file)
+            if (wcschr(L"\/:*?\"<>|", c) || c < 32) c = L'_';
+        if (file.empty()) file = L"_";
+        std::wstring lower = file;
+        for (auto& c : lower) c = (wchar_t)towlower(c);
+        std::wstring unique = lower;  // two playlists whose names differ only in case or a replaced character
+        for (int n = 2; std::find(used.begin(), used.end(), unique) != used.end(); ++n) unique = lower + L" " + std::to_wstring(n);
+        if (unique != lower) file += unique.substr(lower.size());
+        used.push_back(unique);
+        files.push_back({L"autoplaylists/" + file + L".txt", L"name " + name + L"\n" + DecodePackText(rules)});
+    }
+    return files;
 }

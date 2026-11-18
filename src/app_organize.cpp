@@ -94,6 +94,12 @@ void BrowseRoot() {
 // empty-folder cleanup even if all its files moved away.
 void Start() {
     if (g_moving) return;
+    // A tag write or conversion still has these files open, or replaces them as it finishes.
+    if (TagWriteBusy() || ConvertBusy()) {
+        MessageBoxW(o.hwnd, L"Tags are being written or files converted; try again in a moment.", kAppName,
+                    MB_OK | MB_ICONINFORMATION);
+        return;
+    }
     std::wstring root = WindowText(o.root), pattern = WindowText(o.pattern);
     IniWrite(L"Organize", L"Folder", root);
     IniWrite(L"Organize", L"Pattern", pattern);

@@ -70,7 +70,7 @@ struct Parser {
                 std::string key;
                 JsonValue member;
                 if (!Text(key) || !Take(':') || !Value(member)) break;
-                v.members.emplace_back(std::move(key), std::move(member));
+                v.members.push_back({std::move(key), std::move(member)});
                 if (Take('}')) { ok = true; break; }
                 if (!Take(',')) break;
             }

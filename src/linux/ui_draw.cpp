@@ -1077,20 +1077,30 @@ void DrawGroupHeader(const Group& gr, int index, float top, float right, const P
     float h = L.rowH;
     if (index > 0) Fill({L.rows.x, top, right - L.rows.x, std::max(1.0f, S(1) / 2)},
                         g.settings.theme == ThemeMode::Foobar ? Mix(p.bg, p.text, 50) : p.border);
-    float size = 2 * h - S(8);
-    Rect cover{L.rows.x + S(8), top + S(5), size, size};
-    DrawGroupCover(gr, cover, p);
-    float x = cover.R() + S(10), r = right - S(10);
+    const PackGroups* look = GroupLook();
+    float size = 2 * h - S(8), x = L.rows.x + S(8), r = right - S(10);
+    if (!look || look->cover) {
+        Rect cover{x, top + S(5), size, size};
+        DrawGroupCover(gr, cover, p);
+        x = cover.R() + S(10);
+    }
     std::wstring artist = gr.artist ? g_lib.Str(gr.artist) : L"Various artists";
     std::wstring year = g_lib.Str(gr.date).substr(0, 4);
     std::wstring edition = TrackEditionLabel(g.rows[gr.first]);
     if (!edition.empty()) artist += L"  \x00B7  " + edition;
-    std::string stats = std::to_string(gr.count) + " tracks  \xC2\xB7  " + Utf8(FormatDuration(gr.seconds));
+    std::wstring title = g_lib.Str(gr.album), sub = year.empty() ? artist : artist + L"  \x00B7  " + year;
+    std::wstring stats = std::to_wstring(gr.count) + L" tracks  \x00B7  " + FormatDuration(gr.seconds);
+    if (look) {
+        if (!look->title.empty()) title = GroupHeaderText(look->title, gr);
+        if (!look->subtitle.empty()) sub = GroupHeaderText(look->subtitle, gr);
+        if (!look->right.empty()) stats = GroupHeaderText(look->right, gr);
+    }
+    std::string right8 = Utf8(stats);
     Rect line1{x, top + S(3), r - x, h - S(2)}, line2{x, top + h - S(1), r - x, h - S(2)};
-    float sw = TextWidth(Font::Normal, stats);
-    DrawText(Font::Normal, stats, std::max(x, r - sw), TextY(line1), p.sub);
-    DrawText(Font::Bold, Utf8(g_lib.Str(gr.album)), x, TextY(line1, Font::Bold), p.text, std::max(0.0f, r - sw - S(12) - x));
-    DrawText(Font::Normal, Utf8(year.empty() ? artist : artist + L"  \x00B7  " + year), x, TextY(line2), p.sub, r - x);
+    float sw = TextWidth(Font::Normal, right8);
+    DrawText(Font::Normal, right8, std::max(x, r - sw), TextY(line1), p.sub);
+    DrawText(Font::Bold, Utf8(title), x, TextY(line1, Font::Bold), p.text, std::max(0.0f, r - sw - S(12) - x));
+    DrawText(Font::Normal, Utf8(sub), x, TextY(line2), p.sub, r - x);
 }
 
 // Wind behind the track list (wind.h; app_playlists.cpp, DrawListWind): each frame steps the ribbons

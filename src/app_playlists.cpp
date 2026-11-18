@@ -738,8 +738,7 @@ HMENU BuildListContextMenu() {
     AppendMenuW(m, MF_POPUP | en, (UINT_PTR)gain, L"Replay&Gain");
     AppendMenuW(m, MF_STRING | en, IDM_SHOW_IN_EXPLORER, L"S&how in Explorer");
     AppendMenuW(m, MF_STRING | en, IDM_ORGANIZE, L"&Organize files...");
-    AppendMenuW(m, MF_STRING | (en == MF_ENABLED && !ConvertBusy() ? MF_ENABLED : MF_GRAYED), IDM_CONVERT, L"Con&vert to .cord...");
-    AppendMenuW(m, MF_POPUP | (en == MF_ENABLED && !ConvertBusy() ? MF_ENABLED : MF_GRAYED), (UINT_PTR)CordExportMenu(), L"Export .cor&d");
+    AppendMenuW(m, MF_STRING | (en == MF_ENABLED && !ConvertBusy() ? MF_ENABLED : MF_GRAYED), IDM_CONVERT, L"Con&vert...");
     AppendMenuW(m, MF_STRING | (en == MF_ENABLED && !CopyBusy() ? MF_ENABLED : MF_GRAYED), IDM_COPY_TO, L"Cop&y to folder or device...");
     AppendMenuW(m, MF_STRING | en, IDM_PROPERTIES, L"Edit &tags...\tAlt+Enter");
     AppendMenuW(m, MF_STRING | en, IDM_EDIT_ALBUM_TAGS, L"Edit al&bum tags...");

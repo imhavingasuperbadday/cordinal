@@ -91,6 +91,15 @@ public:
         return Seek(0);
     }
 
+    bool LosslessFormat(PcmFormat& f) const override {
+        if (channels_ > 2) return false;
+        f.rate = rate_;
+        f.channels = channels_;
+        f.bits = bits_;
+        f.frames = frames_;
+        return true;
+    }
+
     size_t Read(float* out, size_t count) override {
         if (failed_) return 0;
         size_t done = 0;

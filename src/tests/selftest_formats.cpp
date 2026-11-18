@@ -1,12 +1,14 @@
 // Checks of the formats added for game-music packs and older music: songs inside ZIP archives, DSD
-// (DSF and DSDIFF), tracker modules (MOD, S3M, XM, IT), Commodore 64 SID tunes, MIDI through a
-// SoundFont, and G.726 against cordinal's own reference model of the recommendation. Every fixture
-// is written here in code: a tone whose pitch, length and level the decoders must reproduce, or
-// (G.726) the model's encoding of a signal built here.
+// (DSF and DSDIFF, both as PCM and as the native bitstream payloads of dsd.h), tracker modules (MOD,
+// S3M, XM, IT), Commodore 64 SID tunes, MIDI through a SoundFont, and G.726 against cordinal's own
+// reference model of the recommendation. Every fixture is written here in code: a tone whose pitch,
+// length and level the decoders must reproduce, or (G.726) the model's encoding of a signal built
+// here.
 #include "selftest_common.h"
 
 #include "archive.h"
 #include "chiptune/cpu6502.h"
+#include "dsd.h"
 #include "native_audio.h"
 #include "g726_reference.h"
 
@@ -242,6 +244,85 @@ std::string Dff(const std::vector<uint8_t>& bits) {
                 if (bits[k * 8 + j] ^ c) v |= (uint8_t)(0x80 >> j);  // MSB first
             sound += (char)v;
         }
+    std::string prop = "SND ";
+    prop += "FS  ";
+    Be64(prop, 4);
+    Be32(prop, 2822400);
+    prop += "CHNL";
+    Be64(prop, 10);
+    Be16(prop, 2);
+    prop += "SLFTSRGT";
+    prop += "CMPR";
+    Be64(prop, 20);
+    prop += "DSD ";
+    prop += (char)14;
+    prop += "not compressed";
+    prop += '\0';
+    std::string body = "DSD ";
+    body += "FVER";
+    Be64(body, 4);
+    Be32(body, 0x01050000);
+    body += "PROP";
+    Be64(body, prop.size());
+    body += prop;
+    body += "DSD ";
+    Be64(body, sound.size());
+    body += sound;
+    std::string f = "FRM8";
+    Be64(f, body.size());
+    return f + body;
+}
+
+// --- DSD bitstream: the same containers, but the file's own bits leave as DoP or ASIO payloads ---
+
+// Channel c's byte i of the payload fixtures: a known pattern that differs per channel and changes
+// every byte, so a wrong bit order or a swapped channel shows up at once.
+uint8_t DsdPat(unsigned c, size_t i) { return (uint8_t)((i * 37 + c * 101) ^ 0x5A); }
+
+uint8_t Reverse8(uint8_t b) {
+    b = (uint8_t)((b & 0xF0) >> 4 | (b & 0x0F) << 4);
+    b = (uint8_t)((b & 0xCC) >> 2 | (b & 0x33) << 2);
+    return (uint8_t)((b & 0xAA) >> 1 | (b & 0x55) << 1);
+}
+
+// A DSF file of `bytes` bytes a channel, every channel carrying DsdPat, in 4096-byte blocks of one
+// channel at a time and LSB first. `type` is the DSF channel type: 1 mono, 2 stereo, 7 5.1.
+std::string DsfPattern(unsigned channels, unsigned type, unsigned bytes, unsigned rate = 2822400) {
+    const size_t blocks = (bytes + 4095) / 4096;
+    std::string data;
+    for (size_t b = 0; b < blocks; ++b)
+        for (unsigned c = 0; c < channels; ++c)
+            for (size_t k = 0; k < 4096; ++k) {
+                const size_t i = b * 4096 + k;
+                data += (char)(i < bytes ? DsdPat(c, i) : 0);
+            }
+    std::string f = "DSD ";
+    Le64(f, 28);
+    Le64(f, 28 + 52 + 12 + data.size());
+    Le64(f, 0);
+    f += "fmt ";
+    Le64(f, 52);
+    Le32(f, 1);
+    Le32(f, 0);
+    Le32(f, type);
+    Le32(f, channels);
+    Le32(f, rate);
+    Le32(f, 1);  // one bit a sample, LSB first
+    Le64(f, (uint64_t)bytes * 8);
+    Le32(f, 4096);
+    Le32(f, 0);
+    f += "data";
+    Le64(f, 12 + data.size());
+    return f + data;
+}
+
+// The same pattern as a stereo DSDIFF: one byte of each channel in turn, MSB first.
+std::string DffPattern(unsigned bytes) {
+    std::string sound;
+    for (size_t i = 0; i < bytes; ++i) {
+        sound += (char)DsdPat(0, i);
+        sound += (char)DsdPat(1, i);
+    }
     std::string prop = "SND ";
     prop += "FS  ";
     Be64(prop, 4);
@@ -624,6 +705,76 @@ void TestDsd(const std::wstring& dir) {
     TagData u;
     Check(ReadTags(dff, u) && u.codec == Codec::DSD && u.sampleRate == 2822400 && Near(u.duration, 1, 0.001),
           L"DSDIFF tags give DSD, its rate and length");
+
+    batch.Next(L"DSD payload floats carry their bits exactly and name the transport's rate");
+    const auto named = [](unsigned hz, const wchar_t* want) { return std::wstring_view(DsdRateName(hz)) == want; };
+    bool words = true, bytes = true;
+    for (unsigned w = 0; w < 65536; ++w) words = words && DopWord(DopPayload((uint16_t)w)) == w;
+    for (unsigned b = 0; b < 256; ++b) bytes = bytes && DsdByte(DsdBytePayload((uint8_t)b)) == b;
+    Check(words && bytes && DopWord(std::nanf("")) == 0x6969 && DopWord(1.0f) == 0x6969 && DopWord(-0.5f) == 0x6969 &&
+              DsdByte(-0.1f) == kDsdIdle && DsdByte(1.5f) == kDsdIdle && DsdByte(std::nanf("")) == kDsdIdle,
+          L"every DoP word and ASIO byte round trips through its payload float, and junk maps to the idle pattern");
+    Check(DsdFrameRate(2822400, DsdTransport::Dop) == 176400 &&
+              DsdFrameRate(2822400, DsdTransport::AsioNative) == 352800 &&
+              DsdFrameRate(2822400, DsdTransport::None) == 0 && named(2822400, L"DSD64") && named(3072000, L"DSD64") &&
+              named(22579200, L"DSD512") && named(49152000, L"DSD1024") && named(5644801, L"DSD"),
+          L"DoP and ASIO run at a sixteenth and an eighth of the DSD rate, and rates carry their names");
+
+    batch.Next(L"A DSD bitstream sends the file's own bits as DoP and ASIO payloads and seeks to the frame");
+    const std::wstring bdsf = dir + L"\\bits.dsf", bdff = dir + L"\\bits.dff";
+    const std::wstring mono = dir + L"\\mono.dsf", six = dir + L"\\six.dsf", odd = dir + L"\\odd.dsf";
+    Ready(WriteTestBytes(bdsf, DsfPattern(2, 2, 64)) && WriteTestBytes(bdff, DffPattern(64)) &&
+              WriteTestBytes(mono, DsfPattern(1, 1, 64)) && WriteTestBytes(six, DsfPattern(6, 7, 64)) &&
+              WriteTestBytes(odd, DsfPattern(2, 2, 64, 2822404)),
+          L"DSD bitstream fixtures are written");
+    unsigned dopRate = 0, asioRate = 0, dffDsRate = 0;
+    auto dop = OpenDsdStream(bdsf, 2, dopRate), asio = OpenDsdStream(bdsf, 1, asioRate);
+    auto dffBits = OpenDsdStream(bdff, 2, dffDsRate);
+    Check(dop && asio && dffBits && dopRate == 2822400 && asioRate == 2822400 && dffDsRate == 2822400 &&
+              dop->Rate() == 176400 && asio->Rate() == 352800 && dop->FastSeek() &&
+              Near(dop->Duration(), 32.0 / 176400.0, 1e-9) && Near(asio->Duration(), 64.0 / 352800.0, 1e-9) &&
+              Near(dffBits->Duration(), 32.0 / 176400.0, 1e-9),
+          L"DSF and DSDIFF bitstreams open at the DoP and ASIO frame rates for their exact length (%.1f s)",
+          dop ? dop->Duration() : 0.0);
+    std::vector<float> payload(128);
+    const size_t n = dop ? dop->Read(payload.data(), 32) : 0;
+    bool paired = n == 32;
+    for (unsigned k = 0; paired && k < 32; ++k) {
+        const uint16_t l = (uint16_t)(Reverse8(DsdPat(0, k * 2)) << 8 | Reverse8(DsdPat(0, k * 2 + 1)));
+        const uint16_t r = (uint16_t)(Reverse8(DsdPat(1, k * 2)) << 8 | Reverse8(DsdPat(1, k * 2 + 1)));
+        paired = DopWord(payload[k * 2]) == l && DopWord(payload[k * 2 + 1]) == r;
+    }
+    Check(paired, L"DoP payloads are 16 bits of each channel, left then right, the first bit in time first");
+    const size_t m = asio ? asio->Read(payload.data(), 64) : 0;
+    bool plain = m == 64;
+    for (unsigned k = 0; plain && k < 64; ++k)
+        plain = DsdByte(payload[k * 2]) == Reverse8(DsdPat(0, k)) && DsdByte(payload[k * 2 + 1]) == Reverse8(DsdPat(1, k));
+    Check(plain, L"ASIO payloads are 8 bits a sample in time order, with DSF's LSB-first bytes reversed");
+    const size_t q = dffBits ? dffBits->Read(payload.data(), 32) : 0;
+    bool interleaved = q == 32;
+    for (unsigned k = 0; interleaved && k < 32; ++k) {
+        const uint16_t l = (uint16_t)(DsdPat(0, k * 2) << 8 | DsdPat(0, k * 2 + 1));
+        const uint16_t r = (uint16_t)(DsdPat(1, k * 2) << 8 | DsdPat(1, k * 2 + 1));
+        interleaved = DopWord(payload[k * 2]) == l && DopWord(payload[k * 2 + 1]) == r;
+    }
+    Check(interleaved, L"DSDIFF bitstreams de-interleave their channels and keep their MSB-first order");
+    const bool sought2 = dop && dop->Seek(16.0 / 176400.0) && dop->Read(payload.data(), 4) == 4 &&
+                         DopWord(payload[0]) == (uint16_t)(Reverse8(DsdPat(0, 32)) << 8 | Reverse8(DsdPat(0, 33))) &&
+                         DopWord(payload[1]) == (uint16_t)(Reverse8(DsdPat(1, 32)) << 8 | Reverse8(DsdPat(1, 33)));
+    Check(sought2, L"a bitstream seek lands on the exact frame");
+    Check(dop && dop->Seek(0) && dop->Read(payload.data(), 40) == 32 && dop->Read(payload.data(), 8) == 0,
+          L"a read past the last bitstream frame returns the frames left and then nothing, never padding");
+    unsigned monoRate = 0;
+    auto m1 = OpenDsdStream(mono, 1, monoRate);
+    const size_t mn = m1 ? m1->Read(payload.data(), 64) : 0;
+    bool both = mn == 64;
+    for (unsigned k = 0; both && k < 64; ++k)
+        both = payload[k * 2] == payload[k * 2 + 1] && DsdByte(payload[k * 2]) == Reverse8(DsdPat(0, k));
+    Check(both, L"a mono DSD bitstream puts the same bits on both channels");
+    unsigned sixRate = 0, oddRate = 0;
+    Check(!OpenDsdStream(six, 2, sixRate) && !OpenDsdStream(six, 1, sixRate) && !OpenDsdStream(odd, 2, oddRate) &&
+              !OpenDsdStream(odd, 1, oddRate),
+          L"more than two channels, or a rate without a whole payload frame rate, falls back to PCM");
 }
 
 void TestModules(const std::wstring& dir) {

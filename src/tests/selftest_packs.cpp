@@ -4,6 +4,7 @@
 #include "selftest_common.h"
 
 #include "packs.h"
+#include "autoplaylist.h"
 #include "app_packfiles.h"
 #include <winioctl.h>
 
@@ -183,6 +184,42 @@ void TestPacks(const std::wstring& scratch) {
     Check(ini.size() == 1 && ini[0].name == L"theme" && ini[0].Get(L"playing_mark") && *ini[0].Get(L"playing_mark") == L"> " &&
               ini[0].Get(L"name") && *ini[0].Get(L"name") == L"Sea",
           L"ini files read as UTF-16, keep quoted spaces and lowercase their names");
+    // U+1F3B5 as a UTF-16 surrogate pair: one character where wchar_t is 32 bits (Linux), two units on Windows.
+    Check(DecodePackText(std::string("\xFF\xFE\x3C\xD8\xB5\xDF!\x00", 8)) == L"\U0001F3B5!",
+          L"UTF-16 pack text keeps characters beyond the Basic Multilingual Plane");
+
+    // Make a pack's files, shared by both players: the setup reads back the same, and auto-playlists whose
+    // names only differ in characters a file name can't hold get files of their own.
+    {
+        StarterSetup setup;
+        setup.name = L"Mine";
+        setup.palette = DarkPalette();
+        setup.playingMark = L"\x25B6";
+        setup.ratingMark = L"\x2605";
+        setup.formats[0] = L"%title% - mine";
+        setup.columns = L"Title, Artist";
+        setup.eq[0] = 3.5f;
+        setup.layout = L"player = bottom\nmenu_bar = 0\n";
+        const std::string rules = SerializeAutoPlaylist(AutoPlaylist{});
+        setup.autoPlaylists = {{L"a/b", rules}, {L"A:b", rules}};
+        std::vector<PackEntry> files;
+        for (const auto& [path, text] : StarterPackFiles(setup)) {
+            std::wstring lower = path;
+            for (auto& c : lower) c = (wchar_t)towlower(c);
+            files.push_back({lower, ToUtf8(text)});
+        }
+        Pack made = ParsePack(L"mine", files);
+        batch.Next(L"a starter pack reads back as the setup it was made from");
+        Check(made.error.empty() && made.name == L"Mine" && made.themes.size() == 1 &&
+                  made.themes[0].palette.bg == DarkPalette().bg && made.themes[0].palette.dark &&
+                  made.formats[kPackWindow] == L"%title% - mine" && made.columnSets.size() == 1 &&
+                  made.columnSets[0].show == std::vector<std::wstring>{L"Title", L"Artist"} && made.presets.size() == 1 &&
+                  made.presets[0].gains[0] == 3.5f && made.layouts.size() == 1 && made.layouts[0].values.Get(L"menu_bar") &&
+                  *made.layouts[0].values.Get(L"menu_bar") == L"0" && !made.groups.any && made.keys.empty() &&
+                  made.autoPlaylists.size() == 2 && made.autoPlaylists[0].name != made.autoPlaylists[1].name &&
+                  made.warnings.empty(),
+              L"a starter pack reads back as the setup it was made from, one file per auto-playlist");
+    }
 
     // .cordpack: stored and deflated entries read back with their checksums; anything else is refused.
     std::vector<PackEntry> entries;

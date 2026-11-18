@@ -23,7 +23,7 @@ std::wstring OrganizeLogDir() { return g.dataDir + L"/organize"; }
 // kept through the empty-folder cleanup even if all its files moved away.
 void StartOrganize(const std::vector<OrganizeMove>& plan, const std::wstring& root) {
     if (moving) return;
-    if (ConvertBusy() || CordExportBusy() || TagWriteBusy() || CopyBusy()) {
+    if (ConvertBusy() || TagWriteBusy() || CopyBusy()) {
         ShowMessage(L"Wait for the running conversion, export, tag write or copy to finish.");
         return;
     }
