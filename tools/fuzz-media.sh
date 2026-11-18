@@ -35,6 +35,13 @@ tags=(-metadata title='Seed title' -metadata artist='Seed artist' -metadata albu
 printf ';FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=100\ntitle=One\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=100\nEND=300\ntitle=Two\n' >"$S/chapters.txt"
 for image in png jpg bmp gif; do ff -f lavfi -i 'testsrc=s=16x12:d=1' -frames:v 1 "$S/cover.$image"; done
 ff -f lavfi -i 'testsrc=s=24x24:d=1' -frames:v 1 -q:v 2 -huffman 0 "$S/progressive.jpg"
+# A 1x1 PNG whose first IDAT is empty, which once made stb_image copy to a null buffer (UBSan).
+python3 - "$S/empty-idat.png" <<'PY'
+import struct, sys, zlib
+chunk = lambda kind, data: struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
+open(sys.argv[1], 'wb').write(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0)) +
+    chunk(b'IDAT', b'') + chunk(b'IDAT', zlib.compress(b'\x00\xff\x00\x00')) + chunk(b'IEND', b''))
+PY
 picture() {  # picture CODEC OUTPUT: audio with a front cover and tags
     ff -f lavfi -i "$sine" -i "$S/cover.png" -map 0:a -map 1:v -c:a "$1" -c:v copy -disposition:v attached_pic \
         "${tags[@]}" "$2"

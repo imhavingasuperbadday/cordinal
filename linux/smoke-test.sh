@@ -5,6 +5,10 @@ set -euo pipefail
 BUILD=${1:?usage: smoke-test.sh BUILD_DIR OUT_DIR}
 OUT=${2:?usage: smoke-test.sh BUILD_DIR OUT_DIR}
 mkdir -p -- "$OUT"
+# Absolute from here on: release CI passes relative folders, and a helper program is started after
+# changing into its own folder, where a relative path to it no longer resolves.
+BUILD=$(cd -- "$BUILD" && pwd)
+OUT=$(cd -- "$OUT" && pwd)
 failures=0
 check() {
     local name=$1 code=0
@@ -156,7 +160,8 @@ mkdir -p "$OUT/journal" "$OUT/helpers" "$OUT/convert" "$OUT/organize" "$OUT/copy
 check tags "$BUILD/cordinal-core-test" tags "$OUT/source.mp3" "$OUT/journal"
 check helpers "$BUILD/cordinal-core-test" helpers "$OUT/helpers"
 cp "$OUT/source.flac" "$OUT/convert.flac"
-check convert "$BUILD/cordinal-core-test" convert "$OUT/convert.flac" "$OUT/convert"
+# A trash on the run folder's drive, as for duplicates below: CI's home is another mount.
+check convert env XDG_DATA_HOME="$OUT/convert-data" "$BUILD/cordinal-core-test" convert "$OUT/convert.flac" "$OUT/convert"
 mkdir -p "$OUT/organize-source"
 cp "$OUT/source.flac" "$OUT/organize-source/track.flac"
 # These round trips require a cover file and verify its bytes, rather than decoding the image.

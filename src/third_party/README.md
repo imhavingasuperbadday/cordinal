@@ -13,7 +13,9 @@ stb_vorbis and Nuked OPN2 sources have been removed from the source tree and bui
 Cordinal decoder routines live in `src/audio_*`; emulator routines in `src/chiptune`.
 
 `stb_image.h` (github.com/nothings/stb, commit f58f558c120e9b32c217290b80bad1a0729fbb2c, public domain or MIT)
-decodes covers and color emoji (CBDT and sbix PNGs) in the Linux build only.
+decodes covers and color emoji (CBDT and sbix PNGs) in the Linux build only. One local change, marked
+`cordinal:`: a PNG whose first IDAT chunk is empty no longer copies zero bytes to a null buffer, which
+UndefinedBehaviorSanitizer reports (found by the fuzzers, November 18, 2026).
 
 `bearssl/` is BearSSL (https://www.bearssl.org/git/BearSSL, commit
 7bea48e5e850ab4cafbe68d3765cdaba13a86d6f, 6 April 2026, MIT, `bearssl/LICENSE.txt`): its `inc/`
