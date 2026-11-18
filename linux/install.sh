@@ -1,5 +1,5 @@
 #!/bin/sh
-# Installs cordinal for the current user on 64-bit glibc Linux. From a terminal:
+# Installs cordinal for the current user on 64-bit x86 Linux. From a terminal:
 #   curl -fsSL https://github.com/imhavingasuperbadday/cordinal/releases/latest/download/install.sh | sh
 # Run it again to update. Options (after `sh -s --` when piped):
 #   --version X.Y.Z   a release other than the latest (must publish a checksum)
@@ -9,9 +9,10 @@
 #   --uninstall       remove cordinal; the library and settings stay
 #   --self-test       check this script's own checks, then stop (used by CI)
 #
-# The published program needs only glibc 2.31 or newer (Debian 11, Ubuntu 20.04 and anything
-# newer): windows (X11 and Wayland), drawing, HTTPS, font matching, text layout and the PipeWire
-# and PulseAudio clients are compiled in, and so is the C++ runtime. The one package it may install
+# The published program is one static file that needs no library from the distribution, not even a
+# C library, so it runs on glibc and musl systems alike: windows (X11 and Wayland), drawing, HTTPS,
+# font matching, text layout, the PipeWire and PulseAudio clients, the C++ runtime and the C library
+# are compiled in. The one package it may install
 # is a font, from repositories already configured on the machine, when the system has none. The
 # script does not add a repository, does not turn signature checks off, and does not upgrade the system.
 set -eu
@@ -87,7 +88,7 @@ distro_kind() {
     esac
 }
 
-# Shared libraries the program needs from the distribution, beyond glibc: none. SDL3, OpenSSL,
+# Shared libraries the program needs from the distribution: none, not even glibc. SDL3, OpenSSL,
 # fontconfig, SDL3_ttf/FreeType/HarfBuzz, PipeWire/PulseAudio/ALSA and libX11/libwayland were each
 # replaced by code in the program. A library added here needs its package names in pkg_for.
 LIBS=""
@@ -108,6 +109,7 @@ font_pkg() {
         apt) printf '%s\n' fonts-noto-core ;;
         dnf) printf '%s\n' google-noto-sans-fonts ;;
         zypper) printf '%s\n' noto-sans-fonts ;;
+        alpine) printf '%s\n' font-noto ;;
         *) return 1 ;;
     esac
 }
@@ -146,16 +148,6 @@ have_font() {
         [ -d "$font_dir" ] || continue
         found=$(find -L "$font_dir" -type f \( -iname '*.ttf' -o -iname '*.otf' -o -iname '*.ttc' -o -iname '*.otc' \) 2>/dev/null | head -n 1)
         [ -n "$found" ] && return 0
-    done
-    return 1
-}
-
-glibc_loader() {
-    for candidate in /lib64/ld-linux-x86-64.so.2 /usr/lib64/ld-linux-x86-64.so.2 /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2; do
-        if [ -x "$candidate" ]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
     done
     return 1
 }
@@ -284,18 +276,11 @@ pick_pkg() {
 
 libs_help() {
     cat <<'EOF'
-cordinal needs no libraries from the distribution beyond glibc 2.31 or newer on
-64-bit x86 (Debian 11, Ubuntu 20.04, Fedora 32 and newer systems), plus at least
-one TrueType or OpenType font. It runs on X11 and on Wayland. Alpine and other
-musl systems cannot run this build.
+cordinal is one static program for 64-bit x86 Linux. It needs no libraries from
+the distribution, not even glibc, so it runs on glibc and musl systems such as
+Alpine alike. It needs at least one TrueType or OpenType font, and runs on X11
+and on Wayland.
 EOF
-}
-
-refuse_special() {
-    case "$KIND" in
-        alpine)
-            fail "Alpine uses musl. This build is linked against glibc and cannot run there." ;;
-    esac
 }
 
 # Systems this installer will not change (it only ever installs a font package on them).
@@ -371,6 +356,7 @@ install_libs() {
             apt) as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -- "$font" || say "No font package was installed. Text may not appear until a font is." ;;
             dnf) as_root dnf install -y --setopt=install_weak_deps=False -- "$font" || say "No font package was installed. Text may not appear until a font is." ;;
             zypper) as_root zypper --non-interactive install --no-recommends -- "$font" || say "No font package was installed. Text may not appear until a font is." ;;
+            alpine) as_root apk add -- "$font" || say "No font package was installed. Text may not appear until a font is." ;;
         esac
     fi
 }
@@ -381,6 +367,7 @@ need_tool() {
         apt) command -v apt-get >/dev/null 2>&1 || fail "apt-get is not installed." ;;
         dnf) command -v dnf >/dev/null 2>&1 || fail "dnf is not installed." ;;
         zypper) command -v zypper >/dev/null 2>&1 || fail "zypper is not installed." ;;
+        alpine) command -v apk >/dev/null 2>&1 || fail "apk is not installed." ;;
     esac
 }
 
@@ -400,23 +387,9 @@ fetch() {
     [ "$bytes" -gt 0 ] && [ "$bytes" -le "$limit" ]
 }
 
+# The program is static, so there is no loader or library to check for: only that the file is one.
 program_loads() {
-    bin=$1
-    out=$2
-    err=$3
-    elf_ok "$bin" || fail "The downloaded program is not a 64-bit Linux executable."
-    loader=$(glibc_loader) || fail "This system has no glibc dynamic linker for x86-64. The build cannot run on musl."
-    status=0
-    "$loader" --list "$bin" >"$out" 2>"$err" || status=$?
-    if [ "$status" -ne 0 ] || grep -q "not found" "$out" || grep -q "not found" "$err"; then
-        cat "$err" >&2
-        grep "not found" "$out" >&2 || true
-        if grep -q "GLIBC_" "$err"; then
-            say "This system's glibc is older than 2.31 (Debian 11), the oldest the published build runs on."
-        fi
-        libs_help >&2
-        fail "cordinal cannot load here, so it was not installed over any copy already present."
-    fi
+    elf_ok "$1" || fail "The downloaded program is not a 64-bit Linux executable."
 }
 
 # Shell functions share variables with their caller, so these names must not reuse install_files' src.
@@ -454,7 +427,7 @@ install_files() {
     [ "$bytes" -gt 0 ] && [ "$bytes" -le 100000 ] || fail "The launcher entry has an unexpected size."
     bytes=$(wc -c < "$src/cordinal.png")
     [ "$bytes" -gt 0 ] && [ "$bytes" -le 2000000 ] || fail "The icon has an unexpected size."
-    program_loads "$src/cordinal" "$work/ld.out" "$work/ld.err"
+    program_loads "$src/cordinal"
     mkdir -p "$BIN" "$DATA/applications" "$(dirname "$ICON")"
     [ ! -L "$BIN/cordinal" ] || fail "$BIN/cordinal is a symbolic link. Remove it and run the installer again."
     stage="$BIN/.cordinal.installing.$$"
@@ -523,13 +496,11 @@ self_test() {
     done
     [ "$(font_pkg apt)" = fonts-noto-core ] || fail "apt font"
     [ "$(font_pkg zypper)" = noto-sans-fonts ] || fail "zypper font"
-    font_pkg alpine >/dev/null && fail "font package for alpine"
+    [ "$(font_pkg alpine)" = font-noto ] || fail "alpine font"
     (KIND=steamos; read_only_system) || fail "steamos is read-only"
     (KIND=immutable; read_only_system) || fail "nixos is read-only"
     if [ ! -e /run/ostree-booted ]; then (KIND=apt; read_only_system) && fail "apt systems are not read-only"; fi
-    (KIND=alpine; refuse_special) 2>/dev/null && fail "alpine accepted"
-    (KIND=steamos; refuse_special) || fail "steamos refused"
-    libs_help | grep -q "glibc 2.31" || fail "libs_help names the glibc it needs"
+    libs_help | grep -q "not even glibc" || fail "libs_help says the program is static"
     libs_help | grep -q SDL3 && fail "libs_help still asks for SDL3"
     member_name_ok "cordinal/cordinal" || fail "member"
     member_name_ok "cordinal/../../etc/passwd" && fail "traversal accepted"
@@ -537,7 +508,8 @@ self_test() {
     printf 'not an elf\n' > "$work/text"
     elf_ok "$work/text" && fail "text accepted as elf"
     found_elf=0
-    for candidate in /bin/true /usr/bin/true /bin/dash /usr/bin/dash; do
+    # Alpine's /bin/true is a link to BusyBox, which elf_ok refuses as a link.
+    for candidate in /bin/true /usr/bin/true /bin/dash /usr/bin/dash /bin/busybox; do
         if [ -x "$candidate" ] && elf_ok "$candidate"; then
             found_elf=1
             break
@@ -614,13 +586,9 @@ case "$HOME" in
 '*) fail "HOME contains a line break." ;;
 esac
 [ "$(uname -m)" = x86_64 ] || fail "This Linux build is for 64-bit x86 (this machine is $(uname -m))."
-glibc_loader >/dev/null || fail "This system has no glibc dynamic linker for x86-64. Alpine and other musl systems cannot run this build."
 
 read_os
 KIND=$(distro_kind "$OS_ID" "$OS_LIKE")
-if [ -n "$deps" ]; then
-    refuse_special
-fi
 
 if [ "$dry" = 1 ]; then
     say "Distribution $OS_ID ($KIND)."
@@ -635,7 +603,7 @@ if [ "$dry" = 1 ]; then
         if [ -n "$planned" ]; then
             say "Would install$planned"
         else
-            say "Needs no libraries beyond glibc."
+            say "Needs no libraries from the distribution."
         fi
         if ! have_font; then
             if read_only_system; then say "No font found; would not change $OS_ID."
