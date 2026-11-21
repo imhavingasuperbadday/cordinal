@@ -630,6 +630,8 @@ void ApplyAll() {
     }
     SetPackThemes(std::move(themes));
     SetTitleFunctions(std::move(functions));
+    // Rebuild pack columns, column sets and layouts before ApplyKeys() builds MenuCommands().
+    ApplyColumns();
     ApplyKeys();
     auto resolve = [](const std::wstring& key, ThemeMode current) {
         if (!key.empty()) return ThemeByKey(key, ThemeMode::System);
@@ -638,7 +640,6 @@ void ApplyAll() {
     g.settings.theme = resolve(now, g.settings.theme);
     g.settings.defaultTheme = resolve(def, g.settings.defaultTheme);
     if (g.window) ApplyTheme();
-    ApplyColumns();
     AlternateThemeChanged();
     ClearTextCache();
     MprisChanged();  // a pack's tray tip
@@ -812,6 +813,12 @@ void ApplyPackLayout(size_t index) {
 
 // Reads the packs folder and applies the ones that are on.
 void LoadPacks() {
+    // Drop non-owning pointers into g_packs before freeing the old packs.
+    g_themes.clear();
+    g_autoPlaylists.clear();
+    g_columnSets.clear();
+    g_layouts.clear();
+    g_keyWarnings.clear();
     g_packs.clear();
     std::error_code ec;
     fs::create_directories(PacksDir(), ec);
