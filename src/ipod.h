@@ -7,11 +7,13 @@
 // different, undocumented database and are reported as unsupported.
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace ipod {
@@ -66,5 +68,8 @@ SyncResult Sync(const std::vector<SourceTrack>& tracks, const std::filesystem::p
 
 bool IsSupportedAudio(const std::filesystem::path& path);
 bool IsProtectedAudio(const std::filesystem::path& path);
+
+// The libgpod subset's SHA-1, shared so the CD disc id (cdrip.cpp) needs no second copy.
+std::array<uint8_t, 20> Sha1(std::string_view bytes);
 
 }  // namespace ipod

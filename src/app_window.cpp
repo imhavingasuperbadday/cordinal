@@ -253,7 +253,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_CONTEXTMENU:
             if (MainContextMenu(wp, lp)) return 0;
             break;
-        case WM_INITMENUPOPUP: UpdateMainMenu((HMENU)wp); return 0;
+        case WM_INITMENUPOPUP:
+            RefreshLayoutPopup((HMENU)wp);
+            UpdateMainMenu((HMENU)wp);
+            return 0;
         case WM_SYSCOMMAND:
             // Alt on its own, with the normal window's menu bar hidden: its menus as a popup instead.
             if ((wp & 0xFFF0) == SC_KEYMENU && lp == 0 && g.size == ViewSize::Normal && !GetMenu(hwnd)) {
@@ -300,6 +303,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_APP_ORGANIZE:
             OnOrganizeDone(lp);
+            return 0;
+        case WM_APP_RIP:
+            OnRipMessage(wp, lp);
             return 0;
         case WM_APP_CONVERT:
             OnConvertMessage(wp, lp);

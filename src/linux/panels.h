@@ -21,7 +21,8 @@ enum FilePurpose : int {
     kFileCoverPick = 7,  // the cover picker's From file...
     kFileCoverDirect = 8,  // the track menu's Cover > Choose image file...
     kFileAlbumCover = 9,   // the album maker's Choose cover...
-    kFileConvertDest = 10  // the Convert panel's Browse...
+    kFileConvertDest = 10,  // the Convert panel's Browse...
+    kFileRipDest = 11       // the Rip CD panel's Browse...
 };
 
 void OpenEqualizer();
@@ -62,7 +63,7 @@ bool GamesAnimating();  // a clip plays, or the next pair is on its way
 void OnGameResult(LPARAM lp);  // WM_APP_GAME
 void OpenHelpers();  // View > Helpers
 void OpenPacks();    // View > Packs
-void OpenLayout();   // View > Customize layout
+void OpenLayout();   // Layout > Customize layout
 void OpenPalette();  // View > Command palette (Ctrl+Shift+P)
 // Playback > Pick up where you left off (history false) or Play history (panel_comeback.cpp).
 void OpenComebacks(bool history);
@@ -134,6 +135,22 @@ void ArtistPanelKey(const SDL_KeyboardEvent& e);
 void ArtistPanelWheel(float x, float y, float dy);
 void ArtistPanelClose();
 void ShowArtistPanel();  // panels.cpp
+// webfetch_ui.cpp: Save music from the web (Library > Save music from the web...), a panel like the
+// others; panels.cpp shows it. The engine's callbacks arrive as the WM_APP_WEBFETCH_* messages.
+void OpenWebFetch();
+void OnWebFetchAdded(LPARAM lp);                  // WM_APP_WEBFETCH_ADDED
+void OnWebFetchUpdated(WPARAM index, LPARAM lp);  // WM_APP_WEBFETCH_UPDATED
+void OnWebFetchNotice(LPARAM lp);                 // WM_APP_WEBFETCH_NOTICE
+void OnWebFetchDone(LPARAM lp);                   // WM_APP_WEBFETCH_DONE
+void StopWebFetch();
+void DrawWebFetchPanel(const Palette& p);
+void WebFetchPanelMouseDown(float x, float y);
+void WebFetchPanelKey(const SDL_KeyboardEvent& e);
+void WebFetchPanelText(const char* text);
+void WebFetchPanelWheel(float x, float y, float dy);
+bool WebFetchPanelWantsText(float x, float y);
+void WebFetchPanelClose();
+void ShowWebFetchPanel();  // panels.cpp
 // collection_run.cpp: File > Export collection's Select what to export, a panel like the others;
 // panels.cpp shows it, and ClosePanel calls ExportPanelClose last (Export... then asks for the file).
 void ShowExportPanel();  // panels.cpp

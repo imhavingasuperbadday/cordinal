@@ -167,10 +167,12 @@ HMENU BuildMenu() {
     AppendMenuW(library, MF_STRING, IDM_RECENT_ADDITIONS, L"Remove recen&t additions (24 hours)...");
     AppendMenuW(library, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(library, MF_STRING, IDM_ORGANIZE, L"&Organize files...");
+    AppendMenuW(library, MF_STRING, IDM_WEBFETCH, L"Save music from the &web...");
     AppendMenuW(library, MF_STRING, IDM_ORGANIZE_UNDO, L"&Undo last organize");
     AppendMenuW(library, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(library, MF_STRING, IDM_CONVERT, L"Con&vert...");
     AppendMenuW(library, MF_STRING, IDM_CONVERT_UNDO, L"Undo &last conversion");
+    AppendMenuW(library, MF_STRING, IDM_RIP_CD, L"Rip C&D...");
     AppendMenuW(library, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(library, MF_STRING, IDM_COPY_TO, L"Cop&y to folder or device...");
     AppendMenuW(library, MF_STRING, IDM_IPOD_SYNC, L"Sync to i&Pod...");
@@ -201,24 +203,8 @@ HMENU BuildMenu() {
     AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(view, MF_STRING, IDM_OPEN_RADIO, L"&Radio\tCtrl+Shift+R");
     AppendMenuW(view, MF_STRING, IDM_GROUP_ALBUMS, L"&Group tracks by album");
-    AppendMenuW(view, MF_STRING, IDM_LYRICS, L"L&yrics panel\tCtrl+L");
-    AppendMenuW(view, MF_STRING, IDM_QUEUE_SHOW, L"&Up next\tCtrl+Shift+Q");
     AppendMenuW(view, MF_STRING, IDM_ARTIST_INFO, L"Artist &info...");
-    AppendMenuW(view, MF_POPUP, (UINT_PTR)LayoutMenu(), L"Customize &layout");
-    HMENU sizes = CreatePopupMenu();
-    const wchar_t* sizeNames[] = {L"&Compact", L"&Normal", L"Big mode &plus", L"&Big mode"};
-    for (int i = 0; i < (int)ViewSize::Count; ++i) AppendMenuW(sizes, MF_STRING, IDM_SIZE_BASE + i, sizeNames[i]);
-    AppendMenuW(sizes, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(sizes, MF_STRING, IDM_SMALLER, L"S&maller\tCtrl+-");
-    AppendMenuW(sizes, MF_STRING, IDM_LARGER, L"&Larger\tCtrl+=");
-    AppendMenuW(view, MF_POPUP, (UINT_PTR)sizes, L"Window si&ze");
-    HMENU panels = CreatePopupMenu();
-    const wchar_t* panelNames[] = {L"&Library", L"&Now playing", L"&Up next"};
-    for (int i = 0; i < kPanelCount; ++i) AppendMenuW(panels, MF_STRING, IDM_PANEL_BASE + i, panelNames[i]);
-    AppendMenuW(panels, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(panels, MF_STRING, IDM_PANELS_RESET, L"&Reset the layout");
-    AppendMenuW(view, MF_POPUP, (UINT_PTR)panels, L"Big mode pa&nels");
-    AppendMenuW(view, MF_STRING, IDM_MINI_PLAYER, L"&Mini player\tCtrl+Shift+M");
+    // The panels, the window's sizes, Big mode's panels and the mini player are in the Layout menu.
     AppendMenuW(view, MF_STRING, IDM_LIGHTWEIGHT, L"Light&weight mode\tCtrl+Shift+L");
     AppendMenuW(view, MF_STRING, IDM_ALWAYS_ON_TOP, L"&Always on top");
     AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
@@ -236,7 +222,7 @@ HMENU BuildMenu() {
     AppendMenuW(help, MF_STRING, IDM_ABOUT, L"&About cordinal");
 
     // The titles are shared with the Linux port's menu bar (ui_spec.h).
-    HMENU menus[] = {file, edit, playback, playlist, library, view, help};
+    HMENU menus[] = {file, edit, playback, playlist, library, view, LayoutMenu(), help};
     static_assert(std::size(menus) == std::size(ui::kMenuBar));
     for (size_t i = 0; i < std::size(menus); ++i) AppendMenuW(bar, MF_POPUP, (UINT_PTR)menus[i], ui::kMenuBar[i]);
     return bar;
@@ -388,6 +374,8 @@ void UpdateMainMenu(HMENU m) {
     ShowWhileRunning(m, IDM_RESCAN, IDM_WATCH_IMPORTED, L"&Watch imported folders", !g.importedFolders.empty());
     ShowWhileRunning(m, IDM_RG_SCAN_ALL, IDM_RG_CANCEL, L"Cancel sc&an", manualScan);
     ShowWhileRunning(m, IDM_CONVERT, IDM_CONVERT_CANCEL, L"Cancel conversion", ConvertBusy());
+    ShowWhileRunning(m, IDM_RIP_CD, IDM_RIP_CANCEL, L"Cancel rip", RipBusy());
+    EnableMenuItem(m, IDM_RIP_CD, MF_BYCOMMAND | (RipBusy() ? MF_GRAYED : MF_ENABLED));
     ShowWhileRunning(m, IDM_COPY_TO, IDM_COPY_CANCEL, L"Cancel copy", CopyBusy());
     ShowWhileRunning(m, IDM_BACKUP, IDM_CANCEL_BACKUP, L"Cancel backup", BackupBusy());
     ShowWhileRunning(m, IDM_IMPORT_COLLECTION, IDM_COLLECTION_CANCEL, CollectionCancelText().c_str(), CollectionRunning());

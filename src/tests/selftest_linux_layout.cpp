@@ -68,6 +68,55 @@ int CheckWindowLayouts() {
     DoLayout();
     check(L.grip.w == 0 && L.cover.w == 0 && L.seek.w == 0 && L.tabs.y <= S(ui::kMenuBarHeight + 4),
         "hiding the entire player returns its space to the library");
+
+    // The Layout menu, as the Windows build's: View's layout items are there, it starts from a preset or a
+    // blank canvas, and it saves, lists and forgets your own layouts.
+    g.settings = saved;
+    for (auto& slot : g.settings.savedLayouts) slot.clear();
+    auto find = [](const std::vector<MenuItem>& items, const std::string& label) -> const MenuItem* {
+        for (const MenuItem& item : items)
+            if (item.label == label) return &item;
+        return nullptr;
+    };
+    const auto view = BarMenu(ui::kViewMenu), layout = BarMenu(ui::kLayoutMenu);
+    check(Plain(ui::kMenuBar[ui::kLayoutMenu]) == "Layout" && Plain(ui::kMenuBar[ui::kHelpMenu]) == "Help" &&
+              find(layout, "Start from a preset") && find(layout, "Start from a blank canvas") && find(layout, "Show") &&
+              find(layout, "Window size") && find(layout, "Big mode panels") && find(layout, "Mini player") &&
+              find(layout, "Customize layout...") && !find(view, "Window size") && !find(view, "Mini player") &&
+              !find(view, "Customize layout...") && !find(view, "Lyrics panel") && find(view, "Theme"),
+          "the Layout menu sits between View and Help and holds the layout items View had");
+    RunLayoutAction(kLayoutPreset, 1);
+    WindowLayout bottom;
+    bottom.dock = 1;
+    bottom.waveSize = 1;
+    bottom.waveOwnRow = bottom.largeCover = true;
+    check(g.settings.layout == bottom && g.settings.defaultLayout == bottom, "Layout presets read from ui_spec.h keep their arrangements");
+    RunLayoutAction(kLayoutBlank, 0);
+    DoLayout();
+    check(g.settings.layout.hiddenParts == 1023 && g.settings.layout.menuBar && !g.settings.layout.upNext &&
+              !g.settings.layout.hints && L.seek.w == 0 && L.grip.w == 0 && L.tabs.h == 0 && L.menuBar.h > 0,
+          "a blank canvas hides every part but the menu bar");
+    const auto blankMenu = BarMenu(ui::kLayoutMenu);
+    const MenuItem* show = find(blankMenu, "Show");
+    const MenuItem* waveRow = show ? find(show->sub, "Waveform seek bar") : nullptr;
+    if (waveRow) RunAction(*waveRow);
+    DoLayout();
+    check(waveRow && !(g.settings.layout.hiddenParts & kPartWave) && L.seek.w > 0, "a part added from Layout > Show shows again");
+    const WindowLayout built = g.settings.layout;
+    RunLayoutAction(kLayoutSave, 0);
+    const std::string savedText = g.settings.savedLayouts[0];
+    RunLayoutAction(kLayoutPreset, 0);
+    const bool reset = g.settings.layout == WindowLayout{};
+    RunLayoutAction(kLayoutSaved, 0);
+    const auto start = BarMenu(ui::kLayoutMenu);
+    const MenuItem* presets = find(start, "Start from a preset");
+    const MenuItem* mine = presets ? find(presets->sub, "My layout 1") : nullptr;
+    const MenuItem* save = find(start, "Save this layout");
+    check(!savedText.empty() && savedText.find('\n') == std::string::npos && reset && g.settings.layout == built && mine &&
+              mine->checked && save && !save->enabled && presets && find(presets->sub, "Forget a saved layout"),
+          "Save this layout keeps My layout 1, which the presets list and check while the window is it");
+    RunLayoutAction(kLayoutForget, 0);
+    check(g.settings.savedLayouts[0].empty() && g.settings.layout == built, "forgetting a saved layout keeps the window's layout");
     g.settings = saved;
     g.scale = scale;
     DoLayout();

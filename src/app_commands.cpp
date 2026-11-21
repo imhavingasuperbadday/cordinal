@@ -127,7 +127,7 @@ void OnCommand(int id, int code, HWND ctl) {
         SetViewSize((ViewSize)(id - IDM_SIZE_BASE));
         return;
     }
-    if (LayoutCommand(id) || WaveLookCommand(id) || ConvertCommand(id) || CopyCommand(id)) return;
+    if (LayoutCommand(id) || WaveLookCommand(id) || ConvertCommand(id) || RipCommand(id) || CopyCommand(id)) return;
     if (id >= IDM_PANEL_BASE && id < IDM_PANEL_BASE + (int)kPanelCount) {
         TogglePanel(id - IDM_PANEL_BASE);
         return;
@@ -458,6 +458,9 @@ void OnCommand(int id, int code, HWND ctl) {
             ShowOrganize(ids);
             break;
         }
+        case IDM_WEBFETCH:
+            ShowWebFetch();
+            break;
         case IDM_OUTPUT_SHARED:
         case IDM_OUTPUT_EXCLUSIVE:
         case IDM_OUTPUT_ASIO:

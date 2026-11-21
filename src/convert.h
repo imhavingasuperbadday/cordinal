@@ -13,6 +13,8 @@
 #include <string>
 #include <vector>
 
+class PcmReader;
+
 // The formats Convert writes. None is cordinal's own .cord (named so for the settings and menus
 // that predate the other formats).
 enum class CordExport : uint8_t { None, Flac, Wav, Mp3_192, Mp3_320, Aac128, Aac192, Count };
@@ -61,6 +63,12 @@ bool ExportFlac(const std::wstring& from, const std::wstring& to, std::wstring& 
 // `threads` is the .cord encoder's.
 bool ExportAudio(const std::wstring& from, const std::wstring& to, CordExport format, std::wstring& error,
                  const std::atomic<bool>& cancel, unsigned threads = 1);
+
+// Writes `source`, read once to its end, as FLAC (`flac`) or .cord at `to`, which must not exist
+// yet, with `meta` (.cord META entries) and `pictures` (PICT payloads) as its tags. Verified like
+// ExportAudio's lossless copies before it appears; on failure nothing is left behind. CD rips use it.
+bool WriteLossless(PcmReader& source, const std::string& meta, const std::vector<std::string>& pictures, const std::wstring& to,
+                   bool flac, std::wstring& error, const std::atomic<bool>& cancel, unsigned threads = 1);
 
 // The source's tags as the new file's META entries and PICT payloads. FLAC's Vorbis comments and
 // pictures are carried over whole: the fields cordinal shows become typed entries, everything else

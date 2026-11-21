@@ -1250,6 +1250,11 @@ void TruePeak::Reset() { *this = TruePeak{}; }
 
 void PeakLimiter::SetHeadroom(float headroomDb) {
     ceiling_ = kCeiling * (float)std::pow(10.0, -(std::isfinite(headroomDb) ? std::clamp(headroomDb, 0.0f, 24.0f) : 0) / 20.0);
+    // The 4-point estimate never under-reads by more than about 14% (measured across tones and
+    // band-limited noise, worst at a third of the sample rate), so a frame whose true level is
+    // over the ceiling always reads above this gate: the FIR then re-reads it. Below the gate the
+    // level is never allowed to act, and the plain path stays exactly as cheap as before.
+    refine_ = ceiling_ * 0.75f;
 }
 
 void PeakLimiter::Prime(float left, float right) {
@@ -1279,31 +1284,61 @@ float PeakLimiter::Average::Push(float value) {
     return (float)(sum / values.size());
 }
 
-// The level of the frame two behind the newest: its larger sample, or more where the waveform
-// overshoots between it and either neighbour (4-point half-sample interpolation). Shifts `frame` in.
+// The level of the frame kMeasureLag behind the newest: its larger sample, or more where the
+// waveform overshoots between it and either neighbour (4-point half-sample interpolation). Each
+// frame measures its own interval once, so together the frames cover every sample and gap.
 float PeakLimiter::Level(const float* frame) {
+    constexpr size_t kTaps = TruePeak::kTaps;
+    for (int ch = 0; ch < 2; ++ch) history_[histPos_][ch] = history_[histPos_ + kTaps][ch] = frame[ch];
+    histPos_ = (histPos_ + 1) % kTaps;
+    const float (*w)[2] = history_ + histPos_;  // frames [newest-kTaps+1 .. newest]
     float level = 0;
     for (int ch = 0; ch < 2; ++ch) {
-        const float a = history_[0][ch], b = history_[1][ch], c = history_[2][ch], d = history_[3][ch], e = frame[ch];
+        const float a = w[kMeasureLag - 3][ch], b = w[kMeasureLag - 2][ch], c = w[kMeasureLag - 1][ch],
+                    d = w[kMeasureLag][ch], e = w[kMeasureLag + 1][ch];
         const float before = (9 * (b + c) - a - d) * 0.0625f, after = (9 * (c + d) - b - e) * 0.0625f;
         level = std::max({level, std::fabs(c), std::fabs(before), std::fabs(after)});
-        history_[0][ch] = b;
-        history_[1][ch] = c;
-        history_[2][ch] = d;
-        history_[3][ch] = e;
     }
+    if (level > refine_) level = std::max(level, TruePeakLevel());
     return level;
+}
+
+// The scanner's windowed-sinc FIR over the history window: the newest frame is the FIR's
+// pointer, so its three phases read the quarter positions of the measured frame's own interval,
+// the one the 4-point estimate only sampled at its middle. Doubles throughout and summed
+// newest-first like TruePeak, so a level near the ceiling is what a scan of the same audio
+// would report.
+float PeakLimiter::TruePeakLevel() const {
+    constexpr int kTaps = TruePeak::kTaps;
+    const TruePeakTable& t = PeakTable();
+    alignas(16) double work[kTaps][2];
+    const float (*window)[2] = history_ + histPos_;
+    for (int k = 0; k < kTaps; ++k)
+        for (int ch = 0; ch < 2; ++ch) work[k][ch] = window[k][ch];
+    const __m128d sign = _mm_set1_pd(-0.0);
+    __m128d maximum = _mm_setzero_pd();
+    for (int p = 0; p < 3; ++p) {
+        __m128d sum = _mm_setzero_pd();
+        for (int k = 0; k < kTaps; ++k)
+            sum = _mm_add_pd(sum, _mm_mul_pd(_mm_load_pd(t.c[p][k]), _mm_load_pd(work[kTaps - 1 - k])));
+        // A NaN frame is skipped, as the 4-point estimate and the scanner both skip it.
+        maximum = _mm_max_pd(maximum, _mm_andnot_pd(sign, sum));
+    }
+    return (float)Larger(maximum);
 }
 
 void PeakLimiter::Configure(unsigned rate, float headroomDb) {
     SetHeadroom(headroomDb);
     length_ = std::max<size_t>(16, (size_t)(std::max(rate, 1u) * kLookaheadSeconds));
-    delay_.assign((length_ + 1) * 2, 0.0f);
+    delay_.assign((length_ + kMeasureLag + 1) * 2, 0.0f);
     delayPos_ = 0;
     for (auto& frame : history_) frame[0] = frame[1] = 0;
+    histPos_ = 0;
     first_.Reset(length_ / 2);
     second_.Reset(length_ - length_ / 2 + 1);  // the two spans overlap one frame: together length_
-    minQueue_.assign(length_ + 1, {1.0f, 0});
+    // A frame's entry outlives its output by two frames (the stamp's +2 below), so the queue can
+    // hold length_ + 2 entries at once; one spare keeps the ring writes in bounds.
+    minQueue_.assign(length_ + 3, {1.0f, 0});
     queueHead_ = queueSize_ = 0;
     frame_ = 0;
     gain_ = 1;
@@ -1316,10 +1351,11 @@ void PeakLimiter::Configure(unsigned rate, float headroomDb) {
 
 void PeakLimiter::Process(float* x, size_t frames) {
     if (!length_) return;
-    const size_t delayFrames = length_ + 1, cap = minQueue_.size();
+    const size_t delayFrames = length_ + kMeasureLag + 1, cap = minQueue_.size();
     // Not limiting and nothing over full scale in this block: only the delay applies.
     if (gain_ == 1.0f && !first_.below && !second_.below) {
-        float saved[4][2];
+        float saved[TruePeak::kTaps * 2][2];
+        const size_t savedPos = histPos_;
         std::memcpy(saved, history_, sizeof(saved));
         bool over = false;
         for (size_t i = 0; i < frames && !over; ++i) over = Level(x + i * 2) > ceiling_;
@@ -1336,6 +1372,7 @@ void PeakLimiter::Process(float* x, size_t frames) {
             return;
         }
         std::memcpy(history_, saved, sizeof(saved));
+        histPos_ = savedPos;
     }
     for (size_t i = 0; i < frames; ++i) {
         float* s = x + i * 2;
@@ -1348,7 +1385,10 @@ void PeakLimiter::Process(float* x, size_t frames) {
         if (peak > ceiling_) {
             const float need = ceiling_ / peak;
             while (queueSize_ && minQueue_[(queueHead_ + queueSize_ - 1) % cap].first >= need) --queueSize_;
-            minQueue_[(queueHead_ + queueSize_++) % cap] = {need, f};
+            // Stamped two past the frame arriving now: the measured frame (kMeasureLag back)
+            // then comes out one frame before the entry expires, and the S-curve, which spans
+            // length_ from when the level is known, has fully arrived by then.
+            minQueue_[(queueHead_ + queueSize_++) % cap] = {need, f + 2};
         }
         const float h = queueSize_ ? minQueue_[queueHead_].first : 1.0f;
         const float target = second_.Push(first_.Push(h));

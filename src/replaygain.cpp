@@ -3,8 +3,12 @@
 // Cordinal applies its levelling model to the selected track or album gain:
 //
 //  - Loudness differences inside an album are the artist's intent (a finale is meant to hit
-//    harder than the interlude before it), so album mode starts from the album gain. Peak
-//    protection can reduce it for an individual track. Missing values fall back to the other gain.
+//    harder than the interlude before it), so album mode plays a measured album at one gain:
+//    peak protection is worked out for the whole album, from the member with the least room
+//    (see PeakRoom), never track by track. Lowering only the track with the biggest peak would
+//    turn the finale down against the interlude, and where the music runs on from one track into
+//    the next (a live set, a symphony, an ambient album) the level would step at the join.
+//    Missing values fall back to the other gain.
 //  - Music with loud and quiet parts is levelled by its loud parts, not only its average. A song
 //    that builds from a quiet verse to a big sung chorus has a low average, and lifting the
 //    average alone would push the chorus up into the limiter and flatten it. So the further the
@@ -22,8 +26,9 @@
 //    gain is capped by the track's own true peak plus a small limiting budget. The budget is
 //    measured against the loud parts: only peaks that stand well clear of them (drum hits,
 //    plucks) may be limited, a little; loud sustained passages and voices never lean on it.
-//    The limiter holds a fraction of a dB of headroom, so inter-sample overshoot (which it
-//    cannot see) still lands under the hard clip instead of distorting.
+//    Near its ceiling the limiter measures the overshoot between samples with the scanner's own
+//    true-peak estimate, and holds a fraction of a dB of headroom for what that estimate still
+//    misses, so inter-sample peaks land under the hard clip instead of distorting.
 //  - Only tracks are scanned; album values are worked out from the tracks' measurements
 //    (UpdateAlbumGains). So a scan does exactly the tracks asked for, and a track added to an
 //    album never means measuring the rest of it again.
@@ -70,12 +75,42 @@ uint64_t AudioHasher::Finish() const {
 namespace replaygain {
 
 namespace {
-// Each album's levelling for its loud parts, dB (see Dynamics). Keys are string handles, so
-// compaction clears it (ForgetAlbumDynamics) and UpdateAlbumGains fills it again.
-std::map<AlbumId, float> g_albumDynamics;
+// What a measured album shares when it plays at its album gain. Keys are string handles, so
+// compaction clears it (ForgetAlbumDynamics) and UpdateAlbumGains or RefreshAlbums fills it again.
+struct AlbumLevel {
+    float dynamics = 0;      // levelling for the album's loud parts, dB (see Dynamics)
+    float room = INFINITY;   // the least PeakRoom of its members, dB
+};
+std::map<AlbumId, AlbumLevel> g_albumLevels;
 
 // How far the loud parts sit above the average, LU, or -1 when not measured.
 double HighOf(const Track& t) { return t.rgHigh ? (t.rgHigh - 1) / 4.0 : -1.0; }
+
+double PeakDb(uint16_t peak) { return peak ? 20 * std::log10(peak / 20000.0) : 0.0; }
+
+// The most a track can be turned up, dB, before its peaks need more limiting than their budget,
+// or +inf when its peak isn't known. The budget is measured against the loud parts: only peaks
+// that stand well clear of them (drum hits, plucks) may be limited, a little; loud sustained
+// passages and voices never lean on it.
+double PeakRoom(const Track& t) {
+    const uint16_t peak = t.rgTrackPeak ? t.rgTrackPeak : t.rgAlbumPeak;
+    if (!peak) return INFINITY;
+    const double peakDb = PeakDb(peak);
+    double budget = 0;  // dB of limiting allowed; none until the loud parts are measured
+    if (t.rgTrackGain != kNoGain && t.rgHigh) {
+        const double loudParts = kReplayGainReference - t.rgTrackGain / 100.0 + HighOf(t);
+        budget = std::clamp((peakDb - loudParts - 9.0) / 3.0, 0.0, 3.0);
+    }
+    return budget - peakDb;
+}
+
+// An album's levelling with the room its members leave: every member's peaks must fit under the
+// one gain the album plays at.
+AlbumLevel LevelOf(float dynamics, const std::vector<TrackId>& members) {
+    AlbumLevel level{dynamics};
+    for (TrackId id : members) level.room = std::min(level.room, (float)PeakRoom(g_lib[id]));
+    return level;
+}
 
 // How much less to lift music whose loud parts sit `high` LU above its average. Most music sits
 // within about 3 LU and is left alone; beyond that, 60% of the extra range comes off the gain
@@ -118,23 +153,21 @@ float Gain(const Track& t, const ReplayGainOptions& o, double eqPeakDb) {
     const int16_t gain = album ? t.rgAlbumGain : t.rgTrackGain;
     const double eqPeak = eqPeakDb + o.headroom;
     const uint16_t peak = t.rgTrackPeak ? t.rgTrackPeak : t.rgAlbumPeak;
-    const double peakDb = peak ? 20 * std::log10(peak / 20000.0) : 0.0;
+    const double peakDb = PeakDb(peak);
     if (gain == kNoGain) {
         double db = o.preampNoInfo;
         db = peak ? std::min(db, -peakDb - eqPeak) : db - std::max(0.0, eqPeak);
         return (float)std::pow(10.0, db / 20.0);
     }
     double db = gain / 100.0;
+    const AlbumLevel* level = nullptr;  // set while a measured album plays at its album gain
+    if (album) {
+        auto it = g_albumLevels.find(AlbumKeyOf(t));
+        if (it != g_albumLevels.end()) level = &it->second;
+    }
     // Damp a lift, never a cut: dynamics only ever holds back turning a quiet track up. A track
     // that is already loud keeps its level instead of being turned down twice for being dynamic.
-    if (db > 0) {
-        double dynamics = Dynamics(HighOf(t));
-        if (album) {
-            auto it = g_albumDynamics.find(AlbumKeyOf(t));
-            if (it != g_albumDynamics.end()) dynamics = it->second;
-        }
-        db = std::max(0.0, db - dynamics);
-    }
+    if (db > 0) db = std::max(0.0, db - (level ? level->dynamics : Dynamics(HighOf(t))));
     if (db < 0) {
         double keep = o.keep;
         // A hot master (running at or past full scale) was limited flat in mastering, so its cut
@@ -143,24 +176,19 @@ float Gain(const Track& t, const ReplayGainOptions& o, double eqPeakDb) {
         if (keep > 0) {
             const uint16_t keepPeak = album && t.rgAlbumPeak ? t.rgAlbumPeak : peak;
             // The track's peak was already converted; a distinct album peak matters only for a cut.
-            const double keepPeakDb = keepPeak == peak ? peakDb :
-                keepPeak ? 20 * std::log10(keepPeak / 20000.0) : 0.0;
+            const double keepPeakDb = keepPeak == peak ? peakDb : PeakDb(keepPeak);
             if (keepPeakDb > 0.0)
                 keep = std::min(0.85, keep + (1.0 - keep) * 0.6 * std::min(keepPeakDb, 1.0));
         }
         db *= 1.0 - keep;
     }
     db += o.preamp;
-    if (peak) {
-        double budget = 0;  // dB of limiting allowed; none until the loud parts are measured
-        if (t.rgTrackGain != kNoGain && t.rgHigh) {
-            const double loudParts = kReplayGainReference - t.rgTrackGain / 100.0 + HighOf(t);
-            budget = std::clamp((peakDb - loudParts - 9.0) / 3.0, 0.0, 3.0);
-        }
-        // The EQ preamp and complete filter response share this budget. A negative AutoEq
-        // preamp already offsets its boosts; subtracting each positive band would count them twice.
-        db = std::min(db, budget - peakDb - eqPeak);
-    } else db -= std::max(0.0, eqPeak);  // reserve EQ boost even before the source peak has been measured
+    // The EQ preamp and complete filter response share the peaks' room. A negative AutoEq preamp
+    // already offsets its boosts; subtracting each positive band would count them twice. A track
+    // whose own peak isn't measured yet still reserves the EQ's boost.
+    if (!peak) db -= std::max(0.0, eqPeak);
+    const double room = std::min(PeakRoom(t), level ? (double)level->room : INFINITY);
+    if (std::isfinite(room)) db = std::min(db, room - eqPeak);
     return (float)std::pow(10.0, db / 20.0);
 }
 
@@ -174,7 +202,7 @@ float GainForEstimate(const Track& track, double lufs, const ReplayGainOptions& 
 }
 
 void ForgetAlbumDynamics(bool keepMeasurements) {
-    std::map<AlbumId, float>().swap(g_albumDynamics);
+    std::map<AlbumId, AlbumLevel>().swap(g_albumLevels);
     if (!keepMeasurements) std::map<AlbumId, AlbumMeasurement>().swap(g_albumMeasurements);
 }
 
@@ -271,11 +299,11 @@ bool UpdateAlbumGains(const std::vector<TrackId>& ids) {
             // album (a member's measurement was cleared, or the track was retagged or removed),
             // as then it cannot speak for what is left.
             if (saved != g_albumMeasurements.end() && MeasurementCovers(saved->second, a.members)) {
-                g_albumDynamics[key] = saved->second.dynamics / 10.0f;
+                g_albumLevels[key] = LevelOf(saved->second.dynamics / 10.0f, a.members);
                 continue;
             }
             if (saved != g_albumMeasurements.end()) g_albumMeasurements.erase(saved);
-            g_albumDynamics.erase(key);
+            g_albumLevels.erase(key);
             for (TrackId id : a.members) {
                 Track& t = g_lib[id];
                 if (!(t.flags & (Track::kRgScanned | Track::kRgAlbumMeasured)) || (t.rgAlbumGain == kNoGain && !t.rgAlbumPeak))
@@ -302,7 +330,7 @@ bool UpdateAlbumGains(const std::vector<TrackId>& ids) {
         // The measurement is saved with the library: a restart reuses it instead of working the
         // album out again, and playback keeps the same levelling before the first tick.
         const uint8_t levelling = (uint8_t)std::clamp((int)std::lround(dynamics * 10.0), 0, 255);
-        g_albumDynamics[key] = levelling / 10.0f;
+        g_albumLevels[key] = LevelOf(levelling / 10.0f, a.members);
         auto previous = g_albumMeasurements.find(key);
         const bool restate = previous == g_albumMeasurements.end() || previous->second.gain != gain || previous->second.peak != a.peak ||
                              previous->second.dynamics != levelling || previous->second.members != a.members;
@@ -344,7 +372,7 @@ AlbumRefresh RefreshAlbums(uint32_t& revision) {
     for (const auto& [key, members] : albums) {
         auto saved = g_albumMeasurements.find(key);
         if (saved != g_albumMeasurements.end() && MeasurementMatches(saved->second, members)) {
-            g_albumDynamics[key] = saved->second.dynamics / 10.0f;
+            g_albumLevels[key] = LevelOf(saved->second.dynamics / 10.0f, members);
             restored = true;
             continue;
         }

@@ -57,6 +57,7 @@
 #include "tests/text_checks.h"
 #include "tests/wind_checks.h"
 #include "tests/metadata_checks.h"
+#include "tests/cdrip_checks.h"
 #include "tests/sound_checks.h"
 #include "tests/keymap_checks.h"
 #include "tests/tag_suggest_checks.h"
@@ -550,6 +551,17 @@ int CheckResampler() {
         }
     }
     return failures;
+}
+
+// CD ripping without a drive (tests/cdrip_checks.h, shared with the Windows "cd-rip" suite).
+int CheckCdRip(const char* dir) {
+    int failed = 0;
+    for (const auto& group : cdrip_checks::All(compat::Widen(dir))) {
+        printf("%s %s (%d cases)\n", group.Passed() ? "ok  " : "FAIL", group.name.c_str(), group.cases);
+        for (const auto& f : group.failures) printf("     %s\n", f.c_str());
+        failed += !group.Passed();
+    }
+    return failed ? 1 : 0;
 }
 
 // A 62 Hz tone through the player's renderer with the Bass boost preset: it must come out about
@@ -1357,6 +1369,7 @@ int main(int argc, char** argv) {
     if (argc >= 3 && !strcmp(argv[1], "collection")) return CollectionRoundTrip(argv[2]);
     if (argc >= 2 && !strcmp(argv[1], "eq")) return CheckEq();
     if (argc >= 3 && !strcmp(argv[1], "metadata")) return CheckMetadata(argv[2], argc - 3, argv + 3);
+    if (argc >= 3 && !strcmp(argv[1], "cd-rip")) return CheckCdRip(argv[2]);
     if (argc >= 2 && !strcmp(argv[1], "resampler")) return CheckResampler();
     if (argc >= 2 && !strcmp(argv[1], "waveform"))
         return CheckWaveform(argc >= 3 ? argv[2] : nullptr, argc >= 4 ? argv[3] : nullptr, argc >= 5 ? argv[4] : nullptr);

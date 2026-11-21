@@ -112,7 +112,50 @@ constexpr int PlayedWidth(int width, double position, double duration) {
 
 // The menu bar, left to right ('&' marks the mnemonic).
 inline constexpr const wchar_t* kMenuBar[] = {L"&File", L"&Edit", L"&Playback", L"Pl&aylist", L"&Library", L"&View",
-                                              L"&Help"};
+                                              L"La&yout", L"&Help"};
+constexpr int kViewMenu = 5, kLayoutMenu = 6, kHelpMenu = 7;  // their places in kMenuBar
+
+// Layout > Start from a preset: the built-in arrangements, written as a pack's layout.ini writes one
+// (packs.h ParseIni; a part a preset leaves out keeps its default), so both platforms read one list.
+// The index is the preset's offset from IDM_LAYOUT_PRESET_BASE, so entries are only ever appended.
+struct LayoutPreset {
+    const wchar_t* name;
+    const char* text;
+};
+inline constexpr LayoutPreset kLayoutPresets[] = {
+    {L"&Classic (the default)", ""},
+    {L"Player at the &bottom", "player = bottom\nwaveform size = medium\nwaveform row = 1\nlarge cover = 1\n"},
+    {L"Player on the &side", "player = left\nwaveform size = medium\nup next = 1\n"},
+    {L"&Waveform studio", "waveform size = tall\nwaveform row = 1\nlarge cover = 1\n"},
+    {L"&Minimal", "order = 0\nnow playing = 0\npoints = 0\nview buttons = 0\nstatus bar = 0\n"},
+};
+// Layout > Start from a blank canvas: every part hidden but the menu bar, whose Layout menu adds them
+// back one at a time. The track list always stays.
+inline constexpr const char* kBlankCanvas =
+    "transport = 0\norder = 0\nwaveform = 0\ntimes = 0\nvolume = 0\nnow playing = 0\nlarge cover = 0\npoints = 0\n"
+    "tabs = 0\nsearch = 0\nview buttons = 0\nup next = 0\nstatus bar = 0\nmenu bar = 1\ntab counts = 0\n"
+    "status details = 0\nhints = 0\n";
+// Keys and packs name commands by their menu path. These moved from View to the Layout menu, so a
+// path saved under the old prefix is read under the new one. Both are in the palette's lowercase form,
+// '>' between levels (CommandKey on each platform); the first prefix that matches wins.
+struct MovedCommand {
+    const wchar_t* from;
+    const wchar_t* to;
+};
+inline constexpr MovedCommand kMovedToLayoutMenu[] = {
+    {L"view>customize layout>presets>", L"layout>start from a preset>"},
+    {L"view>customize layout>player position>", L"layout>player position>"},
+    {L"view>customize layout>waveform>", L"layout>waveform>"},
+    {L"view>customize layout>", L"layout>show>"},
+    {L"view>window size>", L"layout>window size>"},
+    {L"view>big mode panels>", L"layout>big mode panels>"},
+    {L"view>mini player", L"layout>mini player"},
+    {L"view>lyrics panel", L"layout>show>lyrics panel"},
+    {L"view>up next", L"layout>up next"},
+};
+// Layout > Save this layout keeps up to this many of your own, "My layout 1" to "My layout 8". Each is
+// saved in the same words on one line, ';' standing for the line breaks.
+constexpr int kSavedLayouts = 8;
 
 // The normal window, in pixels at 96 DPI. The player band runs across the top: the handle, the
 // transport and order buttons, the elapsed time, the waveform seek bar, the remaining time and the

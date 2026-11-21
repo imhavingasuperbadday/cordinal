@@ -90,7 +90,8 @@ void LayoutNormal(HDWP& dwp, RECT r);
 void PaintLayoutChrome(HDC dc);
 bool LayoutMouse(UINT msg, LPARAM lp);
 bool LayoutSetCursor(POINT pt);
-HMENU LayoutMenu();
+HMENU LayoutMenu();                    // the menu bar's Layout menu, also the player's right-click menu
+void RefreshLayoutPopup(HMENU popup);  // WM_INITMENUPOPUP: fills the menu bar's Layout menu afresh
 void UpdateLayoutMenu(HMENU m);
 bool LayoutCommand(int id);
 void ShowLayoutMenu(POINT pt);

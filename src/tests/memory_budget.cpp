@@ -46,7 +46,9 @@ constexpr Budget kBudgets[] = {
 // about this much. The native image was 5.21 MiB when the budget was set.
 // Raised from 5.5 on November 16, 2026: the FLAC encoder, album tagging and duplicate finder landed
 // since, and the image measured 5.51 MB.
-constexpr double kProgramBudget = 5.75;
+// Raised from 5.75 on November 20, 2026: Save music from the web added the SoundCloud, YouTube
+// and Spotify resolvers and the download queue, and the image measured 5.76 MB.
+constexpr double kProgramBudget = 6.00;
 
 // Where the budgets are heading: what the packed release player should show in Task Manager while
 // playing. docs/memory.md has the plan; the log reports the distance on every run.

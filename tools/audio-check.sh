@@ -5,8 +5,8 @@
 #
 #   tools/audio-check.sh path/to/cordinal-core-test
 #
-# Needs pipewire, wireplumber, pipewire-pulse, pipewire-bin (pw-record, pw-metadata, pw-link),
-# pulseaudio-utils (pactl) and dbus-daemon. Exits non-zero if any check failed.
+# Needs pipewire, wireplumber, pipewire-pulse, pipewire-bin (pw-cli, pw-metadata, pw-link),
+# pulseaudio-utils (pactl, parec) and dbus-daemon. Exits non-zero if any check failed.
 set -u
 TEST=$(readlink -f "${1:?usage: audio-check.sh path/to/cordinal-core-test}")
 WORK=$(mktemp -d /tmp/cordinal-audio.XXXXXX)
@@ -34,10 +34,13 @@ if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-daemon >/dev/null; 
 fi
 start_servers() {
     pipewire >> "$WORK/pipewire.log" 2>&1 & PIDS=($!)
-    for _ in $(seq 50); do [ -S "$XDG_RUNTIME_DIR/pipewire-0" ] && break; sleep 0.1; done
-    wireplumber >> "$WORK/wireplumber.log" 2>&1 & PIDS+=($!)
+    for _ in $(seq 50); do pw-cli info 0 >/dev/null 2>&1 && break; sleep 0.1; done
+    wireplumber >> "$WORK/wireplumber.log" 2>&1 & WP_PID=$!; PIDS+=($WP_PID)
     pipewire-pulse >> "$WORK/pulse.log" 2>&1 & PIDS+=($!)
     for _ in $(seq 50); do
+        if ! kill -0 "$WP_PID" 2>/dev/null; then
+            wireplumber >> "$WORK/wireplumber.log" 2>&1 & WP_PID=$!; PIDS+=($WP_PID)
+        fi
         pactl list short sinks 2>/dev/null | grep -q test-sink-b && pw-metadata 0 default.audio.sink 2>/dev/null |
             grep -q test-sink && break
         sleep 0.1
@@ -64,9 +67,11 @@ result() {  # result NAME STATUS [LOG]
     else echo "FAIL $1"; FAILED=$((FAILED + 1)); [ -n "${3:-}" ] && sed 's/^/       /' "$3"; fi
 }
 # capture SINK RATE FILE: records SINK's monitor as float32 stereo until stop_capture.
+# parec buffers captured audio in pipewire-pulse's ringbuffer (unlike pw-record, which writes to
+# disk in PipeWire's synchronous graph callback and drops quanta silently on a brief VM stall).
 capture() {
-    pw-record -P stream.capture.sink=true --target "$1" --format f32 --rate "$2" --channels 2 "$3" \
-        > "$WORK/record.log" 2>&1 & CAPTURE=$!
+    parec -d "$1.monitor" --format=float32le --rate="$2" --channels=2 --latency-msec=250 \
+        --file-format=wav "$3" > "$WORK/record.log" 2>&1 & CAPTURE=$!
     sleep 0.7
 }
 stop_capture() { sleep 0.4; kill -INT "$CAPTURE" 2>/dev/null; wait "$CAPTURE" 2>/dev/null; }

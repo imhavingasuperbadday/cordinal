@@ -16,7 +16,8 @@
         @{ Paths = @('src/tests/testlog.h', 'src/tests/test_report.*', 'src/stub/*'); Suites = @('harness') }
         @{ Paths = @('src/tests/*bench*', 'src/tests/reference_audio.*', 'src/tests/g726_reference.*')
            Suites = @('native-codecs', 'exact-pcm') }
-        @{ Paths = @('src/tests/metadata_checks.h'); Suites = @('metadata') }
+        @{ Paths = @('src/tests/metadata_checks.h'); Suites = @('metadata', 'cd-rip') }
+        @{ Paths = @('src/tests/cdrip_checks.h'); Suites = @('cd-rip') }
         @{ Paths = @('src/tests/selftest_linux_*', 'src/tests/selftest_hls.cpp', 'src/tests/selftest_radio_stream.cpp')
            Suites = @('radio', 'live-audio'); Note = 'Linux test sources also run under .\linux.bat.' }
         @{ Paths = @('src/tests/*'); Suites = @() }  # mapped through --list-tests; listed so the check sees a rule
@@ -29,7 +30,9 @@
         @{ Paths = @('src/sort.*'); Suites = @('sorting') }
         @{ Paths = @('src/album_editions*', 'src/app_editions.*', 'src/app_groups.*'); Suites = @('album-editions', 'ui') }
         @{ Paths = @('src/album_maker.*', 'src/app_albummaker.*'); Suites = @('album-maker', 'ui') }
-        @{ Paths = @('src/album_tagger.*', 'src/app_albumtag.*'); Suites = @('metadata', 'ui') }
+        @{ Paths = @('src/album_tagger.*', 'src/app_albumtag.*'); Suites = @('metadata', 'cd-rip', 'ui') }
+        @{ Paths = @('src/cdrip.*'); Suites = @('cd-rip') }
+        @{ Paths = @('src/app_rip.*'); Suites = @('cd-rip', 'ui') }
         @{ Paths = @('src/duplicates.*', 'src/app_duplicates.*'); Suites = @('duplicates', 'ui') }
         @{ Paths = @('src/column_layout.*'); Suites = @('ui'); Note = 'Shared with Linux: also run .\linux.bat.' }
         @{ Paths = @('src/playlist.*', 'src/playlist_files.*', 'src/playlist_shuffle.*', 'src/app_playlists.*')
@@ -43,7 +46,7 @@
         @{ Paths = @('src/organize.*', 'src/app_organize.*'); Suites = @('organize') }
         @{ Paths = @('src/devicecopy.*', 'src/app_copy.*'); Suites = @('copy') }
         @{ Paths = @('src/collection.*', 'src/app_collection.*'); Suites = @('collection') }
-        @{ Paths = @('src/ipod.h', 'src/ipod/*', 'src/app_ipod.*'); Suites = @('ipod') }
+        @{ Paths = @('src/ipod.h', 'src/ipod/*', 'src/app_ipod.*'); Suites = @('ipod', 'cd-rip') }
         @{ Paths = @('src/headsets.*', 'src/app_headphones.*'); Suites = @('headsets') }
         @{ Paths = @('src/command_line.*'); Suites = @('explorer', 'harness') }
 
@@ -84,6 +87,10 @@
         # Radio, web, online services and helpers.
         @{ Paths = @('src/radio*', 'src/app_radio.*', 'src/audio_live.*'); Suites = @('radio', 'live-audio') }
         @{ Paths = @('src/web_*', 'src/qr.*', 'src/app_web.*', 'src/third_party/bearssl/*'); Suites = @('web') }
+        @{ Paths = @('src/soundcloud.*', 'src/ytaudio.*', 'src/spotifylink.*', 'src/webfetch.*',
+                     'src/app_webfetch.*', 'src/tests/selftest_soundcloud.cpp', 'src/tests/selftest_ytaudio.cpp',
+                     'src/tests/selftest_spotifylink.cpp')
+            Suites = @('webfetch', 'ui'); Note = 'Resolvers are pure C++ shared with Linux: also run .\linux.bat.' }
         @{ Paths = @('src/metadata_fetch.*', 'src/coverfetch.*', 'src/customcover.*', 'src/musicbrainz.*',
                      'src/coverupload.*', 'src/app_coverfetch.*', 'src/app_artistinfo.*', 'src/app_review.*')
            Suites = @('metadata') }
@@ -110,7 +117,8 @@
         @{ Paths = @('src/third_party/*'); Suites = @('native-codecs', 'web') }
 
         # Outside the Windows suites.
-        @{ Paths = @('src/linux/*', 'CMakeLists.txt', 'linux/*', 'linux.bat', 'tools/linux.ps1')
+        @{ Paths = @('src/linux/*', 'CMakeLists.txt', 'linux/*', 'linux.bat', 'tools/linux.ps1',
+                     'tools/audio-check.sh', 'tools/platform-gui-test.sh', 'tools/wl-inject.py')
            Suites = @(); Note = 'Linux sources: run .\linux.bat (and .\linux.bat test -Suite e2e for UI changes).' }
         @{ Paths = @('tools/test.ps1', 'tools/test-runner.ps1', 'tools/test-map.psd1', 'test.bat')
            Suites = @('harness'); Note = 'Test runner changed: also run pwsh -File tools\test-runner.ps1.' }

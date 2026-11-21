@@ -320,11 +320,15 @@ constexpr double kReplayGainReference = -18.0;  // LUFS (ReplayGain 2.0)
 
 // Look-ahead peak limiter for the output, in place of clipping: keeps interleaved stereo within
 // full scale without the distortion a hard clip adds. Each frame's level counts the overshoot
-// between samples too (a 2x true-peak estimate), and its gain is the lowest any frame in the next
-// kLookahead needs (a sliding minimum), smoothed by two moving averages of half that length, so the
-// gain eases in along an S-curve, has fully arrived by the time the loud frame comes out, and never
-// steps; afterwards it recovers with a smooth release. Output is delayed by Latency() frames.
-// While nothing is over full scale the samples pass through bit-exact (only delayed).
+// between samples too: a 4-point estimate everywhere, and near the ceiling the scanner's 4x
+// windowed-sinc true-peak FIR (the polynomial under-reads by a decibel and more when the music's
+// energy sits near a third of the sample rate; the sinc leaves a fraction of that, which the
+// ceiling's headroom covers). Each frame is measured kMeasureLag frames after it arrives, inside
+// the look-ahead, and its gain is the lowest any frame in the look-ahead needs (a sliding
+// minimum), smoothed by two moving averages of half that length, so the gain eases in along an
+// S-curve, has fully arrived by the time the loud frame comes out, and never steps; afterwards it
+// recovers with a smooth release. Output is delayed by Latency() frames. While nothing is over
+// full scale the samples pass through bit-exact (only delayed).
 class PeakLimiter {
 public:
     void Configure(unsigned rate, float headroomDb = 0);  // also clears the state
@@ -335,14 +339,18 @@ public:
     void Prime(float left, float right);
     void Process(float* stereo, size_t frames);
     float Reduction() const { return gain_; }  // the gain now applied, 1 = not limiting
-    size_t Latency() const { return length_ ? length_ + 1 : 0; }  // frames
+    size_t Latency() const { return length_ ? length_ + kMeasureLag + 1 : 0; }  // frames
 
 private:
-    // Hold a fraction of a dB below full scale: the true-peak estimate catches most of the overshoot
-    // between samples, and this little headroom covers what it misses, before the hard clip at the
-    // output (where it would distort, voices most of all).
+    // Hold a fraction of a dB below full scale: the true-peak estimate misses only a fraction of
+    // a dB of the overshoot between samples, and this headroom covers that before the hard clip
+    // at the output (where it would distort, voices most of all).
     static constexpr float kCeiling = 0.96605f;  // -0.3 dBFS
     float ceiling_ = kCeiling;
+    // The measured frame trails the newest input by this many frames: the true-peak FIR needs
+    // half its taps ahead of the frame it measures. The look-ahead delay covers it, so the gain
+    // still arrives before the loud frame comes out.
+    static constexpr size_t kMeasureLag = TruePeak::kTaps / 2;
     // 3 ms is long enough that the gain change doesn't buzz on bass and short enough not to duck
     // ahead of a drum hit audibly. Release is fast after a brief peak and slows when limiting goes
     // on (a long loud passage), so sustained material, voices especially, doesn't pump.
@@ -355,11 +363,16 @@ private:
         void Reset(size_t length);
         float Push(float value);
     };
-    float Level(const float* frame);
+    float Level(const float* frame);  // the measured frame's level; refines near the ceiling
+    float TruePeakLevel() const;       // the scanner's FIR over history_, see Level
     size_t length_ = 0;                     // look-ahead frames
-    std::vector<float> delay_;              // the last length_ + 1 input frames
+    std::vector<float> delay_;              // the last length_ + kMeasureLag + 1 input frames
     size_t delayPos_ = 0;
-    float history_[4][2] = {};              // the newest input frames, for the between-samples estimate
+    // The last TruePeak::kTaps input frames twice over: the upper half mirrors the lower, so the
+    // window ending at the newest frame is always contiguous and the FIR reads no wrapped slots.
+    float history_[TruePeak::kTaps * 2][2] = {};
+    size_t histPos_ = 0;  // slot of the next frame
+    float refine_ = 0;    // the 4-point estimate's gate for the true-peak FIR (a share of ceiling_)
     Average first_, second_;
     std::vector<std::pair<float, uint64_t>> minQueue_;  // monotonic queue (ring) for the minimum
     size_t queueHead_ = 0, queueSize_ = 0;

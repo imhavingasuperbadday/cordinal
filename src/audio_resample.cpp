@@ -1,6 +1,8 @@
 // Band-limited sinc resampler used by the playback pipeline to convert a
-// decoder's rate to the output device rate. A 256-phase polyphase table with a
-// Kaiser window is built once per rate pair; the fractional cursor (idx_/num_)
+// decoder's rate to the output device rate. A polyphase table with a Kaiser
+// window is built once per rate pair: one exact row per rational phase where
+// that fits (44.1 <-> 48 kHz and every whole-number ratio), otherwise 256 rows
+// with linear interpolation between them. The fractional cursor (idx_/num_)
 // carries position across pushes so streaming stays sample-accurate. The kernel
 // grows for downsampling so high source rates retain the same transition width.
 #include "decoder.h"
@@ -29,6 +31,14 @@ double BesselI0(double x) {
 // Build the polyphase table for inRate -> outRate. The ratio is reduced by its
 // GCD first; an unchanged reduced pair keeps the existing table. Cutoff sits at
 // the lower of the two rates with a little headroom to tame aliasing.
+//
+// Every output frame lands on one of out_ rational phases. When a row for each of
+// them, computed exactly, fits in the memory the 257 interpolated rows would take,
+// those are used instead: no interpolation error between phases (which held the
+// passband to about 95 dB SNR), and the rows saved pay for a kernel 25% longer
+// with a Kaiser beta of 12.3 instead of 10. That keeps the same transition band,
+// so the same treble, while the stopband and passband ripple move from about
+// -100 dB to about -120 dB. The longer kernel costs a little arithmetic, no memory.
 void Resampler::Init(unsigned inRate, unsigned outRate) {
     fast_=nativeaudio::FastAudioKernels();
     inRate_ = inRate;
@@ -53,13 +63,20 @@ void Resampler::Init(unsigned inRate, unsigned outRate) {
         const double ratio = std::min(1.0, (double)outRate / inRate);
         // A short fixed kernel loses treble and barely rejects aliases at high downsampling
         // ratios. Keep its width in output frames, with a bound for unusual file/speed rates.
-        taps_ = (unsigned)std::min(8192.0, std::ceil(128.0 / ratio / 8) * 8);
-        const double beta = 10.0, half = taps_ / 2.0;
+        auto width = [ratio](double outputTaps) { return std::ceil(outputTaps / ratio / 8) * 8; };
+        const unsigned interpolatedTaps = (unsigned)std::min(8192.0, width(128));
+        const double exactTaps = width(160);
+        exact_ = out_ <= (unsigned)kPhases && exactTaps <= 8192 &&
+                 out_ * exactTaps <= (kPhases + 1.0) * interpolatedTaps;
+        taps_ = exact_ ? (unsigned)exactTaps : interpolatedTaps;
+        // Kaiser's beta for about 120 dB of rejection, and for about 100 dB.
+        const double beta = exact_ ? 12.27 : 10.0, half = taps_ / 2.0;
         const double cutoff = ratio * 0.95;
-        table_.reset(new float[(kPhases + 1) * taps_]);
+        const unsigned rows = exact_ ? out_ : kPhases + 1, step = exact_ ? out_ : kPhases;
+        table_.reset(new float[rows * taps_]);
         const double normalization = BesselI0(beta);
-        for (int p = 0; p <= kPhases; ++p) {
-            double frac = (double)p / kPhases, sum = 0;
+        for (unsigned p = 0; p < rows; ++p) {
+            double frac = (double)p / step, sum = 0;
             float* row = &table_[p * taps_];
             for (unsigned k = 0; k < taps_; ++k) {
                 double x = (double)k - (taps_ / 2 - 1) - frac;
@@ -73,7 +90,8 @@ void Resampler::Init(unsigned inRate, unsigned outRate) {
         }
         // Since p=floor(num*kPhases/out_) >= num, ascending writes can reuse
         // this allocation without clobbering a phase still needed as input.
-        if (fast_ && out_<=kPhases) nativeaudio::AudioResamplePrepareAvx2(table_.get(),taps_,out_);
+        if (fast_ && exact_) nativeaudio::AudioResampleLayoutAvx2(table_.get(),taps_,out_);
+        else if (fast_ && out_<=kPhases) nativeaudio::AudioResamplePrepareAvx2(table_.get(),taps_,out_);
     }
     Reset();
 }
@@ -124,19 +142,27 @@ void Resampler::Convert(const float* in,size_t frames,std::vector<float>& out,bo
         if (count) nativeaudio::AudioResampleAvx2(h,table_.get(),taps_,count,step,remainder,out_,idx_,num_,out.data()+begin);
     }
     else for (size_t frame=0;frame<count;++frame) {
-        size_t i0 = idx_;
-        double f = (double)(unsigned)num_ * phaseScale;
-        int p = (int)f;
-        float t = (float)(f - p);
-        const float* r0 = &table_[p * taps_];
-        const float* r1 = r0 + taps_;
-        const float* s = h + (i0 - (taps_ / 2 - 1)) * 2;
-        __m128 a=_mm_setzero_ps(),b=a,blend=_mm_set1_ps(t);
-        for (unsigned k=0;k<taps_;k+=4) {
-            __m128 first=_mm_loadu_ps(r0+k),second=_mm_loadu_ps(r1+k);
-            __m128 w=_mm_add_ps(first,_mm_mul_ps(_mm_sub_ps(second,first),blend));
-            a=_mm_add_ps(a,_mm_mul_ps(_mm_loadu_ps(s+k*2),_mm_unpacklo_ps(w,w)));
-            b=_mm_add_ps(b,_mm_mul_ps(_mm_loadu_ps(s+k*2+4),_mm_unpackhi_ps(w,w)));
+        const float* s = h + (idx_ - (taps_ / 2 - 1)) * 2;
+        __m128 a=_mm_setzero_ps(),b=a;
+        if (exact_) {  // the row for this very phase
+            const float* r = &table_[(size_t)num_ * taps_];
+            for (unsigned k=0;k<taps_;k+=4) {
+                __m128 w=_mm_loadu_ps(r+k);
+                a=_mm_add_ps(a,_mm_mul_ps(_mm_loadu_ps(s+k*2),_mm_unpacklo_ps(w,w)));
+                b=_mm_add_ps(b,_mm_mul_ps(_mm_loadu_ps(s+k*2+4),_mm_unpackhi_ps(w,w)));
+            }
+        } else {
+            double f = (double)(unsigned)num_ * phaseScale;
+            int p = (int)f;
+            const float* r0 = &table_[p * taps_];
+            const float* r1 = r0 + taps_;
+            __m128 blend=_mm_set1_ps((float)(f - p));
+            for (unsigned k=0;k<taps_;k+=4) {
+                __m128 first=_mm_loadu_ps(r0+k),second=_mm_loadu_ps(r1+k);
+                __m128 w=_mm_add_ps(first,_mm_mul_ps(_mm_sub_ps(second,first),blend));
+                a=_mm_add_ps(a,_mm_mul_ps(_mm_loadu_ps(s+k*2),_mm_unpacklo_ps(w,w)));
+                b=_mm_add_ps(b,_mm_mul_ps(_mm_loadu_ps(s+k*2+4),_mm_unpackhi_ps(w,w)));
+            }
         }
         __m128 sum=_mm_add_ps(a,b);float lanes[4];_mm_storeu_ps(lanes,sum);
         out[begin+frame*2]=lanes[0]+lanes[2];out[begin+frame*2+1]=lanes[1]+lanes[3];

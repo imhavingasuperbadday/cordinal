@@ -175,5 +175,6 @@ check collection "$BUILD/cordinal-core-test" collection "$OUT/collection"
 check ipod "$BUILD/cordinal-core-test" ipod "$OUT/ipod"
 check away "$BUILD/cordinal-core-test" away "$OUT/away"
 check metadata "$BUILD/cordinal-core-test" metadata "$OUT/metadata" "$OUT/source.mp3" "$OUT/source.flac"
+check cd-rip "$BUILD/cordinal-core-test" cd-rip "$OUT/cdrip"
 echo "$failures failure(s)"
 ((failures == 0))

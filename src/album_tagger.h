@@ -41,6 +41,9 @@ struct Release {
 // Release search replies (/ws/2/release?query=...) and release lookups (/ws/2/release/<id>).
 std::vector<Release> ParseReleaseSearch(std::string_view json);
 bool ParseRelease(std::string_view json, Release& out);
+// A disc id lookup (/ws/2/discid/<id>?toc=...): each release with only the medium holding that disc
+// (or, for a lookup by table of contents, the first medium with `discTracks` tracks) in `tracks`.
+std::vector<Release> ParseDiscLookup(std::string_view json, const std::string& discId, size_t discTracks);
 
 // Which release track each local track takes, and how sure the match is. A pair needs a matching
 // title, duration or position to count; confidence is the pairs' average agreement over the larger

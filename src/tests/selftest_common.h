@@ -83,7 +83,15 @@ void TestTitleFormat();
 void TestExplorerMenu();
 void TestWeb(const std::wstring& scratch);
 void TestMetadata(const std::wstring& media, const std::wstring& scratch);
+void TestCdRip(const std::wstring& scratch);
 void TestWebPreferences(const std::wstring& scratch);
+// Web links saved into the library (selftest_soundcloud.cpp, selftest_ytaudio.cpp,
+// selftest_spotifylink.cpp, selftest_webfetch.cpp): resolvers against fixtures, and
+// the download queue against fakes, never the live sites.
+void TestSoundCloud();
+void TestYtAudio();
+void TestSpotifyLink();
+void TestWebFetch(const std::wstring& scratch, const std::wstring& media);
 void TestSearch();
 bool ReferenceSearch(const Library& library, TrackId id, const std::vector<std::wstring>& words);
 void TestAudioHashSection(const std::wstring& scratch);

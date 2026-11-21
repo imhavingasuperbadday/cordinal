@@ -729,9 +729,12 @@ void TestPeakLimiter() {
     quiet.Configure(rate);
     std::vector<float> in(rate * 2), out;
     uint32_t seed = 1;
-    // White noise is the worst case for overshoot between samples (up to 1.25x its sample peak), so
-    // it stays at 0.75 to be under the ceiling between samples too.
-    for (float& v : in) v = (float)(((seed = seed * 1664525u + 1013904223u) >> 8) / 16777216.0 * 1.5 - 0.75);
+    // White noise is the worst case for overshoot between samples: its reconstructed waveform
+    // peaks far above its samples (this generator's reaches 1.8x, over full scale at 0.75
+    // amplitude), so it plays at 0.5, where a TruePeak scan of the same noise reads 0.90: under
+    // the limiter's ceiling, so even the accurate between-samples estimate finds nothing to
+    // limit, and every sample comes out bit-exact whatever the block sizes.
+    for (float& v : in) v = (float)(((seed = seed * 1664525u + 1013904223u) >> 8) / 16777216.0 * 1.0 - 0.5);
     out = in;
     for (size_t at = 0, block = 1; at < rate; at += block, block = block * 3 % 1021 + 1)
         quiet.Process(out.data() + at * 2, std::min<size_t>(block, rate - at));
@@ -789,18 +792,24 @@ void TestPeakLimiter() {
         if (i - lag != 2400 && i - lag != 2401) step = std::max(step, std::fabs(spike[i * 2] - spike[(i - 1) * 2]));
     Check(spikeMax <= 1.0f && step < 0.02f, L"LIMITER click: max %.4f, largest step elsewhere %.4f", spikeMax, step);
 
-    // A 12 kHz tone whose peaks fall between samples: its samples sit at 0.85, under the ceiling, but
-    // the waveform reaches 1.2, so it is turned down rather than left to clip after conversion.
+    // A 12 kHz tone whose peaks fall between samples: its samples sit at 0.85, under the ceiling,
+    // but the waveform reaches 1.2, past full scale. The 4-point estimate reads only 1.06 of it,
+    // so near the ceiling the limiter re-reads with the scanner's FIR and lands the tone at the
+    // level its true peak requires (within the FIR's fraction of a percent), in uneven chunks.
     PeakLimiter between;
     between.Configure(rate);
     std::vector<float> hidden(rate / 10 * 2);
     for (size_t i = 0; i < hidden.size() / 2; ++i)
         hidden[i * 2] = hidden[i * 2 + 1] = (float)(1.2 * std::sin(pi / 2 * i + pi / 4));
-    between.Process(hidden.data(), hidden.size() / 2);
+    for (size_t at = 0, block = 1; at < hidden.size() / 2; at += block, block = block * 3 % 211 + 1)
+        between.Process(hidden.data() + at * 2, std::min<size_t>(block, hidden.size() / 2 - at));
     float hiddenPeak = 0;
     for (size_t i = hidden.size() / 2; i < hidden.size(); ++i) hiddenPeak = std::max(hiddenPeak, std::fabs(hidden[i]));
-    Check(hiddenPeak < 0.8f, L"LIMITER catches peaks between samples: a tone sampled at 0.85 peaking at 1.2 plays at %.3f",
-          hiddenPeak);
+    const float expected = (float)(1.2 * std::sin(pi / 4)) * (float)(0.96605 / 1.2);
+    Check(hiddenPeak < 0.7f && std::fabs(hiddenPeak - expected) < 0.01f,
+          L"LIMITER catches peaks between samples: a tone sampled at 0.85 with a 1.2 true peak "
+          L"plays at %.3f (its true peak asks %.3f), not the %.3f a half-sample estimate leaves",
+          hiddenPeak, expected, (float)(0.96605 * 1.2 * std::sin(pi / 4) / 1.0606));
 
     batch.Next(L"the production limiter preserves headphone reserves and leaves audio below the reserve "
                L"ceiling bit-exact");
@@ -1027,6 +1036,42 @@ void TestReplayGainModel() {
     app::UpdateAlbumGains({a});
     Check(g_lib[a].rgTrackGain == kNoGain && g_lib[b].rgAlbumGain == kNoGain && !g_lib[b].rgAlbumPeak,
           L"RG clearing one measurement invalidates the album gain of its measured siblings");
+    // A lifted album plays at one gain: the member whose peak leaves the least room sets it for
+    // all of them, so the album keeps its balance and a gapless join between its tracks never
+    // steps. Track mode still lifts each track as far as its own peak allows.
+    batch.Next(L"RG album mode shares one peak limit across the album, after a restart too; track mode "
+               L"keeps each track's own");
+    const ReplayGainMode mode = g.rgMode;
+    g.rgOn = true;
+    g.rgKeep = 0.4f;
+    g.rgMode = ReplayGainMode::Album;
+    auto lifted = [&](const wchar_t* name, int16_t gain, float peak) {
+        TrackId id = g_lib.Add(std::wstring(L"C:\\RgRoom\\") + name + L".flac");
+        g_lib[id].durationMs = 200000;
+        g_lib[id].rgTrackGain = gain;
+        g_lib[id].rgTrackPeak = EncodeReplayPeak(peak);
+        g_lib[id].rgHigh = high(1.0);
+        g_lib[id].flags |= Track::kRgScanned | Track::kRgTruePeak;
+        return id;
+    };
+    const TrackId calm = lifted(L"calm", 800, 0.25f), swell = lifted(L"swell", 700, 0.7f);
+    app::UpdateAlbumGains({calm});
+    // swell's peak, plus the 3 dB its isolated peak may be limited, is the album's limit.
+    const double swellRoom = 3.0 - 20 * std::log10(0.7);
+    const double calmAlbum = db(calm), swellAlbum = db(swell);
+    app::ForgetAlbumDynamics(true);
+    uint32_t revision = g_lib.Revision() + 1;
+    replaygain::RefreshAlbums(revision);
+    const double calmRestored = db(calm);
+    g.rgMode = ReplayGainMode::Track;
+    const double calmTrack = db(calm), swellTrack = db(swell);
+    Check(g_lib[calm].rgAlbumGain > 700 && std::fabs(calmAlbum - swellAlbum) < 0.01 &&
+              std::fabs(swellAlbum - swellRoom) < 0.05 && std::fabs(calmRestored - calmAlbum) < 0.01 &&
+              std::fabs(calmTrack - 8.0) < 0.01 && std::fabs(swellTrack - swellRoom) < 0.05,
+          L"RG album %+.2f dB: calm %+.2f and swell %+.2f (both %+.2f), after restart %+.2f; track mode %+.2f "
+          L"(+8) and %+.2f", g_lib[calm].rgAlbumGain / 100.0, calmAlbum, swellAlbum, swellRoom, calmRestored,
+          calmTrack, swellTrack);
+    g.rgMode = mode;
     g.rgOn = on;
     g.rgKeep = keep;
     g.rgPreamp = preamp;
@@ -2073,6 +2118,26 @@ void TestEffects() {
         for (float sample : rendered) safeRise &= std::isfinite(sample) && std::fabs(sample) < 0.98f;
     }
     Check(safeRise, L"volume rise with loudness compensation avoids hard clipping with ReplayGain, both EQ types and night mode");
+
+    // A volume change glides over the same ~10 ms at any output rate, so a high-rate device doesn't
+    // turn it into a near-step that zippers.
+    batch.Next(L"VOLUME glides over the same time at 44.1, 48 and 192 kHz");
+    testlog::Cases glides;
+    for (unsigned glideRate : {44100u, 48000u, 192000u}) {
+        std::vector<float> level((size_t)glideRate / 4 * 2, 0.5f);
+        RenderEffects step;
+        step.volumeChangeFrame = glideRate / 20;
+        step.volumeAfter = 0.5f;
+        auto rendered = RenderPlayerPcm(level.data(), level.size() / 2, glideRate, EqSettings{}, false, 1, 0, &step);
+        // Frames until the gain has covered 1 - 1/e of the way from 1 to 0.5: one time constant.
+        size_t frames = step.volumeChangeFrame;
+        const float mark = 0.5f * (0.5f + 0.5f * (float)std::exp(-1.0));
+        while (frames < rendered.size() / 2 && rendered[frames * 2] > mark) ++frames;
+        const double seconds = (double)(frames - step.volumeChangeFrame) / glideRate;
+        glides.Add(std::fabs(seconds - 1.0 / 96) < 0.0003,
+                   std::to_wstring(glideRate) + L" Hz: " + std::to_wstring(seconds * 1000) + L" ms");
+    }
+    Check(glides.Passed(), L"VOLUME glide time constant is about 10.4 ms at every output rate%ls", glides.failed.c_str());
 
     // Night mode: lifts a quiet passage, softens a loud one quickly, leaves near-silence alone. The
     // levels are the detector's (as played before the 0.5 volume); left and right are in quadrature, so

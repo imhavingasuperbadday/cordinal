@@ -166,11 +166,38 @@ void TestResampler() {
                 }
                 exact &= memcmp(actual + 1, expected, sizeof expected) == 0 && index == referenceIndex &&
                          numerator == referenceNum && actual[0] == 123 && actual[frames * 2 + 1] == 123;
+                if (denominator > 256) continue;
+                // Exact rows: only rearranged, so each phase uses its own row unblended.
+                auto laid = table;
+                nativeaudio::AudioResampleLayoutAvx2(laid.data(), taps, denominator);
+                index = referenceIndex = taps / 2 - 1;
+                numerator = referenceNum = denominator - 1;
+                std::fill_n(actual, frames * 2 + 2, 123.0f);
+                nativeaudio::AudioResampleAvx2(history.data(), laid.data(), taps, frames, 1, remainder, denominator,
+                                             index, numerator, actual + 1);
+                for (unsigned frame = 0; frame < frames; ++frame) {
+                    const float* row = table.data() + referenceNum * taps;
+                    float a[8]{}, b[8]{};
+                    for (unsigned k = 0; k < taps; k += 8) for (unsigned lane = 0; lane < 8; ++lane) {
+                        const unsigned tap = k + lane / 2;
+                        const size_t at = (referenceIndex - (taps / 2 - 1)) * 2 + k * 2 + lane;
+                        a[lane] = std::fma(history[at], row[tap], a[lane]);
+                        b[lane] = std::fma(history[at + 8], row[tap + 4], b[lane]);
+                    }
+                    for (unsigned c = 0; c < 2; ++c)
+                        expected[frame * 2 + c] = ((a[c] + b[c]) + (a[c + 4] + b[c + 4])) +
+                                                  ((a[c + 2] + b[c + 2]) + (a[c + 6] + b[c + 6]));
+                    referenceNum += remainder; ++referenceIndex;
+                    if (referenceNum >= denominator) { referenceNum -= denominator; ++referenceIndex; }
+                }
+                exact &= memcmp(actual + 1, expected, sizeof expected) == 0 && index == referenceIndex &&
+                         numerator == referenceNum && actual[0] == 123 && actual[frames * 2 + 1] == 123;
             }
         }
-        batch.Next(L"RESAMPLE prepared and interpolated AVX2 phases preserve exact FMA results, cursor and "
-                   L"output guards");
-        Check(exact, L"RESAMPLE prepared and interpolated AVX2 phases preserve exact FMA results, cursor and output guards");
+        batch.Next(L"RESAMPLE exact, prepared and interpolated AVX2 phases preserve exact FMA results, cursor "
+                   L"and output guards");
+        Check(exact, L"RESAMPLE exact, prepared and interpolated AVX2 phases preserve exact FMA results, cursor and "
+              L"output guards");
     } else testlog::Skip(L"RESAMPLE exact AVX2 phase comparison requires AVX2/FMA");
     batch.Next(L"RESAMPLE chunked pushes, length, tone SNR and stereo DC gain hold at every rate pair");
     const unsigned in = 44100, out = 48000;
@@ -248,8 +275,9 @@ void TestResampler() {
           pending.failed.c_str());
 
     batch.Next(L"RESAMPLE preserves the passband and rejects aliases and images at common and extreme rate pairs");
-    testlog::Cases passband, stopband;
-    double worstSnr = 200, worstRejection = 200, worstGain = 0;
+    testlog::Cases passband, stopband, exactPairs;
+    constexpr double kExactSnr = 115, kExactRejection = 118;  // measured 119.5 and 122.3 dB
+    double worstSnr = 200, worstRejection = 200, worstGain = 0, exactSnr = 200, exactRejection = 200;
     for (auto rates : {std::pair{8000u,48000u}, std::pair{44100u,48000u}, std::pair{48000u,44100u}, std::pair{44100u,96000u},
                        std::pair{96000u,48000u}, std::pair{192000u,48000u}, std::pair{48000u,8000u},
                        std::pair{192000u,8000u}, std::pair{65792u,65536u}, std::pair{65536u,65792u}}) {
@@ -257,6 +285,11 @@ void TestResampler() {
         const std::wstring pair = std::to_wstring(rates.first) + L"->" + std::to_wstring(rates.second);
         Resampler sampler;
         sampler.Init(rates.first, rates.second);
+        // 44.1 <-> 48 kHz and whole-number ratios have few enough phases to get exact rows.
+        const bool exactPhases = sampler.ExactPhases();
+        const bool expectExact = rates.first % rates.second == 0 || rates.second % rates.first == 0 ||
+                                 (low == 44100 && std::max(rates.first, rates.second) == 48000);
+        exactPairs.Add(exactPhases == expectExact, pair + (exactPhases ? L" exact" : L" interpolated"));
         // Compare to an analytic stereo tone, rather than another implementation of the filter.
         // Trim both ends so starting and flushing the stream do not count as frequency response.
         auto measure = [&](double hz, bool reject) {
@@ -290,13 +323,16 @@ void TestResampler() {
             if (reject) {
                 const double db = -10 * std::log10(std::max(1e-30, power / std::max(1.0, count * 0.15625)));
                 worstRejection = std::min(worstRejection, db);
-                stopband.Add(finite && count > 0 && db > 90, name + L" rejection " + std::to_wstring(db) + L" dB");
+                if (exactPhases) exactRejection = std::min(exactRejection, db);
+                stopband.Add(finite && count > 0 && db > (exactPhases ? kExactRejection : 90),
+                             name + L" rejection " + std::to_wstring(db) + L" dB");
             } else {
                 const double snr = 10 * std::log10(signal / std::max(1e-30, error));
                 const double db = 10 * std::log10(std::max(1e-30, power / std::max(1e-30, signal)));
                 worstSnr = std::min(worstSnr, snr);
+                if (exactPhases) exactSnr = std::min(exactSnr, snr);
                 worstGain = std::max(worstGain, std::abs(db));
-                passband.Add(finite && count > 0 && snr > 85 && std::abs(db) < 0.01,
+                passband.Add(finite && count > 0 && snr > (exactPhases ? kExactSnr : 85) && std::abs(db) < 0.01,
                              name + L" SNR " + std::to_wstring(snr) + L" dB, gain " + std::to_wstring(db) + L" dB");
             }
         };
@@ -305,8 +341,11 @@ void TestResampler() {
             for (double fraction : {0.5, 0.51, 0.55, 0.65, 0.9})
                 if (rates.second * fraction < rates.first * 0.5) measure(rates.second * fraction, true);
     }
-    fwprintf(g_log, L"  frequency response: worst passband SNR %.1f dB, gain error %.5f dB, rejection %.1f dB\n",
-             worstSnr, worstGain, worstRejection);
+    fwprintf(g_log, L"  frequency response: worst passband SNR %.1f dB, gain error %.5f dB, rejection %.1f dB; "
+             L"exact-phase pairs %.1f dB SNR, %.1f dB rejection\n",
+             worstSnr, worstGain, worstRejection, exactSnr, exactRejection);
+    Check(exactPairs.Passed(), L"RESAMPLE 44.1/48 kHz and whole-number ratios use exact phases, others interpolate%ls",
+          exactPairs.failed.c_str());
     Check(passband.Passed(), L"RESAMPLE passband through 90%% of Nyquist: worst SNR %.1f dB, gain error %.4f dB%ls",
           worstSnr, worstGain, passband.failed.c_str());
     Check(stopband.Passed(), L"RESAMPLE stopband from Nyquist: worst rejection %.1f dB%ls",

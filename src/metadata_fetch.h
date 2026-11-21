@@ -270,6 +270,7 @@ struct Settings {
     bool lyrics[kLyricsSources] = {};  // per lyrics provider, all off
     bool artistInfo = false;           // MusicBrainz and Wikipedia for Artist info...
     bool albumTags = false;            // MusicBrainz for Tag album from MusicBrainz
+    bool saveMusic = false;            // Save music from the web (webfetch.h)
 };
 Settings& Config();
 std::vector<CoverSource> CoverOrder();  // the enabled providers, the preferred one first

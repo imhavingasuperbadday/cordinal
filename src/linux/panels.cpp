@@ -236,11 +236,21 @@ const Ops kExportOps{
     .wheel = ExportPanelWheel,
     .key = ExportPanelKey,
 };
+const Ops kWebFetchOps{
+    .draw = DrawWebFetchPanel,
+    .mouseDown = [](float x, float y, int) { WebFetchPanelMouseDown(x, y); },
+    .wheel = WebFetchPanelWheel,
+    .key = WebFetchPanelKey,
+    .text = WebFetchPanelText,
+    .wantsText = WebFetchPanelWantsText,
+    .close = WebFetchPanelClose,
+    .typing = true,
+};
 
 const Ops* const kOps[] = {
     nullptr, &kEqOps, &kHeadphonesOps, &kTagsOps, &kPrefsOps, &kRulesOps, &kOrganizeOps, &kCopyOps, &kListenBrainzOps,
     &kFormatOps, &kDeviceOps, &kPointsOps, &kReviewOps, &kPaletteOps, &kLayoutOps, &kPacksOps, &kHelpersOps, &kGamesOps,
-    &kEditionsOps, &kCoversOps, &kArtistOps, &kExportOps, &kAlbumOps, &kKeysOps, &kComebackOps, &kAlbumTagOps, &kDuplicatesOps, &kConvertOps,
+    &kEditionsOps, &kCoversOps, &kArtistOps, &kExportOps, &kAlbumOps, &kKeysOps, &kComebackOps, &kAlbumTagOps, &kDuplicatesOps, &kConvertOps, &kRipOps, &kWebFetchOps,
 };
 static_assert(std::size(kOps) == (size_t)Kind::Count);
 
@@ -371,6 +381,13 @@ void ShowExportPanel() {
 void ShowArtistPanel() {
     if (g_kind != Kind::Artist) ClosePanel();
     g_kind = Kind::Artist;
+    g.redraw = true;
+}
+
+void ShowWebFetchPanel() {
+    if (g_kind != Kind::WebFetch) ClosePanel();
+    g_kind = Kind::WebFetch;
+    SDL_StartTextInput(g.window);
     g.redraw = true;
 }
 

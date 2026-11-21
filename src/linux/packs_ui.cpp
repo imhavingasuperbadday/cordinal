@@ -293,6 +293,11 @@ int FindCommand(const std::vector<PaletteCommand>& commands, const std::wstring&
     // Keep existing pack shortcuts valid after the playback-order command was renamed.
     if (want == L"keep playing like this (radio)" || want == L"playback>keep playing like this (radio)")
         want.erase(want.size() - wcslen(L" (radio)"));
+    for (const ui::MovedCommand& m : ui::kMovedToLayoutMenu)  // from View to the Layout menu
+        if (want.rfind(m.from, 0) == 0) {
+            want = m.to + want.substr(wcslen(m.from));
+            break;
+        }
     int found = -1;
     for (size_t i = 0; i < commands.size(); ++i) {
         std::wstring label = CommandKey(compat::Widen(commands[i].label.c_str()));
@@ -729,20 +734,21 @@ std::vector<std::wstring> PackLayoutNames() {
     return names;
 }
 
-void ApplyPackLayout(size_t index) {
-    if (index >= g_layouts.size()) return;
-    const auto& values = g_layouts[index]->values;
+// The words a pack's layout.ini uses for the parts hiddenParts holds, bit by bit.
+const wchar_t* const kLayoutPartKeys[] = {L"transport", L"order", L"waveform", L"times", L"volume",
+                                          L"now_playing", L"tabs", L"search", L"view_buttons", L"status_bar"};
+
+// A layout in a pack's layout.ini words, which ui_spec.h's presets and the saved layouts use too. A part
+// it leaves out keeps its default; 0, no, off or false hides one.
+WindowLayout LayoutOfValues(const IniSection& values) {
     auto flag = [&](const wchar_t* key, bool def) {
         const auto* v = values.Get(key);
         return !v || v->empty() ? def : !(*v == L"0" || _wcsicmp(v->c_str(), L"no") == 0 ||
             _wcsicmp(v->c_str(), L"off") == 0 || _wcsicmp(v->c_str(), L"false") == 0);
     };
-    const wchar_t* keys[] = {L"transport", L"order", L"waveform", L"times", L"volume",
-        L"now_playing", L"tabs", L"search", L"view_buttons", L"status_bar"};
-    g.settings.defaultLayout = WindowLayout{};
-    for (unsigned i = 0; i < std::size(keys); ++i)
-        if (!flag(keys[i], true)) g.settings.defaultLayout.hiddenParts |= 1u << i;
-    auto& l = g.settings.defaultLayout;
+    WindowLayout l;
+    for (unsigned i = 0; i < std::size(kLayoutPartKeys); ++i)
+        if (!flag(kLayoutPartKeys[i], true)) l.hiddenParts |= 1u << i;
     l.points = flag(L"points", false);
     l.waveOwnRow = flag(L"waveform_row", false);
     l.largeCover = flag(L"large_cover", false);
@@ -750,7 +756,7 @@ void ApplyPackLayout(size_t index) {
     l.panelsLeft = flag(L"side_panels_left", false);
     l.menuBar = flag(L"menu_bar", true);
     l.tabCounts = flag(L"tab_counts", false);
-    l.statusDetails = flag(L"status_details", false);
+    l.statusDetails = flag(L"status_details", true);
     l.hints = flag(L"hints", false);
     if (const auto* dock = values.Get(L"player")) {
         const wchar_t* docks[] = {L"top", L"bottom", L"left", L"right"};
@@ -761,9 +767,43 @@ void ApplyPackLayout(size_t index) {
         for (int i = 0; i < 3; ++i)
             if (_wcsicmp(size->c_str(), sizes[i]) == 0) l.waveSize = i;
     }
+    return l;
+}
+
+// A layout in those words, where ';' may stand for the line breaks (a saved layout's line).
+WindowLayout LayoutOfText(std::string text) {
+    std::replace(text.begin(), text.end(), ';', '\n');
+    std::vector<IniSection> sections = ParseIni(text);
+    return sections.empty() ? WindowLayout{} : LayoutOfValues(sections.front());
+}
+
+// `l` in the same words, as the starter pack's layout.ini and a saved layout write it.
+std::wstring LayoutText(const WindowLayout& l) {
+    const wchar_t* docks[] = {L"top", L"bottom", L"left", L"right"};
+    const wchar_t* sizes[] = {L"slim", L"medium", L"tall"};
+    auto bit = [](bool on) { return std::wstring(on ? L"1" : L"0"); };
+    std::wstring text = L"player = " + std::wstring(docks[std::clamp(l.dock, 0, 3)]) + L"\nwaveform size = " +
+                        sizes[std::clamp(l.waveSize, 0, 2)] + L"\nwaveform row = " + bit(l.waveOwnRow) +
+                        L"\nside panels left = " + bit(l.panelsLeft) + L"\n";
+    for (unsigned i = 0; i < std::size(kLayoutPartKeys); ++i)
+        text += std::wstring(kLayoutPartKeys[i]) + L" = " + bit(!(l.hiddenParts >> i & 1)) + L"\n";
+    const std::pair<const wchar_t*, bool> flags[] = {{L"large_cover", l.largeCover}, {L"points", l.points}, {L"up_next", l.upNext},
+        {L"menu_bar", l.menuBar}, {L"tab_counts", l.tabCounts}, {L"status_details", l.statusDetails}, {L"hints", l.hints}};
+    for (const auto& [key, on] : flags) text += std::wstring(key) + L" = " + bit(on) + L"\n";
+    return text;
+}
+
+std::vector<WindowLayout> PackLayouts() {
+    std::vector<WindowLayout> out;
+    for (auto layout : g_layouts) out.push_back(LayoutOfValues(layout->values));
+    return out;
+}
+
+void ApplyPackLayout(size_t index) {
+    if (index >= g_layouts.size()) return;
     // The live layout is the pack's from here on: customizing it afterwards is the user's own
     // change, exactly as it is after a Preferences edit.
-    g.settings.layout = l;
+    g.settings.defaultLayout = g.settings.layout = LayoutOfValues(g_layouts[index]->values);
     g.settings.bandWaveSize = 0;
     SaveSettings();
     g.redraw = true;
@@ -959,20 +999,7 @@ std::wstring MakeStarterPack() {
         setup.columns += (setup.columns.empty() ? L"" : L", ") + name;
     }
     setup.eq = g.settings.eq.gains;
-    const WindowLayout& l = g.settings.layout;
-    const wchar_t* docks[] = {L"top", L"bottom", L"left", L"right"};
-    const wchar_t* sizes[] = {L"slim", L"medium", L"tall"};
-    const wchar_t* parts[] = {L"transport", L"order", L"waveform", L"times", L"volume",
-                              L"now_playing", L"tabs", L"search", L"view_buttons", L"status_bar"};
-    auto bit = [](bool on) { return std::wstring(on ? L"1" : L"0"); };
-    setup.layout = L"player = " + std::wstring(docks[std::clamp(l.dock, 0, 3)]) + L"\nwaveform size = " +
-                   sizes[std::clamp(l.waveSize, 0, 2)] + L"\nwaveform row = " + bit(l.waveOwnRow) +
-                   L"\nside panels left = " + bit(l.panelsLeft) + L"\n";
-    for (unsigned i = 0; i < std::size(parts); ++i)
-        setup.layout += std::wstring(parts[i]) + L" = " + bit(!(l.hiddenParts >> i & 1)) + L"\n";
-    const std::pair<const wchar_t*, bool> flags[] = {{L"large_cover", l.largeCover}, {L"points", l.points}, {L"up_next", l.upNext},
-        {L"menu_bar", l.menuBar}, {L"tab_counts", l.tabCounts}, {L"status_details", l.statusDetails}, {L"hints", l.hints}};
-    for (const auto& [key, on] : flags) setup.layout += std::wstring(key) + L" = " + bit(on) + L"\n";
+    setup.layout = LayoutText(g.settings.layout);
     for (const auto& pl : g.playlists)
         if (pl.kind == PlaylistKind::Auto) setup.autoPlaylists.push_back({pl.name, pl.rules});
     bool ok = fs::create_directories(temp / "sounds", ec) && !ec;

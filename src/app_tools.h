@@ -33,6 +33,13 @@ void UndoConversion();
 bool ConvertCommand(int id);
 void UpdateConvertMenu(HMENU m);
 void StopConverter();
+// Library > Rip CD... (app_rip.cpp).
+void ShowRipCd();
+bool RipBusy();
+bool RipDialogMessage(MSG* msg);
+void OnRipMessage(WPARAM wp, LPARAM lp);
+bool RipCommand(int id);
+void StopRipper();
 // Classic iPod sync (app_ipod.cpp).
 void ShowIpod();
 bool IpodDialogMessage(MSG* msg);
@@ -68,6 +75,11 @@ void OnlineSettingsChanged();  // Preferences > Online changed a source
 void ShowArtistInfo();
 bool ArtistInfoDialogMessage(MSG* msg);
 void StopArtistInfo();
+// Save music from the web (app_webfetch.cpp): pasted SoundCloud, YouTube and Spotify
+// links downloaded into the library on a worker.
+void ShowWebFetch();
+bool WebFetchDialogMessage(MSG* msg);
+void StopWebFetch();
 // Copy to folder or device (app_copy.cpp).
 bool CopyCommand(int id);
 bool CopyBusy();

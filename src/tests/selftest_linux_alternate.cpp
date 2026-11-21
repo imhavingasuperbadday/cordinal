@@ -74,10 +74,11 @@ int CheckLinuxAlternateThemes() {
     g.settings.theme = ThemeMode::Light;
     check(!AlternateMode() && &ActiveColumnTypes() == &g.settings.columns && !FountainStyleShown(),
         "normal themes keep their own columns and never activate private layouts");
-    const auto viewMenu = BarMenu(5);
-    const bool appearanceItem = std::any_of(viewMenu.begin(), viewMenu.end(),
+    const auto layoutMenu = BarMenu(ui::kLayoutMenu);
+    const auto waveform = std::find_if(layoutMenu.begin(), layoutMenu.end(), [](const MenuItem& item) { return item.label == "Waveform"; });
+    const bool appearanceItem = waveform != layoutMenu.end() && std::any_of(waveform->sub.begin(), waveform->sub.end(),
         [](const MenuItem& item) { return item.label == "Waveform appearance" && !item.sub.empty(); });
-    check(appearanceItem == kExtraThemes, "View offers waveform appearance only when its private controls exist");
+    check(appearanceItem == kExtraThemes, "Layout > Waveform offers its appearance only when its private controls exist");
     // Apollo is part of every build.
     const auto baseColumns = g.settings.columns;
     for (float factor : {1.f, 2.f}) {

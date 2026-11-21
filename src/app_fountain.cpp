@@ -1,7 +1,7 @@
 // The player's waveform as a Dark Fountain, and the waveform colors of every player position.
 //
 // At every player position (app_custom.cpp), the seek bar can be drawn three ways
-// (View > Customize layout > Waveform > Waveform style):
+// (Layout > Waveform > Waveform style):
 //   Bars            the plain waveform (app_waveform.cpp)
 //   Fountain bars   the waveform's own bars in the fountain's light: the hue flows up the column,
 //                   the bars ripple and sparks rise. Nothing from the game is needed.

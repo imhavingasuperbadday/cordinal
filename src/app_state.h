@@ -71,6 +71,7 @@ constexpr UINT WM_APP_IMPORT = WM_APP + 8;
 constexpr UINT WM_APP_ART = WM_APP + 9;
 constexpr UINT WM_APP_CONVERT = WM_APP + 10;  // wParam 1: lParam is a ConvertResult; else lParam = files started
 constexpr UINT WM_APP_COPY = WM_APP + 11;     // wParam 1: lParam is a CopyResult; else lParam = the plan index started
+constexpr UINT WM_APP_RIP = WM_APP + 12;      // wParam 1: lParam is a cdrip::Result; else lParam = track << 8 | percent
 // How long conversions stay undoable (Preferences > Conversion), in days, in the order offered.
 constexpr unsigned kConvertMemoryDays[] = {1, 3, 7, 49};
 // Playback speed (pitch follows), tempo (pitch stays) and reverb amount, in menu order.
@@ -143,7 +144,7 @@ enum : int {
     IDM_EQUALIZER, IDM_RG_SCAN_SEL, IDM_RG_SCAN_PL, IDM_RG_ENABLE,
     IDM_RG_AUTO_SCAN, IDM_RG_CANCEL, IDM_RG_CLEAR, IDM_RG_WRITE_TAGS,
     IDM_LIBRARY_FOLDERS, IDM_RESCAN, IDM_REMOVE_MISSING, IDM_RECENT_ADDITIONS, IDM_INBOX_ACCEPT, IDM_INBOX_ACCEPT_ALL, IDM_EXCLUDE,
-    IDM_COLUMNS_RESET, IDM_QUEUE_NEXT, IDM_QUEUE_ADD, IDM_QUEUE_CLEAR, IDM_NEW_AUTO, IDM_EDIT_AUTO, IDM_ORGANIZE, IDM_ORGANIZE_UNDO,
+    IDM_COLUMNS_RESET, IDM_QUEUE_NEXT, IDM_QUEUE_ADD, IDM_QUEUE_CLEAR, IDM_NEW_AUTO, IDM_EDIT_AUTO, IDM_ORGANIZE, IDM_ORGANIZE_UNDO, IDM_WEBFETCH,
     IDM_TAG_UNDO, IDM_OUTPUT_SHARED, IDM_OUTPUT_EXCLUSIVE,
     IDM_SOUND_EFFECTS, IDM_FORMAT, IDM_TASKBAR_PROGRESS, IDM_GAME_NAME_THAT_TRACK, IDM_GAME_WHICH_CAME_FIRST,
     IDM_POINTS, IDM_REVIEW, IDM_LISTENBRAINZ, IDM_STEAM, IDM_DUPLICATES, IDM_MUTE,
@@ -197,6 +198,8 @@ enum : int {
     IDM_CONVERT_MEMORY_BASE = 3550,  // + kConvertMemoryDays index
     // Copy to folder or device (app_copy.cpp): the selection or playlist, the playlist tab's, Cancel.
     IDM_COPY_TO = 3560, IDM_COPY_PL, IDM_COPY_CANCEL,
+    // Library > Rip CD... and its Cancel (app_rip.cpp).
+    IDM_RIP_CD = 3570, IDM_RIP_CANCEL,
     // Packs (app_packs.cpp): View > Packs, one item per pack, and the pack themes in View > Theme.
     IDM_PACK_BASE = 3600,        // + pack index, up to kMaxPacks
     IDM_PACKS_FOLDER = 3680, IDM_PACKS_RELOAD, IDM_PACKS_REPORT, IDM_PACKS_NEW,
@@ -228,6 +231,10 @@ enum : int {
     // computer again, searching again, and the speakers the last search found.
     IDM_SPEAKERS = 4350, IDM_SPEAKER_HERE, IDM_SPEAKER_SEARCH,
     IDM_SPEAKER_BASE = 4360,  // + found speaker index, up to kMaxSpeakers
+    // The Layout menu's own starts (app_custom.cpp): a blank canvas, and the layouts you saved.
+    IDM_LAYOUT_BLANK = 4400, IDM_LAYOUT_SAVE,
+    IDM_LAYOUT_SAVED_BASE = 4410,   // + saved layout, up to ui::kSavedLayouts
+    IDM_LAYOUT_FORGET_BASE = 4420,  // + saved layout
 };
 constexpr int kMaxPacks = 64, kMaxPackThemes = 64, kMaxPackAutoPlaylists = 64, kMaxPackColumnSets = 30;
 constexpr int kMaxHelpers = 32, kMaxHelperVisualizers = 16, kMaxHelperTools = 40;
@@ -258,9 +265,11 @@ struct MainLayout {
     bool nowPlaying = true, largeCover = false, points = false;
     bool tabs = true, search = true, views = true, upNext = false, panelsLeft = false;
     bool status = true, menuBar = true;
-    // Extras that crowd the window, off unless asked for: the item count after each tab's name,
-    // ReplayGain / EQ / output in the status bar, and how-to hints in the now playing line.
-    bool tabCounts = false, statusDetails = false, hints = false;
+    // ReplayGain / EQ / output in the status bar: on, since they are the buttons that switch them.
+    bool statusDetails = true;
+    // Extras that crowd the window, off unless asked for: the item count after each tab's name and
+    // how-to hints in the now playing line.
+    bool tabCounts = false, hints = false;
     bool operator==(const MainLayout&) const = default;
 };
 
@@ -460,6 +469,7 @@ struct App {
     // left out of the library; conversions stay undoable for kConvertMemoryDays[convertMemory].
     bool convertRecycle = true, convertShowOriginals = false;
     uint8_t convertMemory = 3;
+    float ripOffset = 0;  // the CD drive's read offset in samples (Preferences > Conversion)
     ViewSize size = ViewSize::Normal;
     ViewSize defaultSize = ViewSize::Normal;
     bool defaultMiniPlayer = false;

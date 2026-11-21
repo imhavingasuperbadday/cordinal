@@ -140,7 +140,14 @@ void FinishScope(const std::wstring& scope, ScopeScan& st) {
         PlaySfx(Sfx::NewFiles);
     }
     if (!st.rootOk && st.initial) {
-        ShowMessage(L"Couldn't read " + scope + L"; its tracks were left as they were.");
+        // A folder that isn't there at all (an uninstalled game, an unplugged drive) is not a read
+        // error: say so, and where to remove it if it is gone for good.
+        const bool gone = std::any_of(st.unreachable.begin(), st.unreachable.end(), [&](const std::wstring& root) {
+            return CompareStringOrdinal(root.c_str(), -1, scope.c_str(), -1, TRUE) == CSTR_EQUAL;
+        });
+        ShowMessage(gone ? scope + L" isn't there anymore; its tracks were kept. If it's gone for good, remove it in "
+                                  L"Library %B8 Library folders."
+                           : L"Couldn't read all of " + scope + L"; its tracks were left as they were.");
     } else if ((!st.initial && (st.added || st.moved)) || st.missing) {
         std::wstring msg = L"Library: ";
         if (st.added) msg += std::to_wstring(st.added) + (g.settings.inboxEnabled ? L" new in the Inbox" : L" added");

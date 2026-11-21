@@ -108,6 +108,13 @@ void AudioResamplePrepareAvx2(float* table,unsigned taps,unsigned denominator) {
     }
     _mm256_zeroupper();
 }
+void AudioResampleLayoutAvx2(float* table,unsigned taps,unsigned rows) {
+    for (size_t at=0;at<(size_t)rows*taps;at+=8) {
+        __m256 row=_mm256_loadu_ps(table+at);
+        _mm256_storeu_ps(table+at,_mm256_castpd_ps(_mm256_permute4x64_pd(_mm256_castps_pd(row),0xD8)));
+    }
+    _mm256_zeroupper();
+}
 // Common rate pairs visit at most 256 rational phases. Their weights are already
 // interpolated, with the same FMA rounding, so convolution only loads one row.
 template<bool Prepared> static void ResampleAvx2(const float* history,const float* table,unsigned taps,size_t frames,unsigned step,unsigned remainder,

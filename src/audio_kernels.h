@@ -61,6 +61,8 @@ void AudioMpegSynthesis18Avx2(const float* in,float* history,unsigned& head,cons
 // denominator <= 256 ensures that no destination overwrites an unread source row.
 // taps must be a multiple of eight in both resampler kernels.
 void AudioResamplePrepareAvx2(float* table,unsigned taps,unsigned denominator);
+// The same layout for a table that already holds an exact row for each of `rows` (<= 256) phases.
+void AudioResampleLayoutAvx2(float* table,unsigned taps,unsigned rows);
 void AudioResampleAvx2(const float* history,const float* table,unsigned taps,size_t frames,unsigned step,unsigned remainder,
     unsigned denominator,size_t& index,uint64_t& numerator,float* output);
 // One WavPack decorrelation pass with a positive term (1-8, 17 or 18) over a stereo block of

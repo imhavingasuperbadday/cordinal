@@ -217,9 +217,11 @@ std::vector<MenuItem> BarMenu(int m) {
                 Item("Add everything in the Inbox", kAcceptAllInbox, {}, false,
                      std::any_of(g.playlists.begin(), g.playlists.end(), [](const Playlist& p) { return p.kind == PlaylistKind::Inbox; })), Separator(),
                 Item("Organize files...", kOrganize, {}, false, !OrganizeBusy()),
+                Item("Save music from the web...", kWebFetch),
                 Item("Undo last organize", kOrganizeUndo, {}, false, !OrganizeBusy()), Separator(),
                 Item("Convert...", kConvert, {}, false, !ConvertBusy() && !TagWriteBusy() && !OrganizeBusy()),
-                Item("Undo last conversion", kConvertUndo, {}, false, CanUndoConversion() && !ConvertBusy()), Separator(),
+                Item("Undo last conversion", kConvertUndo, {}, false, CanUndoConversion() && !ConvertBusy()),
+                Item("Rip CD...", kRipCd, {}, false, !RipBusy()), Separator(),
                 Item("Copy to folder or device...", kCopyTo, {}, false, !CopyBusy()),
                 Item("Sync to iPod...", kIpodSync, {}, false, !IpodBusy()), Separator(),
                 Submenu("Album editions", {Item("Group selected albums as editions", kGroupEditions, {}, false,
@@ -241,6 +243,7 @@ std::vector<MenuItem> BarMenu(int m) {
                 Item("Find duplicates...", kDuplicateAudio),
                 Item("Add Steam soundtracks", kSteam, {}, false, !g_playlistFileBusy && !g_playlistImport)};
             if (ConvertBusy()) items.push_back(Item("Cancel conversion", kCancelConvert));
+            if (RipBusy()) items.push_back(Item("Cancel rip", kCancelRip));
             if (CopyBusy()) items.push_back(Item("Cancel copy", kCancelCopy));
             if (IpodBusy()) items.push_back(Item("Cancel iPod sync", kCancelIpodSync));
             if (CoverFetchBusy()) items.push_back(Item("Cancel cover search", kCancelFetchCovers));
@@ -256,25 +259,51 @@ std::vector<MenuItem> BarMenu(int m) {
             themes.push_back(Separator());
             for (int t = (int)ThemeMode::Deltarune; t < ThemeTotal(); ++t)
                 if (ThemeAvailable((ThemeMode)t)) themes.push_back(Radio(Plain(ThemeInfo((ThemeMode)t).name), kTheme, t, (int)g.settings.theme == t));
-            std::vector<MenuItem> view = {Submenu("Theme", std::move(themes)), Item("Radio", kOpenRadio, "Ctrl+Shift+R"), Item("Lyrics panel", kLyrics, "Ctrl+L", LyricsShown()), Item("Up next", kQueuePanel, "Ctrl+Shift+Q", QueueShown()), Item("Artist info...", kArtistInfo), Item("Customize layout...", kLayout),
-                    Submenu("Window size", {Radio("Compact", kViewSize, 0, g.settings.size == ViewSize::Compact),
-                        Radio("Normal", kViewSize, 1, g.settings.size == ViewSize::Normal),
-                        Radio("Big mode plus", kViewSize, 2, g.settings.size == ViewSize::Spotlight),
-                        Radio("Big mode", kViewSize, 3, g.settings.size == ViewSize::Big)}), Submenu("Big mode panels", {Item("Library", kBigPanel, {}, BigPanelShown(0)),
-                        Radio("Now playing", kBigPanel, 1, BigPanelShown(1)),
-                        Radio("Up next", kBigPanel, 2, BigPanelShown(2)),
-                        Item("Reset panel layout", kBigReset)}), Item("Mini player", kMini, "Ctrl+Shift+M"), Item("Lightweight mode", kLightweight, "Ctrl+Shift+L", g.lightweight), Item("Packs...", kPacks), Item("Helpers...", kHelpers), Item("Command palette...", kPalette, "Ctrl+Shift+P"), Separator(), Item("Group tracks by album", kGroupAlbums, {}, g.settings.groupAlbums),
+            // The panels, the window's sizes, Big mode's panels and the mini player are in the Layout menu.
+            std::vector<MenuItem> view = {Submenu("Theme", std::move(themes)), Item("Radio", kOpenRadio, "Ctrl+Shift+R"), Item("Artist info...", kArtistInfo),
+                    Item("Lightweight mode", kLightweight, "Ctrl+Shift+L", g.lightweight), Item("Packs...", kPacks), Item("Helpers...", kHelpers), Item("Command palette...", kPalette, "Ctrl+Shift+P"), Separator(), Item("Group tracks by album", kGroupAlbums, {}, g.settings.groupAlbums),
                     Separator(), Item("Start on login", kStartOnLogin, {}, StartsOnLogin()), Separator(),
                     Submenu("Games and stats", {Item("Name That Track...", kNameThatTrack), Item("Which Came First...", kWhichCameFirst), Separator(),
                                                 Item("cordinal points...", kPoints), Item("Year in review...", kReview)})};
             if (!waybar::ConfigPath().empty())  // beside Start on login, only where Waybar is set up
                 view.insert(std::find_if(view.begin(), view.end(), [](const MenuItem& m) { return m.action == kStartOnLogin; }) + 1,
                             Item("Show on the top bar", kTopBar, {}, waybar::Shown()));
-            auto appearance = WaveAppearanceMenu();
-            if (!appearance.empty()) view.insert(view.begin() + 4, Submenu("Waveform appearance", std::move(appearance)));
             return view;
         }
-        case 6: return {Item("About cordinal", kAbout)};
+        case 6: {
+            // As the Windows build's Layout menu (app_custom.cpp): where to start, the player and its
+            // waveform, each part, then the window's other arrangements. Customize layout... is the same
+            // choices in a dialog.
+            const WindowLayout& l = g.settings.layout;
+            std::vector<MenuItem> items = LayoutStartItems();
+            items.push_back(Separator());
+            const char* docks[] = {"At the top", "At the bottom", "On the left", "On the right"};
+            std::vector<MenuItem> dock;
+            for (int i = 0; i < 4; ++i) dock.push_back(Radio(docks[i], kLayoutDock, i, l.dock == i));
+            items.push_back(Submenu("Player position", std::move(dock)));
+            const bool wave = !(l.hiddenParts & kPartWave);
+            std::vector<MenuItem> waveform{Radio("Slim", kLayoutWave, 0, l.waveSize == 0), Radio("Medium", kLayoutWave, 1, l.waveSize == 1),
+                                           Radio("Tall", kLayoutWave, 2, l.waveSize == 2), Separator(),
+                                           Item("On a line of its own", kLayoutWaveRow, {}, l.waveOwnRow, l.dock < 2 && wave)};
+            if (auto appearance = WaveAppearanceMenu(); !appearance.empty())
+                waveform.push_back(Submenu("Waveform appearance", std::move(appearance)));
+            items.push_back(Submenu("Waveform", std::move(waveform)));
+            items.push_back(Submenu("Show", LayoutShowItems()));
+            items.push_back(Item("Customize layout...", kLayout));
+            items.push_back(Separator());
+            items.push_back(Item("Up next", kQueuePanel, "Ctrl+Shift+Q", QueueShown()));
+            items.push_back(Submenu("Window size", {Radio("Compact", kViewSize, 0, g.settings.size == ViewSize::Compact),
+                Radio("Normal", kViewSize, 1, g.settings.size == ViewSize::Normal),
+                Radio("Big mode plus", kViewSize, 2, g.settings.size == ViewSize::Spotlight),
+                Radio("Big mode", kViewSize, 3, g.settings.size == ViewSize::Big)}));
+            items.push_back(Submenu("Big mode panels", {Item("Library", kBigPanel, {}, BigPanelShown(0)),
+                Radio("Now playing", kBigPanel, 1, BigPanelShown(1)),
+                Radio("Up next", kBigPanel, 2, BigPanelShown(2)),
+                Item("Reset panel layout", kBigReset)}));
+            items.push_back(Item("Mini player", kMini, "Ctrl+Shift+M"));
+            return items;
+        }
+        case 7: return {Item("About cordinal", kAbout)};
         default: return {};
     }
 }
@@ -548,6 +577,7 @@ void RunAction(const MenuItem& item) {
         case kConvertUndo: UndoConversion(); break;
         case kOrganize: OpenOrganize(SelectedTracks()); break;
         case kOrganizeUndo: UndoOrganize(); break;
+        case kWebFetch: OpenWebFetch(); break;
         case kCopyTo: {
             // The selection, or the whole playlist when nothing is selected.
             std::vector<TrackId> ids = SelectedTracks();
@@ -559,6 +589,8 @@ void RunAction(const MenuItem& item) {
         case kIpodSync: StartIpodSync(); break;
         case kCancelIpodSync: CancelIpodSync(); break;
         case kCancelConvert: CancelConversion(); break;
+        case kRipCd: OpenRipCd(); break;
+        case kCancelRip: CancelRip(); break;
         case kNewAuto: OpenRules(-1); break;
         case kEditAuto: OpenRules(g.active); break;
         case kChoice: {
@@ -642,6 +674,10 @@ void RunAction(const MenuItem& item) {
         case kBigReset: ResetBigPanels(); break;
         case kViewSize: SetViewSize((ViewSize)item.arg); break;
         case kLayout: OpenLayout(); break;
+        case kLayoutPreset: case kLayoutBlank: case kLayoutSave: case kLayoutSaved: case kLayoutForget:
+        case kLayoutDock: case kLayoutWave: case kLayoutWaveRow: case kLayoutPart: case kColumnBrowser:
+            RunLayoutAction(item.action, item.arg);
+            break;
         case kPacks: OpenPacks(); break;
         case kPackPlaylist: AddPackAutoPlaylist((size_t)item.arg); break;
         case kHelpers: OpenHelpers(); break;

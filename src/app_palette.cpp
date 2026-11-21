@@ -514,6 +514,13 @@ std::vector<int> RankMatches(const std::vector<std::wstring>& texts, const std::
     return result;
 }
 
+// Keys and packs saved before the Layout menu name its commands under View. `key` is a CommandKey.
+static std::wstring MovedToLayoutMenu(const std::wstring& key) {
+    for (const ui::MovedCommand& m : ui::kMovedToLayoutMenu)
+        if (key.rfind(m.from, 0) == 0) return m.to + key.substr(wcslen(m.from));
+    return key;
+}
+
 int MenuCommandByName(const std::wstring& name) {
     std::vector<Entry> saved = std::move(p.entries);  // the palette may be open
     Collect();
@@ -524,6 +531,7 @@ int MenuCommandByName(const std::wstring& name) {
     // Keys and packs saved before Edit > Reload selected metadata took the tags' name.
     if (want == L"reload selected metadata" || want == L"edit>reload selected metadata")
         want = L"edit>reload tags from files";
+    want = MovedToLayoutMenu(want);
     int found = 0;
     for (const Entry& e : p.entries) {
         // A setting that is a plain toggle runs its command, so a key bound to it keeps working

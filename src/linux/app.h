@@ -62,8 +62,13 @@ constexpr UINT WM_APP_GAME = WM_APP + 36;  // a game's clip or cover decoded (lP
 constexpr UINT WM_APP_FILE = WM_APP + 31;    // a file chosen for a dialog (wParam = what for, lParam = std::wstring*)
 constexpr UINT WM_APP_COLLECTION = WM_APP + 40;  // collection export/import progress, results and choices (collection_run.cpp)
 constexpr UINT WM_APP_ALBUMTAG = WM_APP + 42;  // a MusicBrainz album search finished (lParam owns it, albumtag_ui.cpp)
+constexpr UINT WM_APP_RIP = WM_APP + 44;  // Rip CD: a disc read (wParam 2), progress (0) or the finished rip (1), panel_rip.cpp
 constexpr UINT WM_APP_DUPLICATES = WM_APP + 43;  // a duplicate clean-up or its undo moved its files (duplicates_ui.cpp)
 constexpr UINT WM_APP_SPEAKERS = WM_APP + 41;  // network speakers a search found (lParam owns them, panel_setup.cpp)
+constexpr UINT WM_APP_WEBFETCH_ADDED = WM_APP + 45;    // a track joined the saving list (webfetch_ui.cpp)
+constexpr UINT WM_APP_WEBFETCH_UPDATED = WM_APP + 46;  // its state or percent changed (wParam = index)
+constexpr UINT WM_APP_WEBFETCH_NOTICE = WM_APP + 47;   // a line of progress for the status line
+constexpr UINT WM_APP_WEBFETCH_DONE = WM_APP + 48;     // the run finished, carrying its summary
 
 // How long a conversion can be undone, in days; the Windows build's kConvertMemoryDays.
 constexpr unsigned kConvertMemoryDays[] = {1, 3, 7, 49};
@@ -123,7 +128,7 @@ struct WindowLayout {
     unsigned hiddenParts = 0;
     int dock = 0, waveSize = 0;  // top, bottom, left, right; slim, medium, tall
     bool points = false, waveOwnRow = false, largeCover = false, upNext = false, panelsLeft = false;
-    bool menuBar = true, tabCounts = false, statusDetails = false, hints = false;
+    bool menuBar = true, tabCounts = false, statusDetails = true, hints = false;
     bool operator==(const WindowLayout&) const = default;
 };
 
@@ -144,6 +149,7 @@ struct Settings {
     std::string packThemeKey;    // "pack/theme" of the default theme when a pack provides it (resolved once the packs load)
     std::string packsOn;         // ids of the packs that are on, joined by |
     WindowLayout layout, defaultLayout;
+    std::string savedLayouts[ui::kSavedLayouts];  // Layout > Save this layout, in LayoutText's words on one line
     ViewSize size = ViewSize::Normal, defaultSize = ViewSize::Normal;
     bool lyricsPanel = false;    // the lyrics panel beside the track list (lyrics.cpp)
     bool timeRemaining = true;   // the time beside the seek bar counts down instead of showing the length
@@ -234,6 +240,11 @@ struct Settings {
     uint8_t convertFormat = 1;
     bool convertReplace = false, convertIntoFolder = false;
     std::wstring convertFolder;
+    // Library > Rip CD...: the format last chosen (FLAC, else .cord), the folder albums go in, and the
+    // CD drive's read offset in samples (Preferences > Conversion).
+    bool ripFlac = true;
+    std::wstring ripFolder;
+    int ripOffset = 0;
     // Library > Organize files: the folder last organized into and the naming pattern (empty: the
     // library's first folder and kDefaultOrganizePattern).
     std::wstring organizeFolder, organizePattern;
@@ -484,6 +495,12 @@ void CancelConversion();
 void SetConvertShowOriginals(bool on);
 void SetConvertMemory(unsigned index);
 void StopConverter();
+// panel_rip.cpp: Library > Rip CD..., its panel and its run on a worker.
+void OpenRipCd();
+bool RipBusy();
+void CancelRip();
+void OnRipMessage(WPARAM wp, LPARAM lp);
+void StopRipper();
 // A question with OK and Cancel over the window; true for OK.
 bool Confirm(const std::string& question, const char* title);
 
@@ -665,7 +682,12 @@ int PackColumnType(const std::string& key);
 std::vector<std::wstring> PackColumnSetNames();
 void ApplyPackColumnSet(size_t index);
 std::vector<std::wstring> PackLayoutNames();
+std::vector<WindowLayout> PackLayouts();  // the same, read
 void ApplyPackLayout(size_t index);
+// A layout in a pack's layout.ini words (ui_spec.h's presets, the blank canvas, a saved layout), and back.
+WindowLayout LayoutOfValues(const IniSection& values);
+WindowLayout LayoutOfText(std::string text);  // ';' may stand for its line breaks
+std::wstring LayoutText(const WindowLayout& l);
 bool PackGlobalKeysActive();
 void TickPackGlobalKeys();
 void StopPackGlobalKeys();

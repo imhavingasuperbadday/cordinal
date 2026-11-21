@@ -5,6 +5,7 @@
 
 #include <gpod/error.hpp>
 #include <gpod/fileops.hpp>
+#include <gpod/hash.hpp>
 #include <gpod/model.hpp>
 #include <gpod/paths.hpp>
 
@@ -389,6 +390,12 @@ SyncResult Sync(const std::vector<SourceTrack>& tracks, const path& mountpoint,
         }
     }
     return result;
+}
+
+std::array<uint8_t, 20> Sha1(std::string_view bytes) {
+    gpod::Sha1 sha;
+    sha.update(bytes.data(), bytes.size());
+    return sha.finish();
 }
 
 }  // namespace ipod

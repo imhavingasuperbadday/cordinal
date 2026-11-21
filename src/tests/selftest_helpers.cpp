@@ -7,6 +7,9 @@
 
 #include "helpers.h"
 
+#include <aclapi.h>
+#include <sddl.h>
+
 #include <thread>
 
 namespace {
@@ -52,6 +55,23 @@ std::wstring Companion() {
     wchar_t self[MAX_PATH * 4];
     DWORD n = GetModuleFileNameW(nullptr, self, (DWORD)std::size(self));
     return std::wstring(self, n);
+}
+
+// Sandbox workspaces can label new files Low integrity; a copied test companion then launches at
+// Low integrity and fails user32 initialization (0xC0000142). Match tools/build.ps1's Medium label.
+bool CopyCompanion(const std::wstring& dest) {
+    if (!CopyFileW(Companion().c_str(), dest.c_str(), FALSE)) return false;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(L"S:(ML;;NW;;;ME)", SDDL_REVISION_1, &sd, nullptr)) {
+        BOOL present = FALSE, defaulted = FALSE;
+        PACL sacl = nullptr;
+        if (GetSecurityDescriptorSacl(sd, &present, &sacl, &defaulted) && present) {
+            std::wstring path = dest;
+            SetNamedSecurityInfoW(path.data(), SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, nullptr, nullptr, nullptr, sacl);
+        }
+        LocalFree(sd);
+    }
+    return true;
 }
 
 std::string ReadAllOf(const Helper& h, const std::wstring& arguments, std::wstring& error, bool& complete, DWORD& code) {
@@ -184,7 +204,7 @@ void TestHelperIntegration(const std::wstring& scratch) {
     const std::string ini = "[helper]\nname = Fake\n[decoder]\nextensions = fake\n"
                             "decode = fake.exe --fake-helper wav 1 8000 2 16 0 {start} {file}\n"
                             "[tool]\nlabel = Say hello\ncommand = fake.exe --fake-helper echo hello\noutput = nothing\n";
-    if (!Ready(!ec && CopyFileW(Companion().c_str(), (dir + L"\\fake.exe").c_str(), FALSE) && WriteTestBytes(dir + L"\\helper.ini", ini),
+    if (!Ready(!ec && CopyCompanion(dir + L"\\fake.exe") && WriteTestBytes(dir + L"\\helper.ini", ini),
                L"a helper folder in the scratch profile"))
         return;
     g.dataDir = scratch;
@@ -252,7 +272,7 @@ void TestHelpers(const std::wstring& scratch) {
     std::error_code ec;
     std::filesystem::remove_all(scratch + L"\\helpers", ec);  // an earlier run's helper.ini would change what is read
     std::filesystem::create_directories(dir, ec);
-    if (!Ready(!ec && CopyFileW(Companion().c_str(), (dir + L"\\fake.exe").c_str(), FALSE) && WriteTestBytes(song, "x"),
+    if (!Ready(!ec && CopyCompanion(dir + L"\\fake.exe") && WriteTestBytes(song, "x"),
                L"a helper folder holds a copy of the test companion"))
         return;
     SetHelperPatience(15000);

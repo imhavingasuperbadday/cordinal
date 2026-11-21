@@ -99,11 +99,13 @@ void StopAppWorkers(HWND hwnd) {
     StopTagWriter();
     StopOrganizer();
     StopConverter();
+    StopRipper();
     StopDuplicates();  // files it already moved take their history with them before the save
     StopCopier();
     StopCollection();
     StopIpod();
     StopArtistInfo();
+    StopWebFetch();
     discord::Stop();  // its cover lookups use the online cache, which StopCoverFetch saves and closes
     StopCoverFetch();
     MSG completed;

@@ -19,6 +19,7 @@ int RunAwayProbe();
 int RunFakeHelper(const std::vector<std::wstring>& args);
 int RunMemoryProfile(const std::vector<std::wstring>& args);
 int RunMemoryReport(const std::vector<std::wstring>& args);
+int RunWebFetchLive(const std::vector<std::wstring>& args);
 
 // Dispatches on the first argument; nullopt means "not a test mode", so the player starts normally.
 // --pipeline-benchmark deliberately shares RunDecodeBenchmark, which switches on args[0] itself.
@@ -29,6 +30,7 @@ std::optional<int> RunTestMode(const std::vector<std::wstring>& args) {
     if (!args.empty() && args[0] == L"--away-probe") return RunAwayProbe();
     if (!args.empty() && args[0] == L"--memory-profile") return RunMemoryProfile(args);  // the memory-budget library
     if (!args.empty() && args[0] == L"--memory-report") return RunMemoryReport(args);
+    if (!args.empty() && args[0] == L"--webfetch-live") return RunWebFetchLive(args);
     if (!args.empty() && args[0] == L"--runtime-benchmark") return RunRuntimeBenchmark(args);
     if (!args.empty() && args[0] == L"--performance-benchmark") return RunPerformanceBenchmark(args);
     if (!args.empty() && args[0] == L"--selftest") return RunSelfTest(args);
@@ -54,6 +56,7 @@ int wmain(int argc, wchar_t** argv) {
             L"  --decode-benchmark <audio-folder> | --pipeline-benchmark <audio-folder>\n"
             L"  --memory-benchmark | --performance-benchmark | --runtime-benchmark\n"
             L"  --away-probe   check this network for away-from-home listening (asks the router and STUN servers)\n"
+            L"  --webfetch-live <link>   resolve and save one web link into webfetch-live beside this exe\n"
             L"test.bat adds fixture generation, timeouts, fresh run folders and repeated runs.\n");
         return 0;
     }

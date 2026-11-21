@@ -56,6 +56,7 @@ void Dispatch(const Message& m) {
         case WM_APP_RG: FinishReplayGain(m.wp, m.lp); break;
         case WM_APP_TAGWRITE: OnTagWriteMessage(m.wp, m.lp); break;
         case WM_APP_CONVERT: OnConvertMessage(m.wp, m.lp); break;
+        case WM_APP_RIP: OnRipMessage(m.wp, m.lp); break;
         case WM_APP_EXPAND: OnExpanded(); break;
         case WM_APP_ORGANIZE: OnOrganizeDone(); break;
         case WM_APP_COPY: OnCopyMessage(m.wp, m.lp); break;
@@ -64,6 +65,10 @@ void Dispatch(const Message& m) {
         case WM_APP_IPOD: OnIpodMessage(m.wp, m.lp); break;
         case WM_APP_COVERFETCH: OnCoverFetchMessage(m.wp, m.lp); break;
         case WM_APP_ARTISTINFO: OnArtistInfoMessage(m.lp); break;
+        case WM_APP_WEBFETCH_ADDED: OnWebFetchAdded(m.lp); break;
+        case WM_APP_WEBFETCH_UPDATED: OnWebFetchUpdated(m.wp, m.lp); break;
+        case WM_APP_WEBFETCH_NOTICE: OnWebFetchNotice(m.lp); break;
+        case WM_APP_WEBFETCH_DONE: OnWebFetchDone(m.lp); break;
         case WM_APP_ALBUMTAG: OnAlbumTagMessage(m.lp); break;
         case WM_APP_DUPLICATES: OnDuplicatesMessage(); break;
         case WM_APP_PLAYLIST_FILE: OnPlaylistFile(m.wp, m.lp); break;
@@ -221,7 +226,7 @@ int Run(int argc, char** argv) {
         if (!full.empty()) paths.push_back(full);
     }
 
-    SDL_SetAppMetadata("cordinal", "0.1.15", "cordinal");
+    SDL_SetAppMetadata("cordinal", "0.1.16", "cordinal");
     SDL_SetHint(SDL_HINT_VIDEO_WAYLAND_PREFER_LIBDECOR, "1");
     if (parity) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
@@ -428,11 +433,13 @@ int Run(int argc, char** argv) {
     StopPlaylistFiles();
     StopMigration();
     StopConverter();
+    StopRipper();
     StopOrganizer();
     StopCopier();
     StopCollection();
     StopIpod();
     StopArtistInfo();
+    StopWebFetch();
     StopDiscord();
     StopCoverFetch();
     StopExpanders();

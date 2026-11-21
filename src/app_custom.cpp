@@ -1,4 +1,4 @@
-// Customize layout: the normal window's own arrangement (View > Customize layout, a right-click on
+// The Layout menu: the normal window's own arrangement (the menu bar's Layout menu, a right-click on
 // the player, or the player's handle). The player - transport, shuffle / repeat, the waveform seek
 // bar, the times and the volume - docks at any edge of the window:
 //   Top / Bottom  a band across the window, the waveform inline between the buttons and the volume
@@ -8,7 +8,8 @@
 // Every part can be hidden, as can the now playing line, the level chip, the playlist tabs, the
 // search box, the Library's view row, the status bar and the menu bar (Alt or a right-click still
 // opens the menus). Up next can join the lyrics as a side panel, on either side. Presets set the
-// whole arrangement at once. Drag the player's handle (the dots at its start) to an edge to dock it
+// whole arrangement at once, a blank canvas hides every part to build up from, and Save this layout
+// keeps up to eight of your own (settings.ini [Layout] Saved1 to Saved8). Drag the player's handle (the dots at its start) to an edge to dock it
 // there; click it for this menu.
 #include "app.h"
 
@@ -49,42 +50,10 @@ const Part kLayoutParts[] = {
 };
 constexpr int kPartCount = (int)std::size(kLayoutParts);
 
-struct Preset {
-    const wchar_t* name;
-    MainLayout (*make)();
-};
-const Preset kPresets[] = {
-    {L"&Classic (the default)", [] { return MainLayout{}; }},
-    {L"Player at the &bottom", [] {
-         MainLayout l;
-         l.player = Dock::Bottom;
-         l.waveSize = 1;
-         l.waveOwnRow = true;
-         l.largeCover = true;
-         return l;
-     }},
-    {L"Player on the &side", [] {
-         MainLayout l;
-         l.player = Dock::Left;
-         l.waveSize = 1;
-         l.upNext = true;
-         return l;
-     }},
-    {L"&Waveform studio", [] {
-         MainLayout l;
-         l.waveSize = 2;
-         l.waveOwnRow = true;
-         l.largeCover = true;
-         return l;
-     }},
-    {L"&Minimal", [] {
-         MainLayout l;
-         l.order = l.nowPlaying = l.points = l.views = l.status = false;
-         return l;
-     }},
-};
-constexpr int kPresetCount = (int)std::size(kPresets);
+// The built-in presets live in ui_spec.h, in a pack's words, shared with the Linux port.
+constexpr int kPresetCount = (int)std::size(ui::kLayoutPresets);
 constexpr int kMaxPresets = IDM_WAVE_STYLE_BASE - IDM_LAYOUT_PRESET_BASE;  // built-in and pack presets together
+static_assert(ui::kSavedLayouts <= IDM_LAYOUT_FORGET_BASE - IDM_LAYOUT_SAVED_BASE);
 
 // A pack's layout preset: the default arrangement, then what its [layout] section says. Words name
 // the dock and the waveform size; a part it leaves out keeps the default, and 0, no or off hides one.
@@ -111,6 +80,38 @@ MainLayout LayoutOfPack(const IniSection& s) {
     l.panelsLeft = flag(L"side_panels_left", false);
     for (const Part& p : kLayoutParts) l.*p.on = flag(p.key, l.*p.on);
     return l;
+}
+
+// A layout written in a pack's words, where ';' may stand for the line breaks (a saved layout's line).
+MainLayout LayoutOfText(std::string text) {
+    std::replace(text.begin(), text.end(), ';', '\n');
+    std::vector<IniSection> sections = ParseIni(text);
+    return sections.empty() ? MainLayout{} : LayoutOfPack(sections.front());
+}
+
+// The built-in presets, read once.
+const std::vector<MainLayout>& PresetLayouts() {
+    static const std::vector<MainLayout> layouts = [] {
+        std::vector<MainLayout> out;
+        for (const ui::LayoutPreset& p : ui::kLayoutPresets) out.push_back(LayoutOfText(p.text));
+        return out;
+    }();
+    return layouts;
+}
+
+const MainLayout& BlankCanvas() {
+    static const MainLayout blank = LayoutOfText(ui::kBlankCanvas);
+    return blank;
+}
+
+// Your saved layouts, [Layout] Saved1 to Saved8: empty where a slot is free.
+std::wstring SavedKey(int slot) { return L"Saved" + std::to_wstring(slot + 1); }
+std::wstring SavedName(int slot) { return L"My layout " + std::to_wstring(slot + 1); }
+bool SavedLayout(int slot, MainLayout& out) {
+    std::wstring text = IniRead(L"Layout", SavedKey(slot).c_str(), L"");
+    if (text.empty()) return false;
+    out = LayoutOfText(ToUtf8(text));
+    return true;
 }
 
 // The presets menu's entries past the built-in ones.
@@ -372,7 +373,9 @@ bool SeekVertical() { return g.size == ViewSize::Normal && Side() && !ApolloMode
 // [Layout]: Player (Dock), Wave (size), WaveRow, PanelsLeft, and Parts: one 0/1 per kLayoutParts
 // entry, so a part added later keeps its default in an older file. Revision 1 made the level and
 // points chip opt-in: a file saved before it had the chip on by default, so it starts hidden once.
-constexpr int kLayoutRevision = 1;
+// Revision 2 turned the status bar's audio details back on by default: files saved while they were
+// off by default (October 19 to November 19, 2026) show them once.
+constexpr int kLayoutRevision = 2;
 
 void LoadMainLayout() {
     MainLayout& l = g.layout;
@@ -383,7 +386,9 @@ void LoadMainLayout() {
     l.panelsLeft = IniInt(L"Layout", L"PanelsLeft", 0) != 0;
     std::wstring parts = IniRead(L"Layout", L"Parts", L"");
     for (int i = 0; i < kPartCount && i < (int)parts.size(); ++i) l.*kLayoutParts[i].on = parts[i] == L'1';
-    if (IniInt(L"Layout", L"Revision", 0) < 1) l.points = false;
+    const int revision = IniInt(L"Layout", L"Revision", 0);
+    if (revision < 1) l.points = false;
+    if (revision < 2) l.statusDetails = true;
     g.defaultLayout = l;
     LoadWaveLook();
 }
@@ -509,14 +514,66 @@ bool LayoutSetCursor(POINT pt) {
     return true;
 }
 
-// View > Customize layout, and the right-click menu of the player. Built fresh each time; the
-// checks come from UpdateLayoutMenu.
-HMENU LayoutMenu() {
+namespace {
+
+// Start from a preset: the built-in ones, the packs', then the ones you saved, and Reset the layout.
+HMENU PresetsMenu() {
+    HMENU presets = CreatePopupMenu();
+    for (int i = 0; i < kPresetCount; ++i) AppendMenuW(presets, MF_STRING, IDM_LAYOUT_PRESET_BASE + i, ui::kLayoutPresets[i].name);
+    auto packs = PackPresetsInMenu();
+    if (!packs.empty()) AppendMenuW(presets, MF_SEPARATOR, 0, nullptr);
+    for (size_t i = 0; i < packs.size(); ++i)
+        AppendMenuW(presets, MF_STRING, IDM_LAYOUT_PRESET_BASE + kPresetCount + i, packs[i]->name.c_str());
+    // Your own, each with its number as its access key.
+    HMENU forget = CreatePopupMenu();
+    bool any = false;
+    MainLayout saved;
+    for (int i = 0; i < ui::kSavedLayouts; ++i) {
+        if (!SavedLayout(i, saved)) continue;
+        if (!any) AppendMenuW(presets, MF_SEPARATOR, 0, nullptr);
+        any = true;
+        std::wstring name = L"My layout &" + std::to_wstring(i + 1);
+        AppendMenuW(presets, MF_STRING, IDM_LAYOUT_SAVED_BASE + i, name.c_str());
+        AppendMenuW(forget, MF_STRING, IDM_LAYOUT_FORGET_BASE + i, name.c_str());
+    }
+    AppendMenuW(presets, MF_SEPARATOR, 0, nullptr);
+    if (any) AppendMenuW(presets, MF_POPUP, (UINT_PTR)forget, L"&Forget a saved layout");
+    else DestroyMenu(forget);
+    // The classic preset again, by the name people look for.
+    AppendMenuW(presets, MF_STRING, IDM_LAYOUT_PRESET_BASE, L"&Reset the layout");
+    return presets;
+}
+
+// Show: every part the normal window can hide, with the Library's own toggles in its group.
+HMENU PartsMenu() {
     HMENU m = CreatePopupMenu();
+    for (int i = 0; i < kPartCount; ++i) {
+        AppendMenuW(m, MF_STRING, IDM_LAYOUT_PART_BASE + i, kLayoutParts[i].name);
+        // The column browser and the lyrics after the view buttons, and which side the side panels
+        // take after Up next.
+        if (kLayoutParts[i].on == &MainLayout::views) {
+            AppendMenuW(m, MF_STRING, IDC_VIEW4, L"Column b&rowser");
+            AppendMenuW(m, MF_STRING, IDM_LYRICS, L"L&yrics panel\tCtrl+L");
+        }
+        if (kLayoutParts[i].on == &MainLayout::upNext) AppendMenuW(m, MF_STRING, IDM_LAYOUT_PANELS_LEFT, L"Side panels on the l&eft");
+        if (kLayoutParts[i].separatorAfter) AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    }
+    return m;
+}
+
+// The menu bar's Layout menu, and the right-click menu of the player. Start from a preset or from a
+// blank canvas, then dock the player, size the waveform and show each part you want; Save this layout
+// keeps the result among the presets. The window's other arrangements follow: Up next, the window's
+// size, Big mode's panels and the mini player. The checks come from UpdateLayoutMenu.
+void FillLayoutMenu(HMENU m) {
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)PresetsMenu(), L"Start from a &preset");
+    AppendMenuW(m, MF_STRING, IDM_LAYOUT_BLANK, L"Start from a &blank canvas");
+    AppendMenuW(m, MF_STRING, IDM_LAYOUT_SAVE, L"Sa&ve this layout");
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     HMENU dock = CreatePopupMenu();
     const wchar_t* docks[] = {L"At the &top", L"At the &bottom", L"On the &left", L"On the &right"};
     for (int i = 0; i < (int)Dock::Count; ++i) AppendMenuW(dock, MF_STRING, IDM_LAYOUT_DOCK_BASE + i, docks[i]);
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)dock, L"&Player position");
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)dock, L"P&layer position");
     HMENU wave = CreatePopupMenu();
     const wchar_t* sizes[] = {L"&Slim", L"&Medium", L"&Tall"};
     if (Side()) {
@@ -526,31 +583,41 @@ HMENU LayoutMenu() {
     AppendMenuW(wave, MF_STRING, IDM_LAYOUT_WAVE_ROW, L"On a line of its &own");
     AppendWaveLookMenu(wave);
     AppendMenuW(m, MF_POPUP, (UINT_PTR)wave, L"Wave&form");
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)PartsMenu(), L"&Show");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    for (int i = 0; i < kPartCount; ++i) {
-        AppendMenuW(m, MF_STRING, IDM_LAYOUT_PART_BASE + i, kLayoutParts[i].name);
-        // The Library's own toggles join its group: the column browser and the lyrics after the
-        // view buttons, and which side the side panels take after Up next.
-        if (kLayoutParts[i].on == &MainLayout::views) {
-            AppendMenuW(m, MF_STRING, IDC_VIEW4, L"Column b&rowser");
-            AppendMenuW(m, MF_STRING, IDM_LYRICS, L"L&yrics panel\tCtrl+L");
-        }
-        if (kLayoutParts[i].on == &MainLayout::upNext) AppendMenuW(m, MF_STRING, IDM_LAYOUT_PANELS_LEFT, L"Side panels on the l&eft");
-        if (kLayoutParts[i].separatorAfter) AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    }
-    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    HMENU presets = CreatePopupMenu();
-    for (int i = 0; i < kPresetCount; ++i) AppendMenuW(presets, MF_STRING, IDM_LAYOUT_PRESET_BASE + i, kPresets[i].name);
-    auto packs = PackPresetsInMenu();
-    if (!packs.empty()) AppendMenuW(presets, MF_SEPARATOR, 0, nullptr);
-    for (size_t i = 0; i < packs.size(); ++i)
-        AppendMenuW(presets, MF_STRING, IDM_LAYOUT_PRESET_BASE + kPresetCount + i, packs[i]->name.c_str());
-    // The classic preset again, by the name people look for. It lives here rather than beside Presets
-    // so that every item of this long menu keeps an access key of its own.
-    AppendMenuW(presets, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(presets, MF_STRING, IDM_LAYOUT_PRESET_BASE, L"&Reset the layout");
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)presets, L"Pre&sets");
+    AppendMenuW(m, MF_STRING, IDM_QUEUE_SHOW, L"&Up next\tCtrl+Shift+Q");
+    HMENU windowSizes = CreatePopupMenu();
+    const wchar_t* sizeNames[] = {L"&Compact", L"&Normal", L"Big mode &plus", L"&Big mode"};
+    for (int i = 0; i < (int)ViewSize::Count; ++i) AppendMenuW(windowSizes, MF_STRING, IDM_SIZE_BASE + i, sizeNames[i]);
+    AppendMenuW(windowSizes, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(windowSizes, MF_STRING, IDM_SMALLER, L"S&maller\tCtrl+-");
+    AppendMenuW(windowSizes, MF_STRING, IDM_LARGER, L"&Larger\tCtrl+=");
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)windowSizes, L"Window si&ze");
+    HMENU panels = CreatePopupMenu();
+    const wchar_t* panelNames[] = {L"&Library", L"&Now playing", L"&Up next"};
+    for (int i = 0; i < kPanelCount; ++i) AppendMenuW(panels, MF_STRING, IDM_PANEL_BASE + i, panelNames[i]);
+    AppendMenuW(panels, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(panels, MF_STRING, IDM_PANELS_RESET, L"&Reset the layout");
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)panels, L"Big mo&de panels");
+    AppendMenuW(m, MF_STRING, IDM_MINI_PLAYER, L"&Mini player\tCtrl+Shift+M");
+}
+
+}  // namespace
+
+HMENU LayoutMenu() {
+    HMENU m = CreatePopupMenu();
+    FillLayoutMenu(m);
     return m;
+}
+
+// The menu bar keeps its Layout menu between openings, but what it lists follows the layout (the
+// waveform's sizes on a side, the layouts you saved), so it is filled again each time it opens.
+void RefreshLayoutPopup(HMENU popup) {
+    HMENU bar = MainMenuBar();
+    if (!bar || !popup || GetSubMenu(bar, ui::kLayoutMenu) != popup) return;
+    while (GetMenuItemCount(popup) > 0) DeleteMenu(popup, 0, MF_BYPOSITION);
+    FillLayoutMenu(popup);
+    ApplyShortcutLabels(popup);
 }
 
 void UpdateLayoutMenu(HMENU m) {
@@ -576,13 +643,25 @@ void UpdateLayoutMenu(HMENU m) {
     enable(partId(&MainLayout::largeCover), !Side() && l.nowPlaying);  // the column's cover is always large
     enable(partId(&MainLayout::points), l.nowPlaying);                 // the chip sits with Now playing
     enable(IDC_VIEW4, LibraryActive());
+    // The start the window's layout still is, if any: a preset, the blank canvas or one of yours.
     int preset = -1;
     for (int i = 0; i < kPresetCount && preset < 0; ++i)
-        if (kPresets[i].make() == l) preset = i;
+        if (PresetLayouts()[i] == l) preset = i;
     auto packs = PackPresetsInMenu();
     for (size_t i = 0; i < packs.size() && preset < 0; ++i)
         if (LayoutOfPack(packs[i]->values) == l) preset = kPresetCount + (int)i;
     for (int i = 0; i < kPresetCount + (int)packs.size(); ++i) check(IDM_LAYOUT_PRESET_BASE + i, i == preset);
+    const bool blank = l == BlankCanvas();
+    check(IDM_LAYOUT_BLANK, blank);
+    int mine = -1;
+    MainLayout saved;
+    for (int i = 0; i < ui::kSavedLayouts; ++i) {
+        bool same = mine < 0 && preset < 0 && !blank && SavedLayout(i, saved) && saved == l;
+        if (same) mine = i;
+        check(IDM_LAYOUT_SAVED_BASE + i, same);
+    }
+    // Saving is for a layout of your own, not one the menu already starts from.
+    enable(IDM_LAYOUT_SAVE, preset < 0 && !blank && mine < 0);
 }
 
 // OnCommand's share: true when `id` was a layout command.
@@ -602,12 +681,37 @@ bool LayoutCommand(int id) {
         on = !on;
         if (&on == &l.menuBar && !on) ShowMessage(L"Menu bar hidden. Press Alt, or right-click the player, for the menus.");
     } else if (id >= IDM_LAYOUT_PRESET_BASE && id < IDM_LAYOUT_PRESET_BASE + kPresetCount) {
-        l = kPresets[id - IDM_LAYOUT_PRESET_BASE].make();
+        l = PresetLayouts()[id - IDM_LAYOUT_PRESET_BASE];
     } else if (id >= IDM_LAYOUT_PRESET_BASE + kPresetCount && id < IDM_LAYOUT_PRESET_BASE + kMaxPresets) {
         auto packs = PackPresetsInMenu();
         size_t i = id - IDM_LAYOUT_PRESET_BASE - kPresetCount;
         if (i >= packs.size()) return true;
         l = LayoutOfPack(packs[i]->values);
+    } else if (id == IDM_LAYOUT_BLANK) {
+        l = BlankCanvas();
+        ShowMessage(L"A blank canvas. Add the parts you want from Layout > Show.");
+    } else if (id == IDM_LAYOUT_SAVE) {
+        int slot = -1;
+        MainLayout saved;
+        for (int i = 0; i < ui::kSavedLayouts && slot < 0; ++i)
+            if (!SavedLayout(i, saved)) slot = i;
+        if (slot < 0) {
+            ShowMessage(L"Eight layouts are saved. Forget one under Layout > Start from a preset first.");
+            return true;
+        }
+        std::wstring text = LayoutIniText(l);
+        std::replace(text.begin(), text.end(), L'\n', L';');
+        if (IniWrite(L"Layout", SavedKey(slot).c_str(), text))
+            ShowMessage(SavedName(slot) + L" saved. It is under Layout > Start from a preset.");
+        return true;
+    } else if (id >= IDM_LAYOUT_SAVED_BASE && id < IDM_LAYOUT_SAVED_BASE + ui::kSavedLayouts) {
+        MainLayout saved;
+        if (!SavedLayout(id - IDM_LAYOUT_SAVED_BASE, saved)) return true;
+        l = saved;
+    } else if (id >= IDM_LAYOUT_FORGET_BASE && id < IDM_LAYOUT_FORGET_BASE + ui::kSavedLayouts) {
+        IniDelete(L"Layout", SavedKey(id - IDM_LAYOUT_FORGET_BASE).c_str());
+        ShowMessage(SavedName(id - IDM_LAYOUT_FORGET_BASE) + L" forgotten. The window keeps the layout it has.");
+        return true;
     } else if (id == IDM_LAYOUT_MENUS) {
         POINT pt;
         GetCursorPos(&pt);

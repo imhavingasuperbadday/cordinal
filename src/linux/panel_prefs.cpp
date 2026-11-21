@@ -444,6 +444,10 @@ const Pref kPrefs[] = {
     {"convert_undo_days", "Conversion", "Conversions can be undone for",
      "How long cordinal remembers a conversion so it can put the originals back.", PrefType::Choice,
      0, 3, 3, 1, [] { return (double)Cfg().convertMemory; }, [](double v) { SetConvertMemory((unsigned)v); Saved(); }, kUndoNames},
+    {"rip_offset", "Conversion", "CD drive read offset",
+     "Your CD drive's read offset correction, as AccurateRip's list of drives gives it; Rip CD shifts the audio by that many "
+     "samples so rips match other drives'.", PrefType::Float, -3000, 3000, 0, 1, [] { return (double)Cfg().ripOffset; },
+     [](double v) { Cfg().ripOffset = (int)std::lround(v); Saved(); }, nullptr, " samples"},
 };
 
 struct PrefLink {

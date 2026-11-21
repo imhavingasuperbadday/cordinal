@@ -213,12 +213,17 @@ void LoadSettings() {
     s.defaultLayout.panelsLeft = ToInt(v, "layout_panels_left", 0) != 0;
     s.defaultLayout.menuBar = ToInt(v, "layout_menu_bar", 1) != 0;
     s.defaultLayout.tabCounts = ToInt(v, "layout_tab_counts", 0) != 0;
-    s.defaultLayout.statusDetails = ToInt(v, "layout_status_details", 0) != 0;
+    // layout_revision 2 turned the audio details back on by default; older files show them once.
+    s.defaultLayout.statusDetails = ToInt(v, "layout_revision", 0) < 2 || ToInt(v, "layout_status_details", 1) != 0;
     s.defaultLayout.hints = ToInt(v, "layout_hints", 0) != 0;
     s.defaultLayout.points = ToInt(v, "points_chip", 0) != 0;
     s.defaultSize = s.size = (ViewSize)std::clamp(ToInt(v, "view_size", 1), 0, 3);
     s.defaultLayout.hiddenParts = (unsigned)std::clamp(ToInt(v, "layout_hidden", 0), 0, 1023);
     s.layout = s.defaultLayout;
+    for (int i = 0; i < ui::kSavedLayouts; ++i) {
+        auto it = v.find("layout_saved" + std::to_string(i + 1));
+        s.savedLayouts[i] = it == v.end() ? std::string() : it->second;
+    }
     s.timeRemaining = ToInt(v, "time_remaining", 1) != 0;
     s.waveform = ToInt(v, "waveform", 1) != 0;
     s.liveWaveform = ToInt(v, "live_waveform", 0) != 0;
@@ -352,6 +357,9 @@ void LoadSettings() {
     s.convertReplace = ToInt(v, "convert_replace", 0) != 0;
     s.convertIntoFolder = ToInt(v, "convert_into_folder", 0) != 0;
     if (auto it = v.find("convert_folder"); it != v.end()) s.convertFolder = compat::Widen(it->second.c_str());
+    s.ripFlac = ToInt(v, "rip_format", 0) != 1;
+    if (auto it = v.find("rip_folder"); it != v.end()) s.ripFolder = compat::Widen(it->second.c_str());
+    s.ripOffset = std::clamp(ToInt(v, "rip_offset", 0), -3000, 3000);  // cdrip::kMaxOffset
     if (auto it = v.find("organize_folder"); it != v.end()) s.organizeFolder = compat::Widen(it->second.c_str());
     if (auto it = v.find("organize_pattern"); it != v.end()) s.organizePattern = compat::Widen(it->second.c_str());
     if (auto it = v.find("copy_folder"); it != v.end()) s.copyFolder = compat::Widen(it->second.c_str());
@@ -503,8 +511,11 @@ void SaveSettings() {
     text += "layout_menu_bar=" + std::to_string(s.defaultLayout.menuBar) + "\n";
     text += "layout_tab_counts=" + std::to_string(s.defaultLayout.tabCounts) + "\n";
     text += "layout_status_details=" + std::to_string(s.defaultLayout.statusDetails) + "\n";
+    text += "layout_revision=2\n";
     text += "layout_hints=" + std::to_string(s.defaultLayout.hints) + "\n";
     text += "layout_hidden=" + std::to_string(s.defaultLayout.hiddenParts) + "\n";
+    for (int i = 0; i < ui::kSavedLayouts; ++i)
+        if (!s.savedLayouts[i].empty()) text += "layout_saved" + std::to_string(i + 1) + "=" + s.savedLayouts[i] + "\n";
     text += "points_chip=" + std::to_string(s.defaultLayout.points) + "\n";
     text += "packs_on=" + s.packsOn + "\nhelpers_on=" + s.helpersOn + "\n";
     for (const auto& [id, record] : s.helperTrust) text += "helper_trust." + id + "=" + record + "\n";
@@ -545,6 +556,8 @@ void SaveSettings() {
             "\nconvert_undo_days=" + std::to_string(s.convertMemory) + "\nconvert_format=" + std::to_string(s.convertFormat) +
             "\nconvert_replace=" + std::to_string(s.convertReplace) + "\nconvert_into_folder=" + std::to_string(s.convertIntoFolder) +
             "\nconvert_folder=" + compat::Narrow(s.convertFolder.c_str()) + "\n";
+    text += "rip_format=" + std::to_string(s.ripFlac ? 0 : 1) + "\nrip_folder=" + compat::Narrow(s.ripFolder.c_str()) +
+            "\nrip_offset=" + std::to_string(s.ripOffset) + "\n";
     text += "organize_folder=" + compat::Narrow(s.organizeFolder.c_str()) + "\norganize_pattern=" +
             compat::Narrow(s.organizePattern.c_str()) + "\n";
     text += "copy_folder=" + compat::Narrow(s.copyFolder.c_str()) + "\ncopy_pattern=" + compat::Narrow(s.copyPattern.c_str()) +

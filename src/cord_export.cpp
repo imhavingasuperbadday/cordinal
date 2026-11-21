@@ -83,26 +83,53 @@ struct ExportTags {
     std::vector<std::string> comments, pictures;
 };
 
+// A .cord PICT payload as the body of a FLAC PICTURE block.
+bool FlacPicture(const std::string& bytes, std::string& block) {
+    uint8_t type;
+    std::string_view image;
+    if (bytes.size() > 0xFFFFFF || !cord::ParsePicture(bytes, type, image)) return false;
+    const size_t mime = (uint8_t)bytes[1], describedAt = 2 + mime;
+    const size_t described = cord::Le32((const uint8_t*)bytes.data() + describedAt);
+    block.clear();
+    Be(block, type, 4);
+    Be(block, mime, 4);
+    block.append(bytes, 2, mime);
+    Be(block, described, 4);
+    block.append(bytes, describedAt + 4, described);
+    block.append(16, '\0');  // dimensions and colour depth unspecified in .cord
+    Be(block, image.size(), 4);
+    block += image;
+    return true;
+}
+
+// "fLaC", STREAMINFO, the comments and the pictures. STREAMINFO's frame sizes and MD5 are patched in
+// once the audio is written.
+bool FlacHead(const PcmFormat& format, const std::vector<std::string>& comments, const std::vector<std::string>& pictures,
+              std::string& head) {
+    head = "fLaC";
+    MetadataBlock(head, 0, cordinal::encode::FlacStreamInfo(format.rate, format.channels, format.bits, format.frames, 0, 0, {}));
+    std::string vorbis;
+    cord::PutLe(vorbis, 8, 4);
+    vorbis += "cordinal";
+    cord::PutLe(vorbis, comments.size(), 4);
+    for (const auto& c : comments) {
+        cord::PutLe(vorbis, c.size(), 4);
+        vorbis += c;
+    }
+    if (!MetadataBlock(head, pictures.empty() ? 0x84 : 4, vorbis)) return false;
+    for (size_t i = 0; i < pictures.size(); ++i)
+        if (!MetadataBlock(head, i + 1 == pictures.size() ? 0x86 : 6, pictures[i])) return false;
+    return true;
+}
+
 // The source's tags as Vorbis comments and FLAC PICTURE blocks (and, in `tags`, .cord PICT payloads for
 // the ID3 and MP4 writers). A .cord file's META and PICT chunks are read whole; any other source goes
 // through CordTagsFrom, the same tags a conversion to .cord would carry.
 bool Metadata(const std::wstring& from, FileSource& input, const PcmFormat& format, std::string& head, ExportTags* tags = nullptr) {
     std::vector<std::string> comments, pictures;
     auto picture = [&](const std::string& bytes) {
-        uint8_t type;
-        std::string_view image;
-        if (bytes.size() > 0xFFFFFF || !cord::ParsePicture(bytes, type, image)) return false;
-        const size_t mime = (uint8_t)bytes[1], describedAt = 2 + mime;
-        const size_t described = cord::Le32((const uint8_t*)bytes.data() + describedAt);
         std::string block;
-        Be(block, type, 4);
-        Be(block, mime, 4);
-        block.append(bytes, 2, mime);
-        Be(block, described, 4);
-        block.append(bytes, describedAt + 4, described);
-        block.append(16, '\0');  // dimensions and colour depth unspecified in .cord
-        Be(block, image.size(), 4);
-        block += image;
+        if (!FlacPicture(bytes, block)) return false;
         pictures.push_back(std::move(block));
         if (tags) tags->pictures.push_back(bytes);
         return true;
@@ -139,20 +166,7 @@ bool Metadata(const std::wstring& from, FileSource& input, const PcmFormat& form
         const auto result = std::to_chars(mask, mask + sizeof mask, format.channelMask, 16);
         comments.push_back("WAVEFORMATEXTENSIBLE_CHANNEL_MASK=0x" + std::string(mask, result.ptr));
     }
-    head = "fLaC";  // STREAMINFO's frame sizes and MD5 are patched in once the audio is written
-    MetadataBlock(head, 0, cordinal::encode::FlacStreamInfo(format.rate, format.channels, format.bits, format.frames, 0, 0, {}));
-    std::string vorbis;
-    cord::PutLe(vorbis, 8, 4);
-    vorbis += "cordinal";
-    cord::PutLe(vorbis, comments.size(), 4);
-    for (const auto& c : comments) {
-        cord::PutLe(vorbis, c.size(), 4);
-        vorbis += c;
-    }
-    if (!MetadataBlock(head, pictures.empty() ? 0x84 : 4, vorbis)) return false;
-    for (size_t i = 0; i < pictures.size(); ++i)
-        if (!MetadataBlock(head, i + 1 == pictures.size() ? 0x86 : 6, pictures[i])) return false;
-    return true;
+    return FlacHead(format, comments, pictures, head);
 }
 
 std::string Integer(uint64_t value, unsigned bytes, bool syncsafe = false) {
@@ -371,6 +385,8 @@ private:
     std::wstring path_;
 };
 
+bool WriteFlac(PcmReader& source, std::string head, const std::wstring& to, std::wstring& error, const std::atomic<bool>& cancel);
+
 }  // namespace
 
 bool ExportFlac(const std::wstring& from, const std::wstring& to, std::wstring& error, const std::atomic<bool>& cancel) {
@@ -392,8 +408,17 @@ bool ExportFlac(const std::wstring& from, const std::wstring& to, std::wstring& 
         error = L"The tags are damaged, unsupported, or too large for FLAC. Nothing was exported.";
         return false;
     }
+    return WriteFlac(*source, std::move(head), to, error, cancel);
+}
+
+namespace {
+
+// Encodes `source`, read once to its end, after `head` into a sibling temporary file; reads the
+// audio and the head back, and only then publishes the file at `to`.
+bool WriteFlac(PcmReader& source, std::string head, const std::wstring& to, std::wstring& error, const std::atomic<bool>& cancel) {
+    const PcmFormat& f = source.Format();
     Output out(to);
-    error = L"Couldn't write the FLAC file next to its source. Check free space and folder permissions.";
+    error = L"Couldn't write the FLAC file. Check free space and folder permissions.";
     if (!out.Write(head)) return false;
     constexpr size_t block = cordinal::encode::FlacEncoder::kBlockFrames;
     std::vector<int32_t> pcm(block * f.channels);
@@ -403,7 +428,7 @@ bool ExportFlac(const std::wstring& from, const std::wstring& to, std::wstring& 
         // The encoder needs whole blocks until the last; a reader may return fewer frames at a time.
         size_t n = 0;
         while (n < block) {
-            const size_t got = source->Read(pcm.data() + n * f.channels, block - n);
+            const size_t got = source.Read(pcm.data() + n * f.channels, block - n);
             if (!got) break;
             n += got;
         }
@@ -414,15 +439,15 @@ bool ExportFlac(const std::wstring& from, const std::wstring& to, std::wstring& 
         if (n < block) break;
     }
     if (cancel) { error = L"Cancelled."; return false; }
-    if (source->Damaged()) { error = L"The source audio is damaged. Nothing was exported."; return false; }
+    if (source.Damaged()) { error = L"The source audio is damaged. Nothing was exported."; return false; }
     head.replace(8, 34, cordinal::encode::FlacStreamInfo(f.rate, f.channels, f.bits, f.frames, encoder.MinFrameBytes(),
-                                                         encoder.MaxFrameBytes(), source->Digest()));
+                                                         encoder.MaxFrameBytes(), source.Digest()));
     if (!out.Finish(head)) return false;
     bool same = false;
     if (auto back = OpenFlacExact(out.Path())) {
         while (!cancel && back->Read(pcm.data(), 4096)) {}
         const PcmFormat& b = back->Format();
-        same = !cancel && !back->Damaged() && back->Digest() == source->Digest() && b.frames == f.frames &&
+        same = !cancel && !back->Damaged() && back->Digest() == source.Digest() && b.frames == f.frames &&
                b.bits == f.bits && b.channels == f.channels && b.rate == f.rate;
     }
     // Audio and metadata are checked separately: a PCM hash says nothing about the tags or covers.
@@ -441,6 +466,58 @@ bool ExportFlac(const std::wstring& from, const std::wstring& to, std::wstring& 
     if (!out.Commit(to)) { error = L"Couldn't publish the FLAC file; existing files are never overwritten."; return false; }
     error.clear();
     return true;
+}
+
+// Reads a new .cord back in full: its length and its own MD5 must hold, and its samples must hash
+// the same as the source's. One that doesn't is removed again.
+bool VerifyCord(const PcmReader& source, const std::wstring& to, std::wstring& error, const std::atomic<bool>& cancel) {
+    bool same = false;
+    if (auto back = OpenPcmReader(to, error)) {
+        std::vector<int32_t> block(4096 * (size_t)std::max(1u, back->Format().channels));
+        while (back->Read(block.data(), 4096) && !cancel) {}
+        const PcmFormat &a = source.Format(), &b = back->Format();
+        same = !cancel && !back->Damaged() && back->Digest() == source.Digest() && b.frames == a.frames &&
+               b.channels == a.channels && b.bits == a.bits && b.rate == a.rate;
+    }
+    if (!same) {
+        DeleteFileW(to.c_str());  // never verified, never used
+        error = cancel ? L"Cancelled." : L"The new file didn't read back identical to the original, so it was removed.";
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
+}  // namespace
+
+bool WriteLossless(PcmReader& source, const std::string& meta, const std::vector<std::string>& pictures, const std::wstring& to,
+                   bool flac, std::wstring& error, const std::atomic<bool>& cancel, unsigned threads) {
+    error.clear();
+    if (GetFileAttributesW(to.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        error = L"The destination already exists; move it first or choose another folder.";
+        return false;
+    }
+    if (!flac) {
+        cord::EncodeOptions options;
+        options.threads = std::max(1u, threads);
+        options.background = true;
+        options.meta = meta;
+        options.pictures = pictures;
+        if (!cord::Encode(source, to, error, &cancel, options)) {
+            if (cancel) error = L"Cancelled.";
+            return false;
+        }
+        return VerifyCord(source, to, error, cancel);
+    }
+    std::vector<std::string> comments, blocks;
+    for (const std::string& p : pictures)
+        if (std::string block; FlacPicture(p, block)) blocks.push_back(std::move(block));
+    std::string head;
+    if (!Comments(meta, comments) || !FlacHead(source.Format(), comments, blocks, head)) {
+        error = L"The tags are too large for FLAC.";
+        return false;
+    }
+    return WriteFlac(source, std::move(head), to, error, cancel);
 }
 
 // cord::Encode builds the file beside `to` and moves it into place only when complete; it is then
@@ -464,21 +541,7 @@ static bool ExportCord(const std::wstring& from, const std::wstring& to, std::ws
         if (cancel) error = L"Cancelled.";
         return false;
     }
-    bool same = false;
-    if (auto back = OpenPcmReader(to, error)) {
-        std::vector<int32_t> block(4096 * (size_t)std::max(1u, back->Format().channels));
-        while (back->Read(block.data(), 4096) && !cancel) {}
-        const PcmFormat &a = source->Format(), &b = back->Format();
-        same = !cancel && !back->Damaged() && back->Digest() == source->Digest() && b.frames == a.frames &&
-               b.channels == a.channels && b.bits == a.bits && b.rate == a.rate;
-    }
-    if (!same) {
-        DeleteFileW(to.c_str());  // never verified, never used
-        error = cancel ? L"Cancelled." : L"The new file didn't read back identical to the original, so it was removed.";
-        return false;
-    }
-    error.clear();
-    return true;
+    return VerifyCord(*source, to, error, cancel);
 }
 
 bool ExportAudio(const std::wstring& from, const std::wstring& to, CordExport format, std::wstring& error,

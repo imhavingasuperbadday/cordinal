@@ -102,17 +102,28 @@ std::vector<Release> ParseReleaseSearch(std::string_view json) {
     return out;
 }
 
-bool ParseRelease(std::string_view json, Release& out) {
-    out = Release{};
-    Json root;
-    if (!web::ParseJson(json, root) || root.kind != Json::Kind::Object) return false;
-    Summary(root, out);
-    if (!IsMbid(out.id) || !IsArray(root["media"])) return false;
+namespace {
+
+// A release's tracks from its "media" list. With `onlyDisc`, only the medium that holds that disc id
+// (a CD's table of contents, as MusicBrainz knows it) or, failing that, the first medium with
+// `discTracks` tracks; false when there is no such medium.
+bool Tracks(const Json& root, Release& out, const std::string* onlyDisc = nullptr, size_t discTracks = 0) {
+    if (!IsArray(root["media"])) return false;
+    const Json* chosen = nullptr;
+    if (onlyDisc) {
+        for (const auto& m : root["media"].items)
+            if (IsArray(m["discs"]))
+                for (const auto& d : m["discs"].items)
+                    if (!chosen && d.String("id") == *onlyDisc) chosen = &m;
+        for (const auto& m : root["media"].items)
+            if (!chosen && IsArray(m["tracks"]) && m["tracks"].items.size() == discTracks) chosen = &m;
+        if (!chosen) return false;
+    }
     uint32_t disc = 0;
     for (const auto& m : root["media"].items) {
         ++disc;
         const Json& tracks = m["tracks"];
-        if (!IsArray(tracks)) continue;
+        if (!IsArray(tracks) || (chosen && &m != chosen)) continue;
         const uint32_t number = Number(m["position"]) > 0 ? (uint32_t)Number(m["position"]) : disc;
         for (const auto& t : tracks.items) {
             ReleaseTrack track;
@@ -132,6 +143,28 @@ bool ParseRelease(std::string_view json, Release& out) {
     }
     out.trackCount = (uint32_t)out.tracks.size();
     return !out.tracks.empty();
+}
+
+}  // namespace
+
+bool ParseRelease(std::string_view json, Release& out) {
+    out = Release{};
+    Json root;
+    if (!web::ParseJson(json, root) || root.kind != Json::Kind::Object) return false;
+    Summary(root, out);
+    return IsMbid(out.id) && Tracks(root, out);
+}
+
+std::vector<Release> ParseDiscLookup(std::string_view json, const std::string& discId, size_t discTracks) {
+    std::vector<Release> out;
+    Json root;
+    if (!web::ParseJson(json, root) || root.kind != Json::Kind::Object || !IsArray(root["releases"])) return out;
+    for (const auto& r : root["releases"].items) {
+        Release release;
+        Summary(r, release);
+        if (IsMbid(release.id) && Tracks(r, release, &discId, discTracks)) out.push_back(std::move(release));
+    }
+    return out;
 }
 
 Match MatchRelease(const std::vector<LocalTrack>& local, const Release& release) {

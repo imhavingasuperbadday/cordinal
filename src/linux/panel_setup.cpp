@@ -4,6 +4,7 @@
 #include "panels_internal.h"
 
 #include "audio_output.h"
+#include "libview.h"
 #include "listenbrainz.h"
 #include "speakers.h"
 #include "titleformat.h"
@@ -250,7 +251,7 @@ void DeviceKey(const SDL_KeyboardEvent& e) {
 }
 
 // --- customize the layout --------------------------------------------------------------------------------
-// View > Customize layout: which parts of the main window show (app_custom.cpp's parts). A hidden part gives its
+// Layout > Customize layout: which parts of the main window show (app_custom.cpp's parts). A hidden part gives its
 // room back to the rest; the track list and the menu bar always stay. Choices save as they are made.
 struct LayoutPart {
     unsigned bit;
@@ -305,19 +306,11 @@ void LayoutActivate(int index) {
         SaveSettings();
         g.redraw = true;
     } else if (index == (int)std::size(kLayoutParts) + 3) {
-        std::vector<std::string> names{"Classic", "Player at the bottom", "Player on the side", "Waveform studio", "Minimal"};
+        // The Layout menu's presets (ui_spec.h), then the packs'.
+        std::vector<std::string> names;
+        for (const ui::LayoutPreset& preset : ui::kLayoutPresets) names.push_back(Plain(preset.name));
         for (const auto& name : PackLayoutNames()) names.push_back(Utf8(name));
-        OpenChoice(g_layout.presets.x, g_layout.presets.B(), names, -1, [](int i) {
-            if (i >= 5) { ApplyPackLayout(i - 5); return; }
-            auto& l = g.settings.defaultLayout;
-            l = WindowLayout{};
-            if (i == 1) { l.dock = 1; l.waveSize = 1; l.waveOwnRow = l.largeCover = true; }
-            if (i == 2) { l.dock = 2; l.waveSize = 1; l.upNext = true; }
-            if (i == 3) { l.waveSize = 2; l.waveOwnRow = l.largeCover = true; }
-            if (i == 4) l.hiddenParts = kPartOrder | kPartNowPlaying | kPartViews | kPartStatus;
-            g.settings.layout = g.settings.defaultLayout;
-            SaveSettings(); g.redraw = true;
-        });
+        OpenChoice(g_layout.presets.x, g_layout.presets.B(), names, -1, [](int i) { RunLayoutAction(kLayoutPreset, i); });
     } else ClosePanel();
 }
 
@@ -770,6 +763,186 @@ void OpenPacks() {
 void OpenLayout() {
     g_kind = Kind::Layout;
     g.redraw = true;
+}
+
+// --- the Layout menu -----------------------------------------------------------------------------------------
+// The menu bar's Layout menu, as the Windows build's (app_custom.cpp): start from a preset or from a blank
+// canvas, then show each part you want; Save this layout keeps the result among the presets, as "My layout 1"
+// to 8. Like the dialog's choices, every change applies at once and is saved.
+namespace {
+
+void UseLayout(const WindowLayout& l) {
+    g.settings.defaultLayout = g.settings.layout = l;
+    SaveSettings();
+    g.redraw = true;
+}
+
+const std::vector<WindowLayout>& PresetLayouts() {
+    static const std::vector<WindowLayout> layouts = [] {
+        std::vector<WindowLayout> out;
+        for (const ui::LayoutPreset& p : ui::kLayoutPresets) out.push_back(LayoutOfText(p.text));
+        return out;
+    }();
+    return layouts;
+}
+
+const WindowLayout& BlankCanvas() {
+    static const WindowLayout blank = LayoutOfText(ui::kBlankCanvas);
+    return blank;
+}
+
+bool SavedLayout(int slot, WindowLayout& out) {
+    if (g.settings.savedLayouts[slot].empty()) return false;
+    out = LayoutOfText(g.settings.savedLayouts[slot]);
+    return true;
+}
+
+// The preset (built-in, then the packs') the live layout still is, or -1.
+int CurrentPreset() {
+    const WindowLayout& l = g.settings.layout;
+    const auto& built = PresetLayouts();
+    for (size_t i = 0; i < built.size(); ++i)
+        if (built[i] == l) return (int)i;
+    const auto packs = PackLayouts();
+    for (size_t i = 0; i < packs.size(); ++i)
+        if (packs[i] == l) return (int)(built.size() + i);
+    return -1;
+}
+
+// Layout > Show, in the Windows menu's order and words. A row is a hidden-part bit, a flag of the layout, or
+// an action of its own (the column browser and the lyrics, which the Library keeps apart from the layout).
+struct ShowRow {
+    const char* label;
+    unsigned bit = 0;
+    bool WindowLayout::*flag = nullptr;
+    int action = kNoAction;
+    bool separatorAfter = false;
+};
+const ShowRow kShowRows[] = {
+    {"Previous, play and next", kPartTransport}, {"Shuffle and repeat", kPartOrder}, {"Waveform seek bar", kPartWave},
+    {"Times", kPartTimes}, {"Volume", kPartVolume, nullptr, kNoAction, true},
+    {"Now playing (cover, title and artist)", kPartNowPlaying}, {"Large cover", 0, &WindowLayout::largeCover},
+    {"Level and points", 0, &WindowLayout::points, kNoAction, true},
+    {"Playlist tabs", kPartTabs}, {"Search box", kPartSearch}, {"Library view buttons", kPartViews},
+    {"Column browser", 0, nullptr, kColumnBrowser}, {"Lyrics panel", 0, nullptr, kLyrics},
+    {"Up next panel", 0, &WindowLayout::upNext}, {"Side panels on the left", 0, &WindowLayout::panelsLeft, kNoAction, true},
+    {"Status bar", kPartStatus}, {"Menu bar", 0, &WindowLayout::menuBar, kNoAction, true},
+    {"Track counts on tabs", 0, &WindowLayout::tabCounts}, {"Audio details in the status bar", 0, &WindowLayout::statusDetails},
+    {"Playback hints", 0, &WindowLayout::hints},
+};
+
+}  // namespace
+
+std::vector<MenuItem> LayoutStartItems() {
+    const int preset = CurrentPreset();
+    const bool blank = g.settings.layout == BlankCanvas();
+    std::vector<MenuItem> presets;
+    for (size_t i = 0; i < std::size(ui::kLayoutPresets); ++i) {
+        presets.push_back(Item(Plain(ui::kLayoutPresets[i].name), kLayoutPreset, {}, preset == (int)i));
+        presets.back().arg = (int)i;
+    }
+    const auto packNames = PackLayoutNames();
+    if (!packNames.empty()) presets.push_back(Separator());
+    for (size_t i = 0; i < packNames.size(); ++i) {
+        const int index = (int)(std::size(ui::kLayoutPresets) + i);
+        presets.push_back(Item(Utf8(packNames[i]), kLayoutPreset, {}, preset == index));
+        presets.back().arg = index;
+    }
+    // Your own, checked while the window still is one (and no preset), the first of equal ones.
+    std::vector<MenuItem> forget;
+    bool mine = false;
+    WindowLayout saved;
+    for (int i = 0; i < ui::kSavedLayouts; ++i) {
+        if (!SavedLayout(i, saved)) continue;
+        if (forget.empty()) presets.push_back(Separator());
+        const std::string name = "My layout " + std::to_string(i + 1);
+        const bool same = !mine && preset < 0 && !blank && saved == g.settings.layout;
+        mine = mine || same;
+        presets.push_back(Item(name, kLayoutSaved, {}, same));
+        presets.back().arg = i;
+        forget.push_back(Item(name, kLayoutForget));
+        forget.back().arg = i;
+    }
+    presets.push_back(Separator());
+    if (!forget.empty()) presets.push_back(Submenu("Forget a saved layout", std::move(forget)));
+    presets.push_back(Item("Reset the layout", kLayoutPreset));  // the classic preset, by the name people look for
+    return {Submenu("Start from a preset", std::move(presets)), Item("Start from a blank canvas", kLayoutBlank, {}, blank),
+            Item("Save this layout", kLayoutSave, {}, false, preset < 0 && !blank && !mine)};
+}
+
+std::vector<MenuItem> LayoutShowItems() {
+    const WindowLayout& l = g.settings.layout;
+    const bool side = l.dock >= 2;
+    std::vector<MenuItem> items;
+    for (size_t i = 0; i < std::size(kShowRows); ++i) {
+        const ShowRow& row = kShowRows[i];
+        if (row.action == kColumnBrowser) items.push_back(Item(row.label, kColumnBrowser, {}, BrowserShown()));
+        else if (row.action == kLyrics) items.push_back(Item(row.label, kLyrics, "Ctrl+L", LyricsShown()));
+        else {
+            const bool on = row.flag ? l.*row.flag : !(l.hiddenParts & row.bit);
+            // As on Windows, items that mean something only in some arrangements are grayed, not hidden.
+            const bool nowPlaying = !(l.hiddenParts & kPartNowPlaying);
+            const bool enabled = row.flag == &WindowLayout::largeCover ? !side && nowPlaying
+                                 : row.flag == &WindowLayout::points   ? nowPlaying : true;
+            items.push_back(Item(row.label, kLayoutPart, {}, on, enabled));
+            items.back().arg = (int)i;
+        }
+        if (row.separatorAfter) items.push_back(Separator());
+    }
+    return items;
+}
+
+void RunLayoutAction(int action, int arg) {
+    WindowLayout l = g.settings.layout;
+    switch (action) {
+        case kLayoutPreset: {
+            const auto& built = PresetLayouts();
+            if (arg < (int)built.size()) UseLayout(built[std::max(arg, 0)]);
+            else ApplyPackLayout((size_t)arg - built.size());
+            return;
+        }
+        case kLayoutBlank:
+            UseLayout(BlankCanvas());
+            ShowMessage(L"A blank canvas. Add the parts you want from Layout > Show.");
+            return;
+        case kLayoutSave:
+            for (int i = 0; i < ui::kSavedLayouts; ++i) {
+                if (!g.settings.savedLayouts[i].empty()) continue;
+                std::string text = Utf8(LayoutText(l));
+                std::replace(text.begin(), text.end(), '\n', ';');
+                g.settings.savedLayouts[i] = text;
+                SaveSettings();
+                ShowMessage(L"My layout " + std::to_wstring(i + 1) + L" saved. It is under Layout > Start from a preset.");
+                return;
+            }
+            ShowMessage(L"Eight layouts are saved. Forget one under Layout > Start from a preset first.");
+            return;
+        case kLayoutSaved:
+            if (arg >= 0 && arg < ui::kSavedLayouts && SavedLayout(arg, l)) UseLayout(l);
+            return;
+        case kLayoutForget:
+            if (arg < 0 || arg >= ui::kSavedLayouts) return;
+            g.settings.savedLayouts[arg].clear();
+            SaveSettings();
+            ShowMessage(L"My layout " + std::to_wstring(arg + 1) + L" forgotten. The window keeps the layout it has.");
+            return;
+        case kLayoutDock: l.dock = std::clamp(arg, 0, 3); break;
+        case kLayoutWave: l.waveSize = std::clamp(arg, 0, 2); break;
+        case kLayoutWaveRow: l.waveOwnRow = !l.waveOwnRow; break;
+        case kColumnBrowser: ToggleBrowser(); return;
+        case kLayoutPart: {
+            if (arg < 0 || arg >= (int)std::size(kShowRows)) return;
+            const ShowRow& row = kShowRows[arg];
+            if (row.flag) l.*row.flag = !(l.*row.flag);
+            else if (row.bit) l.hiddenParts ^= row.bit;
+            else return;
+            if (row.flag == &WindowLayout::menuBar && !l.menuBar)
+                ShowMessage(L"Menu bar hidden. Press Alt, or right-click the player, for the menus.");
+            break;
+        }
+        default: return;
+    }
+    UseLayout(l);
 }
 void OpenOutputDevice() {
     const bool searching = g_dev.searching;

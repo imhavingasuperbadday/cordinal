@@ -71,6 +71,14 @@ std::vector<Suite> Suites(const std::wstring& root) {
             L"src/tests/selftest_metadata.cpp", Media, 0, [root](const auto& s) { TestMetadata(root + L"\\media", s); }},
         {L"radio", L"radio directory and favorites", L"src/tests/selftest_radio.cpp", 0, 0,
             [](const auto& s) { TestRadioDirectory(s); TestRadioStream(); TestHls(); }},
+        {L"webfetch", L"web links into your library: SoundCloud, YouTube, Spotify matching and the queue",
+            L"src/tests/selftest_webfetch.cpp", Media, 0,
+            [root](const auto& s) {
+                TestSoundCloud();
+                TestYtAudio();
+                TestSpotifyLink();
+                TestWebFetch(s, root + L"\\media");
+            }},
         {L"speakers", L"network speakers: descriptions, control and the stream", L"src/tests/selftest_speakers.cpp", 0, 0,
             [](const auto&) { TestSpeakers(); }},
         {L"exact-pcm", L"exact PCM and MD5", L"src/tests/selftest_exact.cpp", Media | Gap | Rg | Tags | Native, 0,
@@ -80,6 +88,8 @@ std::vector<Suite> Suites(const std::wstring& root) {
         {L"cord-conversion", L"Convert: .cord, FLAC, WAV, MP3 and AAC copies and replacements", L"src/tests/selftest_cord.cpp",
             Media | Tags | Rg | Native, 0,
             [root](const auto& s) { TestCordConversion(root, s); }},
+        {L"cd-rip", L"Rip CD: disc ids, CD-Text, verified reads and rips into FLAC and .cord", L"src/tests/selftest_cdrip.cpp", 0, 0,
+            [](const auto& s) { TestCdRip(s + L"\\cdrip"); }},
         {L"gapless", L"gapless decoder joins", L"src/tests/selftest_audio.cpp", Gap, 0,
             [root](const auto&) { TestGapless(root + L"\\gap2"); }},
         {L"ranges", L"source ranges", L"src/tests/selftest_audio.cpp", Gap, 0,

@@ -9,7 +9,7 @@ One program, under 2 MB. No installer, no runtime, no codecs to add.
 
 <div align="center">
 
-Current release: **0.1.15** · `cordinal.exe`, 1,968,128 bytes<br>
+Current release: **0.1.16** · `cordinal.exe`, 1,968,128 bytes<br>
 **[Download](https://github.com/imhavingasuperbadday/cordinal/releases/latest)** ·
 [Getting started](#getting-started) · [Guide](#guide) · [Building](#building) ·
 [Issues](https://github.com/imhavingasuperbadday/cordinal/issues)
@@ -58,7 +58,7 @@ soundtrack import, copying to devices, and classic iPod sync.
 
 **Tags and artwork.** Edit tags, covers and lyrics for one track or hundreds, with undo. Rename and
 move files from their tags. Convert to FLAC, WAV, MP3, AAC or `.cord`, as copies or as undoable
-replacements. Find duplicates and missing tags. Covers, lyrics and artist info from your files or,
+replacements. Rip audio CDs to FLAC or `.cord`, every sector checked. Find duplicates and missing tags. Covers, lyrics and artist info from your files or,
 if you turn them on, from online sources.
 
 **Listening history.** Half-star ratings, play and skip counts, a play log and a year in review.
@@ -153,6 +153,20 @@ them. Files already in your library are skipped. Folders where games keep their 
 as `sfx` or `sound`) are left out unless you turn on **Include game sound effects** in
 **Preferences ▸ Library**.
 
+**Library ▸ Save music from the web...** downloads pasted links into your library as real files you
+own, filed as `Artist\Album\[track] Title`. SoundCloud tracks, sets, likes and artists' pages,
+YouTube videos and playlists, and Spotify tracks, albums and playlists all work. A Spotify link is
+matched to the same recording on YouTube — Spotify's own audio is encrypted, and cordinal does not
+break that — and the file's comment says where its audio came from. SoundCloud's and YouTube's
+streams today are fragmented MP4: they play everywhere, but nothing can write tags into them yet, so
+those songs keep their identity in their file name and their cover as `cover.jpg` beside them; a
+stream that can carry tags is tagged fully, cover and all. The first save asks before contacting
+anyone, and the answer lives in **Preferences ▸ Online ▸ Save music from the web**. A song already
+saved is never downloaded twice, an interrupted download is tried again the
+next time, and a track that is gone for good is remembered instead of failing on every run; **Forgot
+what failed** tries those again. Files land in the first library folder and appear in the library on
+their own as the scanner picks them up.
+
 ### Album editions
 
 Many albums have more than one edition: the original, a remaster, a deluxe or regional release. cordinal
@@ -183,7 +197,7 @@ see the whole list again. **Preferences ▸ View ▸ Now Playing shows the playi
 it. Click a heading to sort, click again to reverse, and a third time to go back to the original
 order. Right-click the headings to choose which columns show.
 
-**Up next.** **View ▸ Up next** (Ctrl+Shift+Q) shows the queue: what you queued, then what the
+**Up next.** **Layout ▸ Up next** (Ctrl+Shift+Q) shows the queue: what you queued, then what the
 playlist plays after it. Drag tracks to reorder them, or drag them in from the list. Delete removes
 tracks, Alt+Up and Alt+Down move them, and Enter plays one now.
 
@@ -290,6 +304,23 @@ without gaps between tracks. Lossless formats need a lossless original: FLAC, WA
 Monkey's Audio, TTA or `.cord` (mono or stereo, up to 24 bits for the last four), since a lossless copy
 of a lossy file would only be bigger.
 
+**Ripping CDs.** Put an audio CD in the drive and choose **Library ▸ Rip CD...**. cordinal reads the
+disc's track list and any CD-Text on it. **Look up** asks MusicBrainz for the disc's names (this
+uses **Album tags from MusicBrainz** in **Preferences ▸ Online**, and asks before turning it on);
+once it is on, every disc is looked up as soon as it is read. When MusicBrainz knows the disc as
+several releases, **Names** lets you pick one. Edit the artist, album, date and each track's title
+(select a track, then type in **Title**), choose FLAC or `.cord` and a folder, and press **Rip**.
+
+Each album goes in `<folder>\<artist>\<album>\`, one file per track (`01 Title.flac`), tagged with
+the names, the track and disc numbers, the MusicBrainz ids and, when **MusicBrainz** covers are on,
+the release's front cover. The tracks join the library when the rip ends. Progress shows in the
+status bar, and **Library ▸ Cancel rip** stops at once, leaving out the unfinished track. Every
+sector is read twice; a sector whose two reads differ is read again until two reads agree, and the
+status line says if any never did. Set your drive's read offset correction in **Preferences ▸ Conversion** (AccurateRip's
+list of drives gives it) so rips match other drives sample for sample. Existing files are never
+overwritten. On Linux the drive is `/dev/sr0` and the like, which your account must be allowed to
+read (usually the `cdrom` or `optical` group).
+
 ### Covers
 
 The quickest way to add a cover is to drag a JPEG or PNG onto one of the album's tracks. You can also
@@ -316,7 +347,7 @@ badly saved JPEG, and the new one appears block by block.
 
 ### Lyrics and artist info
 
-The lyrics panel (**View ▸ Lyrics panel**, Ctrl+L) shows lyrics from the song's tags or from a `.lrc`
+The lyrics panel (**Layout ▸ Show ▸ Lyrics panel**, Ctrl+L) shows lyrics from the song's tags or from a `.lrc`
 file beside it. With an online source turned on, it asks LrcLib and then lyrics.ovh, and prefers timed
 lyrics. Nothing is saved until you right-click the panel and choose **Save lyrics to tags** or **Save
 as .lrc file**.
@@ -422,16 +453,25 @@ where keys from other programs go through the desktop's shortcut settings.
 
 ### Layouts, packs and helpers
 
-**View ▸ Window size** offers Compact, Big mode plus and Big mode, and the mini player
+The **Layout** menu arranges the window. Start from a preset (**Layout ▸ Start from a preset**: Classic,
+Player at the bottom, Player on the side, Waveform studio, Minimal and any a pack adds), or from a blank
+canvas, which hides everything but the menu bar and the track list. Then build it up: **Player
+position** docks the player at any edge (or drag its handle there), **Waveform** sets its size and
+look, and **Show** turns each part on or off, from the transport buttons and the times to the tabs,
+search box, side panels and status bar. **Save this layout** keeps the result as **My layout 1** to
+**8** among the presets; **Forget a saved layout** removes one. Right-click the player for the same
+menu.
+
+**Layout ▸ Window size** offers Compact, Big mode plus and Big mode, and the mini player
 (Ctrl+Shift+M). Big mode has panels you can drag, split and dock. From the keyboard, F6 moves between
-panel groups and Ctrl+Up or Ctrl+Down moves a panel between areas. Reopen closed panels from **View ▸
+panel groups and Ctrl+Up or Ctrl+Down moves a panel between areas. Reopen closed panels from **Layout ▸
 Big mode panels**. **Startup defaults** chooses the size and layout to use next time.
 
 **Packs** are folders or `.cordpack` files (a ZIP) that add themes, columns, group headers, title
 formats, shortcuts, EQ and layout presets, auto-playlists and fonts. Nothing in a pack runs as a
 program. Install and turn them on in **View ▸ Packs**, or drop one on the window. Turning a pack off
-removes what it added. Layout presets, and **Reset the layout**, are in **View ▸ Customize layout ▸
-Presets**. **Make a pack from my setup** in **View ▸ Packs** writes your current look as a new pack,
+removes what it added. Pack layout presets join **Layout ▸ Start from a preset**, with **Reset the
+layout**. **Make a pack from my setup** in **View ▸ Packs** writes your current look as a new pack,
 with a commented example of every file; edit it, then choose **Reload packs**. Every file is optional:
 
 | File | What it holds |

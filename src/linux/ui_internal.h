@@ -121,7 +121,7 @@ enum Action {
     kPlayPause, kStopAction, kMute, kPrevAction, kNextAction, kShuffleAction, kShuffleAlbumsAction, kRadio, kTaste, kRepeatSet, kStopAfter, kSpots, kPlayHistory, kSpeed, kTempo, kShared, kExclusive,
     kNewPl, kRenamePl, kClosePl, kDuplicatePl, kReopenPl, kMovePlLeft, kMovePlRight, kNextPl, kPrevPl, kReveal,
     kFolders, kRescan, kAcceptInbox, kAcceptAllInbox, kExcludeLibrary, kDuplicateAudio,
-    kSteam, kCancelSteam, kWebServer, kConvert, kConvertUndo, kCancelConvert, kOrganize, kOrganizeUndo, kCopyTo, kCancelCopy,
+    kSteam, kCancelSteam, kWebServer, kConvert, kConvertUndo, kCancelConvert, kOrganize, kOrganizeUndo, kWebFetch, kCopyTo, kCancelCopy,
     kIpodSync, kCancelIpodSync,
     kTheme, kOpenRadio, kGroupAlbums, kStartOnLogin, kNameThatTrack, kWhichCameFirst, kPoints, kReview, kPalette, kLyrics, kLayout, kViewSize, kBigPanel, kBigReset, kMini, kLightweight, kPickSong, kVolumeUp, kVolumeDown, kSeekBack, kSeekForward, kKeyboard, kPacks, kPackPlaylist, kHelpers, kHelperTool, kHelperCancel,
     kAbout,
@@ -132,6 +132,9 @@ enum Action {
     kAlbumEditions, kEditionVersions, kRgScanAll, kFindCover, kFetchCovers, kCancelFetchCovers, kRecentAdditions,
     kSaveLyricsTags, kSaveLyricsLrc, kArtistInfo, kRestoreCover,
     kCoverFile, kCoverPaste, kEditAlbumTags, kMissingInfo, kQueuePanel, kQueueEdit, kMakeAlbum, kTagAlbum, kTopBar,
+    // The Layout menu (panel_setup.cpp RunLayoutAction): arg is the preset, saved slot, dock, size or row.
+    kLayoutPreset, kLayoutBlank, kLayoutSave, kLayoutSaved, kLayoutForget, kLayoutDock, kLayoutWave, kLayoutWaveRow,
+    kLayoutPart, kColumnBrowser, kRipCd, kCancelRip,
 };
 extern std::function<void(int)> g_choicePick;  // the choice a panel's OpenChoice menu is for
 struct MenuItem {
@@ -331,6 +334,11 @@ std::vector<MenuItem> ReplayGainMenu();
 std::vector<MenuItem> PlaylistDestinations();
 bool CanvasHasFocusedEdition();
 std::vector<MenuItem> BarMenu(int m);
+// The Layout menu's own parts (panel_setup.cpp), which BarMenu puts together with the window's sizes:
+// Start from a preset, Start from a blank canvas and Save this layout; then Show, every part's check.
+std::vector<MenuItem> LayoutStartItems();
+std::vector<MenuItem> LayoutShowItems();
+void RunLayoutAction(int action, int arg);  // the kLayout* actions and kColumnBrowser
 std::vector<int> BarMenus();
 float PopupItemHeight(const MenuItem& it);
 void OpenPopup(float x, float y, std::vector<MenuItem> items, bool submenu = false);

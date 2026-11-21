@@ -132,7 +132,8 @@ public:
     // glide: an estimated gain, applied as a slow level change rather than the usual quick one.
     void SetGain(unsigned long long token, float gain, bool glide = false);
     // A look-ahead peak limiter in place of clipping (see PeakLimiter); it delays the output by
-    // 3 ms. EQ also enables it automatically; with both off the plain path stays bit-perfect.
+    // a touch over 3 ms. EQ also enables it automatically; with both off the plain path stays
+    // bit-perfect.
     // Optional output reserve lowers the limiter ceiling for EQ applied inside a headset.
     void SetLimiter(bool on, float headroomDb = 0);
     // Game-music loop points (LOOPSTART/LOOPEND tags, WAV smpl chunks): the intro, then the loop

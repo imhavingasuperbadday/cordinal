@@ -132,14 +132,16 @@ std::unique_ptr<Decoder> OpenRange(std::unique_ptr<Decoder> inner, double start,
 std::unique_ptr<Decoder> OpenLooped(std::unique_ptr<Decoder> inner, int64_t loopStart, int64_t loopEnd, int count,
                                     double fadeSeconds);
 
-// Polyphase windowed-sinc resampler for interleaved stereo float (Kaiser window, 128 taps scaled
-// for downsampling, 256 phases with linear interpolation). Its state carries across Push calls,
-// so a stream joined from several tracks is resampled without seams.
+// Polyphase windowed-sinc resampler for interleaved stereo float (Kaiser window, scaled for
+// downsampling): an exact 160-tap row per phase where they fit in memory (44.1 <-> 48 kHz and
+// whole-number ratios), otherwise 128 taps and 256 phases with linear interpolation. Its state
+// carries across Push calls, so a stream joined from several tracks is resampled without seams.
 class Resampler {
 public:
     void Init(unsigned inRate, unsigned outRate);
     void Reset();  // after a seek
     bool Passthrough() const { return in_ == out_; }
+    bool ExactPhases() const { return exact_; }  // one exact row per phase, no interpolation
     unsigned InRate() const { return inRate_; }
     // Consumes all input; appends output frames to `out`.
     void Push(const float* in, size_t frames, std::vector<float>& out);
@@ -162,4 +164,5 @@ private:
     std::unique_ptr<float[]> table_;
     std::vector<float> hist_;  // stereo history + pending input
     bool fast_=false;
+    bool exact_=false;  // table_ has out_ exact rows, one per phase, instead of kPhases + 1
 };

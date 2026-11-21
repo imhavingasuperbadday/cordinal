@@ -430,6 +430,10 @@ const Tweak kTweaks[] = {
      L"How long cordinal remembers a conversion so it can put the originals back.", TweakType::Choice, 0, 3, 3,
      [] { return (double)g.convertMemory; }, [](double v) { g.convertMemory = (uint8_t)v; }, IDM_CONVERT_MEMORY_BASE,
      nullptr, kUndoNames, nullptr, kTweakRadio},
+    {"convert.cd_offset", L"Rip", L"Offset", L"CD drive read offset",
+     L"Your CD drive's read offset correction, as AccurateRip's list of drives gives it; Rip CD shifts the audio by that many "
+     L"samples so rips match other drives'.", TweakType::Float, -3000, 3000, 0, [] { return (double)g.ripOffset; },
+     [](double v) { g.ripOffset = (float)std::round(v); }, 0, nullptr, nullptr, L" samples"},
     {"scrobbling.paused", L"Scrobbling", L"Paused", L"Pause scrobbling",
      L"Stops collecting and sending listens to Last.fm, ListenBrainz and Libre.fm, keeping connections and queued listens.",
      TweakType::Bool, 0, 1, 0, [] { return (double)listenbrainz::Paused(); },
@@ -519,6 +523,12 @@ const Tweak kTweaks[] = {
      L"Sends the album's title and artist to musicbrainz.org when you choose Tag album from MusicBrainz, then the ids of the few releases that match, to read their tracks.",
      TweakType::Bool, 0, 1, 0, [] { return (double)online::Config().albumTags; },
      [](double v) { online::Config().albumTags = v != 0; }, 0, OnlineSettingsChanged},
+    {"online.save_music", L"Online", L"SaveMusic", L"Save music from the web",
+     L"Downloads a link you paste from soundcloud.com, youtube.com or open.spotify.com: the audio, its cover and its details, saved as your own file in the library. A Spotify link's audio is the same recording matched on YouTube.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)online::Config().saveMusic; },
+     // Nothing to refresh when this changes: the window reads the switch when a save is
+     // asked for, so the apply callback is an honest no-op.
+     [](double v) { online::Config().saveMusic = v != 0; }, 0, [] {}},
     {"library.explorer_menu", L"Explorer", L"FolderMenu", L"Play folders from Explorer",
      L"Right-clicking a folder offers Play with cordinal and Add to cordinal; a folder plays its tracks like a "
      L"command line does.", TweakType::Bool, 0, 1, 1, [] { return (double)g.explorerMenu; },
@@ -697,7 +707,7 @@ const Tweak kTweaks[] = {
      [](double v) { g.layout.tabCounts = v != 0; }, 0, ApplyMainLayout},
     {"window.status_details", L"Layout", L"PartsStatusDetails", L"Show audio details in the status bar",
      L"ReplayGain, equalizer and output details in the status bar.",
-     TweakType::Bool, 0, 1, 0, [] { return (double)g.layout.statusDetails; },
+     TweakType::Bool, 0, 1, 1, [] { return (double)g.layout.statusDetails; },
      [](double v) { g.layout.statusDetails = v != 0; }, 0, ApplyMainLayout},
     {"window.hints", L"Layout", L"PartsHints", L"Show playback hints",
      L"How-to hints in the now playing line.",
@@ -735,7 +745,7 @@ const Page kPages[] = {
      {{IDM_STARTUP_DEFAULTS, L"&Startup defaults..."}}},
     {"library.", L"Library", L"New music, sizes in the library views, and Explorer and the web server.", L"Collection",
      {{IDM_LIBRARY_FOLDERS, L"Library &folders..."}, {IDM_WEB_SERVER, L"&Web server..."}}},
-    {"convert.", L"Conversion", L"Converting to .cord, and putting the originals back.", nullptr, {}},
+    {"convert.", L"Conversion", L"Converting between formats, putting the originals back, and ripping CDs.", nullptr, {}},
     {"online.", L"Online", L"Covers, lyrics and artist info from the web. Each says what it sends, and all start off.",
      nullptr, {{IDM_FETCH_COVERS, L"&Fetch missing covers..."}}},
     {"scrobbling.", L"Scrobbling", L"Listens sent to connected services, and your Discord status.", nullptr,

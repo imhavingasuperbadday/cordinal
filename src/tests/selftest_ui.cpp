@@ -846,7 +846,7 @@ void TestQueueEditor(const std::wstring& scratch) {
     UINT state = GetMenuState(menu, IDM_QUEUE_SHOW, MF_BYCOMMAND);
     DestroyMenu(menu);
     Check(state != (UINT)-1 && !(state & MF_CHECKED),
-          L"queue: View > Up next is in the menu and unchecked while the panel is closed");
+          L"queue: Layout > Up next is in the menu and unchecked while the panel is closed");
 
     g.queue = savedQueue;
     g.queuePicks = 0;
@@ -1085,6 +1085,123 @@ void TestKeyboardShortcuts() {
     batch.End();
 }
 
+// The menu bar's Layout menu: it holds what used to be View's layout items, starts from a preset or a
+// blank canvas, saves your own layouts among the presets and forgets them again, lists them as soon as
+// they are saved, and keys saved under the old View names still find their commands.
+void TestLayoutMenu() {
+    using namespace app;
+    testlog::Batch batch;
+    const MainLayout savedLayout = g.layout;
+    std::vector<std::wstring> savedSlots;
+    for (int i = 0; i < ui::kSavedLayouts; ++i) {
+        std::wstring key = L"Saved" + std::to_wstring(i + 1);
+        savedSlots.push_back(IniRead(L"Layout", key.c_str(), L""));
+        IniDelete(L"Layout", key.c_str());
+    }
+    std::function<bool(HMENU, UINT)> holds = [&](HMENU menu, UINT id) {
+        for (int i = 0, n = GetMenuItemCount(menu); i < n; ++i)
+            if (GetMenuItemID(menu, i) == id || (GetSubMenu(menu, i) && holds(GetSubMenu(menu, i), id))) return true;
+        return false;
+    };
+    auto checked = [](HMENU menu, UINT id) { return (GetMenuState(menu, id, MF_BYCOMMAND) & MF_CHECKED) != 0; };
+    auto grayed = [](HMENU menu, UINT id) { return (GetMenuState(menu, id, MF_BYCOMMAND) & MF_GRAYED) != 0; };
+    auto shown = [](HWND h) { return (GetWindowLongPtrW(h, GWL_STYLE) & WS_VISIBLE) != 0; };
+
+    batch.Next(L"layout menu: the menu bar has a Layout menu with View's layout items");
+    HMENU bar = BuildMenu(), view = GetSubMenu(bar, ui::kViewMenu), layout = GetSubMenu(bar, ui::kLayoutMenu);
+    wchar_t title[32]{};
+    GetMenuStringW(bar, ui::kLayoutMenu, title, (int)std::size(title), MF_BYPOSITION);
+    bool moved = true;
+    for (UINT id : {(UINT)IDM_SIZE_BASE, (UINT)IDM_PANEL_BASE, (UINT)IDM_MINI_PLAYER, (UINT)IDM_LYRICS, (UINT)IDM_QUEUE_SHOW,
+                    (UINT)IDM_LAYOUT_PART_BASE, (UINT)IDM_LAYOUT_DOCK_BASE, (UINT)IDM_LAYOUT_PRESET_BASE, (UINT)IDC_VIEW4})
+        moved = moved && holds(layout, id) && !holds(view, id);
+    Check(std::wstring(title) == L"La&yout" && GetMenuItemCount(bar) == (int)std::size(ui::kMenuBar) && moved &&
+              holds(layout, IDM_LAYOUT_BLANK) && holds(layout, IDM_LAYOUT_SAVE) && holds(view, IDM_THEME_BASE) &&
+              holds(view, IDM_LIGHTWEIGHT),
+          L"layout menu: Layout sits between View and Help and holds the sizes, panels, parts and presets View had");
+    DestroyMenu(bar);
+
+    batch.Next(L"layout menu: presets and the blank canvas");
+    g.size = ViewSize::Normal;
+    OnCommand(IDM_LAYOUT_PRESET_BASE + 1, 0, nullptr);
+    const MainLayout bottom = g.layout;
+    OnCommand(IDM_LAYOUT_PRESET_BASE + 4, 0, nullptr);
+    const MainLayout minimal = g.layout;
+    MainLayout wantBottom, wantMinimal;
+    wantBottom.player = Dock::Bottom;
+    wantBottom.waveSize = 1;
+    wantBottom.waveOwnRow = wantBottom.largeCover = true;
+    wantMinimal.order = wantMinimal.nowPlaying = wantMinimal.views = wantMinimal.status = false;
+    Check(bottom == wantBottom && minimal == wantMinimal, L"layout menu: the presets read from ui_spec.h keep their arrangements");
+    OnCommand(IDM_LAYOUT_BLANK, 0, nullptr);
+    const MainLayout& l = g.layout;
+    HWND body = CanvasActive() ? g.libView : g.list;
+    Check(!l.transport && !l.order && !l.wave && !l.times && !l.volume && !l.nowPlaying && !l.tabs && !l.search && !l.views &&
+              !l.status && !l.upNext && !l.hints && l.menuBar && !shown(g.seek) && !shown(g.buttons[1]) && !shown(g.tabs) &&
+              !shown(g.status) && shown(body),
+          L"layout menu: a blank canvas hides every part but the menu bar and keeps the list");
+    OnCommand(IDM_LAYOUT_PART_BASE + 2, 0, nullptr);  // the waveform
+    OnCommand(IDM_LAYOUT_PART_BASE + 0, 0, nullptr);  // previous, play and next
+    Check(l.wave && l.transport && !l.tabs && shown(g.seek) && shown(g.buttons[1]),
+          L"layout menu: parts added to a blank canvas show again");
+
+    batch.Next(L"layout menu: save, start from and forget your own layout");
+    const MainLayout built = g.layout;
+    OnCommand(IDM_LAYOUT_SAVE, 0, nullptr);
+    const std::wstring saved = IniRead(L"Layout", L"Saved1", L"");
+    OnCommand(IDM_LAYOUT_PRESET_BASE, 0, nullptr);
+    const bool reset = g.layout == MainLayout{};
+    OnCommand(IDM_LAYOUT_SAVED_BASE, 0, nullptr);
+    Check(!saved.empty() && saved.find(L'\n') == std::wstring::npos && reset && g.layout == built,
+          L"layout menu: Save this layout keeps the layout as My layout 1 and starting from it brings it back");
+    // The menu bar's Layout menu is filled again as it opens, so a layout saved since shows at once.
+    IniDelete(L"Layout", L"Saved1");
+    bar = BuildMenu();
+    layout = GetSubMenu(bar, ui::kLayoutMenu);
+    IniWrite(L"Layout", L"Saved1", saved);
+    const bool before = holds(layout, IDM_LAYOUT_SAVED_BASE);  // built before the save
+    HMENU attached = GetMenu(g.hwnd);
+    SetMenu(g.hwnd, bar);
+    WndProc(g.hwnd, WM_INITMENUPOPUP, (WPARAM)layout, 0);
+    const bool listed = holds(layout, IDM_LAYOUT_SAVED_BASE) && holds(layout, IDM_LAYOUT_FORGET_BASE) &&
+                        checked(layout, IDM_LAYOUT_SAVED_BASE) && grayed(layout, IDM_LAYOUT_SAVE) &&
+                        !checked(layout, IDM_LAYOUT_BLANK);
+    OnCommand(IDM_LAYOUT_BLANK, 0, nullptr);
+    WndProc(g.hwnd, WM_INITMENUPOPUP, (WPARAM)layout, 0);
+    const bool blankChecked = checked(layout, IDM_LAYOUT_BLANK) && grayed(layout, IDM_LAYOUT_SAVE) &&
+                              !checked(layout, IDM_LAYOUT_SAVED_BASE);
+    SetMenu(g.hwnd, attached);
+    DestroyMenu(bar);
+    Check(!before && listed && blankChecked,
+          L"layout menu: the Layout menu lists a saved layout as soon as it opens and checks the start the window still is");
+    for (int i = 1; i < ui::kSavedLayouts; ++i) IniWrite(L"Layout", (L"Saved" + std::to_wstring(i + 1)).c_str(), saved);
+    OnCommand(IDM_LAYOUT_PART_BASE + 2, 0, nullptr);  // a layout none of the eight is
+    OnCommand(IDM_LAYOUT_SAVE, 0, nullptr);
+    const std::wstring fullMessage = g.message;
+    OnCommand(IDM_LAYOUT_FORGET_BASE, 0, nullptr);
+    Check(IniRead(L"Layout", L"Saved1", L"").empty() && IniRead(L"Layout", L"Saved2", L"") == saved &&
+              fullMessage.find(L"Forget one") != std::wstring::npos,
+          L"layout menu: with eight saved a ninth asks to forget one, and Forget empties only its own slot");
+
+    batch.Next(L"layout menu: keys saved under the old View names still find their commands");
+    Check(MenuCommandByName(L"View > Customize layout > Menu bar") == IDM_LAYOUT_PART_BASE + 13 &&
+              MenuCommandByName(L"View > Customize layout > Presets > Minimal") == IDM_LAYOUT_PRESET_BASE + 4 &&
+              MenuCommandByName(L"View > Window size > Compact") == IDM_SIZE_BASE &&
+              MenuCommandByName(L"View > Mini player") == IDM_MINI_PLAYER &&
+              MenuCommandByName(L"View > Lyrics panel") == IDM_LYRICS &&
+              MenuCommandByName(L"Layout > Start from a blank canvas") == IDM_LAYOUT_BLANK,
+          L"layout menu: keys saved under View > Customize layout, Window size and Mini player still work");
+
+    for (int i = 0; i < ui::kSavedLayouts; ++i) {
+        std::wstring key = L"Saved" + std::to_wstring(i + 1);
+        if (savedSlots[i].empty()) IniDelete(L"Layout", key.c_str());
+        else IniWrite(L"Layout", key.c_str(), savedSlots[i]);
+    }
+    g.layout = savedLayout;
+    ApplyMainLayout();
+    batch.End();
+}
+
 // Every menu answers the keyboard: in the menu bar and the row and tab right-click menus, no two items
 // of one popup share an access key (a shared key only moves between them, so neither runs), and every
 // item the menus always show has one. The commands only a right-click held are in the palette too, and
@@ -1289,6 +1406,21 @@ void TestUiControls(const std::wstring& scratch) {
         Check(mp3Ready && flacBlocked && folderOff && asMp3 == L"1 song to convert" && asFlac.find(L"already .flac") != std::wstring::npos,
               L"UI: the Convert window counts what each format converts (MP3: \"%ls\", FLAC: \"%ls\") and keeps the folder choice "
               L"to copies", asMp3.c_str(), asFlac.c_str());
+    }
+    {
+        // Library > Rip CD...: both lossless formats, a folder to start from, and Rip and Look up
+        // waiting for a disc to be read, with or without a drive (the cd-rip suite rips).
+        ShowRipCd();
+        HWND window = FindWindowW(L"CordinalRipCd", nullptr);
+        HWND format = window ? GetDlgItem(window, 107) : nullptr, path = window ? GetDlgItem(window, 108) : nullptr;
+        HWND status = window ? GetDlgItem(window, 111) : nullptr, go = window ? GetDlgItem(window, IDOK) : nullptr;
+        HWND lookUp = window ? GetDlgItem(window, 110) : nullptr;
+        const bool laidOut = window && format && path && status && go && lookUp &&
+                             SendMessageW(format, CB_GETCOUNT, 0, 0) == 2 && !WindowText(path).empty() &&
+                             !WindowText(status).empty() && !IsWindowEnabled(go) && !IsWindowEnabled(lookUp);
+        if (window) DestroyWindow(window);
+        batch.Next(L"UI: the Rip CD window offers FLAC and .cord and waits for a disc before ripping");
+        Check(laidOut, L"UI: the Rip CD window offers FLAC and .cord and waits for a disc before ripping");
     }
     {
         // A track with no title, artist or number: the editor offers its file name's, shown as the
@@ -2454,6 +2586,7 @@ void TestUiControls(const std::wstring& scratch) {
     TestWebPreferences(scratch);
     TestLightweightMode();
     TestKeyboardShortcuts();
+    TestLayoutMenu();
     TestMenuAccessKeys();
     batch.Next(L"UI: shutdown joins every application worker before destroying the test window");
     StopAppWorkers(g.hwnd);

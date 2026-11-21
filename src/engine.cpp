@@ -450,6 +450,15 @@ struct Engine::Impl {
     // fades in from its first sample. Outside the fades `ramp` is exactly 1, and the gain multiply
     // leaves the samples untouched. Nothing is consumed while paused at 0.
     static constexpr double kRampSeconds = 0.012;
+    // An estimated ReplayGain moves at this many dB per second (see Render), and every other gain
+    // or volume change follows over about kGainSeconds.
+    static constexpr double kGlideDbPerSecond = 5, kGainSeconds = 1.0 / 96;
+
+    // Multiplies or divides `gain` by `factor` (> 1) toward `target`: an even speed in loudness.
+    static float GlideDb(float gain, float target, float factor) {
+        if (!(gain > 0.0f)) return target;
+        return gain < target ? std::min(target, gain * factor) : std::max(target, gain / factor);
+    }
 
     size_t Render(float* dst, size_t frames, unsigned long long& sourcePos) {
         if (eqDirty.exchange(false)) {
@@ -458,7 +467,10 @@ struct Engine::Impl {
             eqActive = eq.Active();
         }
         const float step = (float)(1.0 / (kRampSeconds * rate.load()));
-        const float glide = (float)(0.5 / rate.load());
+        const float glide = (float)std::pow(10.0, kGlideDbPerSecond / 20.0 / rate.load());
+        // The same glide time at any output rate (0.002 per frame at 48 kHz): a fixed per-frame
+        // share shortened it to under 3 ms at 192 kHz, where a volume step could zipper.
+        const float follow = (float)(1.0 / (kGainSeconds * rate.load()));
         const float vol = volume.load();
         const bool paused = pauseReq.load();
         size_t n = 0;
@@ -520,9 +532,11 @@ struct Engine::Impl {
                 }
                 const float gain = m ? m->gain : 1.0f;
                 playingGain = gain;
-                // An estimated gain arrives once, seconds into the track: it moves at 0.5 per second
-                // instead of the usual 10 ms, so the change is heard as a gentle level shift.
-                glideGain = m && m->glide ? StepFade(glideGain, gain, glide) : gain;
+                // An estimated gain arrives once, seconds into the track: it moves at 5 dB per second
+                // instead of the usual 10 ms, so the change is heard as a gentle fader move. Even in
+                // dB, a cut doesn't speed up as it goes (as a straight line in amplitude did) nor a
+                // lift lurch at the start; the usual 3 dB takes about as long as before (0.6 s).
+                glideGain = m && m->glide ? GlideDb(glideGain, gain, glide) : gain;
                 const float goal = glideGain * vol;
                 if (!paused && !holdReq && ramp==1.0f && smoothGain==goal) {
                     // A steady segment can be copied/scaled as one contiguous
@@ -537,7 +551,7 @@ struct Engine::Impl {
                     }
                     readPos+=count;n+=count;i+=count-1;continue;
                 }
-                smoothGain += (goal - smoothGain) * 0.002f;  // ~10 ms glide, no zipper noise
+                smoothGain += (goal - smoothGain) * follow;  // ~10 ms glide, no zipper noise
                 if (std::fabs(goal - smoothGain) < 1e-6f) smoothGain = goal;  // exact unity gain stays bit-perfect
                 const size_t r = (size_t)(readPos % cap) * 2;
                 const float g = smoothGain * ramp;

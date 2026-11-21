@@ -141,9 +141,11 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int showCmd) {
         if (OrganizeDialogMessage(&msg)) continue;
         if (CopyDialogMessage(&msg)) continue;
         if (ConvertDialogMessage(&msg)) continue;
+        if (RipDialogMessage(&msg)) continue;
         if (IpodDialogMessage(&msg)) continue;
         if (CoverSearchDialogMessage(&msg)) continue;
         if (ArtistInfoDialogMessage(&msg)) continue;
+        if (WebFetchDialogMessage(&msg)) continue;
         if (BackupDialogMessage(&msg)) continue;
         if (RecentAdditionsDialogMessage(&msg)) continue;
         if (RegionMouse(msg)) continue;  // the seek bar's section menu (app_region.cpp)
