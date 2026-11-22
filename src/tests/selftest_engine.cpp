@@ -880,6 +880,10 @@ void TestEngine(const std::wstring& gapDir, const std::wstring& cueDir, const st
             return std::find(ev.list.begin(), ev.list.end(), std::pair{EngineEvent::NeedNext, 2ull}) != ev.list.end();
         });
         const bool ahead = std::find(ev.list.begin(), ev.list.end(), std::pair{EngineEvent::NeedNext, 2ull}) != ev.list.end();
+        // At 1.5x the 1.5 s fixture is one second of output, shorter than the ring: decode-ahead
+        // can open the next track before the device has started. Time the advance once playback
+        // is under way, or the measurement includes the device's start-up.
+        Pump(2000, [&] { return engine.Position() > 0.05; });
         const double before = engine.Position();
         const double level = scopeLevel(engine);
         const ULONGLONG changed = GetTickCount64();

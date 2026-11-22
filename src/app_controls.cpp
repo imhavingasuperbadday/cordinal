@@ -66,6 +66,7 @@ void CreateControls(HWND hwnd) {
 
     CreateBrowser(hwnd);
     CreateLibView(hwnd);
+    CreateOnlineSearch(hwnd);
     CreateLyricsPanel(hwnd);
     // No size grip: the unthemed bar draws a light 3D grip that no palette reaches, and the
     // window's own corner resizes it anyway.

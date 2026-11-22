@@ -233,8 +233,8 @@ bool s_albumOnly = false;   // ApplyTheme for a new album colour alone: the layo
 // new album would re-apply their theme for nothing.
 double WantedAlbumHue() {
     if (AlbumColourConfig().mode != AlbumColours::Interface) return -1;
-    const Palette& base = ThemePalette(g.themeMode);
-    return &base == &LightPalette() || &base == &DarkPalette() ? g.playerHue : -1;
+    const ThemeMode m = g.themeMode;
+    return (m == ThemeMode::System || m == ThemeMode::Light || m == ThemeMode::Dark) ? g.playerHue : -1;
 }
 }  // namespace
 
@@ -500,6 +500,7 @@ PaintSurface paintSurface;
 
 void TrimMemory() {
     ReleaseGroupArt();
+    OnlineSearchTrimMemory();
     paintSurface.Reset();  // sized for the largest panel that last painted; a paint makes a new one
     CompactLibrary();
 }

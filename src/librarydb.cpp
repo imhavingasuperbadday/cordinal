@@ -9,8 +9,9 @@
 //   version 2 only: sections, each varint tag, varint byte length, payload; tag 0 ends the list
 //     1 = the play log (playlog.cpp), 2 = cordinal points (points.cpp), 8 = album groups and
 //     editions (album_editions.h), 9 = explicit group-cover choices, 10 = taste mood sketches,
-//     11 = taste part bins (taste.cpp) and 12 = a CRC-32 (4 bytes, little-endian) of every byte before
-//     its tag, written last. Readers skip unknown tags, so older versions still read a sealed file.
+//     11 = taste part bins (taste.cpp), 13 = the user's favorites and 12 = a CRC-32 (4 bytes,
+//     little-endian) of every byte before its tag, written last. Readers skip unknown tags, so
+//     older versions still read a sealed file.
 //
 // Integers are LEB128 varints (signed ones zigzag-encoded) so typical libraries stay small.
 // Saving writes a temp file and swaps it in with ReplaceFile, keeping the previous file as
@@ -40,13 +41,14 @@ constexpr uint64_t kMaxSectionBytes = 1ull << 30;
 
 // The payloads of the sections a file carries, copied out of the file.
 struct Sections {
-    std::string playLog, points, audioHash, views, loudness, albums, firstPlayed, albumEditions, albumArt, taste, tasteParts;
+    std::string playLog, points, audioHash, views, loudness, albums, firstPlayed, albumEditions, albumArt, taste, tasteParts,
+        favorites;
     bool hasChecksum = false;
     uint32_t checksum = 0;
     uint64_t checkedBytes = 0;  // the bytes the checksum covers: everything before its tag
     bool hasPlayLog = false, hasPoints = false, hasAudioHash = false, hasViews = false, hasLoudness = false,
          hasAlbums = false, hasFirstPlayed = false, hasAlbumEditions = false, hasAlbumArt = false, hasTaste = false,
-         hasTasteParts = false;
+         hasTasteParts = false, hasFavorites = false;
 };
 
 // Optional version-2 section: old readers skip it, so the database format stays compatible.
@@ -139,6 +141,36 @@ bool DecodeAudioHashes(std::string_view data, uint64_t trackCount, const std::ve
         uint64_t hash = r.U();
         if (!r.ok || index >= trackCount) return false;
         if (library) (*library)[savedToId ? (*savedToId)[(size_t)index] : (TrackId)index].audioHash = hash;
+    }
+    return r.ok && r.Done();
+}
+
+// The favorites section: varint count, then the saved index of each favorite, as the gap from
+// the previous one. The bit lives beside Track, so only favorites are listed.
+std::string EncodeFavorites(const Library& library, const std::vector<uint32_t>& newId) {
+    std::string out;
+    ByteWriter w(out);
+    std::vector<uint32_t> items;
+    for (TrackId id = 0; id < (TrackId)library.Count(); ++id)
+        if (newId[id] != UINT32_MAX && library.Favorite(id)) items.push_back(newId[id]);
+    w.U(items.size());
+    uint32_t previous = 0;
+    for (uint32_t index : items) {  // saved indices ascend with the library's ids
+        w.U(index - previous);
+        previous = index;
+    }
+    return out;
+}
+
+// Applies the favorites when a library is supplied (after validation), else only checks the section.
+bool DecodeFavorites(std::string_view data, uint64_t trackCount, const std::vector<TrackId>* savedToId, Library* library) {
+    ByteReader r(data);
+    uint64_t count = r.U(trackCount);
+    uint32_t index = 0;
+    for (uint64_t i = 0; i < count && r.ok; ++i) {
+        index += (uint32_t)r.U(trackCount);
+        if (!r.ok || index >= trackCount) return false;
+        if (library) library->SetFavorite(savedToId ? (*savedToId)[index] : (TrackId)index, true);
     }
     return r.ok && r.Done();
 }
@@ -486,7 +518,7 @@ bool ReadSections(Reader& r, Sections& out) {
             (tag == kSectionFirstPlayed && out.hasFirstPlayed) ||
             (tag == kSectionAlbumEditions && out.hasAlbumEditions) ||
             (tag == kSectionAlbumArt && out.hasAlbumArt) || (tag == kSectionTaste && out.hasTaste) ||
-            (tag == kSectionTasteParts && out.hasTasteParts)) return false;
+            (tag == kSectionTasteParts && out.hasTasteParts) || (tag == kSectionFavorites && out.hasFavorites)) return false;
         if (tag == kSectionPlaylistViews) {
             out.views.assign(body);
             out.hasViews = true;
@@ -520,6 +552,9 @@ bool ReadSections(Reader& r, Sections& out) {
         } else if (tag == kSectionTasteParts) {
             out.tasteParts.assign(body);
             out.hasTasteParts = true;
+        } else if (tag == kSectionFavorites) {
+            out.favorites.assign(body);
+            out.hasFavorites = true;
         }
     }
 }
@@ -600,6 +635,7 @@ bool ValidateLibrary(FileSource& input, uint64_t& stringCount, uint64_t& trackCo
         if (sections.hasAlbumArt && !DecodeAlbumArt(sections.albumArt, trackCount, nullptr, nullptr)) return false;
         if (sections.hasTaste && !DecodeTaste(sections.taste, trackCount, nullptr, nullptr)) return false;
         if (sections.hasTasteParts && !DecodeTasteParts(sections.tasteParts, trackCount, nullptr, nullptr)) return false;
+        if (sections.hasFavorites && !DecodeFavorites(sections.favorites, trackCount, nullptr, nullptr)) return false;
         if (sections.hasViews && !DecodeViews(sections.views, playlistCount, trackCount, nullptr, nullptr)) return false;
     }
     return r.ok && r.Remaining() == 0;
@@ -622,6 +658,7 @@ static bool WriteDatabase(const std::wstring& file, const Library& library,
     std::vector<uint32_t> newId(library.Count(), UINT32_MAX);
     for (TrackId id = 0; id < (TrackId)library.Count(); ++id)
         if ((library[id].flags & (Track::kInLibrary | Track::kInbox | Track::kMissing | Track::kExcluded | Track::kCollected)) || library[id].rating ||
+            library.Favorite(id) ||
             library[id].playCount || library[id].skipCount || library[id].firstPlayed || library[id].lastPlayed) newId[id] = 0;
     for (const auto& e : log) if (e.id < newId.size()) newId[e.id] = 0;
     if (points) for (const auto& e : points->recent) if (e.id < newId.size()) newId[e.id] = 0;
@@ -730,6 +767,8 @@ static bool WriteDatabase(const std::wstring& file, const Library& library,
     w.Bytes(EncodeTaste(taste, newId));
     w.U(kSectionTasteParts);
     w.Bytes(EncodeTasteParts(taste, newId));
+    w.U(kSectionFavorites);
+    w.Bytes(EncodeFavorites(library, newId));
     w.Seal();
     std::vector<uint32_t>().swap(newId);
     return w.Commit();
@@ -847,6 +886,8 @@ bool ReadLibraryArchive(const std::wstring& file, LibraryArchive& out) {
         return reject();
     if (sections.hasTaste && !DecodeTaste(sections.taste, trackCount, savedToId, &data.taste)) return reject();
     if (sections.hasTasteParts && !DecodeTasteParts(sections.tasteParts, trackCount, savedToId, &data.taste.parts))
+        return reject();
+    if (sections.hasFavorites && !DecodeFavorites(sections.favorites, trackCount, savedToId, &data.library))
         return reject();
     for (const auto& e : data.log) if (e.flags & PlayEvent::kCounted) {
         auto& first = data.library[e.id].firstPlayed;

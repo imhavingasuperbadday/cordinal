@@ -298,11 +298,12 @@ struct Engine::Impl {
     float limiterAppliedHeadroom = 0;
     bool limiterActive = false;
     unsigned limiterRate = 0;
-    // Apollo's short output history. The render thread never waits for the display's lock.
+    // Apollo's short output history. The render thread never waits for the display's lock. The
+    // buffer is made by SetScope: a player that never opens the scope view holds none of it.
     static constexpr size_t kScope = 2048;
     std::atomic<bool> scopeOn{false};
     std::mutex scopeMx;
-    std::array<float, kScope * 2> scope{};
+    std::vector<float> scope;
     size_t scopeAt = 0;
     unsigned scopeRate = 0;
     // Fades (see Render). pauseReq is set by the UI; the rest is guarded by ringMx.
@@ -617,7 +618,7 @@ struct Engine::Impl {
             lastOut[0] = dst[frames * 2 - 2];
             lastOut[1] = dst[frames * 2 - 1];
         }
-        if (scopeOn.load(std::memory_order_relaxed) && scopeMx.try_lock()) {
+        if (scopeOn.load(std::memory_order_relaxed) && !scope.empty() && scopeMx.try_lock()) {
             const size_t capacity = scope.size() / 2;
             if (scopeRate != rate.load()) {
                 std::fill(scope.begin(), scope.end(), 0.0f);
@@ -1775,7 +1776,10 @@ void Engine::SetScope(bool on) {
     if (on) {
         std::lock_guard<std::mutex> lock(d.scopeMx);
         if (!d.scopeOn) {
-            d.scope.fill(0);
+            // Made before scopeOn says it exists, so the render thread only ever sees the pair
+            // together; it stays for the session once made, like the other playback buffers.
+            if (d.scope.empty()) d.scope.assign(Impl::kScope * 2, 0.0f);
+            else std::fill(d.scope.begin(), d.scope.end(), 0.0f);
             d.scopeAt = 0;
         }
     }

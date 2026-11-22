@@ -126,24 +126,26 @@ public:
     }
 private:
     // Decode residuals with an adaptive Golomb parameter; runs of zeros are coded at once.
-    template<class T> bool Residuals(Bits& b,std::vector<T>& values,unsigned width,unsigned factor) {
+    template<class T> bool Residuals(Bits& bits,std::vector<T>& values,unsigned width,unsigned factor) {
+        Bits b=bits;
         uint32_t mean=historyStart_, weight=historyWeight_*factor/4;
         unsigned signOffset=0;
         for (size_t i=0;i<values.size();) {
             unsigned k=std::min(Log((mean>>9)+3),riceLimit_);
             uint64_t code=Golomb(b,k,width,(1u<<k)-1), v=code+signOffset;
-            if (!b.Good() || v>(uint64_t(1)<<width)) return false;
+            if (!b.Good() || v>(uint64_t(1)<<width)) { bits=b;return false; }
             values[i++]=(T)((v>>1) ^ (uint64_t(0)-(v&1)));
             mean=code>65535?65535:uint32_t(weight*v+mean-((uint64_t(weight)*mean)>>9));
             signOffset=0;
             if (mean<128 && i<values.size()) {
                 k=mean?7-Log(mean)+((mean+16)>>6):8;
                 uint64_t run=Golomb(b,k,16,((1u<<k)-1)&((1u<<riceLimit_)-1));
-                if (!b.Good() || run>values.size()-i) return false;
+                if (!b.Good() || run>values.size()-i) { bits=b;return false; }
                 std::fill_n(values.begin()+i,(size_t)run,0);
                 i+=(size_t)run; signOffset=run<65535; mean=0;
             }
         }
+        bits=b;
         return b.Good();
     }
     bool Decode(const uint8_t* p,size_t bytes,std::vector<float>& out) override {

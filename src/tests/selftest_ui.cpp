@@ -4,6 +4,7 @@
 #include "selftest_common.h"
 #include "column_layout.h"
 #include "cover_fade.h"
+#include "libview_internal.h"
 #include "metadata_fetch.h"
 #include "radio.h"
 #include "soft_canvas.h"
@@ -159,6 +160,41 @@ void TestSoftCanvas() {
     canvas.Reset();
     Check(painted, L"UI: the software canvas copies each frame to the DC it is given, across a resize");
     Check(after <= before + 1, L"UI: the software canvas draws on its own thread (threads %u before, %u after)", before, after);
+}
+
+// The canvas cover budget (libview_draw.cpp): the reduced-memory modes give back a slack row, never
+// the visible grid. Halving the whole budget, as before, left the halved figure under what a
+// viewport still showed, so Compact and the mini player re-decoded covers that never left screen.
+void TestCanvasCoverBudget() {
+    using namespace app;
+    testlog::Batch batch(L"UI: the canvas cover budget keeps the visible grid");
+    const int width = lv::v.width, height = lv::v.height, tile = lv::v.tile, expanded = lv::v.expanded;
+    const LibraryMode libMode = g.libMode;
+    const ViewSize size = g.size;
+    lv::v.width = 1120;
+    lv::v.height = 555;
+    lv::v.tile = 160;
+    lv::v.expanded = -1;
+    g.libMode = LibraryMode::Albums;
+    g.size = ViewSize::Normal;
+    const size_t normal = lv::CoverBudget();
+    g.size = ViewSize::Compact;  // a reduced-memory mode: it may give back slack only
+    const size_t compact = lv::CoverBudget();
+    int cols = 1;
+    float gap = 0;
+    lv::GridMetrics(lv::TileArt(), cols, gap);
+    const size_t visible = (size_t)(lv::TileArt() * lv::TileArt() * 4) * (size_t)std::max(1, cols) *
+                           ((size_t)std::max(0, lv::v.height) / (size_t)std::max(1.f, lv::TileArt() + lv::F(60)) + 2);
+    lv::v.width = width;
+    lv::v.height = height;
+    lv::v.tile = tile;
+    lv::v.expanded = expanded;
+    g.libMode = libMode;
+    g.size = size;
+    batch.Next(L"UI: the canvas cover budget never drops below the covers a viewport can show");
+    Check(compact >= visible && normal >= visible,
+          L"UI: the canvas cover budget never drops below the covers a viewport can show");
+    Check(normal >= compact, L"UI: a reduced-memory mode gives back only the cover budget's slack");
 }
 
 // The track list keeps formatted cells in one table and one character buffer. A hit is the first
@@ -1189,8 +1225,18 @@ void TestLayoutMenu() {
               MenuCommandByName(L"View > Window size > Compact") == IDM_SIZE_BASE &&
               MenuCommandByName(L"View > Mini player") == IDM_MINI_PLAYER &&
               MenuCommandByName(L"View > Lyrics panel") == IDM_LYRICS &&
-              MenuCommandByName(L"Layout > Start from a blank canvas") == IDM_LAYOUT_BLANK,
+              MenuCommandByName(L"Layout > Start from a blank canvas") == IDM_LAYOUT_BLANK &&
+              MenuCommandByName(L"Layout > Customize layout bar") == IDM_LAYOUT_BAR,
           L"layout menu: keys saved under View > Customize layout, Window size and Mini player still work");
+
+    batch.Next(L"layout top bar: toggles and shifts the player down by kLayoutBarHeight");
+    const bool hadBar = g.layoutBar;
+    OnCommand(IDM_LAYOUT_BAR, 0, nullptr);
+    const bool barOn = g.layoutBar && g.playerRect.top == S(ui::kLayoutBarHeight);
+    OnCommand(IDM_LAYOUT_BAR, 0, nullptr);
+    const bool barOff = !g.layoutBar && g.playerRect.top == 0;
+    Check(barOn && barOff && g.layoutBar == hadBar,
+          L"layout top bar: toggles and shifts the player down by kLayoutBarHeight");
 
     for (int i = 0; i < ui::kSavedLayouts; ++i) {
         std::wstring key = L"Saved" + std::to_wstring(i + 1);
@@ -1261,6 +1307,33 @@ void TestMenuAccessKeys() {
     DestroyMenu(row);
     DestroyMenu(tab);
     Check(cases.Passed(), L"menus: every item has its own access key%ls", cases.failed.c_str());
+
+    batch.Next(L"menus: Favorite and the mixes are commands, Ctrl+D is the heart, and the heart column is offered");
+    bool favorite = false;
+    int mixes = 0;
+    for (const MenuCommandInfo& c : AllMenuCommands()) {
+        favorite = favorite || (c.command == IDM_FAVORITE && c.label == L"Favorite" && c.path == L"Edit");
+        if (c.command >= IDM_MIX_BASE && c.command < IDM_MIX_BASE + (int)MixPreset::Count) ++mixes;
+    }
+    bool accel = false;
+    for (const ACCEL& a : BuiltInAccelerators())
+        if (a.cmd == IDM_FAVORITE) accel = a.key == 'D' && (a.fVirt & FCONTROL) != 0;
+    Check(favorite && accel && mixes == (int)MixPreset::Count,
+          L"menus: Favorite sits under Edit on Ctrl+D, and every mix has a command (favorite=%d accel=%d mixes=%d)",
+          favorite, accel, mixes);
+    bool discovered = false;
+    accel = false;
+    for (const MenuCommandInfo& c : AllMenuCommands())
+        discovered = discovered ||
+                    (c.command == IDM_KEEP_DISCOVERY && c.label == L"Keep the discovered song" && c.path == L"Library");
+    for (const ACCEL& a : BuiltInAccelerators())
+        if (a.cmd == IDM_KEEP_DISCOVERY)
+            accel = a.key == 'K' && (a.fVirt & (FCONTROL | FALT)) == (FCONTROL | FALT);
+    Check(discovered && accel && !DiscoverCanKeep(),
+          L"menus: the discovered song is kept from Library on Ctrl+Alt+K, and only while one waits (command=%d "
+          L"accel=%d waiting=%d)",
+          discovered, accel, DiscoverCanKeep());
+    Check(ColumnOffered(ui::kColFavorite), L"menus: the header menu offers the Favorite column");
 
     batch.Next(L"menus: the menu bar builds before the window's list view exists");
     // wWinMain builds the bar before CreateWindowExW, and the editions submenu asks for the selection
@@ -1452,6 +1525,7 @@ void TestUiControls(const std::wstring& scratch) {
     TestPlayerSliders();
     TestChoiceLabels();
     TestSoftCanvas();
+    TestCanvasCoverBudget();
     TestCellCache();
     TestCoverFade();
     {
@@ -2588,6 +2662,58 @@ void TestUiControls(const std::wstring& scratch) {
     TestKeyboardShortcuts();
     TestLayoutMenu();
     TestMenuAccessKeys();
+    {
+        // Unified online search pane: off by default (shows inline prompt only on empty local hits),
+        // opens a two-tier pane once enabled, and hides again when the query clears.
+        ActivatePlaylist(0);
+        SetLibraryMode(LibraryMode::Tracks);
+        SetWindowTextW(g.search, L"");
+        FlushSearch();
+        if (g.view.empty()) {
+            TrackId local = g_lib.Add(L"C:\\ui-test\\online-local.flac");
+            TagData tags;
+            tags.title = "Online Anchor Song";
+            tags.artist = "Anchor";
+            g_lib.ApplyTags(local, tags);
+            g_lib[local].flags |= Track::kInLibrary;
+            g_lib.Touch();
+            RebuildView(true);
+        }
+        const TrackId firstId =
+            !g.view.empty() && g.view[0] < Active().items.size() ? Active().items[g.view[0]] : kNone;
+        const std::wstring localQuery =
+            firstId != kNone && g_lib[firstId].title ? g_lib.Str(g_lib[firstId].title) : L"Track";
+        const bool prevSearchMusic = online::Config().searchMusic;
+        const int prevSearchSave = online::Config().searchSave;
+        online::Config().searchMusic = false;
+        SetWindowTextW(g.search, localQuery.c_str());
+        FlushSearch();
+        const bool localHitHidden = !app::OnlineSearchVisible();
+        SetWindowTextW(g.search, L"xyznonexistent999");
+        FlushSearch();
+        const bool promptOnEmptyLocal =
+            app::OnlineSearchVisible() && app::OnlineSearchWantedHeight(400) > 0 && app::OnlineSearchRowCount() == 0;
+        online::Config().searchMusic = true;
+        app::OnlineSearchSettingChanged();
+        app::SetOnlineSearchTestRows({
+            {"deezer", "1", "Unowned One", "Artist A", "Album A", "", 200},
+            {"itunes", "2", "Unowned Two", "Artist B", "Album B", "", 210},
+        });
+        Layout();
+        const bool panePopulated =
+            app::OnlineSearchVisible() && app::OnlineSearchRowCount() == 2 && app::OnlineSearchWantedHeight(400) > S(48);
+        SetWindowTextW(g.search, L"");
+        FlushSearch();
+        const bool hiddenOnClear = !app::OnlineSearchVisible();
+        online::Config().searchMusic = prevSearchMusic;
+        online::Config().searchSave = prevSearchSave;
+        app::OnlineSearchSettingChanged();
+        Layout();
+        batch.Next(L"UI: unified online search shows prompt on empty local hits and a two-tier pane when enabled");
+        Check(localHitHidden && promptOnEmptyLocal && panePopulated && hiddenOnClear,
+              L"UI: unified online search prompt and two-tier pane (localHitHidden=%d prompt=%d rows=%d clear=%d view=%zu)",
+              localHitHidden, promptOnEmptyLocal, panePopulated, hiddenOnClear, g.view.size());
+    }
     batch.Next(L"UI: shutdown joins every application worker before destroying the test window");
     StopAppWorkers(g.hwnd);
     Check(!g.rgWorker.joinable() && !g.tagWorker.joinable() && !g.importWorker.joinable() && !g.artWorker.joinable(),

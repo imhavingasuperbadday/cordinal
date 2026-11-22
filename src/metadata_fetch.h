@@ -233,12 +233,15 @@ struct ReleaseGroup {
     std::string title;
     std::string type;   // "Album", "EP", or the first secondary type ("Live", "Compilation", "Soundtrack"...)
     int year = 0;       // of its first release; 0 when MusicBrainz doesn't know
+    std::string firstDate;  // its first release's date, YYYY[-MM[-DD]]; "" when unknown
     bool owned = false;  // MarkOwned: the library has an album of this title by the artist
     std::string Url() const { return "https://musicbrainz.org/release-group/" + id; }
 };
 // One page of MusicBrainz's release-group browse; `total` receives the artist's count of them.
 // Entries without a valid id or title are left out; a malformed reply yields none.
 std::vector<ReleaseGroup> ParseReleaseGroups(std::string_view json, int* total = nullptr);
+// A MusicBrainz id: 36 hex digits and dashes, as the parsers accept them.
+bool ValidMbid(std::string_view id);
 // Earliest first, those of unknown year last, then by title.
 void SortReleaseGroups(std::vector<ReleaseGroup>& groups);
 // Marks a release group owned when its title and one of `owned` (the library's album titles by the
@@ -247,6 +250,8 @@ void MarkOwned(std::vector<ReleaseGroup>& groups, const std::vector<std::string>
 // The titles of the library's albums by `artist` (a track's artist or album artist, compared as
 // LooseTitle compares), each once, for MarkOwned. UI thread: it reads the live library.
 std::vector<std::string> LibraryAlbumsBy(const ::Library& library, std::string_view artist);
+// The library's owned tracks for `album` by `artist`, sorted by disc, track number and title.
+std::vector<uint32_t> LibraryAlbumTracks(const ::Library& library, std::string_view artist, std::string_view album);
 // Pages through an artist's release groups, 100 at a time up to 300: `page` fetches the one at `offset`,
 // false when it couldn't. `out` gets them sorted; `complete` says whether every page arrived. False when
 // none did.
@@ -271,6 +276,10 @@ struct Settings {
     bool artistInfo = false;           // MusicBrainz and Wikipedia for Artist info...
     bool albumTags = false;            // MusicBrainz for Tag album from MusicBrainz
     bool saveMusic = false;            // Save music from the web (webfetch.h)
+    bool releaseRadar = false;         // New releases by favorite artists (release_radar.h)
+    bool discoverRadio = false;        // unowned songs inside Keep playing like this (discovery.h)
+    bool searchMusic = false;          // unified online search in Ctrl+F / song picker (online_search.h)
+    int searchSave = 0;                // 0: preview until saved, 1: play and save automatically
 };
 Settings& Config();
 std::vector<CoverSource> CoverOrder();  // the enabled providers, the preferred one first

@@ -86,6 +86,7 @@ struct ScopeScan {
     std::vector<ScanFile> pending;        // files not in the library, awaiting the moved-file pass
     std::vector<TrackId> toRead, joined;  // tag reads; tracks that just entered the library
     size_t added = 0, moved = 0, missing = 0;
+    bool changed = false;  // a flag, size, time or join date on an existing track actually differs
     // Cached 0/1 values share the existing handle-to-uint32_t map implementation.
     std::unordered_map<StringPool::Handle, uint32_t> dirUnder;
     // Library folders that are not readable right now (a drive letter changed, a NAS is off): tracks
@@ -149,13 +150,15 @@ TrackId AddScanned(ScopeScan& st, const ScanFile& f) {
 void FoundScanned(ScopeScan& st, TrackId id, const ScanFile& f) {
     Track& t = g_lib[id];
     if (t.flags & Track::kExcluded) return;
-    if (!(t.flags & (Track::kInLibrary | Track::kInbox))) t.added = UnixNow();  // joins the library now
+    const uint16_t flagsBefore = t.flags;
+    if (!(t.flags & (Track::kInLibrary | Track::kInbox))) { t.added = UnixNow(); st.changed = true; }
     t.flags = (uint16_t)((t.flags | Track::kInLibrary) & ~Track::kMissing);
     if (t.InLibrary() && !(t.flags & Track::kCollected)) st.joined.push_back(id);
     bool changed = t.fileSize != f.size || t.fileTime != f.time;
     if (changed) t.flags &= (uint16_t)~Track::kRgScanFailed;
     t.fileSize = f.size;
     t.fileTime = f.time;
+    if (changed || t.flags != flagsBefore) st.changed = true;
     if (changed || !t.Loaded()) st.toRead.push_back(id);
 }
 
@@ -214,8 +217,14 @@ void FinishScope(const std::wstring& scope, ScopeScan& st) {
     QueueTags(st.toRead);
     st.toRead.clear();
     RequestAlbumGrouping();  // after the tag reads settle, not during the scan
-    g_lib.Touch();
-    g.dirty = true;
+    // An unchanged scan has nothing to save and no revision to bump: the unconditional dirty here
+    // rewrote library.cdb about twenty seconds into every launch and after every watched-folder
+    // event, and the Touch re-sorted the view once a second while it did. Tag reads still dirty
+    // the library through their own results when the tags actually differ.
+    if (st.added || st.moved || st.missing || st.changed) {
+        g_lib.Touch();
+        g.dirty = true;
+    }
     UpdateInboxTab();
     size_t added = st.added, moved = st.moved, missing = st.missing;
     static ULONGLONG lastChirp = 0;

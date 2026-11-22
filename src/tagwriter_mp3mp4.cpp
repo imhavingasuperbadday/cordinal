@@ -652,7 +652,8 @@ bool WriteMp4(const std::wstring& path, const TagEdit& e, std::wstring& error) {
         return false;
     }
     if (std::any_of(top.begin(), top.end(), [](const Atom& a) { return a.type == "moof"; })) {
-        error = L"Fragmented MP4 files can't be edited yet.";
+        error = L"Tags can't be written into a fragmented MP4; saving from the web rewrites "
+                L"one into a standard M4A first.";
         return false;
     }
     Atom moov = *moovIt;

@@ -52,7 +52,14 @@ constexpr auto BandEdges() {
     return edges;
 }
 constexpr auto edges=BandEdges();
-unsigned Band(unsigned bin) { return (unsigned)(std::upper_bound(edges.begin(),edges.end(),bin)-edges.begin()-1); }
+constexpr auto BandLookup() {
+    std::array<uint8_t,256> map{};
+    for (unsigned band=0;band<50;++band)
+        for (unsigned bin=edges[band];bin<edges[band+1] && bin<256;++bin) map[bin]=(uint8_t)band;
+    return map;
+}
+constexpr auto bandOfBin=BandLookup();
+unsigned Band(unsigned bin) { return bandOfBin[bin<256?bin:255]; }
 // PSD-minus-mask (in 1/32 units) mapped to the bit-allocation pointer for each mantissa.
 constexpr uint8_t allocation[]{0,1,1,1,1,1,2,2,3,3,3,4,4,5,5,6,6,6,6,7,7,7,7,8,8,8,8,9,9,9,9,10,
     10,10,10,11,11,11,11,12,12,12,12,13,13,13,13,14,14,14,14,14,14,14,14,15,15,15,15,15,15,15,15,15};
@@ -247,49 +254,54 @@ struct MantGroups { const float* group[3]{}; unsigned left[3]{}; };
 bool ReadMantissas(const uint8_t* data,size_t& position,size_t limit,Channel* const* order,unsigned count,
                    MantGroups& groups,uint32_t& random) {
     const Mantissas& t=MantissaTable();
-    size_t at=position;uint32_t r=random;
+    BitWindow w(data,position);
+    uint32_t r=random;
     const float** group=groups.group;unsigned* left=groups.left;
     bool bad=false;
-    auto get=[&](unsigned n) { unsigned v=unsigned((U64(data+(at>>3),true)<<(at&7))>>(64-n));at+=n;return v; };
     // A new grouped codeword when the previous one is used up; an invalid code fails the block.
     auto grouped=[&](unsigned g,unsigned width,unsigned capacity,unsigned size,const float* values) {
         if (!left[g]) {
-            unsigned code=get(width);bad|=code>=capacity;
+            w.Refill();
+            unsigned code=w.Get(width);bad|=code>=capacity;
             group[g]=values+(code<capacity?code:0)*size;left[g]=size;
         }
         return group[g][size-left[g]--];
     };
     for (unsigned c=0;c<count;++c) {
-        if (at>limit) return false;
+        if (w.Position()>limit) return false;
         Channel& ch=*order[c];float* out=ch.spectrum.data();
         memset(out,0,ch.first*sizeof(float));memset(out+ch.end,0,(256-ch.end)*sizeof(float));
         for (unsigned bin=ch.first;bin<ch.end;++bin) {
             float v;
-            switch (unsigned bap=ch.bap[bin]) {
-                case 0: {
-                    // A run of unallocated bins (often the whole top of the band) is noise or
-                    // silence; filling it in one loop skips the per-bin dispatch.
-                    unsigned end=bin+1;
-                    while (end<ch.end && !ch.bap[end]) ++end;
-                    if (ch.dither) for (;bin<end;++bin) out[bin]=Scale(Noise(r),ch.exponent[bin]);
-                    else for (;bin<end;++bin) out[bin]=0;
-                    --bin;
-                    continue;
-                }
+            unsigned bap=ch.bap[bin];
+            if (!bap) {
+                // A run of unallocated bins (often the whole top of the band) is noise or
+                // silence; filling it in one loop skips the per-bin dispatch.
+                unsigned end=bin+1;
+                while (end<ch.end && !ch.bap[end]) ++end;
+                if (ch.dither) for (;bin<end;++bin) out[bin]=Scale(Noise(r),ch.exponent[bin]);
+                else memset(out+bin,0,(end-bin)*sizeof(float));
+                bin=end-1;
+                continue;
+            }
+            if (bap>=6) {
+                w.Refill();
+                unsigned width=bap==14?14:bap==15?16:bap-1;
+                int32_t mant=int32_t(w.Get(width)<<(32-width))>>(32-width);
+                out[bin]=(float)mant*std::bit_cast<float>((128u-width-ch.exponent[bin])<<23);
+                continue;
+            }
+            switch (bap) {
                 case 1: v=grouped(0,5,27,3,t.three[0]);break;
                 case 2: v=grouped(1,7,125,3,t.five[0]);break;
                 case 4: v=grouped(2,7,121,2,t.eleven[0]);break;
-                case 3: { unsigned code=get(3);bad|=code>=7;v=t.seven[code];break; }
-                case 5: { unsigned code=get(4);bad|=code>=15;v=t.fifteen[code];break; }
-                default: {
-                    unsigned width=bap==14?14:bap==15?16:bap-1;
-                    v=Scale((float)(int32_t(get(width)<<(32-width))>>(32-width)),width-1);
-                }
+                case 3: { w.Refill();unsigned code=w.Get(3);bad|=code>=7;v=t.seven[code];break; }
+                default: { w.Refill();unsigned code=w.Get(4);bad|=code>=15;v=t.fifteen[code];break; }
             }
             out[bin]=Scale(v,ch.exponent[bin]);
         }
     }
-    position=at;random=r;
+    position=w.Position();random=r;
     return true;
 }
 
@@ -354,7 +366,7 @@ public:
         if (at!=media_.file.Size() || media_.packets.empty()) return false;
         }
         SetupTransforms(transform_,window_);
-        return Ready(media_.rate);
+        return Ready(media_.rate,true);
     }
 private:
     void Reset() override { for (auto& ch:channel_) ch.overlap.fill(0); }
@@ -369,7 +381,7 @@ private:
         Header h=Inspect(p,bytes);if (h.bytes!=bytes || h.rate!=rate_ || !ValidCrc(p,bytes)) return false;
         // At most 3,840 bytes; the copy gives the mantissa reader its padding.
         memcpy(frame_.data(),p,bytes);
-        Bits b(p,bytes-2);b.Skip(48);unsigned mode=(unsigned)b.Get(3),channels=channelCount[mode];
+        Bits b(frame_.data(),bytes-2);b.Skip(48);unsigned mode=(unsigned)b.Get(3),channels=channelCount[mode];
         unsigned center=(mode&1) && mode!=1?(unsigned)b.Get(2):0,surround=mode&4?(unsigned)b.Get(2):0;
         if (mode==2) b.Skip(2);
         bool lfe=b.Get(1)!=0;
@@ -539,28 +551,36 @@ private:
             float gain=1/(1+cg+sg);
             float* o=out.data()+block*512;
             if (!front && !rear) {
-                // Plain stereo or mono: interleave, with the gain applied and the finite check
-                // made on the way.
+                // Plain stereo or mono: gain is 1, interleave with finite check.
                 const float* l=pcm[0].data();const float* r=pcm[mode==1?0:1].data();
-                const __m128 g=_mm_set1_ps(gain);
                 const __m128i exponent=_mm_set1_epi32(0x7F800000);
                 __m128i bad=_mm_setzero_si128();
                 for (unsigned i=0;i<256;i+=4) {
-                    __m128 x=_mm_mul_ps(_mm_loadu_ps(l+i),g),y=_mm_mul_ps(_mm_loadu_ps(r+i),g);
+                    __m128 x=_mm_loadu_ps(l+i),y=_mm_loadu_ps(r+i);
                     bad=_mm_or_si128(bad,_mm_cmpeq_epi32(_mm_and_si128(_mm_castps_si128(x),exponent),exponent));
                     bad=_mm_or_si128(bad,_mm_cmpeq_epi32(_mm_and_si128(_mm_castps_si128(y),exponent),exponent));
                     _mm_storeu_ps(o+i*2,_mm_unpacklo_ps(x,y));_mm_storeu_ps(o+i*2+4,_mm_unpackhi_ps(x,y));
                 }
                 if (_mm_movemask_epi8(bad)) return false;
                 continue;
-            } else for (unsigned i=0;i<256;++i) {
-                float left=pcm[0][i],right=pcm[mode==1?0:front?2:1][i];
-                if (front) { left+=cg*pcm[1][i];right+=cg*pcm[1][i]; }
-                if (rear) { unsigned s=front?3:2;left+=sg*pcm[s][i];right+=sg*pcm[s+(mode>=6?1:0)][i]; }
-                o[i*2]=left*gain;o[i*2+1]=right*gain;
+            } else {
+                const float *lp=pcm[0].data(),*rp=pcm[mode==1?0:front?2:1].data();
+                const float *cp=front?pcm[1].data():nullptr;
+                const float *sl=rear?pcm[front?3:2].data():nullptr,*sr=rear?pcm[(front?3:2)+(mode>=6?1:0)].data():nullptr;
+                const __m128 g=_mm_set1_ps(gain),vcg=_mm_set1_ps(cg),vsg=_mm_set1_ps(sg);
+                const __m128i exponent=_mm_set1_epi32(0x7F800000);
+                __m128i bad=_mm_setzero_si128();
+                for (unsigned i=0;i<256;i+=4) {
+                    __m128 left=_mm_loadu_ps(lp+i),right=_mm_loadu_ps(rp+i);
+                    if (front) { __m128 c=_mm_mul_ps(vcg,_mm_loadu_ps(cp+i));left=_mm_add_ps(left,c);right=_mm_add_ps(right,c); }
+                    if (rear) { left=_mm_add_ps(left,_mm_mul_ps(vsg,_mm_loadu_ps(sl+i)));right=_mm_add_ps(right,_mm_mul_ps(vsg,_mm_loadu_ps(sr+i))); }
+                    left=_mm_mul_ps(left,g);right=_mm_mul_ps(right,g);
+                    bad=_mm_or_si128(bad,_mm_cmpeq_epi32(_mm_and_si128(_mm_castps_si128(left),exponent),exponent));
+                    bad=_mm_or_si128(bad,_mm_cmpeq_epi32(_mm_and_si128(_mm_castps_si128(right),exponent),exponent));
+                    _mm_storeu_ps(o+i*2,_mm_unpacklo_ps(left,right));_mm_storeu_ps(o+i*2+4,_mm_unpackhi_ps(left,right));
+                }
+                if (_mm_movemask_epi8(bad)) return false;
             }
-            // The gain is at most one, so a non-finite input sample stays non-finite here.
-            if (!AllFinite(o,512)) return false;
         }
         return b.Good();
     }
@@ -789,7 +809,7 @@ public:
             }
         }
         SetupTransforms(transform_,window_);
-        return Ready(media_.rate);
+        return Ready(media_.rate,true);
     }
 
 private:
@@ -983,7 +1003,7 @@ private:
         for (auto& ch:channel_) {
             ch.first=ch.end=0;ch.coupled=ch.coordinates=false;ch.deltaMode=2;ch.delta.fill(0);
             ch.stale=true;ch.aht=false;ch.gaqMode=0;ch.gaqGain.fill(0);
-            for (auto& block:ch.blocks) block.fill(0);
+            if (ahte) for (auto& block:ch.blocks) block.fill(0);
         }
         SpxState spx;spx.strc=defaultSpxStr;spx.begCode=0;
         CplState cpl;cpl.bandStr=defaultCplStr;cpl.ecplStr=defaultEcplStr;
@@ -1279,7 +1299,6 @@ private:
             MantGroups groups;
             auto readOne=[&](Channel& c) {
                 Channel* order[1]={&c};
-                unsigned nz=0,mx=0; for (unsigned i=c.first;i<c.end;++i) if (c.bap[i]) { ++nz; mx=std::max(mx,(unsigned)c.bap[i]); }
                 if (!ReadMantissas(frame_.data(),at,(bytes-2)*8,order,1,groups,random)) return false;
                 b.Skip(at-b.Position());
                 return b.Good();
@@ -1344,23 +1363,33 @@ private:
             float* o=out.data()+(size_t)blk*512;
             if (!front && !rear) {
                 const float* l=pcm[0].data();const float* r=pcm[acmod==1?0:1].data();
-                const __m128 g=_mm_set1_ps(gain);
                 const __m128i exponent=_mm_set1_epi32(0x7F800000);
                 __m128i bad=_mm_setzero_si128();
                 for (unsigned i=0;i<256;i+=4) {
-                    const __m128 x=_mm_mul_ps(_mm_loadu_ps(l+i),g),y=_mm_mul_ps(_mm_loadu_ps(r+i),g);
+                    const __m128 x=_mm_loadu_ps(l+i),y=_mm_loadu_ps(r+i);
                     bad=_mm_or_si128(bad,_mm_cmpeq_epi32(_mm_and_si128(_mm_castps_si128(x),exponent),exponent));
                     bad=_mm_or_si128(bad,_mm_cmpeq_epi32(_mm_and_si128(_mm_castps_si128(y),exponent),exponent));
                     _mm_storeu_ps(o+i*2,_mm_unpacklo_ps(x,y));_mm_storeu_ps(o+i*2+4,_mm_unpackhi_ps(x,y));
                 }
                 if (_mm_movemask_epi8(bad)) return false;
-            } else for (unsigned i=0;i<256;++i) {
-                float left=pcm[0][i],right=pcm[acmod==1?0:front?2:1][i];
-                if (front) { left+=cg*pcm[1][i];right+=cg*pcm[1][i]; }
-                if (rear) { const unsigned s=front?3:2;left+=sg*pcm[s][i];right+=sg*pcm[s+(acmod>=6?1:0)][i]; }
-                o[i*2]=left*gain;o[i*2+1]=right*gain;
+            } else {
+                const float *lp=pcm[0].data(),*rp=pcm[acmod==1?0:front?2:1].data();
+                const float *cp=front?pcm[1].data():nullptr;
+                const float *sl=rear?pcm[front?3:2].data():nullptr,*sr=rear?pcm[(front?3:2)+(acmod>=6?1:0)].data():nullptr;
+                const __m128 g=_mm_set1_ps(gain),vcg=_mm_set1_ps(cg),vsg=_mm_set1_ps(sg);
+                const __m128i exponent=_mm_set1_epi32(0x7F800000);
+                __m128i bad=_mm_setzero_si128();
+                for (unsigned i=0;i<256;i+=4) {
+                    __m128 left=_mm_loadu_ps(lp+i),right=_mm_loadu_ps(rp+i);
+                    if (front) { __m128 c=_mm_mul_ps(vcg,_mm_loadu_ps(cp+i));left=_mm_add_ps(left,c);right=_mm_add_ps(right,c); }
+                    if (rear) { left=_mm_add_ps(left,_mm_mul_ps(vsg,_mm_loadu_ps(sl+i)));right=_mm_add_ps(right,_mm_mul_ps(vsg,_mm_loadu_ps(sr+i))); }
+                    left=_mm_mul_ps(left,g);right=_mm_mul_ps(right,g);
+                    bad=_mm_or_si128(bad,_mm_cmpeq_epi32(_mm_and_si128(_mm_castps_si128(left),exponent),exponent));
+                    bad=_mm_or_si128(bad,_mm_cmpeq_epi32(_mm_and_si128(_mm_castps_si128(right),exponent),exponent));
+                    _mm_storeu_ps(o+i*2,_mm_unpacklo_ps(left,right));_mm_storeu_ps(o+i*2+4,_mm_unpackhi_ps(left,right));
+                }
+                if (_mm_movemask_epi8(bad)) return false;
             }
-            if (!AllFinite(o,512)) return false;
 
         }
 

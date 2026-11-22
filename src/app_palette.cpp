@@ -12,6 +12,8 @@
 #include "app.h"
 
 #include <cwctype>
+#include <memory>
+#include <thread>
 
 namespace app {
 
@@ -25,8 +27,18 @@ struct Entry {
     int playlist = -1;      // a playlist to play
     int queued = -1;        // g.queue's index of an Up next song; -1 when it comes from the playlist
     bool album = false;
+    bool online = false;
+    online::SearchTrack onlineTrack;
     bool enabled = true, checked = false;
 };
+
+struct PickerOnlineResult {
+    uint64_t generation = 0;
+    std::vector<online::SearchTrack> tracks;
+};
+
+constexpr UINT_PTR kPickerOnlineTimer = 1;
+constexpr UINT WM_APP_PICKER_ONLINE = WM_APP + 1;
 
 struct Palette {
     HWND hwnd = nullptr, edit = nullptr, list = nullptr;
@@ -35,6 +47,16 @@ struct Palette {
     bool raising = false;  // BringForward is handing it the front: activation flickers, it stays open
     size_t fixed = 0;    // the picker's entries that are not search results
 } p;
+
+struct PickerOnline {
+    online::Generation gen;
+    std::shared_ptr<online::Cancel> cancel;
+    std::atomic<bool> busy{false};
+    std::thread worker;
+    std::wstring query;
+    std::vector<online::SearchTrack> rows;
+};
+PickerOnline* po = nullptr;
 
 // A search lists this many at most: the picker is for choosing, the library view for browsing.
 constexpr size_t kMaxSongs = 60, kMaxAlbums = 6;
@@ -223,6 +245,49 @@ void FindSongs(const std::wstring& query) {
     }
     for (auto* found : {&albums, &songs})
         for (Entry& e : *found) p.entries.push_back(std::move(e));
+    if (online::Config().searchMusic && po && query == po->query) {
+        for (const online::SearchTrack& t : po->rows) {
+            Entry e;
+            e.online = true;
+            e.onlineTrack = t;
+            e.label = FromUtf8(t.title);
+            std::wstring artist = FromUtf8(t.artist);
+            e.path = artist.empty() ? L"Online" : L"Online \x203A " + artist;
+            if (t.durationSec > 0) e.shortcut = FormatDuration((double)t.durationSec);
+            p.entries.push_back(std::move(e));
+        }
+    }
+}
+
+void StopPickerOnline() {
+    if (p.hwnd) KillTimer(p.hwnd, kPickerOnlineTimer);
+    if (!po) return;
+    po->gen.Next();
+    if (po->cancel) po->cancel->Stop();
+}
+
+void StartPickerOnline() {
+    if (!p.hwnd || !p.songs || !online::Config().searchMusic || !po || !online::SearchableQuery(po->query)) return;
+    if (po->busy.load()) {
+        SetTimer(p.hwnd, kPickerOnlineTimer, 80, nullptr);
+        return;
+    }
+    if (po->worker.joinable()) po->worker.join();
+    const uint64_t gen = po->gen.Next();
+    auto cancel = std::make_shared<online::Cancel>();
+    po->cancel = cancel;
+    po->busy = true;
+    PickerOnline* state = po;
+    const HWND target = p.hwnd;
+    const std::string qUtf8 = online::NormalizeSearchQuery(po->query);
+    import::OwnedIndex owned = OnlineSearchOwnedSnapshot();
+    po->worker = std::thread([gen, qUtf8, owned = std::move(owned), cancel, target, state] {
+        auto* res = new PickerOnlineResult{gen, {}};
+        auto reply = online::SearchTracks(qUtf8, owned, *cancel, 5);
+        if (reply.ok) res->tracks = std::move(reply.tracks);
+        state->busy = false;
+        if (!PostMessageW(target, WM_APP_PICKER_ONLINE, 0, (LPARAM)res)) delete res;
+    });
 }
 
 // Lowercase, without mnemonics or dots ("..."), single spaces, and '>' for the palette's separator.
@@ -239,9 +304,22 @@ std::wstring CommandKey(const std::wstring& s) {
     return out;
 }
 
-void Filter() {
+void Filter(bool keepSelection = false) {
     const std::wstring query = WindowText(p.edit);
-    if (p.songs) FindSongs(query);
+    const int prevSel = keepSelection ? (int)SendMessageW(p.list, LB_GETCURSEL, 0, 0) : 0;
+    if (p.songs) {
+        if (!keepSelection) {
+            StopPickerOnline();
+            if (!po) po = new PickerOnline();
+            if (query != po->query) {
+                po->query = query;
+                po->rows.clear();
+            }
+            if (online::Config().searchMusic && online::SearchableQuery(query) && p.hwnd)
+                SetTimer(p.hwnd, kPickerOnlineTimer, 400, nullptr);
+        }
+        FindSongs(query);
+    }
     std::vector<std::wstring> texts;
     for (size_t i = 0, n = p.songs ? p.fixed : p.entries.size(); i < n; ++i)
         texts.push_back(p.entries[i].label + L" " + p.entries[i].path);
@@ -251,8 +329,13 @@ void Filter() {
     std::vector<int> order = RankMatches(texts, query);
     std::stable_partition(order.begin(), order.end(), [](int i) { return p.entries[i].enabled; });
     // In the picker a search is for music: what the library found leads.
-    if (p.songs && !query.empty())
-        for (size_t i = p.entries.size(); i-- > p.fixed;) order.insert(order.begin(), (int)i);
+    if (p.songs && !query.empty()) {
+        size_t pos = 0;
+        for (size_t i = p.fixed; i < p.entries.size(); ++i)
+            if (!p.entries[i].online) order.insert(order.begin() + (ptrdiff_t)pos++, (int)i);
+        for (size_t i = p.fixed; i < p.entries.size(); ++i)
+            if (p.entries[i].online) order.push_back((int)i);
+    }
     for (int i : order) {
         const Entry& e = p.entries[i];
         // The item text is what a screen reader announces.
@@ -261,7 +344,8 @@ void Filter() {
         int row = (int)SendMessageW(p.list, LB_ADDSTRING, 0, (LPARAM)spoken.c_str());
         SendMessageW(p.list, LB_SETITEMDATA, row, i);
     }
-    SendMessageW(p.list, LB_SETCURSEL, 0, 0);
+    const int count = (int)SendMessageW(p.list, LB_GETCOUNT, 0, 0);
+    SendMessageW(p.list, LB_SETCURSEL, count > 0 ? std::clamp(prevSel, 0, count - 1) : -1, 0);
     SendMessageW(p.list, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(p.list, nullptr, TRUE);
 }
@@ -317,6 +401,11 @@ void Run(bool next = false) {
         if (e.command == IDM_PLAY_PAUSE || e.command == IDM_NEXT || e.command == IDM_PREV || e.command == IDM_SHUFFLE) {
             OnCommand(e.command, 0, nullptr);
             RefreshSongs();
+            return;
+        }
+        if (e.online) {
+            Close();
+            OnlineSearchPlay(e.onlineTrack, next);
             return;
         }
         if (!e.command) {
@@ -462,12 +551,39 @@ LRESULT CALLBACK PaletteProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_ACTIVATE:
             if (LOWORD(wp) == WA_INACTIVE && !p.raising) PostMessageW(h, WM_CLOSE, 0, 0);  // clicking elsewhere dismisses it
             return 0;
+        case WM_TIMER:
+            if (wp == kPickerOnlineTimer) {
+                KillTimer(h, kPickerOnlineTimer);
+                StartPickerOnline();
+                return 0;
+            }
+            break;
+        case WM_APP_PICKER_ONLINE: {
+            std::unique_ptr<PickerOnlineResult> res(reinterpret_cast<PickerOnlineResult*>(lp));
+            if (!res || !p.songs || !po || !po->gen.Accepts(res->generation)) return 0;
+            po->rows = std::move(res->tracks);
+            Filter(true);
+            return 0;
+        }
         case WM_CLOSE:
             DestroyWindow(h);
             return 0;
-        case WM_NCDESTROY:
-            p = Palette{};
+        case WM_NCDESTROY: {
+            StopPickerOnline();
+            if (po) {
+                if (po->worker.joinable()) po->worker.join();
+                delete po;
+                po = nullptr;
+            }
+            MSG pending{};
+            while (PeekMessageW(&pending, h, WM_APP_PICKER_ONLINE, WM_APP_PICKER_ONLINE, PM_REMOVE))
+                delete reinterpret_cast<PickerOnlineResult*>(pending.lParam);
+            p.entries.clear();
+            p.hwnd = p.edit = p.list = nullptr;
+            p.songs = p.raising = false;
+            p.fixed = 0;
             return 0;
+        }
     }
     return DefWindowProcW(h, msg, wp, lp);
 }

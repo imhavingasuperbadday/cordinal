@@ -195,10 +195,9 @@ private:
     bool active_ = false;
 };
 
-// Tempo without a pitch change (WSOLA): 40 ms Hann-windowed segments overlap-added at 20 ms, each
-// taken from within ±10 ms of where the tempo puts it, at the offset whose start best matches what
-// the previous segment would have continued with. No FFT. Clean on speech and acceptable on music
-// from about 0.75x to 1.5x. Interleaved stereo in and out; tempo 1 is not Active (the engine skips it).
+// Tempo without a pitch change: stereo-coherent phase-locked phase vocoder with transient phase
+// reset, 75% overlapping Hann windows, and L+R packed into one complex FFT. Interleaved stereo in
+// and out; tempo 1 is not Active (the engine skips it and no FFT buffers are allocated).
 class TimeStretch {
 public:
     void Configure(unsigned rate, double tempo);  // also clears the state
@@ -210,12 +209,19 @@ public:
     double PendingOutput() const;  // output frames still owed for input already pushed
 
 private:
-    void Run(std::vector<float>& out);
-    double tempo_ = 1.0, nominal_ = 0;  // nominal_: input frame where the next segment belongs
-    size_t hop_ = 0, search_ = 0;
-    uint64_t base_ = 0, prev_ = 0;     // input frame of in_[0], and of the last segment used
-    std::vector<float> in_, window_, tail_, mono_;
-    bool primed_ = false;
+    void Run(std::vector<float>& out, bool flushing);
+    void Step(uint64_t pos, std::vector<float>& out);
+    double tempo_ = 1.0, nominal_ = 0;
+    size_t fftSize_ = 0, hop_ = 0, skipOut_ = 0;
+    uint64_t base_ = 0, prevPos_ = 0, totalIn_ = 0, emitted_ = 0;
+    unsigned sinceTransient_ = 0;
+    float fluxAvg_ = 0;
+    bool hasPrev_ = false;
+    std::vector<float> in_, win_, overlap_;
+    std::vector<float> mag_, prevMag_, prevAnaL_, prevAnaR_, prevSynL_, prevSynR_;
+    std::vector<float> fft_, specL_, specR_, twiddles_;  // interleaved re/im pairs
+    std::vector<uint32_t> bitrev_;
+    std::vector<uint16_t> peaks_;
 };
 
 // Loudness compensation tied to the volume (after the ISO 226 equal-loudness contours): ears lose

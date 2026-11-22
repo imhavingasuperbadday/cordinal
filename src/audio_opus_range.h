@@ -6,7 +6,11 @@
 #include <algorithm>
 #include <bit>
 #include <cstdint>
+#include <cstring>
 #include <span>
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
 
 namespace nativeaudio {
 class OpusRange {
@@ -39,12 +43,30 @@ public:
         }
         good_=false; return 0;
     }
+    // Fast path for 2-entry binary iCDFs {prob, 0}.
+    __forceinline unsigned Icdf2(uint8_t prob) {
+        const uint32_t total=256;
+        if (range_<total) { good_=false; return 0; }
+        const uint32_t unit=range_>>8, threshold=unit*prob;
+        if (value_>=threshold) {
+            value_-=threshold; range_-=threshold; Normalize(); return 0;
+        }
+        range_=threshold; Normalize(); return 1;
+    }
     // Decodes from a cumulative iCDF (counts ending in 0) at the given precision;
     // the default 8-bit form is what the SILK/CELT model tables use.
-    unsigned Icdf(std::span<const uint8_t> cumulative,unsigned precision=8) {
-        unsigned total=1u<<precision,target=Frequency(total),low=0;
+    // Checking value_ >= unit * cumulative[i] avoids both integer divisions per call.
+    __forceinline unsigned Icdf(std::span<const uint8_t> cumulative,unsigned precision=8) {
+        const uint32_t total=1u<<precision;
+        if (range_<total) { good_=false; return 0; }
+        const uint32_t unit=range_>>precision;
         for (unsigned i=0;i<cumulative.size();++i) {
-            unsigned high=total-cumulative[i]; if (target<high) { Update(low,high,total); return i; } low=high;
+            const uint32_t c=cumulative[i];
+            if (value_>=unit*c) {
+                value_-=unit*c;
+                range_=i?unit*(cumulative[i-1]-c):range_-unit*c;
+                Normalize(); return i;
+            }
         }
         good_=false; return 0;
     }
@@ -58,12 +80,28 @@ public:
     // Reads `count` raw bits from the end of the buffer, least-significant first
     // (RFC 4.1.2); they count toward the bit budget but not the range state.
     __forceinline uint32_t Raw(unsigned count) {
+        if (count==1) {
+            if (raw_>=bytes_.size()*8) { good_=false; return 0; }
+            uint32_t bit=(bytes_[bytes_.size()-1-(raw_>>3)]>>(raw_&7))&1u;
+            ++raw_; ++total_; return bit;
+        }
         if (count>32 || count>bytes_.size()*8-std::min(raw_,bytes_.size()*8)) { good_=false; return 0; }
+        if (count<=25 && bytes_.size()-(raw_>>3)>=4) {
+            uint32_t w;
+            std::memcpy(&w,bytes_.data()+bytes_.size()-4-(raw_>>3),4);
+#ifdef _MSC_VER
+            w=_byteswap_ulong(w);
+#else
+            w=__builtin_bswap32(w);
+#endif
+            uint32_t value=(w>>(raw_&7))&((1u<<count)-1);
+            raw_+=count; total_+=count; return value;
+        }
         // Take the rest of the current byte at a time rather than single bits.
         uint32_t value=0;
         for (unsigned got=0;got<count;) {
             unsigned bit=raw_&7,take=std::min(8-bit,count-got);
-            value|=uint32_t((bytes_[bytes_.size()-1-raw_/8]>>bit)&((1u<<take)-1))<<got;
+            value|=uint32_t((bytes_[bytes_.size()-1-(raw_>>3)]>>bit)&((1u<<take)-1))<<got;
             got+=take; raw_+=take;
         }
         total_+=count; return value;
@@ -85,9 +123,9 @@ public:
     // RFC 6716 derives the three fractional bits of log2(range) by repeated squaring; they are
     // equally the number of thresholds 2^15*2^(j/8), rounded up, that the top 16 bits reach.
     __forceinline int TellFraction() const {
-        static constexpr uint32_t steps[7]={35734,38968,42496,46341,50536,55110,60098};
-        unsigned l=32-std::countl_zero(range_),r=range_>>(l-16),fraction=0;
-        for (uint32_t step:steps) fraction+=r>=step;
+        unsigned l=32-std::countl_zero(range_),r=range_>>(l-16);
+        unsigned fraction=r>=46341?(r>=55110?(r>=60098?7:6):(r>=50536?5:4))
+                                  :(r>=38968?(r>=42496?3:2):(r>=35734?1:0));
         return total_*8-(int)(l*8+fraction);
     }
     // Final range-coder state; deterministic, so usable as a noise seed and as a

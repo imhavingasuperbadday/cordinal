@@ -396,4 +396,44 @@ void AddDefaultAutoPlaylists() {
     g.dirty = true;
 }
 
+// Playlist > Mixes: a ready-made local mix, seeded from the playing track where one is needed.
+// A tab with the same rules is already that mix, so it comes to the front instead of piling up;
+// closing it and choosing the mix again makes a fresh one.
+void OpenMix(MixPreset mix) {
+    TrackId seed = g.playing != kNone ? g.playing : kInvalidTrack;
+    if (seed == kInvalidTrack) {
+        const std::vector<TrackId> selected = SelectedTracks();
+        if (selected.size() == 1) seed = selected.front();
+    }
+    std::wstring name = MixName(mix);
+    std::string genre;
+    uint16_t bpm = 0;
+    if (MixNeedsSeed(mix)) {
+        if (seed == kNone || !g_lib.Contains(seed)) {
+            ShowMessage(L"Play or select the song the mix should follow first.");
+            return;
+        }
+        const Track& t = g_lib[seed];
+        genre = std::string(g_lib.View(t.genre));
+        bpm = t.bpm;
+        name = L"Mix like " + (t.title ? g_lib.Str(t.title) : StemOf(g_lib.Str(t.file)));
+        if (name.size() > 60) name.resize(60);
+    }
+    const std::string rules = MixRules(mix, genre, bpm);
+    if (rules.empty()) {
+        ShowMessage(L"That song has no genre or BPM to mix from.");
+        return;
+    }
+    for (int i = 0; i < (int)g.playlists.size(); ++i) {
+        if (g.playlists[i].kind != PlaylistKind::Auto || g.playlists[i].rules != rules) continue;
+        ActivatePlaylist(i);
+        return;
+    }
+    g.playlists.push_back(Playlist{UniquePlaylistName(g.playlists, name), {}, PlaylistKind::Auto, rules});
+    g.dirty = true;
+    PlaySfx(Sfx::Sparkle);
+    RefreshTabs();
+    ActivatePlaylist((int)g.playlists.size() - 1);
+}
+
 }  // namespace app

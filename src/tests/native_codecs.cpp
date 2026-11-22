@@ -9,6 +9,7 @@
 #include "cord_codec.h"
 #include "inflate.h"
 #include "audio_packets.h"
+#include "mp4_remux.h"
 #include "testlog.h"
 #include "selftest_common.h"
 #include "mpc_vectors.h"
@@ -97,53 +98,6 @@ bool RescaleMp4Fixture(std::string& bytes, unsigned factor, bool removeEdit, boo
                 if (!(read(pos, width) & (uint64_t(1) << (width * 8 - 1))) && !multiply(pos, width)) return false;
             }
         }
-    }
-    return true;
-}
-
-// The same packets as a fragmented file: ftyp, the moov with its sample count cleared, then one
-// moof/mdat pair per 32 packets. Every fragment points at the same bytes and times as the plain file.
-bool FragmentMp4Fixture(const std::wstring& path, const std::string& plain, std::string& out) {
-    nativeaudio::PacketFile source;
-    if (!source.OpenMp4(path) || source.packets.empty()) return false;
-    TestMp4Box ftyp{}, moov{}, trak{}, tkhd{}, mdia{}, minf{}, stbl{}, stsz{};
-    size_t at = 0;
-    if (!NextMp4Box(plain, at, plain.size(), ftyp) || plain.compare(ftyp.type, 4, "ftyp") != 0) return false;
-    if (!Mp4Child(plain, 0, plain.size(), "moov", moov) || !Mp4Child(plain, moov.body, moov.end, "trak", trak) ||
-        !Mp4Child(plain, trak.body, trak.end, "tkhd", tkhd) || !Mp4Child(plain, trak.body, trak.end, "mdia", mdia) ||
-        !Mp4Child(plain, mdia.body, mdia.end, "minf", minf) || !Mp4Child(plain, minf.body, minf.end, "stbl", stbl) ||
-        !Mp4Child(plain, stbl.body, stbl.end, "stsz", stsz) || stsz.end - stsz.body < 12) return false;
-    size_t idAt = tkhd.body + ((uint8_t)plain[tkhd.body] == 1 ? 20 : 12);
-    if (idAt + 4 > tkhd.end) return false;
-    uint64_t trackId = 0;
-    for (size_t i = 0; i < 4; ++i) trackId = (trackId << 8) | (uint8_t)plain[idAt + i];
-    std::string patched = plain;
-    for (size_t i = 0; i < 4; ++i) patched[stsz.body + 8 + i] = 0;
-    out = plain.substr(0, ftyp.end) + patched.substr(moov.type - 4, moov.end - (moov.type - 4));
-    auto be = [](uint64_t value, int width) {
-        std::string s;
-        for (int i = width - 1; i >= 0; --i) s += (char)(value >> (8 * i));
-        return s;
-    };
-    auto box = [&](const char* type, const std::string& body) { return be(8 + body.size(), 4) + type + body; };
-    const auto& packets = source.packets;
-    for (size_t first = 0; first < packets.size(); first += 32) {
-        size_t last = std::min<size_t>(packets.size(), first + 32);
-        auto moofAt = [&](uint64_t dataOffset) {
-            std::string runs = be(0x000301, 4) + be(last - first, 4) + be(dataOffset, 4);
-            for (size_t i = first; i < last; ++i) runs += be(packets[i].frames, 4) + be(packets[i].bytes, 4);
-            return box("moof", box("mfhd", be(0, 4) + be(first / 32 + 1, 4)) +
-                               box("traf", box("tfhd", be(0x020000, 4) + be(trackId, 4)) +
-                                           box("tfdt", be(0x01000000, 4) + be(packets[first].start, 8)) +
-                                           box("trun", runs)));
-        };
-        const std::string moof = moofAt(moofAt(0).size() + 8);
-        std::string payload;
-        for (size_t i = first; i < last; ++i) {
-            if (packets[i].offset + packets[i].bytes > plain.size()) return false;
-            payload += plain.substr(packets[i].offset, packets[i].bytes);
-        }
-        out += moof + box("mdat", payload);
     }
     return true;
 }
@@ -295,11 +249,32 @@ void TestMp4TimeScales(const std::wstring& root, const std::wstring& scratch) {
         auto plainDecoder = OpenDecoder(plainPath, 48000, error), fragmentDecoder = OpenDecoder(fragmentPath, 48000, error);
         bool matches = plainDecoder && fragmentDecoder && plainDecoder->Rate() == fragmentDecoder->Rate() &&
                        plainDecoder->Duration() == fragmentDecoder->Duration();
+        std::vector<float> expected;
         if (matches) {
-            const std::vector<float> expected = readAll(*plainDecoder), got = readAll(*fragmentDecoder);
+            expected = readAll(*plainDecoder);
+            const std::vector<float> got = readAll(*fragmentDecoder);
             matches = !expected.empty() && !plainDecoder->Failed() && !fragmentDecoder->Failed() && expected == got;
         }
         testlog::Check(matches, L"fragmented MP4 (moof/trun runs, empty sample tables) decodes exactly like its plain copy");
+
+        // The save queue's rewrite turns that fragmented file into one standard M4A with a
+        // full sample table; the same bytes must decode exactly like the plain original.
+        const std::wstring remuxPath = scratch + L"\\mp4-fragments-remux.m4a";
+        std::wstring remuxError;
+        const bool rewrote = nativeaudio::RemuxFragmentedMp4(fragmentPath, remuxPath, remuxError) &&
+                             !nativeaudio::IsFragmentedMp4(remuxPath);
+        testlog::Check(rewrote, L"a fragmented MP4 rewrites into one standard M4A");
+        if (rewrote) {
+            auto remuxDecoder = OpenDecoder(remuxPath, 48000, error);
+            bool remuxMatches = remuxDecoder && remuxDecoder->Rate() == plainDecoder->Rate() &&
+                                remuxDecoder->Duration() == plainDecoder->Duration() &&
+                                !remuxDecoder->Failed() && !expected.empty();
+            if (remuxMatches) remuxMatches = readAll(*remuxDecoder) == expected;
+            testlog::Check(remuxMatches,
+                           L"the rewritten M4A decodes exactly like the file its fragments came from");
+        } else {
+            testlog::Check(false, L"the rewrite refused its own fixture: %ls", remuxError.c_str());
+        }
     }
 }
 
@@ -485,6 +460,53 @@ bool TestFlacFixed(const std::wstring& scratch) {
     testlog::Check(rejected,L"FLAC fixed predictors reject out-of-range reconstruction before emitting a frame");
     return truncated;
 }
+}
+
+// The same packets as a fragmented file: ftyp, the moov with its sample count cleared, then one
+// moof/mdat pair per 32 packets. Every fragment points at the same bytes and times as the plain file.
+bool FragmentMp4Fixture(const std::wstring& path, const std::string& plain, std::string& out) {
+    nativeaudio::PacketFile source;
+    if (!source.OpenMp4(path) || source.packets.empty()) return false;
+    TestMp4Box ftyp{}, moov{}, trak{}, tkhd{}, mdia{}, minf{}, stbl{}, stsz{};
+    size_t at = 0;
+    if (!NextMp4Box(plain, at, plain.size(), ftyp) || plain.compare(ftyp.type, 4, "ftyp") != 0) return false;
+    if (!Mp4Child(plain, 0, plain.size(), "moov", moov) || !Mp4Child(plain, moov.body, moov.end, "trak", trak) ||
+        !Mp4Child(plain, trak.body, trak.end, "tkhd", tkhd) || !Mp4Child(plain, trak.body, trak.end, "mdia", mdia) ||
+        !Mp4Child(plain, mdia.body, mdia.end, "minf", minf) || !Mp4Child(plain, minf.body, minf.end, "stbl", stbl) ||
+        !Mp4Child(plain, stbl.body, stbl.end, "stsz", stsz) || stsz.end - stsz.body < 12) return false;
+    size_t idAt = tkhd.body + ((uint8_t)plain[tkhd.body] == 1 ? 20 : 12);
+    if (idAt + 4 > tkhd.end) return false;
+    uint64_t trackId = 0;
+    for (size_t i = 0; i < 4; ++i) trackId = (trackId << 8) | (uint8_t)plain[idAt + i];
+    std::string patched = plain;
+    for (size_t i = 0; i < 4; ++i) patched[stsz.body + 8 + i] = 0;
+    out = plain.substr(0, ftyp.end) + patched.substr(moov.type - 4, moov.end - (moov.type - 4));
+    auto be = [](uint64_t value, int width) {
+        std::string s;
+        for (int i = width - 1; i >= 0; --i) s += (char)(value >> (8 * i));
+        return s;
+    };
+    auto box = [&](const char* type, const std::string& body) { return be(8 + body.size(), 4) + type + body; };
+    const auto& packets = source.packets;
+    for (size_t first = 0; first < packets.size(); first += 32) {
+        size_t last = std::min<size_t>(packets.size(), first + 32);
+        auto moofAt = [&](uint64_t dataOffset) {
+            std::string runs = be(0x000301, 4) + be(last - first, 4) + be(dataOffset, 4);
+            for (size_t i = first; i < last; ++i) runs += be(packets[i].frames, 4) + be(packets[i].bytes, 4);
+            return box("moof", box("mfhd", be(0, 4) + be(first / 32 + 1, 4)) +
+                               box("traf", box("tfhd", be(0x020000, 4) + be(trackId, 4)) +
+                                           box("tfdt", be(0x01000000, 4) + be(packets[first].start, 8)) +
+                                           box("trun", runs)));
+        };
+        const std::string moof = moofAt(moofAt(0).size() + 8);
+        std::string payload;
+        for (size_t i = first; i < last; ++i) {
+            if (packets[i].offset + packets[i].bytes > plain.size()) return false;
+            payload += plain.substr(packets[i].offset, packets[i].bytes);
+        }
+        out += moof + box("mdat", payload);
+    }
+    return true;
 }
 
 // FLAC and AC-3 frame checksums fold whole 16-byte blocks by carry-less multiplication where the CPU

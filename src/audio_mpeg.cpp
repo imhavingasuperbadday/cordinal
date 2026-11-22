@@ -649,6 +649,9 @@ void Filterbank::Hybrid(Granule& g,unsigned channel,float* pcm) {
     if (limit < 32) for (auto& slot : subbands) memset(slot+limit,0,(32-limit)*sizeof(float));
     unsigned sb=0;
     if (g.type!=2) {
+        if (fast_) for (;sb+8<=active;sb+=8)
+            AudioMpegLong8Avx2(g.spectral+sb*18,g.type,overlap_[channel][sb],subbands[0]+sb,
+                &pre18_[0].r,&twiddle18_[0].r,&post18_[0].r,windows_[g.type]);
         for (;sb+4<=active;sb+=4)
             Long4(g.spectral+sb*18,g.type,overlap_[channel][sb],subbands[0]+sb);
         // The last one to three active subbands share a group with silent ones. The group still

@@ -164,7 +164,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case WM_SHOWWINDOW:
             if (!wp) ReleaseGroupArt();
-            else LightweightWindowShown();
+            else {
+                // Showing again after the tick stopped rebuilding a hidden window: catch up first,
+                // so the first frame the user sees is already the new view.
+                if (g.viewRevision != g_lib.Revision() && Active().IsView()) RefreshViewKeepingSelection();
+                LightweightWindowShown();
+            }
             break;
         case WM_SIZE:
             if (wp == SIZE_MINIMIZED && !g.closing) {
@@ -172,6 +177,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             Layout();
+            // The other way back to a window the tick stopped rebuilding: restored from minimize.
+            if (g.viewRevision != g_lib.Revision() && Active().IsView()) RefreshViewKeepingSelection();
             return 0;
         case WM_GETMINMAXINFO: {
             // Minimum track size, indexed by the current ViewSize.
@@ -271,6 +278,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == kWebTimer) { WebTick(); return 0; }
             if (HelperTimer(wp) || ArtFadeTimer(wp) || LightweightTimer(wp)) return 0;
             if (wp == kSearchTimer) { FlushSearch(); return 0; }
+            if (wp == kOnlineSearchTimer) { OnlineSearchTimer(); return 0; }
             if (wp == kUiTimer) MainTick();
             else if (wp == kBusyTimer) BusyTick();
             else if (wp == kStripTimer) StripHoverTick();
@@ -286,6 +294,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP_HELPER: OnHelperMessage(wp, lp); return 0;
         case WM_APP_STEAM: OnSteamDiscovery(wp, lp); return 0;
         case WM_APP_SPEAKERS: OnSpeakersFound(lp); return 0;
+        case WM_APP_DISCOVER: OnDiscoverMessage(wp, lp); return 0;
+        case WM_APP_ONLINE_SEARCH: OnOnlineSearchMessage(wp, lp); return 0;
+        case WM_APP_ONLINE_RESOLVE: OnOnlineResolveMessage(wp, lp); return 0;
+        case WM_APP_ARTIST_PLAY: OnArtistPlayMessage(wp, lp); return 0;
         case WM_APP_WEB: if (wp == 1) OpenWebPlayer(); else WebTick(); return 0;
         case WM_APP_IMPORT: OnImportResult(lp); return 0;
         case WM_APP_ART: OnArtResult(lp); return 0;
@@ -295,7 +307,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             RequestAlbumGrouping();
             g.dirty = true;
             g.statsDirty = true;
-            if (!g.filter.empty()) RebuildView(true);
+            // A scan's tag batches arrive every few milliseconds; a full rebuild per batch would
+            // re-sort the whole library far faster than the one-second cadence the tick keeps, so
+            // bulk work waits for the tick. A batch with nothing more pending (a single read, the
+            // last batch of a scan) still refreshes at once.
+            if (!g.filter.empty() && g.tagPending.empty() && !ScanInProgress()) RebuildView(true);
             RefreshGains();
             InvalidateRect(g.list, nullptr, FALSE);
             if (g.playing != kNone) UpdateNowPlaying();

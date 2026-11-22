@@ -150,8 +150,82 @@ struct Entropy {
             ch[c].error=log>0?Exponent((unsigned)std::min(log,8447)):0;
         }
     }
-    // Decode one residual. Medians select the magnitude range; the value is read either
-    // truncated or by binary search against the error limit.
+    // Decode one residual via the register window. Falls back to the bounded cursor for zero
+    // runs, very long unary prefixes, binary-search hybrid limits, or the final bytes of a block.
+    template<bool Hybrid>
+    __forceinline int32_t WordWindow(LittleBits& bits,LittleWindow& w,unsigned channel,unsigned count) {
+        auto& c=ch[channel];
+        if (!w.Safe() || (ch[0].median[0]<2 && ch[1].median[0]<2 && !holdOne && !holdZero)) {
+            w.Commit();
+            int32_t v=Word(bits,channel,count);
+            w.Load();
+            return v;
+        }
+        uint32_t category=0;
+        if (holdZero) holdZero=0;
+        else {
+            w.Refill();
+            uint32_t ones=w.Run();
+            if (ones<16) {
+                w.Drop(ones+1);
+            } else {
+                w.Commit();
+                ones=bits.Ones(17);
+                if (ones==16) ones+=Variable(bits);
+                w.Load();
+            }
+            category=(ones>>1)+holdOne;holdOne=ones&1;holdZero=1-holdOne;
+        }
+        if constexpr (Hybrid) if (!channel) ErrorLimit(count);
+        uint32_t low=0,high=0;
+        const uint32_t span0=(c.median[0]>>4)+1;
+        if (category==0) {
+            high=span0-1;
+            c.median[0]-=((c.median[0]+126)>>7)*2;
+        } else {
+            c.median[0]+=((c.median[0]+128)>>7)*5;
+            const uint32_t span1=(c.median[1]>>4)+1;
+            if (category==1) {
+                low=span0;high=span0+span1-1;
+                c.median[1]-=((c.median[1]+62)>>6)*2;
+            } else {
+                c.median[1]+=((c.median[1]+64)>>6)*5;
+                const uint32_t span2=(c.median[2]>>4)+1;
+                low=span0+span1+(category-2)*span2;
+                high=low+span2-1;
+                if (category==2) c.median[2]-=((c.median[2]+30)>>5)*2;
+                else c.median[2]+=((c.median[2]+32)>>5)*5;
+            }
+        }
+        low&=0x7fffffff;high=std::max(low,high&0x7fffffff);
+        uint32_t value,sign;
+        if (!c.error && w.Safe()) {
+            w.Refill();
+            const uint32_t maximum=high-low;
+            if (maximum<2) value=low+(maximum?w.Get(1):0);
+            else {
+                const unsigned width=32-std::countl_zero(maximum);
+                const uint32_t cutoff=(uint32_t)((uint64_t(1)<<width)-maximum-1);
+                const uint32_t win=w.Peek(width);
+                const uint32_t v=win&((1u<<(width-1))-1),big=v>=cutoff;
+                w.Drop(width-1+big);
+                value=low+(big?v*2-cutoff+(win>>(width-1)):v);
+            }
+            sign=0u-w.Get(1);
+        } else {
+            w.Commit();
+            value=(uint32_t)((uint64_t(high)+low+1)/2);
+            if (!c.error) value=low+Truncated(bits,high-low);
+            else while (high-low>c.error) {
+                if (bits.Get(1)) low=value;else high=value-1;
+                value=(uint32_t)((uint64_t(high)+low+1)/2);
+            }
+            sign=0u-bits.Get(1);
+            w.Load();
+        }
+        if constexpr (Hybrid) if (flags&512) { c.slow-=(c.slow+128)>>8;c.slow+=Logarithm(value); }
+        return (int32_t)(value^sign);
+    }
     int32_t Word(LittleBits& bits,unsigned channel,unsigned count) {
         bits.Prepare();
         auto& c=ch[channel];
@@ -201,7 +275,7 @@ struct Entropy {
 // Terms, weights and sample history for every decorrelation pass, stored in reverse order.
 bool ReadPasses(const Header& h,const Metadata& meta,std::vector<Pass>& passes) {
     Bytes terms=meta.item[2];if (terms.size()>16) return false;
-    unsigned count=h.Coded();passes.resize(terms.size());
+    unsigned count=h.Coded();passes.assign(terms.size(),{});
     for (unsigned i=0;i<terms.size();++i) {
         auto& pass=passes[i];unsigned value=terms[terms.size()-i-1];
         pass.term=(value&31)-5;pass.step=value>>5;
@@ -270,18 +344,40 @@ void Decorrelate(std::vector<int32_t>& samples,unsigned channels,std::vector<Pas
             else Predict<1>(samples.data(),frames,pass);
             continue;
         }
-        for (size_t i=0;i<frames;++i) {
-            int32_t* value=samples.data()+i*channels;
-            unsigned first=pass.term== -2?1:0,second=1-first;
-            int32_t source=pass.memory[first][0],residual=value[first];
-            value[first]=(int32_t)(uint32_t(residual)+uint32_t(Product(pass.weight[first],source)));
-            Adapt(pass.weight[first],source,residual,pass.step,true);
-            source=pass.term== -3?pass.memory[second][0]:value[first];residual=value[second];
-            value[second]=(int32_t)(uint32_t(residual)+uint32_t(Product(pass.weight[second],source)));
-            Adapt(pass.weight[second],source,residual,pass.step,true);
-            if (pass.term== -3) { pass.memory[0][0]=value[1];pass.memory[1][0]=value[0]; }
-            else pass.memory[first][0]=value[second];
+        int w0=pass.weight[0],w1=pass.weight[1],m0=pass.memory[0][0],m1=pass.memory[1][0];
+        const unsigned step=pass.step;
+        if (pass.term==-1) {
+            for (size_t i=0;i<frames;++i) {
+                int32_t* value=samples.data()+i*channels;
+                int32_t residual=value[0],left=(int32_t)(uint32_t(residual)+uint32_t(Product(w0,m0)));
+                value[0]=left;Adapt(w0,m0,residual,step,true);
+                residual=value[1];int32_t right=(int32_t)(uint32_t(residual)+uint32_t(Product(w1,left)));
+                value[1]=right;Adapt(w1,left,residual,step,true);
+                m0=right;
+            }
+        } else if (pass.term==-2) {
+            for (size_t i=0;i<frames;++i) {
+                int32_t* value=samples.data()+i*channels;
+                int32_t residual=value[1],right=(int32_t)(uint32_t(residual)+uint32_t(Product(w1,m1)));
+                value[1]=right;Adapt(w1,m1,residual,step,true);
+                residual=value[0];int32_t left=(int32_t)(uint32_t(residual)+uint32_t(Product(w0,right)));
+                value[0]=left;Adapt(w0,right,residual,step,true);
+                m1=left;
+            }
+        } else {
+            for (size_t i=0;i<frames;++i) {
+                int32_t* value=samples.data()+i*channels;
+                int32_t r0=value[0],r1=value[1];
+                int32_t left=(int32_t)(uint32_t(r0)+uint32_t(Product(w0,m0)));
+                Adapt(w0,m0,r0,step,true);
+                int32_t right=(int32_t)(uint32_t(r1)+uint32_t(Product(w1,m1)));
+                Adapt(w1,m1,r1,step,true);
+                value[0]=left;value[1]=right;
+                m0=right;m1=left;
+            }
         }
+        pass.weight[0]=w0;pass.weight[1]=w1;
+        pass.memory[0][0]=m0;pass.memory[1][0]=m1;
     }
 }
 
@@ -382,28 +478,61 @@ bool Reconstruct(const Header& h,const Metadata& meta,std::vector<int32_t>& valu
 // One block: metadata, entropy setup, passes, residual decode, joint stereo and
 // reconstruction, all gated by the block CRC.
 // `values` is scratch, reused between blocks.
-bool DecodeBlock(const Header& h,Bytes data,std::vector<float>& out,std::vector<int32_t>& values) {
+bool DecodeBlock(const Header& h,Bytes data,std::vector<float>& out,std::vector<int32_t>& values,std::vector<Pass>& passes) {
     Metadata meta;if (!meta.Read(data,h.flags)) return false;
     Entropy entropy;if (!entropy.Setup(h,meta)) return false;
-    std::vector<Pass> passes;if (!ReadPasses(h,meta,passes)) return false;
+    if (!ReadPasses(h,meta,passes)) return false;
     Bytes compressed=meta.item[10];if (compressed.empty() || (compressed.size()&1)) return false;
-    unsigned count=h.Coded();values.resize(h.samples*count);
+    unsigned count=h.Coded();values.resize(size_t(h.samples)*count);
     LittleBits bits(compressed);
-    if (count==2) for (size_t i=0;i<values.size();i+=2) { values[i]=entropy.Word(bits,0,2);values[i+1]=entropy.Word(bits,1,2); }
-    else for (size_t i=0;i<values.size();++i) values[i]=entropy.Word(bits,0,1);
+    LittleWindow window(bits);
+    if (h.flags&hybrid) {
+        if (count==2) for (size_t i=0;i<values.size();i+=2) { values[i]=entropy.WordWindow<true>(bits,window,0,2);values[i+1]=entropy.WordWindow<true>(bits,window,1,2); }
+        else for (size_t i=0;i<values.size();++i) values[i]=entropy.WordWindow<true>(bits,window,0,1);
+    } else {
+        if (count==2) for (size_t i=0;i<values.size();i+=2) { values[i]=entropy.WordWindow<false>(bits,window,0,2);values[i+1]=entropy.WordWindow<false>(bits,window,1,2); }
+        else for (size_t i=0;i<values.size();++i) values[i]=entropy.WordWindow<false>(bits,window,0,1);
+    }
+    window.Commit();
     if (!bits.Good()) return false;
     Decorrelate(values,count,passes);
-    if (count==2 && (h.flags&joint)) for (size_t i=0;i<values.size();i+=2) {
-        int32_t right=(int32_t)(uint32_t(values[i+1])-uint32_t(values[i]>>1));
-        values[i]=(int32_t)(uint32_t(values[i])+uint32_t(right));values[i+1]=right;
-    }
-    uint32_t crc=UINT32_MAX;for (int32_t v:values) crc=crc*3+(uint32_t)v;
+    const bool plainLossless=!(h.flags&(floating|hybrid|extended)) && meta.item[12].empty() && meta.item[31].empty();
+    if (plainLossless) {
+        const unsigned shift=(h.flags>>13)&31,wbits=((h.flags&3)+1)*8;
+        if (shift>31) return false;
+        const double scale=std::ldexp(1.0,1-(int)wbits);
+        uint32_t crc=UINT32_MAX;
+        out.resize(values.size());
+        if (count==2 && (h.flags&joint)) {
+            for (size_t i=0;i<values.size();i+=2) {
+                const int32_t mid=values[i],diff=values[i+1];
+                const int32_t right=(int32_t)(uint32_t(diff)-uint32_t(mid>>1));
+                const int32_t left=(int32_t)(uint32_t(mid)+uint32_t(right));
+                crc=crc*9+uint32_t(left)*3+uint32_t(right);
+                out[i]=(float)((int32_t)((uint32_t)left<<shift)*scale);
+                out[i+1]=(float)((int32_t)((uint32_t)right<<shift)*scale);
+            }
+        } else {
+            for (size_t i=0;i<values.size();++i) {
+                const int32_t v=values[i];
+                crc=crc*3+(uint32_t)v;
+                out[i]=(float)((int32_t)((uint32_t)v<<shift)*scale);
+            }
+        }
+        if (crc!=h.crc) return false;
+    } else {
+        if (count==2 && (h.flags&joint)) for (size_t i=0;i<values.size();i+=2) {
+            int32_t right=(int32_t)(uint32_t(values[i+1])-uint32_t(values[i]>>1));
+            values[i]=(int32_t)(uint32_t(values[i])+uint32_t(right));values[i+1]=right;
+        }
+        uint32_t crc=UINT32_MAX;for (int32_t v:values) crc=crc*3+(uint32_t)v;
 #ifdef CORDINAL_CODEC_TRACE
-    if (crc!=h.crc) fprintf(stderr,"wv core CRC %08x expected %08x\n",crc,h.crc);
+        if (crc!=h.crc) fprintf(stderr,"wv core CRC %08x expected %08x\n",crc,h.crc);
 #endif
-    if (crc!=h.crc || !Reconstruct(h,meta,values,out)) return false;
+        if (crc!=h.crc || !Reconstruct(h,meta,values,out)) return false;
+    }
     if (h.flags&falseStereo) {
-        out.resize(h.samples*2);
+        out.resize(size_t(h.samples)*2);
         for (size_t i=h.samples;i--;) out[i*2]=out[i*2+1]=out[i];
     }
     return true;
@@ -473,7 +602,7 @@ public:
                     Header h;if (!h.Read(file_.View(offset,32))) { failed_=true;return done; }
                     const uint8_t* data=file_.View(offset,h.bytes);
                     auto& block=direct?pcm_:block_;
-                    if (!data || !DecodeBlock(h,{data,h.bytes},block,values_) || block.size()!=size_t(group.samples)*h.Channels()) { failed_=true;return done; }
+                    if (!data || !DecodeBlock(h,{data,h.bytes},block,values_,passes_) || block.size()!=size_t(group.samples)*h.Channels()) { failed_=true;return done; }
                     if (!direct) for (unsigned i=0;i<group.samples;++i) for (unsigned c=0;c<h.Channels();++c)
                         interleaved_[i*channels_+channel+c]=block[i*h.Channels()+c];
                     channel+=h.Channels();
@@ -511,7 +640,7 @@ public:
         return true;
     }
 private:
-    File file_;std::vector<Group> groups_;std::vector<float> pcm_,interleaved_,block_;std::vector<int32_t> values_;
+    File file_;std::vector<Group> groups_;std::vector<float> pcm_,interleaved_,block_;std::vector<int32_t> values_;std::vector<Pass> passes_;
     size_t next_=0,used_=0;uint64_t frames_=0,position_=0;unsigned channels_=0,rate_=0,bits_=0;bool failed_=false,hybrid_=false,split_=false;
 };
 }

@@ -5,6 +5,7 @@
 #pragma once
 #include "app_state.h"
 #include "convert.h"
+#include "webfetch.h"
 
 #include <functional>
 
@@ -15,6 +16,9 @@ namespace app {
 void ShowAutoPlaylistEditor(int playlist);
 bool AutoEditorDialogMessage(MSG* msg);
 void AddDefaultAutoPlaylists();
+// Playlist > Mixes: the ready-made local mixes (autoplaylist.h MixPreset). An existing auto-playlist
+// with the same rules comes to the front instead of a second copy.
+void OpenMix(MixPreset mix);
 void ShowOrganize(const std::vector<TrackId>& ids);
 bool OrganizeDialogMessage(MSG* msg);
 bool OrganizeBusy();
@@ -71,15 +75,24 @@ bool CoverFetchBusy();
 void OnCoverFetchMessage(WPARAM wp, LPARAM lp);
 void StopCoverFetch();
 void OnlineSettingsChanged();  // Preferences > Online changed a source
-// Artist info (app_artistinfo.cpp): the selected or playing track's artist, from MusicBrainz and Wikipedia.
+// Artist info (app_artistinfo.cpp): the selected or playing track's artist, or an explicit artist name.
 void ShowArtistInfo();
+void ShowArtistInfoFor(const std::string& artist);
 bool ArtistInfoDialogMessage(MSG* msg);
+void OnArtistPlayMessage(WPARAM wp, LPARAM lp);
 void StopArtistInfo();
 // Save music from the web (app_webfetch.cpp): pasted SoundCloud, YouTube and Spotify
 // links downloaded into the library on a worker.
 void ShowWebFetch();
 bool WebFetchDialogMessage(MSG* msg);
 void StopWebFetch();
+// Albums' tracks straight into the save queue (Release Radar): files, not playlist tabs.
+void ShowWebFetchLists(std::vector<WebFetchTrackList> lists);
+// Library > New releases by your favorite artists... (app_releaseradar.cpp): recent MusicBrainz
+// albums of the artists played and hearted most, saved through the queue above.
+void ShowReleaseRadar();
+bool ReleaseRadarDialogMessage(MSG* msg);
+void StopReleaseRadar();
 // Copy to folder or device (app_copy.cpp).
 bool CopyCommand(int id);
 bool CopyBusy();

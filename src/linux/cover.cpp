@@ -5,6 +5,7 @@
 #include "app.h"
 #include "customcover.h"
 #include "discart.h"
+#include "draw.h"
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -30,6 +31,7 @@ std::condition_variable g_cv;
 TrackId g_wanted = kNone;
 std::wstring g_wantedPath;
 unsigned g_wantedDisc = 0, g_wantedDiscTotal = 0;
+int g_wantedSize = 176;  // captured with the request, so the worker never reads the scale itself
 struct Thumb {
     TrackId id;
     std::wstring path;
@@ -132,7 +134,7 @@ void Worker() {
     for (;;) {
         TrackId id;
         std::wstring path;
-        int thumb = 0;
+        int thumb = 0, wanted = 512;
         unsigned disc = 0, discTotal = 0;
         {
             std::unique_lock lock(g_mx);
@@ -143,6 +145,7 @@ void Worker() {
                 path = g_wantedPath;
                 disc = g_wantedDisc;
                 discTotal = g_wantedDiscTotal;
+                wanted = g_wantedSize;
             } else {
                 id = g_thumbs.front().id;
                 path = std::move(g_thumbs.front().path);
@@ -153,7 +156,10 @@ void Worker() {
         auto* img = new CoverImage{id, 0, 0, {}, {}};
         std::string bytes = CoverBytes(path);
         if (!thumb && !bytes.empty()) img->file = SaveForWidgets(bytes);
-        Decode(bytes, *img, thumb ? thumb : 512);
+        // The playing cover decodes at the pane's size, the same S(176) rule as Windows
+        // (app_art.cpp): every size it is drawn at fits inside it at any scale, and the fade's
+        // copy of it stays as small as the Windows one instead of holding a 512 px image.
+        Decode(bytes, *img, thumb ? thumb : wanted);
         if (!thumb && img->width > 0) {
             CoverImage art{};
             if (std::wstring file = FindDiscArt(path, disc, discTotal); !file.empty()) Decode(ReadWhole(file), art, 512);
@@ -242,6 +248,7 @@ void RequestCover(TrackId id) {
         g_wantedPath = g_lib.Path(id);
         g_wantedDisc = g_lib[id].disc;
         g_wantedDiscTotal = g_lib[id].discTotal;
+        g_wantedSize = (int)S(176);  // read here, on the UI thread, where the scale lives
     }
     EnsureCoverThread();
     g_cv.notify_one();

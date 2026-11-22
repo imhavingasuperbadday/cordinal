@@ -66,6 +66,7 @@ void TestSearchProperties();
 void TestLibraryWorkflow(const std::wstring& scratch);
 void TestImportedFolders(const std::wstring& scratch);
 void TestMigration(const std::wstring& scratch);
+void TestDiscovery(const std::wstring& scratch);
 // The real player's private working set in everyday states, against its budgets (memory_budget.cpp).
 void TestMemoryBudget(const std::wstring& root, const std::wstring& scratch);
 
@@ -73,6 +74,10 @@ void TestMemoryBudget(const std::wstring& root, const std::wstring& scratch);
 bool WriteTestBytes(const std::wstring& file, std::string_view bytes);
 std::string ReadTestBytes(const std::wstring& file);
 std::vector<float> DecodeAll(const std::wstring& path, unsigned& rate);
+// Re-states a plain M4A's own packets as a fragmented MP4 (moof/mdat runs, empty sample
+// tables), defined in native_codecs.cpp: the fragmented fixture the codec checks and the
+// web-save queue's rewrite checks share.
+bool FragmentMp4Fixture(const std::wstring& path, const std::string& plain, std::string& out);
 
 // Pumps the message queue for `ms`, or until `done` returns true, so worker threads and posted
 // messages (scanner, engine, peaks) make progress while a test waits.
@@ -86,15 +91,17 @@ void TestMetadata(const std::wstring& media, const std::wstring& scratch);
 void TestCdRip(const std::wstring& scratch);
 void TestWebPreferences(const std::wstring& scratch);
 // Web links saved into the library (selftest_soundcloud.cpp, selftest_ytaudio.cpp,
-// selftest_spotifylink.cpp, selftest_webfetch.cpp): resolvers against fixtures, and
-// the download queue against fakes, never the live sites.
+// selftest_spotifylink.cpp, selftest_webfetch.cpp, selftest_playlistimport.cpp): resolvers
+// against fixtures, and the download queue against fakes, never the live sites.
 void TestSoundCloud();
 void TestYtAudio();
 void TestSpotifyLink();
 void TestWebFetch(const std::wstring& scratch, const std::wstring& media);
+void TestPlaylistImport();
 void TestSearch();
 bool ReferenceSearch(const Library& library, TrackId id, const std::vector<std::wstring>& words);
 void TestAudioHashSection(const std::wstring& scratch);
+void TestFavoritesSection(const std::wstring& scratch);
 void TestLibraryDb(const std::wstring& scratch);
 void TestAlbumEditions(const std::wstring& scratch);
 void TestAlbumMaker(const std::wstring& scratch);

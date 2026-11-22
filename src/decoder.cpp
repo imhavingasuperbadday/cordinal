@@ -85,12 +85,16 @@ public:
             const size_t want = (size_t)std::min<uint64_t>({frames - done, loopEnd_ - file_, total_ - pos_});
             const size_t n = inner_->Read(out + done * 2, want);
             if (!n) { failed_ = true; break; }  // the file ends before the loop does
-            for (size_t i = 0; i < n; ++i) {
-                const uint64_t v = pos_ + i;
-                if (v < fadeFrom_) continue;
-                const float g = 1.0f - (float)(v - fadeFrom_ + 1) / (float)(total_ - fadeFrom_);
-                out[(done + i) * 2] *= g;
-                out[(done + i) * 2 + 1] *= g;
+            // Whole blocks sit before the fade (fadeFrom_ is the maximum when the loop does not
+            // fade at all), so the per-frame test only has to run for the blocks that reach it.
+            if (pos_ + n > fadeFrom_) {
+                for (size_t i = 0; i < n; ++i) {
+                    const uint64_t v = pos_ + i;
+                    if (v < fadeFrom_) continue;
+                    const float g = 1.0f - (float)(v - fadeFrom_ + 1) / (float)(total_ - fadeFrom_);
+                    out[(done + i) * 2] *= g;
+                    out[(done + i) * 2 + 1] *= g;
+                }
             }
             done += n;
             pos_ += n;

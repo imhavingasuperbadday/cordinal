@@ -1,7 +1,9 @@
 // ISO base media (MP4) sample tables: the moov box, track/sample descriptions and the
 // stsz/stts/stsc/stco tables, or the moof/trun runs of a fragmented file. Own parser, no
-// operating-system or external demuxer.
+// operating-system or external demuxer. ReadMp4Fragments below hands the same walk to the
+// container rewriter in mp4_remux.cpp, so the rewrite parses nothing on its own.
 #include "audio_packets.h"
+#include "mp4_remux.h"
 #include <span>
 
 namespace nativeaudio {
@@ -192,9 +194,19 @@ bool ReadFragments(PacketFile& out,Bytes track,Bytes movie) {
     return !out.packets.empty();
 }
 
+// Extra facts Track() records for ReadMp4Fragments(): the raw sample description to
+// copy verbatim, and the edit list's empty edit, which playback ignores but a
+// faithful rewrite has to carry over.
+struct FragmentsCapture {
+    std::vector<uint8_t> sampleDesc;
+    uint64_t emptyEdit = 0;
+    int emptyEdits = 0;
+    bool sawEdit = false, fragmented = false;
+};
+
 // Parse the first audio trak: sample description, codec config and the sample tables that
 // link every packet to a file offset, size and start time.
-bool Track(PacketFile& out,Bytes track,Bytes movie,uint32_t movieScale) {
+bool Track(PacketFile& out,Bytes track,Bytes movie,uint32_t movieScale,FragmentsCapture* capture=nullptr) {
     Bytes mdia=Child(track,Tag("mdia")), handler=Child(mdia,Tag("hdlr"));
     if (handler.size()<12 || Be(handler.data()+8)!=Tag("soun")) return false;
     Bytes stbl=Path(mdia,{Tag("minf"),Tag("stbl")}), stsd=Child(stbl,Tag("stsd"));
@@ -215,6 +227,12 @@ bool Track(PacketFile& out,Bytes track,Bytes movie,uint32_t movieScale) {
     if (config.empty() || config.size()>65536) return false;
     out.config.assign(config.begin(),config.end());
     if (out.codec==Tag("alac")) out.rate=Be(config.data()+20);
+    // The whole sample description box, header included: a rewrite copies it as it is,
+    // so the codec setup stays exactly what the source stated.
+    if (capture) {
+        const uint8_t* head=entry.bytes.data()-(U32(entry.bytes.data()-4,true)==1?16:8);
+        capture->sampleDesc.assign(head,entry.bytes.data()+entry.bytes.size());
+    }
 
     // Sample sizes: either one constant size or a table of per-sample sizes. A fragmented file
     // has no samples here; its runs come from the moof boxes instead.
@@ -222,6 +240,7 @@ bool Track(PacketFile& out,Bytes track,Bytes movie,uint32_t movieScale) {
     if (stsz.size()<12) return false;
     uint32_t constant=Be(stsz.data()+4), samples=Be(stsz.data()+8);
     if (samples>8000000 || samples>out.file.Size() || (!constant && samples>(stsz.size()-12)/4)) return false;
+    if (!samples && capture) capture->fragmented=true;
     if (samples ? !SampleTables(out,stbl,stsz,constant,samples) : !ReadFragments(out,track,movie)) return false;
     Bytes mdhd=Child(mdia,Tag("mdhd"));
     if (mdhd.size()<24 || (mdhd[0]==1 && mdhd.size()<36)) return false;
@@ -240,9 +259,15 @@ bool Track(PacketFile& out,Bytes track,Bytes movie,uint32_t movieScale) {
             const uint8_t* p=elst.data()+8+i*(large?20:12);
             uint64_t dur=large?U64(p,true):Be(p);
             int64_t from=large?(int64_t)U64(p+8,true):(int32_t)Be(p+4);
-            if (from<0) continue;
+            if (from<0) {
+                // An empty edit is leading silence; playback ignores it, a rewrite copies it.
+                if (capture && !capture->emptyEdits) capture->emptyEdit=dur;
+                if (capture) ++capture->emptyEdits;
+                continue;
+            }
             if (U32(p+(large?16:8),true)!=0x10000 || sawEdit) return false;
             sawEdit=true;
+            if (capture) capture->sawEdit=true;
             out.skip=(uint64_t)from;
             editDuration=dur;
         }
@@ -311,5 +336,121 @@ bool PacketFile::OpenMp4(const std::wstring& path) {
     const Bytes movie=moov;
     Box b{}; while (Next(moov,b)) if (b.tag==Tag("trak") && Track(*this,b.bytes,movie,movieScale)) return true;
     return false;
+}
+
+bool IsFragmentedMp4(const std::wstring& path) {
+    PacketFile pf;
+    if (!pf.file.Open(path) || pf.IsMatroska()) return false;
+    // The box-header walk OpenMp4 uses, stopping at the first fragment marker.
+    for (uint64_t at=0;at+8<=pf.file.Size();) {
+        const uint8_t* p=pf.file.View(at,16); if (!p) p=pf.file.View(at,8); if (!p) return false;
+        uint64_t n=Be(p); uint32_t tag=Be(p+4); size_t head=8;
+        if (n==1) { p=pf.file.View(at,16); if (!p) return false; n=U64(p+8,true); head=16; }
+        if (!n) n=pf.file.Size()-at;
+        if (n<head || n>pf.file.Size()-at) return false;
+        if (tag==Tag("moof")) return true;
+        at+=n;
+    }
+    return false;
+}
+
+bool ReadMp4Fragments(const std::wstring& path, Mp4Fragments& out, std::wstring& error) {
+    PacketFile pf;
+    if (!pf.file.Open(path) || pf.IsMatroska()) {
+        error=L"the file could not be read as MP4";
+        return false;
+    }
+    // Top-level boxes up to moov: the brand is kept verbatim, moov is copied out because
+    // the parser remaps regions. A fragmented file always puts its moov before the runs.
+    std::vector<uint8_t> storage;
+    for (uint64_t at=0;at+8<=pf.file.Size();) {
+        const uint8_t* p=pf.file.View(at,16); if (!p) p=pf.file.View(at,8); if (!p) break;
+        uint64_t n=Be(p); uint32_t tag=Be(p+4); size_t head=8;
+        if (n==1) { p=pf.file.View(at,16); if (!p) break; n=U64(p+8,true); head=16; }
+        if (!n) n=pf.file.Size()-at;
+        if (n<head || n>pf.file.Size()-at) break;
+        if (tag==Tag("ftyp") && n<=4096) {
+            p=pf.file.View(at,(size_t)n);
+            if (p) out.ftyp.assign(p,p+(size_t)n);
+        } else if (tag==Tag("moov")) {
+            if (n-head>64*1024*1024) break;
+            p=pf.file.View(at+head,(size_t)n-head); if (!p) break;
+            storage.assign(p,p+(size_t)n-head);
+            break;
+        }
+        at+=n;
+    }
+    if (storage.empty()) {
+        error=L"no moov atom: not an MP4 audio file";
+        return false;
+    }
+    Bytes moov=storage, mvhd=Child(moov,Tag("mvhd"));
+    if (mvhd.size()<24 || (mvhd[0]==1 && mvhd.size()<36)) {
+        error=L"the file's movie header is damaged";
+        return false;
+    }
+    uint32_t movieScale=Be(mvhd.data()+(mvhd[0]==1?20:12));
+    if (!movieScale) {
+        error=L"the file's movie header has no timescale";
+        return false;
+    }
+    const Bytes movie=moov;
+    FragmentsCapture cap;
+    Box b{};
+    bool parsed=false;
+    while (Next(moov,b)) {
+        if (b.tag!=Tag("trak")) continue;
+        // Only the trak that parses leaves its capture behind, so reset it per attempt.
+        cap=FragmentsCapture{};
+        if (Track(pf,b.bytes,movie,movieScale,&cap)) { parsed=true; break; }
+    }
+    if (!parsed) {
+        error=L"the file has no audio track the rewrite could read";
+        return false;
+    }
+    if (!cap.fragmented) {
+        error=L"not a fragmented MP4";
+        return false;
+    }
+    // An encrypted sample description (sinf) means the stream's bytes are not plain
+    // compressed audio this rewrite could copy; save must fall back, not break the file.
+    {
+        const std::vector<uint8_t>& desc=cap.sampleDesc;
+        unsigned version=U16(desc.data()+16,true);
+        size_t children=8+28+(version==1?16:version==2?36:0);
+        if (children>desc.size()) children=desc.size();
+        Bytes kids{desc.data()+children,desc.size()-children};
+        Box k{};
+        while (Next(kids,k)) if (k.tag==Tag("sinf")) {
+            error=L"the stream's audio is encrypted, so it cannot be saved as a plain file";
+            return false;
+        }
+    }
+    if (cap.emptyEdits>1) {
+        error=L"the track's edit list is too unusual to rewrite";
+        return false;
+    }
+    out.sampleDesc=std::move(cap.sampleDesc);
+    out.movieScale=movieScale;
+    out.mediaScale=pf.mp4TimeScale;
+    out.codec=pf.codec; out.channels=pf.channels; out.rate=pf.rate;
+    out.config=pf.config;
+    out.hasEdit=cap.sawEdit;
+    out.emptyEditDuration=cap.emptyEdit;
+    out.editMediaTime=(int64_t)pf.skip;
+    out.editDuration=pf.mp4EditDuration;
+    out.lead=pf.packets.front().start;
+    out.runs.reserve(pf.packets.size());
+    for (const Packet& p:pf.packets) {
+        out.runs.push_back({p.offset,p.bytes,p.frames});
+        out.mediaDuration+=p.frames;
+    }
+    // The rewrite starts its sample table at zero, so the first fragment must sit at or
+    // before the edit list's playable start, or the first samples would move.
+    if ((uint64_t)out.editMediaTime<out.lead) {
+        error=L"the stream's timeline starts after its edit list, which the rewrite cannot express";
+        return false;
+    }
+    return true;
 }
 } // namespace nativeaudio

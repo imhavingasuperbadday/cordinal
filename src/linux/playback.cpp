@@ -5,6 +5,7 @@
 #include "headphones_ui.h"
 #include "app.h"
 #include "radio_ui.h"
+#include "discover_ui.h"
 #include "ui.h"
 
 #include "cue.h"
@@ -295,6 +296,11 @@ TrackId g_listenTrack = kNone;
 void TrackListening() {
     if (g.playing == kNone || g.engine.Paused()) return;
     double pos = g.engine.Position();
+    if (IsDiscoverPreview(g.playing)) {  // a preview never feeds taste or statistics
+        g_listenTrack = g.playing;
+        g.lastPosition = pos;
+        return;
+    }
     // A track change is not a seek. The first sample only starts the next observation.
     if (g.playing != g_listenTrack) {
         g_listenTrack = g.playing;
@@ -314,6 +320,11 @@ void LeaveTrack(bool manual) {
         g_listenTrack = kNone;
         return;
     }
+    if (IsDiscoverPreview(g.playing)) {  // a preview never feeds statistics or the radio history
+        g.listened = 0;
+        g_listenTrack = kNone;
+        return;
+    }
     if (manual) TrackListening();
     // Left on purpose, a song's place is kept; one that gave way by itself played to its end.
     if (g.settings.resumeOn && !RadioPlaying()) {
@@ -321,7 +332,7 @@ void LeaveTrack(bool manual) {
         else ForgetSpot(g.playing);
     }
     if (ConsumeTasteSave()) g.libraryDirty = true;
-    if (g.settings.radio && g.listened > 0) {
+    if (g.settings.radio && g.listened > 0 && !IsDiscoverPreview(g.playing)) {
         g_radioHistory.push_back(g.playing);
         if (g_radioHistory.size() > 256) g_radioHistory.pop_front();
     }
@@ -362,7 +373,7 @@ void SetSectionFor(TrackId id, const PlaybackSection& section) {
 
 // Local playback and the paired browser use the same counting, history and points rules.
 void RecordListening(TrackId id, double seconds, bool manual, uint32_t when) {
-    if (!g_lib.Contains(id)) return;
+    if (!g_lib.Contains(id) || IsDiscoverPreview(id)) return;
     Track& track = g_lib[id];
     bool counted = seconds >= std::clamp(track.Duration() * 0.5, 1.0, 240.0);
     bool skip = !counted && manual && seconds >= 0.5;
@@ -390,6 +401,12 @@ void RecordListening(TrackId id, double seconds, bool manual, uint32_t when) {
 }
 
 bool IsPaused() { return g.engine.Paused(); }
+
+bool EngineHoldsTrack(TrackId id) {
+    for (const auto& [token, info] : g_tokens)
+        if (info.id == id) return true;
+    return false;
+}
 
 // What comes after the playing track changed (the queue did): answer the engine's hand-off again.
 void RefreshNext() {
@@ -983,6 +1000,7 @@ void SetRadio(bool on) {
     for (auto& [token, info] : g_tokens) info.radioNext = -2;
     RefreshNext();
     SaveSettings();
+    if (on) DiscoverMaybe();
     ShowMessage(on ? L"Radio is on." : L"Radio is off.");
 }
 
@@ -1156,6 +1174,7 @@ void OnEngineEvent(EngineEvent e, unsigned long long token) {
                 ScrobbleTrackStarted(token, g.playing);
             }
             EnsureTastePicks();
+            DiscoverTrackStarted();  // a preview says how to keep it; a local song may start a look
             g.redraw = true;
             MprisChanged();
             FlushDeferredTags();
@@ -1195,6 +1214,7 @@ void OnEngineEvent(EngineEvent e, unsigned long long token) {
 
 // Called a few times a second to follow output changes and count only the time actually heard.
 void PlaybackTick() {
+    DiscoverTick();
     // The output settles after a track starts (exclusive mode reopens at the track's rate).
     static unsigned lastRate = 0;
     static int lastState = -1;

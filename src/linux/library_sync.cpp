@@ -26,6 +26,7 @@ struct ScopeScan {
     std::vector<TrackId> toRead;
     std::vector<TrackId> joined;
     size_t added = 0, moved = 0, missing = 0;
+    bool changed = false;  // a flag, size, time or join date on an existing track actually differs
     std::unordered_map<StringPool::Handle, bool> dirUnder;
     std::vector<std::wstring> unreachable;  // configured folders that can't be read right now
     std::unordered_map<StringPool::Handle, bool> dirUnreachable;
@@ -73,12 +74,14 @@ TrackId AddScanned(ScopeScan& st, const ScanFile& f) {
 void FoundScanned(ScopeScan& st, TrackId id, const ScanFile& f) {
     Track& t = g_lib[id];
     if (t.flags & Track::kExcluded) return;
-    if (!(t.flags & (Track::kInLibrary | Track::kInbox))) t.added = UnixNow();
+    const uint16_t flagsBefore = t.flags;
+    if (!(t.flags & (Track::kInLibrary | Track::kInbox))) { t.added = UnixNow(); st.changed = true; }
     t.flags = (uint16_t)((t.flags | Track::kInLibrary) & ~Track::kMissing);
     if (t.InLibrary() && !(t.flags & Track::kCollected)) st.joined.push_back(id);
     bool changed = t.fileSize != f.size || t.fileTime != f.time;
     t.fileSize = f.size;
     t.fileTime = f.time;
+    if (changed || t.flags != flagsBefore) st.changed = true;
     if (changed || !t.Loaded()) st.toRead.push_back(id);
 }
 
@@ -130,8 +133,13 @@ void FinishScope(const std::wstring& scope, ScopeScan& st) {
     }
     QueueTags(st.toRead);
     st.toRead.clear();
-    g_lib.Touch();
-    g.libraryDirty = true;
+    // An unchanged scan has nothing to save and no revision to bump: the unconditional dirty here
+    // rewrote the library about twenty seconds into every launch, and the Touch re-sorted the view
+    // once a second while it did. Tag reads still dirty it through their own results.
+    if (st.added || st.moved || st.missing || st.changed) {
+        g_lib.Touch();
+        g.libraryDirty = true;
+    }
     AnnouncePoints(AwardLibraryAdds(st.joined));
     UpdateInboxTab();
     static uint64_t lastChirp = 0;

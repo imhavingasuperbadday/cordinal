@@ -224,7 +224,7 @@ const Ops kCoversOps{
 };
 const Ops kArtistOps{
     .draw = DrawArtistPanel,
-    .mouseDown = [](float x, float y, int) { ArtistPanelMouseDown(x, y); },
+    .mouseDown = [](float x, float y, int clicks) { ArtistPanelMouseDown(x, y, clicks); },
     .wheel = ArtistPanelWheel,
     .key = ArtistPanelKey,
     .close = ArtistPanelClose,
@@ -242,6 +242,7 @@ const Ops kWebFetchOps{
     .wheel = WebFetchPanelWheel,
     .key = WebFetchPanelKey,
     .text = WebFetchPanelText,
+    .file = [](int purpose, const std::wstring& path) { if (purpose == kFileImportWeb) WebFetchPanelFile(path); },
     .wantsText = WebFetchPanelWantsText,
     .close = WebFetchPanelClose,
     .typing = true,
@@ -251,6 +252,7 @@ const Ops* const kOps[] = {
     nullptr, &kEqOps, &kHeadphonesOps, &kTagsOps, &kPrefsOps, &kRulesOps, &kOrganizeOps, &kCopyOps, &kListenBrainzOps,
     &kFormatOps, &kDeviceOps, &kPointsOps, &kReviewOps, &kPaletteOps, &kLayoutOps, &kPacksOps, &kHelpersOps, &kGamesOps,
     &kEditionsOps, &kCoversOps, &kArtistOps, &kExportOps, &kAlbumOps, &kKeysOps, &kComebackOps, &kAlbumTagOps, &kDuplicatesOps, &kConvertOps, &kRipOps, &kWebFetchOps,
+    &kRadarOps,
 };
 static_assert(std::size(kOps) == (size_t)Kind::Count);
 

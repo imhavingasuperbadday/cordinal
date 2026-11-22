@@ -265,6 +265,25 @@ public:
         const Track& t = tracks_[id];
         return {id, strings_.Get(t.dir), strings_.Get(t.file)};
     }
+    // The heart beside a track: a favorite the user chose. It lives beside the compact Track
+    // record rather than in it (the record is full), and its own library.cdb section keeps
+    // older versions reading the file. ImportTrack and Compact carry it with the track.
+    bool Favorite(TrackId id) const {
+        const size_t word = id / 64;
+        return word < favorites_.size() && ((favorites_[word] >> (id % 64)) & 1);
+    }
+    void SetFavorite(TrackId id, bool on) {
+        if (!Contains(id)) return;
+        const size_t word = id / 64;
+        if (word >= favorites_.size()) {
+            if (!on) return;
+            favorites_.resize(word + 1, 0);
+        }
+        const uint64_t bit = 1ull << (id % 64);
+        const uint64_t before = favorites_[word];
+        favorites_[word] = on ? before | bit : before & ~bit;
+    }
+    size_t FavoriteCount() const;
     std::wstring Str(StringPool::Handle h) const { return FromUtf8(strings_.Get(h)); }
     std::string_view View(StringPool::Handle h) const { return strings_.Get(h); }
     StringPool::Handle Intern(std::string_view s) { return strings_.Intern(s); }
@@ -280,6 +299,7 @@ public:
 private:
     TrackStore tracks_;
     StringPool strings_;
+    std::vector<uint64_t> favorites_;  // a bit per track id
     std::vector<TrackId> byPath_;  // open-addressing index on (dir, file); empty = UINT32_MAX
     uint32_t revision_ = 1;
     void Index(TrackId id);
@@ -351,6 +371,7 @@ struct PlaylistPosition {
     std::vector<TrackId> selected;
     TrackId focus = UINT32_MAX, top = UINT32_MAX, expanded = UINT32_MAX;
     int canvasScroll = 0;  // at 96 DPI
+    bool operator==(const PlaylistPosition&) const = default;
 };
 
 // Undo and redo for an editable playlist's contents, kept for this session only. Each state is

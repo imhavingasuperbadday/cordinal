@@ -109,10 +109,56 @@ const Theme& ThemeInfo(ThemeMode mode) {
     return themes[i >= 0 && i < (int)ThemeMode::Count ? i : (int)ThemeMode::Light];
 }
 
+namespace {
+Rgb BlendRgb(Rgb a, Rgb b, double t) {
+    auto ch = [t](int x, int y) { return std::clamp((int)std::lround(x + (y - x) * t), 0, 255); };
+    return (Rgb)(ch((a >> 16) & 0xFF, (b >> 16) & 0xFF) << 16 |
+                 ch((a >> 8) & 0xFF, (b >> 8) & 0xFF) << 8 |
+                 ch(a & 0xFF, b & 0xFF));
+}
+}  // namespace
+
+ThemeCustomColors& CustomThemeColors(bool dark) {
+    static ThemeCustomColors light, darkC;
+    return dark ? darkC : light;
+}
+
+bool HasCustomThemeColors(bool dark) { return CustomThemeColors(dark) != ThemeCustomColors{}; }
+
+void ResetCustomThemeColors(bool dark) { CustomThemeColors(dark) = ThemeCustomColors{}; }
+
+const Palette& CustomPalette(bool dark) {
+    if (!HasCustomThemeColors(dark)) return dark ? DarkPalette() : LightPalette();
+    static Palette s_light, s_dark;
+    Palette& out = dark ? s_dark : s_light;
+    out = dark ? DarkPalette() : LightPalette();
+    const ThemeCustomColors& c = CustomThemeColors(dark);
+    if (c.bg != kNoRgb) out.bg = c.bg;
+    if (c.surface != kNoRgb) out.surface = c.surface;
+    if (c.surface2 != kNoRgb) out.surface2 = c.surface2;
+    if (c.border != kNoRgb) out.border = c.border;
+    if (c.text != kNoRgb) out.text = c.text;
+    if (c.sub != kNoRgb) out.sub = c.sub;
+    if (c.accent != kNoRgb) {
+        out.accent = c.accent;
+        out.accent2 = BlendRgb(c.accent, dark ? 0xFFFFFF : 0xFFFFFF, dark ? 0.25 : 0.18);
+        if (c.playing == kNoRgb) out.playing = c.accent;
+        if (c.select == kNoRgb) out.select = BlendRgb(out.bg, c.accent, dark ? 0.28 : 0.16);
+    }
+    if (c.select != kNoRgb) out.select = c.select;
+    if (c.playing != kNoRgb) out.playing = c.playing;
+    if (c.bg != kNoRgb || c.surface != kNoRgb) out.hover = BlendRgb(out.surface, out.text, dark ? 0.06 : 0.04);
+    if (c.text != kNoRgb || c.bg != kNoRgb) out.faint = BlendRgb(out.bg, out.text, 0.42);
+    out.selectText = Contrast(out.select, out.text) >= 4.5 ? out.text : TextOn(out.select);
+    return out;
+}
+
 const Palette& ThemePalette(ThemeMode mode) {
     const Theme& t = ThemeInfo(mode);
+    if (mode == ThemeMode::Light) return CustomPalette(false);
+    if (mode == ThemeMode::Dark) return CustomPalette(true);
     if (t.palette) return *t.palette;
-    return SystemUsesDarkTheme() ? DarkPalette() : LightPalette();
+    return CustomPalette(SystemUsesDarkTheme());
 }
 
 namespace {

@@ -171,9 +171,44 @@ private:
         return in;
     }
 
-    // The Rice parameters follow the running sums; then the adaptive filter and the fixed
-    // first-order prediction with the reference's wrapping unsigned shift.
-    __forceinline int32_t Adapt(TtaChannel& c, uint32_t value, bool second) {
+    // The Rice parameters follow the running sums and produce one signed residual before
+    // the adaptive LMS filter runs. Splitting Rice decode from Filter lets each channel's
+    // 8-tap LMS filter run chunked in YMM registers with zero store-forwarding stalls.
+    __forceinline int32_t DecodeResidual(TtaChannel& c, LittleBits& bits, LittleWindow& w) {
+        uint32_t unary;
+        bool second;
+        uint32_t k;
+        uint32_t value;
+        if (w.Safe()) {
+            w.Refill();
+            unary = w.Run();
+            if (unary < 32) {
+                w.Drop(unary + 1);
+                second = unary != 0;
+                if (second) --unary;
+                k = second ? c.k1 : c.k0;
+                value = unary;
+                if (k) {
+                    if (k > 31 || unary > (uint32_t)INT32_MAX >> k) { w.Commit(); bits.Fail(); return 0; }
+                    w.Refill();
+                    value = (unary << k) | w.Get(k);
+                }
+                goto adapt;
+            }
+        }
+        w.Commit();
+        unary = bits.Ones(1u << 20);
+        second = unary != 0;
+        if (second) --unary;
+        k = second ? c.k1 : c.k0;
+        if (k) {
+            if (k > 31 || unary > (uint32_t)INT32_MAX >> k) { bits.Fail(); return 0; }
+            value = (unary << k) | bits.Get(k);
+        } else {
+            value = unary;
+        }
+        w.Load();
+    adapt:
         if (second) {
             c.sum1 += value - (c.sum1 >> 4);
             const bool lower = c.k1 > 0 && c.sum1 < riceTables.sixteen[c.k1];
@@ -185,55 +220,57 @@ private:
         c.k0 += lower ? -1 : (c.sum0 > riceTables.sixteen[c.k0 + 1] ? 1 : 0);
         if (c.k0 > 31) c.k0 = 31;
         if (c.k1 > 31) c.k1 = 31;
-        int32_t residual = 1 + ((value >> 1) ^ ((value & 1) - 1));
-        residual = Filter(c, residual);
+        return 1 + ((value >> 1) ^ ((value & 1) - 1));
+    }
+
+    __forceinline int32_t FilterAndPredict(TtaChannel& c, int32_t residual) {
+        int32_t res = Filter(c, residual);
         const uint64_t previous = (uint64_t)(int64_t)c.predictor;
-        residual += (int32_t)(((previous << predictionShift_) - previous) >> predictionShift_);
-        c.predictor = residual;
-        return residual;
+        res += (int32_t)(((previous << predictionShift_) - previous) >> predictionShift_);
+        c.predictor = res;
+        return res;
     }
 
-    // One Rice-coded residual through the bounded cursor. k may only grow while the
-    // running sum stays above the next threshold.
-    __forceinline int32_t Sample(TtaChannel& c, LittleBits& bits) {
-        uint32_t unary = bits.Ones(1u << 20);
-        const bool second = unary != 0;
-        if (second) --unary;
-        const uint32_t k = second ? c.k1 : c.k0;
-        uint32_t value;
-        if (k) {
-            if (k > 31 || unary > (uint32_t)INT32_MAX >> k) { bits.Fail(); return 0; }
-            value = (unary << k) | bits.Get(k);
-        } else {
-            value = unary;
-        }
-        return Adapt(c, value, second);
-    }
-
-    // The same residual from the register window, the decoder's hot spot. A unary run of 32
-    // or more, and the frame's last bytes, go back through the bounded cursor.
     __forceinline int32_t Sample(TtaChannel& c, LittleBits& bits, LittleWindow& w) {
-        if (w.Safe()) {
-            w.Refill();
-            uint32_t unary = w.Run();
-            if (unary < 32) {
-                w.Drop(unary + 1);
-                const bool second = unary != 0;
-                if (second) --unary;
-                const uint32_t k = second ? c.k1 : c.k0;
-                uint32_t value = unary;
-                if (k) {
-                    if (k > 31 || unary > (uint32_t)INT32_MAX >> k) { w.Commit(); bits.Fail(); return 0; }
-                    w.Refill();
-                    value = (unary << k) | w.Get(k);
-                }
-                return Adapt(c, value, second);
-            }
+        return FilterAndPredict(c, DecodeResidual(c, bits, w));
+    }
+
+    static void EmitMonoChunk(const int32_t* in, size_t n, float scale, float* out) {
+        const __m128 vs = _mm_set1_ps(scale);
+        size_t i = 0;
+        for (; i + 4 <= n; i += 4) {
+            const __m128 f = _mm_mul_ps(_mm_cvtepi32_ps(_mm_loadu_si128((const __m128i*)(in + i))), vs);
+            _mm_storeu_ps(out + i * 2, _mm_unpacklo_ps(f, f));
+            _mm_storeu_ps(out + i * 2 + 4, _mm_unpackhi_ps(f, f));
         }
-        w.Commit();
-        const int32_t sample = Sample(c, bits);
-        w.Load();
-        return sample;
+        for (; i < n; ++i) {
+            const float v = (float)in[i] * scale;
+            out[i * 2] = v;
+            out[i * 2 + 1] = v;
+        }
+    }
+
+    static void EmitStereoChunk(const int32_t* in0, const int32_t* in1, size_t n, float scale, float* out) {
+        const __m128 vs = _mm_set1_ps(scale);
+        size_t i = 0;
+        for (; i + 4 <= n; i += 4) {
+            const __m128i f = _mm_loadu_si128((const __m128i*)(in0 + i));
+            const __m128i r = _mm_loadu_si128((const __m128i*)(in1 + i));
+            const __m128i halfF = _mm_srai_epi32(_mm_sub_epi32(f, _mm_srai_epi32(f, 31)), 1);
+            const __m128i last = _mm_add_epi32(r, halfF);
+            const __m128i first = _mm_sub_epi32(last, f);
+            const __m128 pf = _mm_mul_ps(_mm_cvtepi32_ps(first), vs);
+            const __m128 pl = _mm_mul_ps(_mm_cvtepi32_ps(last), vs);
+            _mm_storeu_ps(out + i * 2, _mm_unpacklo_ps(pf, pl));
+            _mm_storeu_ps(out + i * 2 + 4, _mm_unpackhi_ps(pf, pl));
+        }
+        for (; i < n; ++i) {
+            int32_t first = in0[i];
+            int32_t last = WrapAdd(in1[i], first / 2);
+            first = WrapSub(last, first);
+            out[i * 2] = (float)first * scale;
+            out[i * 2 + 1] = (float)last * scale;
+        }
     }
 
     bool DecodeFrame(size_t index) {
@@ -248,25 +285,37 @@ private:
         pcm_.resize((size_t)frame.samples * 2);
         const unsigned channels = channels_;
         LittleWindow window(bits);
+        constexpr uint32_t kChunk = 2048;
         if (channels == 1) {
             TtaChannel& c = state[0];
-            for (uint32_t i = 0; i < frame.samples; ++i) {
-                const float value = (float)Sample(c, bits, window) * scale_;
-                pcm_[i * 2] = value;
-                pcm_[i * 2 + 1] = value;
+            int32_t buf0[kChunk];
+            for (uint32_t base = 0; base < frame.samples; base += kChunk) {
+                const uint32_t n = std::min(kChunk, frame.samples - base);
+                for (uint32_t i = 0; i < n; ++i) buf0[i] = DecodeResidual(c, bits, window);
+                if (!bits.Good()) { window.Commit(); return false; }
+                if (fast_) TtaFilterBlockAvx2(c.qm, c.dx, c.dl, c.error, c.predictor, buf0, n, round_, shift_, predictionShift_);
+                else for (uint32_t i = 0; i < n; ++i) buf0[i] = FilterAndPredict(c, buf0[i]);
+                EmitMonoChunk(buf0, n, scale_, pcm_.data() + size_t(base) * 2);
             }
         } else if (channels == 2) {
             TtaChannel& left = state[0];
             TtaChannel& right = state[1];
-            for (uint32_t i = 0; i < frame.samples; ++i) {
-                int32_t first = Sample(left, bits, window);
-                int32_t last = Sample(right, bits, window);
-                // TTA's two-channel decorrelation: the second channel carries the sum;
-                // the first is the difference from it.
-                last = WrapAdd(last, first / 2);
-                first = WrapSub(last, first);
-                pcm_[i * 2] = (float)first * scale_;
-                pcm_[i * 2 + 1] = (float)last * scale_;
+            int32_t buf0[kChunk], buf1[kChunk];
+            for (uint32_t base = 0; base < frame.samples; base += kChunk) {
+                const uint32_t n = std::min(kChunk, frame.samples - base);
+                for (uint32_t i = 0; i < n; ++i) {
+                    buf0[i] = DecodeResidual(left, bits, window);
+                    buf1[i] = DecodeResidual(right, bits, window);
+                }
+                if (!bits.Good()) { window.Commit(); return false; }
+                if (fast_) {
+                    TtaFilterBlockAvx2(left.qm, left.dx, left.dl, left.error, left.predictor, buf0, n, round_, shift_, predictionShift_);
+                    TtaFilterBlockAvx2(right.qm, right.dx, right.dl, right.error, right.predictor, buf1, n, round_, shift_, predictionShift_);
+                } else {
+                    for (uint32_t i = 0; i < n; ++i) buf0[i] = FilterAndPredict(left, buf0[i]);
+                    for (uint32_t i = 0; i < n; ++i) buf1[i] = FilterAndPredict(right, buf1[i]);
+                }
+                EmitStereoChunk(buf0, buf1, n, scale_, pcm_.data() + size_t(base) * 2);
             }
         } else {
             int32_t values[8];

@@ -12,6 +12,7 @@
 // keeps up to eight of your own (settings.ini [Layout] Saved1 to Saved8). Drag the player's handle (the dots at its start) to an edge to dock it
 // there; click it for this menu.
 #include "app.h"
+#include <commdlg.h>
 
 namespace app {
 
@@ -78,6 +79,8 @@ MainLayout LayoutOfPack(const IniSection& s) {
     l.waveSize = (uint8_t)word(L"waveform_size", {L"slim", L"medium", L"tall"}, 0);
     l.waveOwnRow = flag(L"waveform_row", false);
     l.panelsLeft = flag(L"side_panels_left", false);
+    if (const std::wstring* v = s.Get(L"side_width")) l.sideWidth = std::clamp(_wtoi(v->c_str()), 180, 480);
+    if (const std::wstring* v = s.Get(L"pad")) l.pad = std::clamp(_wtoi(v->c_str()), 0, 16);
     for (const Part& p : kLayoutParts) l.*p.on = flag(p.key, l.*p.on);
     return l;
 }
@@ -153,7 +156,7 @@ int PlaceNowPlaying(HDWP& dwp, const RECT& r, int y) {
     bool chip = l.points && l.nowPlaying;
     Show(g.pointsChip, chip);
     if (!l.nowPlaying) return 0;
-    int pad = S(ui::kPad), art = S(l.largeCover ? ui::kLargeCover : ui::kCover), chipW = S(220);
+    int pad = S(std::clamp(l.pad, 0, 16)), art = S(l.largeCover ? ui::kLargeCover : ui::kCover), chipW = S(220);
     g.artRect = {r.left + pad, y, r.left + pad + art, y + art};
     int x0 = g.artRect.right + S(ui::kCoverGap), w = (int)r.right - x0 - pad - (chip ? chipW + S(8) : 0);
     int line = S(l.largeCover ? ui::kLargeLineHeight : ui::kLineHeight), gap = l.largeCover ? S(ui::kLargeLineGap) : 0;
@@ -169,7 +172,7 @@ int PlaceNowPlaying(HDWP& dwp, const RECT& r, int y) {
 void PlaceBandRow(HDWP& dwp, const RECT& r, int y, int h) {
     const MainLayout& l = g.layout;
     // The measurements are shared with the Linux port (ui_spec.h).
-    int pad = S(ui::kPad), tb = S(ui::kButton), timeW = S(ui::kTimeWidth), volW = S(ui::kVolumeWidth);
+    int pad = S(std::clamp(l.pad, 0, 16)), tb = S(ui::kButton), timeW = S(ui::kTimeWidth), volW = S(ui::kVolumeWidth);
     int by = y + (h - tb) / 2, ty = y + (h - S(ui::kTimeHeight)) / 2 + S(1);
     g.gripRect = {r.left, y, r.left + S(kGrip), y + h};
     int x = r.left + S(kGrip);
@@ -202,7 +205,7 @@ RECT LayoutBand(HDWP& dwp, RECT r) {
     const MainLayout& l = g.layout;
     bool player = AnyPlayerPart(), ownRow = l.wave && l.waveOwnRow;
     int height = ui::kBandWaveHeights[std::clamp(g.bandWaveSize, 0, 5)];
-    int pad = S(4), timeW = S(58), waveH = S(height ? height : kWaveHeights[std::min<int>(l.waveSize, 2)]);
+    int pad = S(std::clamp(l.pad, 0, 16)), timeW = S(58), waveH = S(height ? height : kWaveHeights[std::min<int>(l.waveSize, 2)]);
     int rowH = ownRow || !l.wave ? S(26) : std::max(S(26), waveH);
     int playerH = player ? rowH + (ownRow ? S(4) + waveH : 0) : 0;
     int art = l.nowPlaying ? S(l.largeCover ? ui::kLargeCover : ui::kCover) : 0;
@@ -384,6 +387,8 @@ void LoadMainLayout() {
     l.waveSize = (uint8_t)std::clamp(IniInt(L"Layout", L"Wave", 0), 0, 2);
     l.waveOwnRow = IniInt(L"Layout", L"WaveRow", 0) != 0;
     l.panelsLeft = IniInt(L"Layout", L"PanelsLeft", 0) != 0;
+    l.sideWidth = std::clamp(IniInt(L"Layout", L"SideWidth", 300), 180, 480);
+    l.pad = std::clamp(IniInt(L"Layout", L"Pad", ui::kPad), 0, 16);
     std::wstring parts = IniRead(L"Layout", L"Parts", L"");
     for (int i = 0; i < kPartCount && i < (int)parts.size(); ++i) l.*kLayoutParts[i].on = parts[i] == L'1';
     const int revision = IniInt(L"Layout", L"Revision", 0);
@@ -399,6 +404,8 @@ std::wstring LayoutIniText(const MainLayout& l) {
     const wchar_t* sizes[] = {L"slim", L"medium", L"tall"};
     std::wstring s = L"player = " + std::wstring(docks[(int)l.player]) + L"\nwaveform size = " + sizes[std::min<int>(l.waveSize, 2)] +
                      L"\nwaveform row = " + (l.waveOwnRow ? L"1" : L"0") + L"\nside panels left = " + (l.panelsLeft ? L"1" : L"0") + L"\n";
+    if (l.sideWidth != 300) s += L"side width = " + std::to_wstring(l.sideWidth) + L"\n";
+    if (l.pad != ui::kPad) s += L"pad = " + std::to_wstring(l.pad) + L"\n";
     for (const Part& p : kLayoutParts) s += std::wstring(p.key) + L" = " + (l.*p.on ? L"1" : L"0") + L"\n";
     return s;
 }
@@ -409,6 +416,8 @@ void SaveMainLayout() {
     IniWrite(L"Layout", L"Wave", std::to_wstring(l.waveSize));
     IniWrite(L"Layout", L"WaveRow", l.waveOwnRow ? L"1" : L"0");
     IniWrite(L"Layout", L"PanelsLeft", l.panelsLeft ? L"1" : L"0");
+    IniWrite(L"Layout", L"SideWidth", std::to_wstring(l.sideWidth));
+    IniWrite(L"Layout", L"Pad", std::to_wstring(l.pad));
     IniWrite(L"Layout", L"Parts", PartKey(l));
     IniWrite(L"Layout", L"Revision", std::to_wstring(kLayoutRevision));
 }
@@ -439,8 +448,222 @@ void LayoutNormal(HDWP& dwp, RECT r) {
     LayoutLibrary(dwp, r, true);
 }
 
-// The window's own paint under the controls: the dividers and the player's handle (a few dots).
+// Forward declarations for menus used by the live Layout Top Bar.
+namespace {
+HMENU PresetsMenu();
+HMENU PartsMenu();
+}
+
+// Interactive Layout Top Bar: live one-click customization of presets, player dock, waveform,
+// parts, Light/Dark theme & accent colour, and Save/Reset/Done.
+namespace {
+enum BarId {
+    kBarPresets = 1,
+    kBarDock0, kBarDock1, kBarDock2, kBarDock3,
+    kBarWave0, kBarWave1, kBarWave2, kBarWaveRow,
+    kBarParts,
+    kBarLight, kBarDark, kBarAccent, kBarColours,
+    kBarSave, kBarReset, kBarDone,
+};
+
+struct BarItem {
+    RECT rect{};
+    int id = 0;
+    std::wstring label;
+    bool active = false;
+    bool primary = false;
+    bool disabled = false;
+    bool hasDot = false;
+    Rgb dot = 0;
+};
+
+int barHover = 0;
+
+std::vector<BarItem> BuildBarItems(int W) {
+    std::vector<BarItem> out;
+    const MainLayout& l = g.layout;
+    const int barH = S(ui::kLayoutBarHeight), pad = S(8), bh = S(24), y = (barH - bh) / 2, gap = S(4);
+    HDC dc = GetDC(g.hwnd);
+    HGDIOBJ old = SelectObject(dc, g.font);
+    auto measure = [&](const std::wstring& s, int extra = 0) {
+        RECT r{};
+        DrawTextW(dc, s.c_str(), -1, &r, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+        return (int)r.right + S(14) + extra;
+    };
+
+    // Right-aligned action buttons first so we know how much width remains on the left.
+    const std::pair<int, const wchar_t*> rightDefs[] = {
+        {kBarDone, L"Done"},
+        {kBarReset, L"Reset"},
+        {kBarSave, L"Save"},
+    };
+    int rx = W - pad;
+    std::vector<BarItem> rightItems;
+    for (const auto& d : rightDefs) {
+        int bw = measure(d.second);
+        if (rx - bw < pad) break;
+        rx -= bw;
+        rightItems.push_back({{rx, y, rx + bw, y + bh}, d.first, d.second, false, d.first == kBarDone, false});
+        rx -= gap;
+    }
+
+    int x = pad;
+    auto push = [&](int id, const std::wstring& label, bool active, bool hasDot = false, Rgb dot = 0, int space = 4) {
+        int bw = measure(label, hasDot ? S(12) : 0);
+        if (x + bw > rx) return false;
+        out.push_back({{x, y, x + bw, y + bh}, id, label, active, false, false, hasDot, dot});
+        x += bw + S(space);
+        return true;
+    };
+
+    push(kBarPresets, L"Presets \x25BE", false, false, 0, 8);
+    const wchar_t* docks[] = {L"Top", L"Bot", L"Left", L"Right"};
+    for (int i = 0; i < 4; ++i) push(kBarDock0 + i, docks[i], (int)l.player == i, false, 0, i == 3 ? 8 : 2);
+    const wchar_t* waves[] = {L"Slim", L"Med", L"Tall"};
+    for (int i = 0; i < 3; ++i) push(kBarWave0 + i, waves[i], l.waveSize == i && l.wave, false, 0, 2);
+    push(kBarWaveRow, L"Row", !Side() && l.wave && l.waveOwnRow, false, 0, 8);
+    push(kBarParts, L"Parts \x25BE", false, false, 0, 8);
+    const bool lightActive = g.themeMode == ThemeMode::Light || (g.themeMode == ThemeMode::System && !g.dark);
+    const bool darkActive = g.themeMode == ThemeMode::Dark || (g.themeMode == ThemeMode::System && g.dark);
+    push(kBarLight, L"Light", lightActive, false, 0, 2);
+    push(kBarDark, L"Dark", darkActive, false, 0, 2);
+    push(kBarAccent, L"Accent \x25BE", false, true, P().accent, 2);
+    push(kBarColours, L"Colours...", false, false, 0, 4);
+
+    SelectObject(dc, old);
+    ReleaseDC(g.hwnd, dc);
+    for (const BarItem& item : rightItems) out.push_back(item);
+    return out;
+}
+
+void ShowAccentPopup(POINT pt) {
+    HMENU m = CreatePopupMenu();
+    const Rgb cur = CustomThemeColors(g.dark).accent;
+    for (int i = 0; i < (int)std::size(kAccentPresets); ++i) {
+        const Rgb target = g.dark ? kAccentPresets[i].darkAccent : kAccentPresets[i].lightAccent;
+        AppendMenuW(m, MF_STRING | (cur == target ? MF_CHECKED : MF_UNCHECKED), 100 + i, kAccentPresets[i].name);
+    }
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(m, MF_STRING, 200, L"Custom colour...");
+    AppendMenuW(m, MF_STRING, 201, L"Reset all colours for this mode");
+    int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, g.hwnd, nullptr);
+    DestroyMenu(m);
+    if (cmd >= 100 && cmd < 100 + (int)std::size(kAccentPresets)) {
+        const AccentPreset& p = kAccentPresets[cmd - 100];
+        CustomThemeColors(g.dark).accent = g.dark ? p.darkAccent : p.lightAccent;
+        if (g.themeMode != ThemeMode::Light && g.themeMode != ThemeMode::Dark && g.themeMode != ThemeMode::System)
+            g.themeMode = g.dark ? ThemeMode::Dark : ThemeMode::Light;
+        ApplyTheme();
+        SavePreferences();
+    } else if (cmd == 200) {
+        static COLORREF custom[16]{};
+        CHOOSECOLORW cc{sizeof(cc), g.hwnd, nullptr, Ref(P().accent), custom, CC_RGBINIT | CC_FULLOPEN, 0, nullptr, nullptr};
+        if (ChooseColorW(&cc)) {
+            CustomThemeColors(g.dark).accent =
+                ((Rgb)GetRValue(cc.rgbResult) << 16) | ((Rgb)GetGValue(cc.rgbResult) << 8) | (Rgb)GetBValue(cc.rgbResult);
+            if (g.themeMode != ThemeMode::Light && g.themeMode != ThemeMode::Dark && g.themeMode != ThemeMode::System)
+                g.themeMode = g.dark ? ThemeMode::Dark : ThemeMode::Light;
+            ApplyTheme();
+            SavePreferences();
+        }
+    } else if (cmd == 201) {
+        OnCommand(g.dark ? IDM_THEME_RESET_DARK : IDM_THEME_RESET_LIGHT, 0, nullptr);
+    }
+}
+
+void RunBarItem(const BarItem& item) {
+    POINT pt{item.rect.left, item.rect.bottom};
+    ClientToScreen(g.hwnd, &pt);
+    switch (item.id) {
+        case kBarPresets: {
+            HMENU m = PresetsMenu();
+            InsertMenuW(m, 0, MF_BYPOSITION | MF_STRING, IDM_LAYOUT_BLANK, L"Start from a &blank canvas");
+            InsertMenuW(m, 1, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
+            UpdateLayoutMenu(m);
+            int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, g.hwnd, nullptr);
+            DestroyMenu(m);
+            if (cmd) OnCommand(cmd, 0, nullptr);
+            break;
+        }
+        case kBarDock0: case kBarDock1: case kBarDock2: case kBarDock3:
+            OnCommand(IDM_LAYOUT_DOCK_BASE + (item.id - kBarDock0), 0, nullptr);
+            break;
+        case kBarWave0: case kBarWave1: case kBarWave2:
+            if (!g.layout.wave) g.layout.wave = true;
+            OnCommand(IDM_LAYOUT_WAVE_BASE + (item.id - kBarWave0), 0, nullptr);
+            break;
+        case kBarWaveRow:
+            if (!Side()) OnCommand(IDM_LAYOUT_WAVE_ROW, 0, nullptr);
+            break;
+        case kBarParts: {
+            HMENU m = PartsMenu();
+            UpdateLayoutMenu(m);
+            int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, g.hwnd, nullptr);
+            DestroyMenu(m);
+            if (cmd) OnCommand(cmd, 0, nullptr);
+            break;
+        }
+        case kBarLight:
+            OnCommand(IDM_THEME_BASE + (int)ThemeMode::Light, 0, nullptr);
+            break;
+        case kBarDark:
+            OnCommand(IDM_THEME_BASE + (int)ThemeMode::Dark, 0, nullptr);
+            break;
+        case kBarAccent:
+            ShowAccentPopup(pt);
+            break;
+        case kBarColours:
+            ShowPreferences(g.dark ? "theme.dark_accent" : "theme.light_accent");
+            break;
+        case kBarSave:
+            OnCommand(IDM_LAYOUT_SAVE, 0, nullptr);
+            break;
+        case kBarReset:
+            OnCommand(IDM_LAYOUT_PRESET_BASE, 0, nullptr);
+            break;
+        case kBarDone:
+            OnCommand(IDM_LAYOUT_BAR, 0, nullptr);
+            break;
+    }
+}
+}  // namespace
+
+// The window's own paint under the controls: the dividers, the Layout Top Bar and the player's handle.
 void PaintLayoutChrome(HDC dc) {
+    if (g.layoutBar) {
+        RECT rc;
+        GetClientRect(g.hwnd, &rc);
+        int barH = S(ui::kLayoutBarHeight);
+        RECT bar{0, 0, rc.right, barH};
+        FillSolid(dc, bar, Ref(P().surface));
+        FillSolid(dc, {0, barH - 1, rc.right, barH}, Ref(P().border));
+        SetBkMode(dc, TRANSPARENT);
+        HGDIOBJ oldFont = SelectObject(dc, g.font);
+        HGDIOBJ oldPen = SelectObject(dc, GetStockObject(DC_PEN));
+        HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(DC_BRUSH));
+        for (const BarItem& item : BuildBarItems(rc.right)) {
+            bool hovered = item.id == barHover;
+            Rgb fill = item.primary || item.active ? P().accent : hovered ? P().hover : P().surface2;
+            Rgb border = item.primary || item.active ? P().accent : P().border;
+            Rgb fg = item.primary || item.active ? TextOn(fill) : P().text;
+            SetDCPenColor(dc, Ref(border));
+            SetDCBrushColor(dc, Ref(fill));
+            RoundRect(dc, item.rect.left, item.rect.top, item.rect.right, item.rect.bottom, S(5), S(5));
+            RECT tr = item.rect;
+            if (item.hasDot) {
+                int ds = S(8), dx = tr.left + S(7), dy = (tr.top + tr.bottom - ds) / 2;
+                SetDCPenColor(dc, Ref(P().border));
+                SetDCBrushColor(dc, Ref(item.dot));
+                Ellipse(dc, dx, dy, dx + ds, dy + ds);
+                tr.left += ds + S(4);
+            }
+            SetTextColor(dc, Ref(fg));
+            DrawTextW(dc, item.label.c_str(), -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        }
+        SelectObject(dc, oldBrush);
+        SelectObject(dc, oldPen);
+        SelectObject(dc, oldFont);
+    }
     for (const RECT& d : g.dividers) FillSolid(dc, d, Ref(P().border));
     if (IsRectEmpty(&g.gripRect)) return;
     const RECT& r = g.gripRect;
@@ -452,10 +675,35 @@ void PaintLayoutChrome(HDC dc) {
         for (int j = 0; j < rows; ++j) FillSolid(dc, {x + i * step, y + j * step, x + i * step + dot, y + j * step + dot}, c);
 }
 
-// The handle's mouse messages (window coordinates). A click opens the layout menu; a drag docks the
-// player at the edge it is let go nearest. True when the message was the handle's.
+// The handle's and Layout Top Bar's mouse messages (window coordinates).
 bool LayoutMouse(UINT msg, LPARAM lp) {
     POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+    if (g.size == ViewSize::Normal && g.layoutBar && !drag.on) {
+        RECT rc;
+        GetClientRect(g.hwnd, &rc);
+        int barH = S(ui::kLayoutBarHeight);
+        if (msg == WM_MOUSEMOVE) {
+            int nextHover = 0;
+            if (pt.y >= 0 && pt.y < barH) {
+                for (const BarItem& item : BuildBarItems(rc.right))
+                    if (PtInRect(&item.rect, pt)) { nextHover = item.id; break; }
+            }
+            if (nextHover != barHover) {
+                barHover = nextHover;
+                RECT bar{0, 0, rc.right, barH};
+                InvalidateRect(g.hwnd, &bar, FALSE);
+            }
+            if (pt.y >= 0 && pt.y < barH) return true;
+        } else if (msg == WM_LBUTTONDOWN && pt.y >= 0 && pt.y < barH) {
+            for (const BarItem& item : BuildBarItems(rc.right)) {
+                if (PtInRect(&item.rect, pt)) {
+                    RunBarItem(item);
+                    return true;
+                }
+            }
+            return true;
+        }
+    }
     switch (msg) {
         case WM_LBUTTONDOWN:
             if (g.size != ViewSize::Normal || !PtInRect(&g.gripRect, pt)) return false;
@@ -509,6 +757,16 @@ bool LayoutMouse(UINT msg, LPARAM lp) {
 }
 
 bool LayoutSetCursor(POINT pt) {
+    if (g.size == ViewSize::Normal && g.layoutBar && !drag.on && pt.y >= 0 && pt.y < S(ui::kLayoutBarHeight)) {
+        RECT rc;
+        GetClientRect(g.hwnd, &rc);
+        for (const BarItem& item : BuildBarItems(rc.right)) {
+            if (PtInRect(&item.rect, pt)) {
+                SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                return true;
+            }
+        }
+    }
     if (g.size != ViewSize::Normal || (!drag.on && !PtInRect(&g.gripRect, pt))) return false;
     SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
     return true;
@@ -566,6 +824,8 @@ HMENU PartsMenu() {
 // keeps the result among the presets. The window's other arrangements follow: Up next, the window's
 // size, Big mode's panels and the mini player. The checks come from UpdateLayoutMenu.
 void FillLayoutMenu(HMENU m) {
+    AppendMenuW(m, MF_STRING, IDM_LAYOUT_BAR, L"&Customize layout bar");
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_POPUP, (UINT_PTR)PresetsMenu(), L"Start from a &preset");
     AppendMenuW(m, MF_STRING, IDM_LAYOUT_BLANK, L"Start from a &blank canvas");
     AppendMenuW(m, MF_STRING, IDM_LAYOUT_SAVE, L"Sa&ve this layout");
@@ -628,6 +888,7 @@ void UpdateLayoutMenu(HMENU m) {
                                   IDM_LAYOUT_WAVE_BASE + l.waveSize, MF_BYCOMMAND);
     auto check = [&](UINT id, bool on) { CheckMenuItem(m, id, MF_BYCOMMAND | (on ? MF_CHECKED : MF_UNCHECKED)); };
     auto enable = [&](UINT id, bool on) { EnableMenuItem(m, id, MF_BYCOMMAND | (on ? MF_ENABLED : MF_GRAYED)); };
+    check(IDM_LAYOUT_BAR, g.layoutBar);
     check(IDM_LAYOUT_WAVE_ROW, l.waveOwnRow);
     UpdateWaveLookMenu(m);
     check(IDM_LAYOUT_PANELS_LEFT, l.panelsLeft);
@@ -711,6 +972,11 @@ bool LayoutCommand(int id) {
     } else if (id >= IDM_LAYOUT_FORGET_BASE && id < IDM_LAYOUT_FORGET_BASE + ui::kSavedLayouts) {
         IniDelete(L"Layout", SavedKey(id - IDM_LAYOUT_FORGET_BASE).c_str());
         ShowMessage(SavedName(id - IDM_LAYOUT_FORGET_BASE) + L" forgotten. The window keeps the layout it has.");
+        return true;
+    } else if (id == IDM_LAYOUT_BAR) {
+        if (g.size != ViewSize::Normal) OnCommand(IDM_SIZE_BASE + (int)ViewSize::Normal, 0, nullptr);
+        g.layoutBar = !g.layoutBar;
+        Layout();
         return true;
     } else if (id == IDM_LAYOUT_MENUS) {
         POINT pt;

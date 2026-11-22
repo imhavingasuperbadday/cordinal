@@ -699,8 +699,7 @@ public:
             dir_ = dir;
         }
         SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
-        cacheBytes_ = PruneCache(dir);
-        stop_ = false;  // the worker starts with the first job (StartWorker)
+        stop_ = false;  // the worker starts with the first job (StartWorker); it lists the cache
     }
 
     void Stop() {
@@ -716,6 +715,7 @@ public:
             failed_.clear();
             dir_.clear();
             cacheCount_ = nextCache_ = 0;
+            pruned_ = false;
             cacheBytes_ = 0;
             current_ = 0;
             currentId_ = 0;
@@ -940,6 +940,17 @@ private:
     void Run() {
         CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+        // Listing the cache folder is this worker's first act, not the UI thread's at startup: a
+        // player that never draws a waveform or measures a track never lists it at all.
+        bool list = false;
+        {
+            std::lock_guard<std::mutex> lock(mx_);
+            if (!stop_ && !pruned_) {
+                pruned_ = true;
+                list = true;
+            }
+        }
+        if (list) cacheBytes_.store(PruneCache(dir_), std::memory_order_relaxed);
         for (;;) {
             Job job;
             Peaks p{};
@@ -1058,6 +1069,7 @@ private:
     std::chrono::steady_clock::time_point lastQueued_{};
     bool queuedBefore_ = false;
     std::atomic<uint64_t> cacheBytes_{0};  // what the .pk folder should hold, from the last listing
+    bool pruned_ = false;                  // that listing happens once, on the worker itself
 };
 
 PeakService g_peaks;

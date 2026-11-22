@@ -155,6 +155,30 @@ bool ParseRelease(std::string_view json, Release& out) {
     return IsMbid(out.id) && Tracks(root, out);
 }
 
+bool ParseReleaseBrowse(std::string_view json, std::vector<Release>& all, Release* best) {
+    all.clear();
+    if (best) *best = Release{};
+    Json root;
+    if (!web::ParseJson(json, root) || root.kind != Json::Kind::Object || !IsArray(root["releases"])) return false;
+    for (const auto& r : root["releases"].items) {
+        Release release;
+        Summary(r, release);
+        if (!IsMbid(release.id) || !Tracks(r, release)) continue;
+        all.push_back(std::move(release));
+    }
+    if (best) {
+        // The fullest tracklist wins; on a tie the earliest release, so a reissue never stands in
+        // for the album it repeats.
+        for (const Release& release : all) {
+            const bool fuller = release.tracks.size() > best->tracks.size();
+            const bool earlier = release.tracks.size() == best->tracks.size() &&
+                                 !release.date.empty() && (best->date.empty() || release.date < best->date);
+            if (fuller || earlier) *best = release;
+        }
+    }
+    return !all.empty();
+}
+
 std::vector<Release> ParseDiscLookup(std::string_view json, const std::string& discId, size_t discTracks) {
     std::vector<Release> out;
     Json root;

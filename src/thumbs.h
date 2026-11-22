@@ -72,5 +72,6 @@ private:
     bool quit_ = false;
     size_t pendingLimit_ = 128, readyLimit_ = 2;
     int threadCount_ = 0;  // workers to start with the first request
+    bool pruned_ = false;  // the one cache listing happens on the first worker, not at Start
     uint64_t cacheBytes_ = 0;  // what the cache folder should hold, from the last listing
 };

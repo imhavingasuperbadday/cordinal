@@ -63,6 +63,8 @@ inline const Column kColumns[] = {
     {L"ID3 Tag",      56,  L"[%apollo_tag%]",      L"[%apollo_tag%]",                                  kAlignRight},
     // Each track's moodbar, drawn by the list rather than formatted (peaks.h ListPeaks).
     {L"Mood",         120, L"",                    L"",                                                kAlignLeft},
+    // The heart beside a track the user chose as a favorite (library.h Track favorites).
+    {L"Favorite",     36,  L"[%favorite%]",        L"[$num(%favorite_value%,1)]",                      kAlignLeft},
 };
 #undef CD_DISC_TRACK
 constexpr int kColumnCount = (int)(sizeof(kColumns) / sizeof(kColumns[0]));
@@ -70,7 +72,7 @@ constexpr int kColDuration = 6, kColRating = 8, kColBpm = 23;  // kColBpm: the B
 constexpr int kColCover = 25, kColTrackNo = 26, kColTitleArtist = 27;
 constexpr int kColApolloTitle = 28, kColApolloBitrate = 29, kColApolloRate = 30, kColApolloBits = 31, kColApolloSize = 32,
               kColApolloTag = 33;
-constexpr int kColMood = 34;
+constexpr int kColMood = 34, kColFavorite = 35;
 // The columns a new profile shows, left to right.
 inline constexpr int kDefaultColumns[] = {0, 1, 2, 3, 4, 5, kColRating, 6, 7};
 
@@ -162,6 +164,7 @@ constexpr int kSavedLayouts = 8;
 // volume; under it the now playing line (cover, title, artist line), then the Library: the tab
 // strip with the search box on its right, the view row (Library tab only), the list, the status bar.
 constexpr int kPad = 4;            // the window's side margin
+constexpr int kLayoutBarHeight = 34;  // the live Layout Top Bar when shown
 constexpr int kGrip = 12;          // the player's handle, left of the buttons
 constexpr int kBandTop = 3;        // the band's distance from the top
 constexpr int kButton = 26;        // a transport button (square), and the band's height

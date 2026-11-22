@@ -9,8 +9,11 @@
 #include "coverfetch.h"
 #include "coverupload.h"
 #include "customcover.h"
+#include "discovery.h"
 #include "library.h"
 #include "metadata_fetch.h"
+#include "online_search.h"
+#include "release_radar.h"
 #include "tags.h"
 #include "tagundo.h"
 #include "tagwriter.h"
@@ -587,6 +590,27 @@ inline Group Discography() {
     g.Add(online::ParseReleaseGroups("<html>", &total).empty() && total == 0 &&
               online::ParseReleaseGroups(R"j({"release-groups":{}})j").empty() && online::LibraryAlbumsBy(lib, "").empty(),
           "a malformed reply gives nothing; an empty artist owns nothing");
+    {
+        Library trackLib;
+        auto addT = [&](const wchar_t* path, const char* artist, const char* album, uint8_t disc, uint16_t no,
+                        uint8_t flags = Track::kInLibrary) {
+            TrackId id = trackLib.Add(path);
+            trackLib[id].artist = trackLib.Intern(artist);
+            trackLib[id].album = trackLib.Intern(album);
+            trackLib[id].disc = disc;
+            trackLib[id].trackNo = no;
+            trackLib[id].flags = flags;
+            return id;
+        };
+        const TrackId d2 = addT(L"C:\\m\\2-01.flac", "Nirvana", "Nevermind", 2, 1);
+        const TrackId d1b = addT(L"C:\\m\\1-02.flac", "Nirvana", "Nevermind", 1, 2);
+        const TrackId d1a = addT(L"C:\\m\\1-01.flac", "Nirvana", "Nevermind", 1, 1);
+        addT(L"C:\\m\\gone.flac", "Nirvana", "Nevermind", 1, 3, Track::kInLibrary | Track::kMissing);
+        addT(L"C:\\m\\dlx.flac", "Nirvana", "Nevermind (Deluxe Edition)", 1, 1);
+        const auto albumTracks = online::LibraryAlbumTracks(trackLib, "Nirvana", "Nevermind");
+        g.Add(albumTracks.size() == 3 && albumTracks[0] == d1a && albumTracks[1] == d1b && albumTracks[2] == d2,
+              "owned album tracks sort by disc and track, prefer exact album title, and skip missing tracks");
+    }
 
     // Paging: 250 release groups over three pages. A page that fails leaves the list incomplete, so it
     // is not cached as the whole discography.
@@ -719,10 +743,330 @@ inline Group AlbumTagger() {
     return g;
 }
 
+// Release Radar: the artists worth checking, their recent releases, owned filtering and the album
+// tracklist behind one, all from canned MusicBrainz replies.
+inline Group ReleaseRadar() {
+    Group g{"release radar: top artists, recent releases, owned albums and a tracklist"};
+    Library lib;
+    auto add = [&](const wchar_t* path, const char* artist, const char* albumArtist, unsigned plays, bool heart) {
+        TrackId id = lib.Add(path);
+        lib[id].artist = lib.Intern(artist);
+        lib[id].albumArtist = lib.Intern(albumArtist);
+        lib[id].flags |= Track::kInLibrary;
+        lib[id].playCount = plays;
+        lib.SetFavorite(id, heart);
+    };
+    add(L"C:\\m\\a.flac", "Nirvana", "", 5, true);
+    add(L"C:\\m\\b.flac", "Nirvana", "", 1, false);
+    add(L"C:\\m\\c.flac", "Blur", "", 7, false);
+    add(L"C:\\m\\d.flac", "Guest", "Host", 9, false);
+    auto top = radar::TopArtists(lib, 4);
+    g.Add(top.size() == 3 && top[0].name == "Nirvana" && top[0].weight == 12 && top[1].name == "Host" &&
+              top[1].weight == 9 && top[2].name == "Blur",
+          "hearts weigh most, plays add, and a track counts for its album artist");
+
+    std::tm when{};
+    when.tm_year = 2026 - 1900;
+    when.tm_mon = 10;
+    when.tm_mday = 21;
+    when.tm_hour = 12;
+    g.Add(radar::SinceDate(std::mktime(&when), 6) == "2026-05-01" && radar::SinceDate(std::mktime(&when), 0) == "2026-11-01",
+          "the window starts at the first of the month, the given number of months back");
+
+    auto fetch = [](const std::string& url) {
+        online::Reply reply;
+        reply.status = 200;
+        if (url.find("/ws/2/artist?") != std::string::npos) {
+            reply.body = R"j({"artists":[{"id":"5b11f4ce-a62d-471e-81fc-a69a8278c7da","name":"Nirvana","score":100}]})j";
+        } else if (url.find("release-group?artist=") != std::string::npos) {
+            reply.body =
+                R"j({"release-group-count":3,"release-groups":[)j"
+                R"j({"id":"11111111-1111-1111-1111-111111111111","title":"New One","primary-type":"Album","first-release-date":"2026-10-01"},)j"
+                R"j({"id":"22222222-2222-2222-2222-222222222222","title":"Old One","primary-type":"Album","first-release-date":"1991-09-24"},)j"
+                R"j({"id":"33333333-3333-3333-3333-333333333333","title":"Soon","primary-type":"EP","first-release-date":"2026-05"}]})j";
+        } else {
+            reply.status = 0;
+        }
+        return reply;
+    };
+    online::Cancel cancel;
+    std::vector<radar::Item> recent;
+    g.Add(radar::RecentReleases("Nirvana", "2026-01-01", recent, cancel, fetch) && recent.size() == 2 &&
+              recent[0].title == "New One" && recent[1].title == "Soon" &&
+              recent[0].groupId == "11111111-1111-1111-1111-111111111111",
+          "only releases first out inside the window, newest first");
+    recent.clear();
+    g.Add(radar::RecentReleases("Nobody", "2026-01-01", recent, cancel, fetch) && recent.empty(),
+          "an artist MusicBrainz does not know by that exact name has nothing to offer");
+    std::vector<radar::Item> items{{"Nirvana", "1", "New One", "Album", "2026-10-01"},
+                                   {"Nirvana", "2", "Old One (Deluxe Edition)", "Album", "1991-09-24"}};
+    radar::MarkOwned(items, {"old one"});
+    g.Add(!items[0].owned && items[1].owned, "an owned album is recognised through an edition note");
+
+    radar::Item item{"Nirvana", "11111111-1111-1111-1111-111111111111", "New One", "Album", "2026-10-01"};
+    const char* browse =
+        R"j({"releases":[)j"
+        R"j({"id":"44444444-4444-4444-4444-444444444444","title":"New One","date":"2026-10-01","artist-credit":[{"name":"Nirvana","joinphrase":""}],"media":[{"position":1,"track-count":2,"tracks":[{"position":1,"number":"1","title":"First","length":180000},{"position":2,"number":"2","title":"Second","length":210000}]}]},)j"
+        R"j({"id":"55555555-5555-5555-5555-555555555555","title":"New One","date":"2026-10-02","artist-credit":[{"name":"Nirvana","joinphrase":""}],"media":[{"position":1,"track-count":3,"tracks":[{"position":1,"number":"1","title":"First","length":180000},{"position":2,"number":"2","title":"Second","length":210000},{"position":3,"number":"3","title":"Third","length":240000}]}]}]})j";
+    radar::Album album;
+    g.Add(radar::ParseAlbum(browse, item, album) && album.title == "New One" && album.releaseId ==
+                  "55555555-5555-5555-5555-555555555555" && album.tracks.size() == 3 &&
+              album.tracks[0].title == "First" && album.tracks[1].position == 2 && album.tracks[2].durationSec == 240,
+          "the fullest official tracklist is the album, with positions and lengths");
+    radar::Album fetched;
+    g.Add(radar::FetchAlbum(item, fetched, cancel, [browse](const std::string& url) {
+              online::Reply reply;
+              if (url.find("ws/2/release?release-group=") == std::string::npos) return reply;
+              reply.status = 200;
+              reply.body = browse;
+              return reply;
+          }) && fetched.tracks.size() == 3 &&
+              fetched.groupId == "11111111-1111-1111-1111-111111111111",
+          "the album's tracklist is read from the release-group browse");
+
+    // Multi-disc conversion to WebFetchTrackList and fallback when status=official has no releases.
+    const char* multiBrowse =
+        R"j({"releases":[{"id":"66666666-6666-6666-6666-666666666666","title":"Double","date":"2025-04-10","artist-credit":[{"name":"Mira","joinphrase":""}],)j"
+        R"j("media":[{"position":1,"tracks":[{"position":1,"title":"Side A","length":150000}]},)j"
+        R"j({"position":2,"tracks":[{"position":1,"title":"Side B","length":200000},{"position":2,"title":"Outro","length":90000}]}]}]})j";
+    radar::Item multiItem{"Mira", "22222222-2222-2222-2222-222222222222", "Double", "Album", "2025-04-10"};
+    radar::Album multi;
+    int browseCalls = 0;
+    g.Add(radar::FetchAlbum(multiItem, multi, cancel, [multiBrowse, &browseCalls](const std::string& url) {
+              ++browseCalls;
+              online::Reply reply;
+              reply.status = 200;
+              reply.body = url.find("status=official") != std::string::npos ? R"j({"releases":[]})j" : multiBrowse;
+              return reply;
+          }) && browseCalls == 2 && multi.discs == 2 && multi.tracks.size() == 3,
+          "when status=official returns nothing, FetchAlbum falls back to any release in the group");
+    const WebFetchTrackList list = radar::AlbumToWebFetchList(multi);
+    g.Add(!list.playlist && list.title == "Double" && list.albumArtist == "Mira" && list.date == "2025-04-10" &&
+              list.releaseId == "66666666-6666-6666-6666-666666666666" &&
+              list.releaseGroupId == "22222222-2222-2222-2222-222222222222" && list.tracks.size() == 3 &&
+              list.tracks[0].site == "musicbrainz" && list.tracks[0].discNo == 1 && list.tracks[0].discTotal == 2 &&
+              list.tracks[0].trackTotal == 1 && list.tracks[1].discNo == 2 && list.tracks[1].trackNo == 1 &&
+              list.tracks[1].trackTotal == 2 &&
+              list.tracks[0].artworkUrl == "https://coverartarchive.org/release/66666666-6666-6666-6666-666666666666/front-500",
+          "AlbumToWebFetchList preserves disc/track totals, date, MusicBrainz ids and Cover Art Archive URL");
+    return g;
+}
+
+inline Group Discovery() {
+    Group g{"discover outside my library"};
+    const auto relations = discovery::ParseArtistRelations(
+        R"j({"relations":[)j"
+        R"j({"type":"member of band","artist":{"id":"bbbbbbbb-1111-4111-8111-111111111111","name":"Related"}},)j"
+        R"j({"type":"url","url":{"resource":"https://example.test"}},)j"
+        R"j({"type":"member of band","artist":{"id":"bbbbbbbb-1111-4111-8111-111111111111","name":"Related"}}]})j");
+    g.Add(relations.size() == 1 && relations[0].name == "Related" && relations[0].mbid ==
+              "bbbbbbbb-1111-4111-8111-111111111111",
+          "artist relations keep a related artist once and leave URL rows out");
+
+    discovery::Snapshot owned;
+    owned.Add("Seed Artist", "Owned Album", "Owned Song");
+    g.Add(owned.HasArtist("seed artist") && owned.HasAlbum("Seed Artist", "Owned Album") &&
+              owned.HasTrack("seed artist", "owned song") && !owned.HasArtist("Related"),
+          "the library snapshot compares artists, albums and songs loosely");
+    g.Add(discovery::ChooseRelatedArtist(relations, owned) == 0,
+          "a related artist the library does not have is offered");
+
+    std::vector<online::ReleaseGroup> groups = {
+        {"cccccccc-1111-4111-8111-111111111111", "Owned Album", "Album", 2001, "2001-01-01", false},
+        {"11111111-1111-4111-8111-111111111111", "New Album", "Album", 2024, "2024-05-01", false},
+        {"22222222-1111-4111-8111-111111111111", "A Single", "Single", 2023, "2023-01-01", false},
+    };
+    g.Add(discovery::ChooseRelease(groups, "Seed Artist", owned) == 1,
+          "an unowned album comes before a single, and an owned album is never offered");
+
+    radar::Album album;
+    album.title = "New Album";
+    album.artist = "Seed Artist";
+    album.releaseId = "dddddddd-1111-4111-8111-111111111111";
+    album.tracks = {{"Owned Song", "Seed Artist", 1, 1, 200},
+                    {"Fresh Song", "Seed Artist", 1, 2, 240},
+                    {"Intro", "Seed Artist", 1, 3, 12}};
+    g.Add(discovery::ChooseTrack(album, "Seed Artist", owned) == 1,
+          "a song the library has, and a scrap under 20 seconds, are not offered");
+    g.Add(discovery::ShouldDiscover(true, true, true, false, false, discovery::kFirstAfter) &&
+              !discovery::ShouldDiscover(true, true, true, false, false, discovery::kFirstAfter - 1) &&
+              !discovery::ShouldDiscover(false, true, true, false, false, 99),
+          "discovery waits a couple of local tracks and stays off until the preference, radio and playback agree");
+    return g;
+}
+
+inline Group OnlineSearch() {
+    Group g{"unified online search: query check, parsers, dedupe, library filter, fallback and cache"};
+    g.Add(!online::SearchableQuery(L"a") && online::SearchableQuery(L"ab") &&
+              !online::SearchableQuery(L"missing:artist") && online::SearchableQuery(L"  hi  "),
+          "SearchableQuery requires two non-space characters and skips missing:* filters");
+    g.Add(online::NormalizeSearchQuery(L"  Hello   World  ") == "Hello World",
+          "NormalizeSearchQuery trims and collapses whitespace");
+
+    const auto dz = online::ParseDeezerSearchTracks(
+        R"({"data":[)"
+        R"({"id":101,"title":"Midnight City","duration":243,"artist":{"name":"M83"},"album":{"id":301,"title":"Hurry Up","cover_medium":"https://cdn.example/c.jpg"}},)"
+        R"({"id":102,"title":"Bad Art","duration":180,"artist":{"name":"M83"},"album":{"title":"X","cover_medium":"http://insecure.example/c.jpg"}},)"
+        R"({"id":103,"title":"","duration":100,"artist":{"name":"Nobody"}}]})");
+    g.Add(dz.size() == 2 && dz[0].source == "deezer" && dz[0].id == "101" && dz[0].albumId == 301 &&
+              dz[0].title == "Midnight City" && dz[0].artist == "M83" && dz[0].album == "Hurry Up" &&
+              dz[0].artworkUrl == "https://cdn.example/c.jpg" && dz[0].durationSec == 243 &&
+              dz[1].artworkUrl.empty(),
+          "ParseDeezerSearchTracks parses metadata, albumId, drops insecure artwork URLs and skips empty titles");
+
+    const auto it = online::ParseItunesSearchTracks(
+        R"({"resultCount":2,"results":[)"
+        R"({"kind":"song","trackId":201,"collectionId":401,"trackName":"Intro","artistName":"The xx","collectionName":"xx","trackTimeMillis":127920,"artworkUrl100":"https://is1.example/100x100bb.jpg"},)"
+        R"({"kind":"music-video","trackId":202,"trackName":"Clip","artistName":"The xx"}]})");
+    g.Add(it.size() == 1 && it[0].source == "itunes" && it[0].id == "201" && it[0].albumId == 401 &&
+              it[0].durationSec == 128 && it[0].artworkUrl == "https://is1.example/600x600bb.jpg",
+          "ParseItunesSearchTracks keeps songs, collectionId, and upgrades artwork to 600x600");
+
+    const auto yts = online::FromYouTubeCandidates({yt::Candidate{"yt1", "Sunset", "Mira - Topic", 195}});
+    g.Add(yts.size() == 1 && yts[0].source == "youtube" && yts[0].id == "yt1" && yts[0].durationSec == 195,
+          "FromYouTubeCandidates keeps id, artist, title and length");
+
+    std::vector<online::SearchTrack> merged{
+        {"youtube", "y1", "Midnight City", "M83", "", "", 243},
+        {"deezer", "101", "Midnight City (Remastered)", "m83", "Hurry Up", "https://cdn.example/c.jpg", 243},
+        {"itunes", "201", "Wait", "M83", "Hurry Up", "", 343},
+    };
+    online::DedupeSearchTracks(merged, 2);
+    g.Add(merged.size() == 2 && merged[0].source == "deezer",
+          "DedupeSearchTracks collapses loose title duplicates and keeps richer provider metadata");
+
+    import::OwnedIndex owned;
+    owned.Add("M83", "Wait", L"C:\\Music\\wait.flac");
+    online::FilterUnownedTracks(merged, owned);
+    g.Add(merged.size() == 1 && merged[0].id == "101",
+          "FilterUnownedTracks removes tracks already in the library");
+
+    online::ClearSearchCache();
+    online::Cancel cancel;
+    int fetches = 0;
+    const char* dzJson =
+        R"({"data":[{"id":501,"title":"Unowned Song","duration":200,"artist":{"name":"Artist A"},"album":{"title":"Album A"}},)"
+        R"({"id":502,"title":"Wait","duration":343,"artist":{"name":"M83"},"album":{"title":"Hurry Up"}}]})";
+    auto fetchDz = [&](const std::string& url) {
+        ++fetches;
+        online::Reply r;
+        if (url.find("api.deezer.com") != std::string::npos) {
+            r.status = 200;
+            r.body = dzJson;
+        }
+        return r;
+    };
+    auto r1 = online::SearchTracks("artist a song", owned, cancel, 15, fetchDz, {});
+    auto r2 = online::SearchTracks("  Artist A  Song ", owned, cancel, 15, fetchDz, {});
+    g.Add(r1.ok && !r1.fromCache && r1.tracks.size() == 1 && r1.tracks[0].id == "501" && r2.ok && r2.fromCache &&
+              r2.tracks.size() == 1 && fetches == 1,
+          "SearchTracks filters owned songs and hits the LRU cache on repeated queries");
+
+    online::ClearSearchCache();
+    auto fetchItunes = [](const std::string& url) {
+        online::Reply r;
+        if (url.find("api.deezer.com") != std::string::npos) {
+            r.status = 200;
+            r.body = R"({"data":[]})";
+            return r;
+        }
+        if (url.find("itunes.apple.com") != std::string::npos) {
+            r.status = 200;
+            r.body = R"({"resultCount":1,"results":[{"kind":"song","trackId":88,"trackName":"Fallback Song","artistName":"Artist B","collectionName":"B","trackTimeMillis":180000}]})";
+        }
+        return r;
+    };
+    auto rIt = online::SearchTracks("fallback query itunes", owned, cancel, 15, fetchItunes, {});
+    g.Add(rIt.ok && rIt.tracks.size() == 1 && rIt.tracks[0].source == "itunes" && rIt.tracks[0].id == "88",
+          "SearchTracks falls back from empty Deezer to iTunes");
+
+    online::ClearSearchCache();
+    auto rYt = online::SearchTracks(
+        "fallback query yt", owned, cancel, 15, [](const std::string&) { return online::Reply{}; },
+        [](const std::string&, const std::atomic<bool>&, std::vector<yt::Candidate>& out, std::string&) {
+            out.push_back({"yt99", "YT Fallback", "Artist C", 210});
+            return true;
+        });
+    g.Add(rYt.ok && rYt.tracks.size() == 1 && rYt.tracks[0].source == "youtube" && rYt.tracks[0].id == "yt99",
+          "SearchTracks falls back to YouTube when Deezer and iTunes are unavailable");
+
+    cancel.Stop();
+    auto rCancel = online::SearchTracks("cancelled query", owned, cancel, 15, fetchItunes, {});
+    g.Add(!rCancel.ok && rCancel.tracks.empty(), "cancelled SearchTracks stops immediately");
+    online::ClearSearchCache();
+
+    // Full album lookup from a search result (Deezer / iTunes direct id and fallback search).
+    WebFetchTrackList dzAlbum;
+    const bool dzParsed = online::ParseDeezerAlbum(
+        R"({"id":301,"title":"Hurry Up","release_date":"2011-10-18","cover_xl":"https://cdn.example/xl.jpg","artist":{"name":"M83"},"tracks":{"data":[{"id":1,"title":"FallbackOnly","duration":100}]}})",
+        R"({"data":[{"id":10,"title":"Intro","duration":322,"track_position":1,"disk_number":1,"artist":{"name":"M83"}},)"
+        R"({"id":11,"title":"Midnight City","duration":243,"track_position":1,"disk_number":2,"artist":{"name":"M83"}}]})",
+        dz[0], dzAlbum);
+    g.Add(dzParsed && !dzAlbum.playlist && dzAlbum.title == "Hurry Up" && dzAlbum.albumArtist == "M83" &&
+              dzAlbum.date == "2011-10-18" && dzAlbum.tracks.size() == 2 &&
+              dzAlbum.tracks[0].discNo == 1 && dzAlbum.tracks[0].discTotal == 2 &&
+              dzAlbum.tracks[0].trackNo == 1 && dzAlbum.tracks[0].trackTotal == 1 &&
+              dzAlbum.tracks[1].discNo == 2 && dzAlbum.tracks[1].artworkUrl == "https://cdn.example/xl.jpg",
+          "ParseDeezerAlbum builds multi-disc WebFetchTrackList with artist, date and cover");
+
+    WebFetchTrackList itAlbum;
+    const bool itParsed = online::ParseItunesAlbum(
+        R"({"resultCount":3,"results":[)"
+        R"({"wrapperType":"collection","collectionId":401,"collectionName":"xx","artistName":"The xx","releaseDate":"2009-08-17T07:00:00Z","artworkUrl100":"https://is1.example/100x100bb.jpg"},)"
+        R"({"wrapperType":"track","kind":"song","trackId":201,"trackName":"Intro","artistName":"The xx","collectionName":"xx","trackNumber":1,"trackCount":2,"discNumber":1,"discCount":1,"trackTimeMillis":127920},)"
+        R"({"wrapperType":"track","kind":"song","trackId":202,"trackName":"VCR","artistName":"The xx","collectionName":"xx","trackNumber":2,"trackCount":2,"discNumber":1,"discCount":1,"trackTimeMillis":177000}]})",
+        it[0], itAlbum);
+    g.Add(itParsed && !itAlbum.playlist && itAlbum.title == "xx" && itAlbum.albumArtist == "The xx" &&
+              itAlbum.date == "2009-08-17" && itAlbum.tracks.size() == 2 &&
+              itAlbum.tracks[0].trackNo == 1 && itAlbum.tracks[1].trackTotal == 2 &&
+              itAlbum.tracks[0].artworkUrl == "https://is1.example/600x600bb.jpg",
+          "ParseItunesAlbum extracts collection metadata and numbered tracks");
+
+    online::Cancel albumCancel;
+    WebFetchTrackList fetchedAlbum;
+    std::string albumErr;
+    const bool fetchedById = online::FetchSearchAlbum(
+        dz[0], albumCancel, fetchedAlbum, albumErr,
+        [](const std::string& url) {
+            online::Reply r;
+            if (url == "https://api.deezer.com/album/301") {
+                r.status = 200;
+                r.body = R"({"id":301,"title":"Hurry Up","release_date":"2011-10-18","artist":{"name":"M83"},"tracks":{"data":[{"id":101,"title":"Midnight City","duration":243,"artist":{"name":"M83"}}]}})";
+            }
+            return r;
+        });
+    g.Add(fetchedById && fetchedAlbum.tracks.size() == 1 && fetchedAlbum.tracks[0].id == "101",
+          "FetchSearchAlbum resolves Deezer album by albumId and falls back to /album tracks when /tracks is unavailable");
+
+    online::SearchTrack ytWithAlbum{"youtube", "yt1", "Sunset", "Artist C", "Sunset EP", "", 195};
+    const bool fetchedFallback = online::FetchSearchAlbum(
+        ytWithAlbum, albumCancel, fetchedAlbum, albumErr,
+        [](const std::string& url) {
+            online::Reply r;
+            if (url.find("itunes.apple.com/search") != std::string::npos) {
+                r.status = 200;
+                r.body = R"({"results":[{"collectionId":999,"collectionName":"Sunset EP","artistName":"Artist C"}]})";
+            } else if (url == "https://itunes.apple.com/lookup?id=999&entity=song&limit=200") {
+                r.status = 200;
+                r.body = R"({"results":[{"wrapperType":"collection","collectionName":"Sunset EP","artistName":"Artist C"},{"wrapperType":"track","kind":"song","trackId":77,"trackName":"Sunset","artistName":"Artist C","trackNumber":1,"trackTimeMillis":195000}]})";
+            }
+            return r;
+        });
+    g.Add(fetchedFallback && fetchedAlbum.title == "Sunset EP" && fetchedAlbum.tracks.size() == 1 &&
+              fetchedAlbum.tracks[0].site == "itunes",
+          "FetchSearchAlbum falls back to album search when no provider albumId is present");
+
+    online::SearchTrack noAlbum{"youtube", "yt2", "Loose Upload", "Someone", "", "", 120};
+    const bool rejectedNoAlbum = !online::FetchSearchAlbum(noAlbum, albumCancel, fetchedAlbum, albumErr) && !albumErr.empty();
+    g.Add(rejectedNoAlbum, "FetchSearchAlbum reports an error when the track has no album");
+    return g;
+}
+
 inline std::vector<Group> All(const std::wstring& scratch) {
     return {Parsers(), Scoring(), Images(), TextImages(), FolderWrites(scratch), CustomCovers(scratch), CoverUpload(),
             Review(scratch),
-            Generations(), Lyrics(), LrcWrite(scratch), Artist(), Discography(), CoverAddresses(), AlbumTagger()};
+            Generations(), Lyrics(), LrcWrite(scratch), Artist(), Discography(), CoverAddresses(), AlbumTagger(),
+            ReleaseRadar(), Discovery(), OnlineSearch()};
 }
 
 }  // namespace metadata_checks

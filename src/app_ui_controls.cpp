@@ -25,12 +25,18 @@ LRESULT CALLBACK SearchSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
         }
         if (wp == VK_RETURN) {
             FlushSearch();
-            if (GetKeyState(VK_CONTROL) >= 0) PlayRow(0);
+            if (GetKeyState(VK_CONTROL) >= 0) {
+                if (!g.view.empty()) PlayRow(0);
+                else OnlineSearchActivateDefault();
+            }
             return 0;
         }
         if (wp == VK_DOWN) {
             FlushSearch();
-            if (g.view.empty()) return 0;
+            if (g.view.empty()) {
+                OnlineSearchFocus();
+                return 0;
+            }
             if (CanvasActive()) {
                 LibViewFocusFirst();
             } else {

@@ -489,6 +489,20 @@ void SetRating(const std::vector<TrackId>& ids, uint8_t rating) {
     if (g.playing != kNone) UpdateNowPlaying();
 }
 
+// A favorite is a heart the user chose, not a rating: pressing Favorite on a selection that is
+// entirely favorited clears them, otherwise it hearts them all, so one key both ways.
+void ToggleFavorites(const std::vector<TrackId>& ids) {
+    if (ids.empty()) return;
+    const bool all = std::all_of(ids.begin(), ids.end(), [](TrackId id) { return g_lib.Favorite(id); });
+    for (TrackId id : ids) g_lib.SetFavorite(id, !all);
+    PlaySfx(all ? Sfx::Unrate : Sfx::Sparkle, 0);
+    g_lib.Touch();
+    g.dirty = true;
+    InvalidateRect(g.list, nullptr, FALSE);
+    LibViewInvalidate();
+    if (g.playing != kNone) UpdateNowPlaying();
+}
+
 HMENU RatingMenu() {
     HMENU m = CreatePopupMenu();
     AppendMenuW(m, MF_STRING, IDM_RATE_BASE + 0, L"&No rating");

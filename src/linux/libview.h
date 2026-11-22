@@ -52,6 +52,7 @@ bool CanvasWantsHand(const Rect& area, float x, float y);  // over a play button
 std::vector<AlbumSelection> CanvasSelectedAlbums();
 bool CanvasFocusedEdition(uint32_t& group, uint32_t& edition);
 void CanvasChooseEdition(uint32_t group, uint32_t edition);
+bool CanvasShowTrack(TrackId id);
 
 // ui.cpp, shared with the views.
 void DrawAlbumCover(TrackId first, StringPool::Handle album, const std::wstring& title, const Rect& r, const Palette& p);

@@ -2071,6 +2071,39 @@ void TestEffects() {
     Check(lengths && pitch && steadyLevel && whole == pieces && owed < 2,
           L"TEMPO keeps a tone's pitch and level, divides the length by the tempo, and ignores chunking");
 
+    // Polyphonic chord at 1.1x: steady envelope without 50 Hz WSOLA flutter, and stereo separation kept.
+    std::vector<float> chord(rate * 2 * 2);
+    for (size_t i = 0; i < rate * 2; ++i) {
+        const double t = (double)i / rate;
+        const float bass = 0.25f * (float)std::sin(2 * 3.14159265358979323846 * 110.0 * t);
+        const float mid = 0.25f * (float)std::sin(2 * 3.14159265358979323846 * 277.18 * t);
+        const float high = 0.25f * (float)std::sin(2 * 3.14159265358979323846 * 440.0 * t);
+        chord[i * 2] = bass + mid;
+        chord[i * 2 + 1] = bass + high;
+    }
+    TimeStretch poly;
+    poly.Configure(rate, 1.1);
+    std::vector<float> polyOut;
+    poly.Process(chord.data(), chord.size() / 2, polyOut);
+    poly.Flush(polyOut);
+    const size_t polyFrames = polyOut.size() / 2;
+    const size_t block = rate / 20;  // 50 ms
+    double minRms = 1e9, maxRms = 0, diffSq = 0, sumSq = 0;
+    for (size_t at = polyFrames / 6; at + block <= polyFrames * 5 / 6; at += block) {
+        const double r = rms(polyOut, at, at + block);
+        minRms = std::min(minRms, r);
+        maxRms = std::max(maxRms, r);
+        for (size_t i = at; i < at + block; ++i) {
+            const double d = polyOut[i * 2] - polyOut[i * 2 + 1];
+            const double s = polyOut[i * 2] + polyOut[i * 2 + 1];
+            diffSq += d * d;
+            sumSq += s * s;
+        }
+    }
+    batch.Next(L"TEMPO keeps a steady envelope and stereo image on polyphonic audio");
+    Check(maxRms > 0 && minRms / maxRms > 0.90 && diffSq > sumSq * 0.15,
+          L"TEMPO keeps a steady envelope (%.3f..%.3f) and stereo image on polyphonic audio", minRms, maxRms);
+
     // Loudness compensation: flat at full volume; at -20 dB the bass and treble rise and the midrange
     // stays, and no boost ever exceeds the attenuation it follows.
     LoudnessContour contour;

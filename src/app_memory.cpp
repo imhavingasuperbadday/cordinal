@@ -72,7 +72,8 @@ void CompactLibrary() {
         const auto& t = g_lib[id];
         // Exclusions, ratings, collection points and listening stats are intentional library data.
         if ((t.flags & (Track::kInLibrary | Track::kInbox | Track::kMissing | Track::kExcluded | Track::kCollected)) ||
-            t.rating || t.playCount || t.skipCount || t.firstPlayed || t.lastPlayed) mark(id);
+            t.rating || g_lib.Favorite(id) ||
+            t.playCount || t.skipCount || t.firstPlayed || t.lastPlayed) mark(id);
     }
     for (const auto& pl : g.playlists) if (pl.Editable()) for (TrackId id : pl.items) mark(id);
     for (const auto& closed : g.closedPlaylists) for (TrackId id : closed.playlist.items) mark(id);
@@ -112,6 +113,7 @@ void CompactLibrary() {
     for (auto& id : g.history) remap(id);
     for (auto& id : g.queue) remap(id);
     for (TrackId* id : {&g.playing, &g.resumeTrack, &g.statTrack, &g.artFor, &g.spotLeft}) remap(*id);
+    DiscoverRemap(mapping);
     for (auto& spot : g.spots) remap(spot.first);
     std::erase_if(g.spots, [](const auto& spot) { return spot.first == kNone; });
     ForgetAlbumDynamics(true);  // Compact remapped the measurements; discard only the derived cache

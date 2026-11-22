@@ -65,6 +65,7 @@ void OnCommand(int id, int code, HWND ctl) {
             g.searchPending = true;
             g.dirty = true;
             if (!SetTimer(g.hwnd, kSearchTimer, 150, nullptr)) FlushSearch();
+            OnlineSearchQueryChanged(text);
         }
         return;
     }
@@ -85,6 +86,7 @@ void OnCommand(int id, int code, HWND ctl) {
         g.shuffleQueue.clear();
         g.shuffleStarted = false;
         RefreshNext();
+        if (id == IDM_RADIO && g.radio) DiscoverMaybe();
         UpdateStatus();
         return;
     }
@@ -188,9 +190,25 @@ void OnCommand(int id, int code, HWND ctl) {
         SetRating(SelectedTracks(), (uint8_t)((id - IDM_RATE_BASE) * 10));
         return;
     }
+    if (id == IDM_FAVORITE) {
+        ToggleFavorites(SelectedTracks());
+        return;
+    }
+    if (id >= IDM_MIX_BASE && id < IDM_MIX_BASE + (int)MixPreset::Count) {
+        OpenMix((MixPreset)(id - IDM_MIX_BASE));
+        return;
+    }
     if (PackCommand(id) || HelperMenuCommand(id)) return;
     if (id == IDM_THEME_ROBOTIC) {
         ToggleRoboticSounds();
+        return;
+    }
+    if (id == IDM_THEME_RESET_LIGHT || id == IDM_THEME_RESET_DARK) {
+        const bool dark = id == IDM_THEME_RESET_DARK;
+        ResetCustomThemeColors(dark);
+        ApplyTheme();
+        SavePreferences();
+        ShowMessage(dark ? L"Dark theme colours reset to default." : L"Light theme colours reset to default.");
         return;
     }
     if (id >= IDM_THEME_BASE && id < IDM_THEME_BASE + (int)ThemeMode::Count && ThemeAvailable((ThemeMode)(id - IDM_THEME_BASE))) {
@@ -227,6 +245,8 @@ void OnCommand(int id, int code, HWND ctl) {
         {IDM_COLLECTION_CANCEL, CancelCollection},
         {IDM_EXIT, [] { SendMessageW(g.hwnd, WM_CLOSE, 0, 0); }},
         {IDM_WEB_SERVER, ShowWebServer},
+        {IDM_RELEASE_RADAR, [] { ShowReleaseRadar(); }},
+        {IDM_KEEP_DISCOVERY, DiscoverKeep},
         {IDM_IPOD_SYNC, ShowIpod},
         {IDM_REMOVE, [] { RemoveTracks(false); }},
         {IDM_CROP, [] { RemoveTracks(true); }},

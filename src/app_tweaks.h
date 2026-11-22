@@ -11,7 +11,7 @@
 
 namespace app {
 
-enum class TweakType : uint8_t { Bool, Choice, Float };
+enum class TweakType : uint8_t { Bool, Choice, Float, Color };
 enum : uint8_t {
     kTweakRadio = 1,       // `command` is a radio base: the value is added to it
     kTweakLegacyLoad = 2,  // LoadPreferences reads it itself, to honour an older key or what goes with it

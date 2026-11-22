@@ -154,11 +154,12 @@ void ThumbLoader::Start(HWND notify, UINT msg, std::wstring cacheDir, int thread
     msg_ = msg;
     dir_ = std::move(cacheDir);
     SHCreateDirectoryExW(nullptr, dir_.c_str(), nullptr);
-    cacheBytes_ = PruneCache(dir_);
     quit_ = false;
     pendingLimit_ = reducedMemory ? 64 : 128;
     readyLimit_ = reducedMemory ? 1 : 2;
     threadCount_ = threads;  // started by the first Request: an empty library never needs them
+    // The cache folder is listed and pruned by the first worker (Run), not here: an empty start
+    // never lists it, and the first paint never waits on the listing.
 }
 
 // Bumps the generation so in-flight jobs are dropped, then joins the workers.
@@ -170,6 +171,7 @@ void ThumbLoader::Stop() {
         jobs_.clear();
         results_.clear();
         active_.clear();
+        pruned_ = false;
         cacheBytes_ = 0;
     }
     cv_.notify_all();
@@ -247,6 +249,21 @@ void ThumbLoader::SetReducedMemory(bool reduced) {
 // generation so stale work never reaches the UI.
 void ThumbLoader::Run() {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    // The one listing the cache needs happens here, on this worker, when a cover is first asked
+    // for: a start with nothing to show never lists the folder, and no paint ever waits on it.
+    bool list = false;
+    {
+        std::lock_guard<std::mutex> lock(mx_);
+        if (!quit_ && !pruned_) {
+            pruned_ = true;
+            list = true;
+        }
+    }
+    if (list) {
+        const uint64_t bytes = PruneCache(dir_);
+        std::lock_guard<std::mutex> lock(mx_);
+        cacheBytes_ = bytes;
+    }
     for (;;) {
         Job job;
         {

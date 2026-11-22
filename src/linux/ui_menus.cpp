@@ -1,7 +1,9 @@
 // The Linux window's menus: the menu bar, its popups and row menus, and the actions they run.
 #include "alternate_ui.h"
 #include "big_ui.h"
+#include "search_online_ui.h"
 #include "ui_internal.h"
+#include "discover_ui.h"
 #include "playlog.h"
 #include "waybar.h"
 
@@ -201,6 +203,19 @@ std::vector<MenuItem> BarMenu(int m) {
                 }
                 items.push_back(Submenu("Add auto-playlist from a pack", std::move(sub)));
             }
+            {
+                // As Playlist > Mixes on Windows: the ready-made local mixes (autoplaylist.h MixPreset).
+                static const char* const mixNames[] = {"Favorites", "On Repeat", "Forgotten Favorites",
+                                                       "Recently Added", "Mix like this song"};
+                std::vector<MenuItem> mixes;
+                for (int i = 0; i < (int)MixPreset::Count; ++i) {
+                    MenuItem mix = Item(mixNames[i], kMix, {}, false,
+                                        i != (int)MixPreset::LikeThis || g.playing != kNone || SelectedTracks().size() == 1);
+                    mix.arg = i;
+                    mixes.push_back(std::move(mix));
+                }
+                items.push_back(Submenu("Mixes", std::move(mixes)));
+            }
             items.insert(items.end(), {
                     Item("Reopen closed playlist", kReopenPl, "Ctrl+Shift+T", false, !g_closedPlaylists.empty()),
                     Item("Move left", kMovePlLeft, "Ctrl+Shift+PageUp", false, g.active > 1),
@@ -218,6 +233,8 @@ std::vector<MenuItem> BarMenu(int m) {
                      std::any_of(g.playlists.begin(), g.playlists.end(), [](const Playlist& p) { return p.kind == PlaylistKind::Inbox; })), Separator(),
                 Item("Organize files...", kOrganize, {}, false, !OrganizeBusy()),
                 Item("Save music from the web...", kWebFetch),
+                Item("New releases by your favorite artists...", kReleaseRadar),
+                Item("Keep the discovered song", kKeepDiscovery, "Ctrl+Alt+K", false, DiscoverCanKeep()),
                 Item("Undo last organize", kOrganizeUndo, {}, false, !OrganizeBusy()), Separator(),
                 Item("Convert...", kConvert, {}, false, !ConvertBusy() && !TagWriteBusy() && !OrganizeBusy()),
                 Item("Undo last conversion", kConvertUndo, {}, false, CanUndoConversion() && !ConvertBusy()),
@@ -275,7 +292,8 @@ std::vector<MenuItem> BarMenu(int m) {
             // waveform, each part, then the window's other arrangements. Customize layout... is the same
             // choices in a dialog.
             const WindowLayout& l = g.settings.layout;
-            std::vector<MenuItem> items = LayoutStartItems();
+            std::vector<MenuItem> items = {Item("Customize layout bar", kLayoutBar, {}, g_layoutBar), Separator()};
+            for (MenuItem& it : LayoutStartItems()) items.push_back(std::move(it));
             items.push_back(Separator());
             const char* docks[] = {"At the top", "At the bottom", "On the left", "On the right"};
             std::vector<MenuItem> dock;
@@ -388,6 +406,9 @@ void OpenRowMenu(float x, float y) {
     ratings.push_back(Separator());
     ratings.push_back(Item("Write ratings and play counts to files", kWriteStatistics, {}, false, !TagWriteBusy()));
     items.push_back(Submenu("Rating", std::move(ratings)));
+    bool allFavorites = !SelectedTracks().empty();
+    for (TrackId id : SelectedTracks()) allFavorites = allFavorites && g_lib.Favorite(id);
+    items.push_back(Item("Favorite", kFavorite, "Ctrl+D", allFavorites));
     bool manual = g.rgRunning && !g.rgAuto;
     // ReplayGain for the selection, named as in Playback > ReplayGain (and as on Windows).
     items.push_back(Submenu("ReplayGain", {Item("Scan selection", kRgScanSel, {}, false, !manual),
@@ -513,6 +534,8 @@ void RunAction(const MenuItem& item) {
         case kShuffleAlbumsAction: SetShuffle(g.settings.shuffle == kShuffleAlbums ? kShuffleOff : kShuffleAlbums); break;
         case kRadio: SetRadio(!g.settings.radio); break;
         case kTaste: SetTaste(!g.settings.taste); break;
+        case kKeepDiscovery: DiscoverKeep(); break;
+        case kOnlineAction: OnlineSearchMenuAction(item.arg); break;
         case kRepeatSet:
             SetRepeat((Repeat)item.arg);
             break;
@@ -552,6 +575,8 @@ void RunAction(const MenuItem& item) {
         }
         case kExcludeLibrary: ExcludeFromLibrary(SelectedTracks()); break;
         case kRating: SetRating(SelectedTracks(), (uint8_t)std::clamp(item.arg, 0, 100)); break;
+        case kFavorite: ToggleFavorites(SelectedTracks()); break;
+        case kMix: OpenMix((MixPreset)std::clamp(item.arg, 0, (int)MixPreset::Count - 1)); break;
         case kSectionPlay: case kSectionLoop: case kSectionStart: case kSectionEnd: case kSectionClear:
             SectionAction(item.action); break;
         case kDuplicateAudio: OpenDuplicates(); break;
@@ -578,6 +603,7 @@ void RunAction(const MenuItem& item) {
         case kOrganize: OpenOrganize(SelectedTracks()); break;
         case kOrganizeUndo: UndoOrganize(); break;
         case kWebFetch: OpenWebFetch(); break;
+        case kReleaseRadar: OpenReleaseRadar(); break;
         case kCopyTo: {
             // The selection, or the whole playlist when nothing is selected.
             std::vector<TrackId> ids = SelectedTracks();
@@ -675,7 +701,7 @@ void RunAction(const MenuItem& item) {
         case kViewSize: SetViewSize((ViewSize)item.arg); break;
         case kLayout: OpenLayout(); break;
         case kLayoutPreset: case kLayoutBlank: case kLayoutSave: case kLayoutSaved: case kLayoutForget:
-        case kLayoutDock: case kLayoutWave: case kLayoutWaveRow: case kLayoutPart: case kColumnBrowser:
+        case kLayoutDock: case kLayoutWave: case kLayoutWaveRow: case kLayoutPart: case kLayoutBar: case kColumnBrowser:
             RunLayoutAction(item.action, item.arg);
             break;
         case kPacks: OpenPacks(); break;

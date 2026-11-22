@@ -21,11 +21,25 @@ bool EnsureGraphics() {
 // Covers
 
 size_t CoverBudget() {
-    // One viewport plus two large covers for partially visible rows/the expanded album.
-    // DPI changes scale this naturally; memory depends on visible pixels, not scroll history.
-    size_t edge = (size_t)S(300);
-    return ViewMemoryBudget(std::max<size_t>(512 * 1024,
-        (size_t)std::max(0, v.width) * std::max(0, v.height) * 4 + edge * edge * 8));
+    // The covers the canvas can actually show: the grid of tiles a viewport can touch at any
+    // scroll, plus two rows of scroll slack, plus the open album's panel cover. The
+    // reduced-memory modes give back one slack row, never the visible grid: halving the whole
+    // budget (as before) left the halved figure under what stayed on screen, so Compact and the
+    // mini player re-decoded covers that never left the window. DPI changes scale this
+    // naturally; memory depends on visible pixels, not scroll history.
+    float art = TileArt();
+    if (g.libMode == LibraryMode::Artists) art = F(140);
+    else if (g.libMode == LibraryMode::AlbumTracks) art = GroupArt((float)std::max(0, v.width));
+    art = std::max(art, F(48));
+    int cols = 1;
+    float gap = 0;
+    GridMetrics(art, cols, gap);
+    const float pitch = art + F(60);  // a tile with its caption and spacing, as the grids lay out
+    const size_t rows = (size_t)std::max(0, v.height) / (size_t)std::max(1.f, pitch) + 3 +
+                        (ReducedMemoryMode() ? 0 : 1);
+    const size_t bytes = (size_t)(art * art * 4) * (size_t)std::max(1, cols) * rows;
+    const size_t panel = v.expanded >= 0 ? (size_t)F(280) * (size_t)F(280) * 4 : 0;
+    return std::max<size_t>(512 * 1024, bytes + panel);
 }
 
 // Evicts least-recently-used covers until both the byte budget and the hard entry count are met.
@@ -228,7 +242,14 @@ void DrawTrackRow(const Album& a, int t, D2D1_RECT_F r, bool hover) {
         Text(who, v.fSmall.Get(), {right - aw, r.top, right, r.bottom}, Col(sub));
         right -= aw + F(8);
     }
-    Text(title, playing ? v.fTitle.Get() : v.fText.Get(), {r.left + F(34), r.top, right, r.bottom}, Col(text));
+    float titleLeft = r.left + F(34);
+    // A favorite keeps its heart beside the title, where the row is read.
+    if (g_lib.Favorite(id)) {
+        Text(L"\x2665", v.fStars.Get(), {titleLeft, r.top, titleLeft + F(14), r.bottom},
+             Col(sel ? P().selectText : P().accent));
+        titleLeft += F(18);
+    }
+    Text(title, playing ? v.fTitle.Get() : v.fText.Get(), {titleLeft, r.top, right, r.bottom}, Col(text));
 }
 
 const std::wstring& AlbumYear(const Album& a) {
@@ -489,6 +510,9 @@ void Paint(HDC dc) {
         if (it.rc.bottom + F(12) < top || it.rc.top - F(12) > bottom) continue;
         DrawItem(it, i);
     }
+    // Every cover this frame drew sits at the LRU's front now, so entries left by an earlier view
+    // mode or window size go here instead of waiting for the next arrival to pressure them out.
+    TrimCovers();
     if ((v.gpu ? v.rt->EndDraw() : v.soft.End(dc, 0, 0)) == D2DERR_RECREATE_TARGET) {
         ReleaseTarget();
         DropBitmaps();

@@ -132,7 +132,7 @@ public:
             cache_ = 0; available_ = 0;
         }
     }
-    uint32_t Rice(unsigned k,uint32_t limit) {
+    __forceinline uint32_t Rice(unsigned k,uint32_t limit) {
         if (available_<32) Fill();
         unsigned q=std::countl_zero(cache_);
         if (q<=limit && q+1+k<64 && q+1+k<=available_) {
@@ -157,8 +157,16 @@ public:
     size_t Position() const { return (size_t)(p_ - begin_) * 8 - available_; }
     bool Good() const { return good_; }
 private:
-    void Fill() {
-        if (end_ - p_ >= 4 && available_ <= 32) {
+    __forceinline void Fill() {
+        if (!available_ && end_ - p_ >= 8) {
+            uint64_t w; memcpy(&w, p_, 8);
+#ifdef _MSC_VER
+            cache_ = _byteswap_uint64(w);
+#else
+            cache_ = __builtin_bswap64(w);
+#endif
+            p_ += 8; available_ = 64;
+        } else if (end_ - p_ >= 4 && available_ <= 32) {
             cache_ |= (uint64_t)U32(p_, true) << (32 - available_);
             p_ += 4; available_ += 32;
         } else while (p_ < end_ && available_ <= 56) {
@@ -225,9 +233,10 @@ bool ParseHeader(const uint8_t* p, size_t n, unsigned rate, unsigned bits, unsig
 // Decode one subframe's residual via Rice partitioning. The 2^partitionCount
 // must divide the block and leave `order` warmup samples; the escape code
 // (k == all-ones) falls back to a fixed-width raw sample.
-template<class T> bool Residual(Bits& b, T* samples, unsigned n, unsigned order) {
+template<class T> bool Residual(Bits& bits, T* samples, unsigned n, unsigned order) {
+    Bits b = bits;
     unsigned method = b.Get(2), partitions = b.Get(4);
-    if (method > 1 || (n & ((1u << partitions) - 1)) || (n >> partitions) < order) return false;
+    if (method > 1 || (n & ((1u << partitions) - 1)) || (n >> partitions) < order) { bits = b; return false; }
     unsigned width = 4 + method, end = 0;
     for (unsigned part = 0; part < (1u << partitions); ++part) {
         unsigned k = b.Get(width), start = part ? end : order;
@@ -241,17 +250,18 @@ template<class T> bool Residual(Bits& b, T* samples, unsigned n, unsigned order)
             if (k<3) for (;i+2<=end;) {
                 if (unsigned count=b.SmallRice(samples+i,k)) { i+=count;continue; }
                 uint32_t v=b.Rice(k,maxUnary);
-                if (!b.Good() || v==UINT32_MAX) return false;
+                if (!b.Good() || v==UINT32_MAX) { bits = b; return false; }
                 samples[i++]=(T)((int64_t)(v>>1)^-(int64_t)(v&1));
             }
             for (; i < end; ++i) {
                 uint32_t v = b.Rice(k,maxUnary);
-                if (!b.Good() || v == UINT32_MAX) return false;
+                if (!b.Good() || v == UINT32_MAX) { bits = b; return false; }
                 samples[i] = (T)((int64_t)(v >> 1) ^ -(int64_t)(v & 1));
             }
         }
-        if (!b.Good()) return false;
+        if (!b.Good()) { bits = b; return false; }
     }
+    bits = b;
     return true;
 }
 
@@ -593,7 +603,43 @@ template<class T> bool FlacDecoder::DecodeFrame(const uint8_t* p, size_t bytes, 
     // side-coded pair is checked here.
     if (h.assignment >= 8) {
         const int64_t bound = int64_t(1) << (bits_ - 1);
-        for (unsigned i = 0; i < h.frames; ++i) {
+        unsigned i = 0;
+        if constexpr (sizeof(T) == 4) {
+            const __m128i lo = _mm_set1_epi32(-(int32_t)bound), hi = _mm_set1_epi32((int32_t)bound - 1);
+            const __m128i one = _mm_set1_epi32(1);
+            __m128i bad = _mm_setzero_si128();
+            if (h.assignment == 8) {
+                for (; i + 4 <= h.frames; i += 4) {
+                    __m128i l = _mm_loadu_si128((const __m128i*)(left + i));
+                    __m128i r = _mm_sub_epi32(l, _mm_loadu_si128((const __m128i*)(right + i)));
+                    bad = _mm_or_si128(bad, _mm_or_si128(_mm_cmplt_epi32(l, lo), _mm_cmpgt_epi32(l, hi)));
+                    bad = _mm_or_si128(bad, _mm_or_si128(_mm_cmplt_epi32(r, lo), _mm_cmpgt_epi32(r, hi)));
+                    _mm_storeu_si128((__m128i*)(right + i), r);
+                }
+            } else if (h.assignment == 9) {
+                for (; i + 4 <= h.frames; i += 4) {
+                    __m128i r = _mm_loadu_si128((const __m128i*)(right + i));
+                    __m128i l = _mm_add_epi32(_mm_loadu_si128((const __m128i*)(left + i)), r);
+                    bad = _mm_or_si128(bad, _mm_or_si128(_mm_cmplt_epi32(l, lo), _mm_cmpgt_epi32(l, hi)));
+                    bad = _mm_or_si128(bad, _mm_or_si128(_mm_cmplt_epi32(r, lo), _mm_cmpgt_epi32(r, hi)));
+                    _mm_storeu_si128((__m128i*)(left + i), l);
+                }
+            } else {
+                for (; i + 4 <= h.frames; i += 4) {
+                    __m128i m = _mm_loadu_si128((const __m128i*)(left + i));
+                    __m128i s = _mm_loadu_si128((const __m128i*)(right + i));
+                    __m128i parity = _mm_and_si128(s, one);
+                    __m128i l = _mm_add_epi32(m, _mm_srai_epi32(_mm_add_epi32(s, parity), 1));
+                    __m128i r = _mm_add_epi32(m, _mm_srai_epi32(_mm_sub_epi32(parity, s), 1));
+                    bad = _mm_or_si128(bad, _mm_or_si128(_mm_cmplt_epi32(l, lo), _mm_cmpgt_epi32(l, hi)));
+                    bad = _mm_or_si128(bad, _mm_or_si128(_mm_cmplt_epi32(r, lo), _mm_cmpgt_epi32(r, hi)));
+                    _mm_storeu_si128((__m128i*)(left + i), l);
+                    _mm_storeu_si128((__m128i*)(right + i), r);
+                }
+            }
+            if (_mm_movemask_epi8(bad)) return false;
+        }
+        for (; i < h.frames; ++i) {
             int64_t l = left[i], r = right[i];
             if (h.assignment == 8) r = l - r;
             else if (h.assignment == 9) l += r;

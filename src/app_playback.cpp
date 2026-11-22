@@ -562,7 +562,7 @@ void PlayTrack(int pl, int index, bool remember, double start, bool paused) {
     auto& items = g.playlists[pl].items;
     RememberSpot();
     FinishListening(true);
-    if (remember && g.playing != kNone) {
+    if (remember && g.playing != kNone && !DiscoverIsPreview(g.playing)) {
         g.history.push_back(g.playing);
         if (g.history.size() > 256) g.history.erase(g.history.begin());
     }
@@ -1429,6 +1429,11 @@ void PaintArt(HDC dc) {
 void TrackListening() {
     if (g.playing == kNone || g.engine.Paused()) return;
     double pos = g.engine.Position();
+    if (DiscoverIsPreview(g.playing)) {  // a preview never feeds taste or statistics
+        g.statTrack = g.playing;
+        g.lastPos = pos;
+        return;
+    }
     if (g.statTrack != g.playing) {
         g.statTrack = g.playing;
         g.listened = 0;
@@ -1446,6 +1451,11 @@ void TrackListening() {
 
 void FinishListening(bool manual) {
     if (g.statTrack == kNone) return;
+    if (DiscoverIsPreview(g.statTrack)) {  // not a play: the preview is not in the library
+        g.statTrack = kNone;
+        g.listened = 0;
+        return;
+    }
     // Credit the last partial tick; after a natural transition the position already belongs
     // to the next track, so only a manual change reads it.
     if (manual) TrackListening();
@@ -1458,7 +1468,7 @@ void FinishListening(bool manual) {
 
 // Both the audio engine and paired browsers commit on the UI thread through the same rules.
 void RecordListening(TrackId id, double seconds, bool manual, uint32_t when) {
-    if (id >= g_lib.Count()) return;
+    if (id >= g_lib.Count() || DiscoverIsPreview(id)) return;
     Track& t = g_lib[id];
     double needed = std::clamp(t.Duration() * 0.5, 1.0, 240.0);
     bool counted = seconds >= needed;
@@ -1553,7 +1563,8 @@ void OnEngineEvent(EngineEvent e, unsigned long long token) {
             if (it == g.tokens.end()) break;
             if (token == g.playingToken) break;  // a seek/reopened section keeps its listening session
             CancelSeekPreview();  // a previewed seek belongs to the track that is leaving
-            if (g.radio && g.playing != kNone && g.statTrack == g.playing) {
+            if (g.radio && g.playing != kNone && g.statTrack == g.playing &&
+                !DiscoverIsPreview(g.playing)) {
                 g.history.push_back(g.playing);
                 if (g.history.size() > 256) g.history.erase(g.history.begin());
             }
@@ -1566,6 +1577,7 @@ void OnEngineEvent(EngineEvent e, unsigned long long token) {
             g.playing = it->second.id;
             g.playingPl = it->second.pl;
             EnsureTastePicks(token);  // a track from another playlist brings picks from there
+            DiscoverTrackStarted();   // a preview says how to keep it; a local song may start a look
             if (token == g.resumeToken) g.engine.Seek(g.resumePos);
             g.resumeToken = 0;
             g.resumeTrack = kNone;

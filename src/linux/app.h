@@ -69,6 +69,12 @@ constexpr UINT WM_APP_WEBFETCH_ADDED = WM_APP + 45;    // a track joined the sav
 constexpr UINT WM_APP_WEBFETCH_UPDATED = WM_APP + 46;  // its state or percent changed (wParam = index)
 constexpr UINT WM_APP_WEBFETCH_NOTICE = WM_APP + 47;   // a line of progress for the status line
 constexpr UINT WM_APP_WEBFETCH_DONE = WM_APP + 48;     // the run finished, carrying its summary
+constexpr UINT WM_APP_WEBFETCH_LISTS = WM_APP + 49;    // the run's list spans, before the summary
+constexpr UINT WM_APP_RADAR = WM_APP + 50;             // Release Radar: wParam 0 rows, 1 notice, 2 albums, 3 done
+constexpr UINT WM_APP_DISCOVER = WM_APP + 51;          // a preview found for Keep playing like this (lParam owns it)
+constexpr UINT WM_APP_ONLINE_SEARCH = WM_APP + 52;     // online search results (lParam owns them, search_online_ui.cpp)
+constexpr UINT WM_APP_ONLINE_RESOLVE = WM_APP + 53;    // a resolved online song (lParam owns it, search_online_ui.cpp)
+constexpr UINT WM_APP_PICKER_ONLINE = WM_APP + 54;     // picker online results (lParam owns them, panel_palette.cpp)
 
 // How long a conversion can be undone, in days; the Windows build's kConvertMemoryDays.
 constexpr unsigned kConvertMemoryDays[] = {1, 3, 7, 49};
@@ -129,6 +135,7 @@ struct WindowLayout {
     int dock = 0, waveSize = 0;  // top, bottom, left, right; slim, medium, tall
     bool points = false, waveOwnRow = false, largeCover = false, upNext = false, panelsLeft = false;
     bool menuBar = true, tabCounts = false, statusDetails = true, hints = false;
+    int sideWidth = 300, pad = ui::kPad;
     bool operator==(const WindowLayout&) const = default;
 };
 
@@ -739,6 +746,7 @@ void QueueTracks(const std::vector<TrackId>& ids, bool next);
 void ClearQueue();
 std::vector<TrackId> UpNextTracks();
 void RefreshNext();
+bool EngineHoldsTrack(TrackId id);  // playing or decoded ahead by an engine token
 int QueuePosition(TrackId id);  // 1-based place in the queue, 0 when not queued
 // The queue editor's edits (queue_ui.cpp), by queue position, as on Windows (app_playback.cpp).
 void InsertIntoQueue(const std::vector<TrackId>& ids, int at);

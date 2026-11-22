@@ -53,6 +53,7 @@ struct Canvas {
     bool scrollGliding = false;     // TickCanvasScroll moves the view toward scrollGoal
     bool layoutDirty = true;
     int expanded = -1;              // Albums: the open album
+    int revealAlbum = -1;           // ... scrolled into view on the next draw
     TrackId expandedTrack = kNone;  // ... by its first track, across rebuilds
     std::unordered_map<uint32_t, uint32_t> chosenEdition;  // group -> edition chosen this session
     std::vector<char> selAlbum, selArtist;
@@ -592,7 +593,13 @@ void DrawTrackRow(const Album& a, int t, const Rect& r, bool hover, const Palett
     std::wstring title;
     LookupField(id, L"title", title);
     Font f = playing ? Font::Bold : Font::Normal;
-    DrawText(f, Utf8(title), r.x + F(34), TextY(r, f), text, std::max(0.0f, right - r.x - F(34)));
+    float titleLeft = r.x + F(34);
+    // A favorite keeps its heart beside the title, where the row is read.
+    if (g_lib.Favorite(id)) {
+        DrawText(Font::Normal, "\xE2\x99\xA5", titleLeft, TextY(r, Font::Normal), sel ? p.selectText : p.accent, F(16));
+        titleLeft += F(18);
+    }
+    DrawText(f, Utf8(title), titleLeft, TextY(r, f), text, std::max(0.0f, right - titleLeft));
 }
 
 void DrawItem(const Item& item, int index, float ox, float oy, const Palette& p) {
@@ -760,6 +767,16 @@ void CanvasRebuild() {
 
 void DrawCanvas(const Rect& area, const Palette& p, float mouseX, float mouseY) {
     Relayout(area);
+    if (v.revealAlbum >= 0) {
+        const int idx = v.revealAlbum;
+        v.revealAlbum = -1;
+        if (g.settings.libraryMode == LibraryMode::Albums) {
+            for (const Item& it : v.items)
+                if (it.kind == ItemKind::Panel && it.index == idx) { EnsureVisible(it.rc, area.h); break; }
+        } else if (idx < (int)v.albumItem.size() && v.albumItem[idx] >= 0 && v.albumItem[idx] < (int)v.items.size()) {
+            EnsureVisible(v.items[v.albumItem[idx]].rc, area.h);
+        }
+    }
     g_mx = mouseX;
     g_my = mouseY;
     g_hover = area.In(mouseX, mouseY) ? HitTest(area, mouseX, mouseY) : Hit{};
@@ -1096,6 +1113,32 @@ bool CanvasFocusedEdition(uint32_t& group, uint32_t& edition) {
 }
 
 void CanvasChooseEdition(uint32_t group, uint32_t edition) { ChooseEdition(group, edition); }
+
+bool CanvasShowTrack(TrackId id) {
+    if (!CanvasActive() || id == kNone) return false;
+    if (g.settings.libraryMode == LibraryMode::Artists) SetLibraryMode(LibraryMode::Albums);
+    for (int i = 0; i < (int)v.albums.size(); ++i) {
+        const auto& tracks = v.albums[i].tracks;
+        if (std::find(tracks.begin(), tracks.end(), id) == tracks.end()) continue;
+        v.focus = i;
+        std::fill(v.selAlbum.begin(), v.selAlbum.end(), (char)0);
+        v.selTrack.clear();
+        if (g.settings.libraryMode == LibraryMode::Albums) {
+            v.expanded = i;
+            v.expandedTrack = tracks.front();
+            v.selAlbum[i] = 1;
+        } else {
+            v.selTrack.insert(id);
+            v.anchorTrack = id;
+        }
+        SyncSelection();
+        v.layoutDirty = true;
+        v.revealAlbum = i;
+        g.redraw = true;
+        return true;
+    }
+    return false;
+}
 
 bool CanvasWantsHand(const Rect& area, float x, float y) {
     if (!area.In(x, y)) return false;

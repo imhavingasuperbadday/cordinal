@@ -32,6 +32,33 @@ struct Palette {
 const Palette& LightPalette();
 const Palette& DarkPalette();
 bool SystemUsesDarkTheme();
+
+// User-customized overrides for Light and Dark palettes (kNoRgb = use the built-in default).
+// Light and Dark keep independent overrides so switching modes preserves both looks.
+struct ThemeCustomColors {
+    Rgb bg = kNoRgb, surface = kNoRgb, surface2 = kNoRgb, border = kNoRgb;
+    Rgb text = kNoRgb, sub = kNoRgb, accent = kNoRgb, select = kNoRgb, playing = kNoRgb;
+    bool operator==(const ThemeCustomColors&) const = default;
+};
+ThemeCustomColors& CustomThemeColors(bool dark);
+bool HasCustomThemeColors(bool dark);
+void ResetCustomThemeColors(bool dark);
+const Palette& CustomPalette(bool dark);
+
+struct AccentPreset {
+    const wchar_t* name;
+    Rgb lightAccent, darkAccent;
+};
+inline constexpr AccentPreset kAccentPresets[] = {
+    {L"Cardinal (default)", kNoRgb, kNoRgb},
+    {L"Ocean blue", 0x1E64B4, 0x4DA3FF},
+    {L"Forest green", 0x247A48, 0x4CC27A},
+    {L"Violet", 0x6E44B8, 0xA47EFF},
+    {L"Amber", 0xB06A00, 0xF0A830},
+    {L"Rose", 0xB8326A, 0xF0669E},
+    {L"Teal", 0x14757A, 0x3CC2C8},
+    {L"Slate", 0x4A5568, 0x94A3B8},
+};
 // WCAG 2 contrast ratio between two colors, 1 (none) to 21 (black on white).
 double Contrast(Rgb a, Rgb b);
 // Black or white, whichever reads better on `fill` (text and glyphs drawn on the accent).

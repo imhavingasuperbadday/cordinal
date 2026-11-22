@@ -1,6 +1,7 @@
 // The Linux window's measurements: the menu bar, transport, tabs, browser, list and status, in pixels.
 #include "alternate_ui.h"
 #include "big_ui.h"
+#include "search_online_ui.h"
 #include "ui_internal.h"
 
 namespace lx {
@@ -9,7 +10,7 @@ namespace {
 Rect PlayerLayout(Rect area) {
     const auto& l = g.settings.layout;
     const unsigned hide = l.hiddenParts;
-    const float pad = S(ui::kPad), tb = S(ui::kButton), timeW = S(ui::kTimeWidth);
+    const float pad = S(std::clamp(l.pad, 0, 16)), tb = S(ui::kButton), timeW = S(ui::kTimeWidth);
     L.grip = L.cover = L.title = L.subtitle = L.chip = L.seek = L.elapsed = L.remaining = {};
     L.speaker = L.volume = {};
     for (auto& b : L.buttons) b = {};
@@ -128,8 +129,9 @@ bool SeekVertical() { return g.settings.size == ViewSize::Normal && g.settings.l
 void DoLayout() {
     int pw = 0, ph = 0;
     SDL_GetRenderOutputSize(g.renderer, &pw, &ph);
-    float W = (float)pw, H = (float)ph, pad = S(ui::kPad);
+    float W = (float)pw, H = (float)ph;
     const auto& l = g.settings.layout;
+    float pad = S(std::clamp(l.pad, 0, 16));
     const unsigned hide = l.hiddenParts;
     L.menuBar = {0, 0, W, l.menuBar && g.settings.size == ViewSize::Normal ? S(ui::kMenuBarHeight) : 0};
     L.barItems.clear();
@@ -140,8 +142,9 @@ void DoLayout() {
         mx += w;
     }
     bool normal = g.settings.size == ViewSize::Normal;
+    L.layoutBar = {0, L.menuBar.B(), W, g_layoutBar && normal ? S(ui::kLayoutBarHeight) : 0};
     L.status = !(hide & kPartStatus) && normal ? Rect{0, H - S(ui::kStatus), W, S(ui::kStatus)} : Rect{0, H, W, 0};
-    Rect bounds{0, L.menuBar.B(), W, std::max(0.f, L.status.y - L.menuBar.B())};
+    Rect bounds{0, L.layoutBar.B(), W, std::max(0.f, L.status.y - L.layoutBar.B())};
     Rect content;
     const bool presentation = LayoutPresentation(bounds, content);
     if (!presentation) content = PlayerLayout(bounds);
@@ -155,7 +158,7 @@ void DoLayout() {
     }
     if (presentation && (content.w <= 0 || content.h <= 0)) {
         L.tabs = L.radioTab = L.search = L.viewRow = L.browser = L.splitter = L.list = {};
-        L.header = L.rows = L.scrollbar = L.radioGrid = L.radioSaved = L.radioDiscover = {};
+        L.header = L.rows = L.scrollbar = L.online = L.radioGrid = L.radioSaved = L.radioDiscover = {};
         L.radioGenre = L.radioCountry = L.radioState = L.radioSearch = {};
         L.tabRects.clear();
         for (auto& view : L.views) view = {};
@@ -187,7 +190,7 @@ void DoLayout() {
         L.tabRects.push_back({tx, y, w, L.tabs.h}); tx += w;
     }
     y += L.tabs.h;
-    float sideW = !presentation && (LyricsShown() || l.upNext) ? std::min(S(300), content.w / 2) : 0;
+    float sideW = !presentation && (LyricsShown() || l.upNext) ? std::min(S(std::clamp(l.sideWidth, 180, 480)), content.w / 2) : 0;
     float sideX = l.panelsLeft ? content.x : content.R() - sideW;
     if (!presentation) L.lyrics = L.upNext = {};
     float sideH = std::max(0.f, content.B() - y);
@@ -213,7 +216,16 @@ void DoLayout() {
         L.splitter = {content.x, y + h, content.w, S(5)};
         y += h + S(5);
     }
-    L.list = {content.x, y, content.w, std::max(0.f, content.B() - y)};
+    L.online = {};
+    float listH = std::max(0.f, content.B() - y);
+    if (!InternetRadio().active) {
+        float onlineH = OnlineSearchWantedHeight(listH);
+        if (onlineH > 0) {
+            listH = std::max(0.f, listH - onlineH);
+            L.online = {content.x, y + listH, content.w, onlineH};
+        }
+    }
+    L.list = {content.x, y, content.w, listH};
     float gap = S(6), field = std::max(S(30), std::min(S(150), (content.w - S(70) - 5 * gap) / 3));
     float x = content.x;
     L.radioSaved = {x + gap, y + S(3), S(100), S(25)};
@@ -226,7 +238,7 @@ void DoLayout() {
     L.header = {x, y, content.w, std::min(S(24), L.list.h)};
     L.rowH = S(ui::kRow);
     float sb = S(17);
-    L.rows = {x, L.header.B(), content.w, std::max(0.f, content.B() - L.header.B())};
+    L.rows = {x, L.header.B(), content.w, std::max(0.f, L.list.B() - L.header.B())};
     bool scroll = g_lines.size() * L.rowH > L.rows.h;
     if (scroll) L.rows.w = std::max(0.f, L.rows.w - sb);
     L.scrollbar = {content.R() - sb, L.rows.y, scroll ? sb : 0, L.rows.h};

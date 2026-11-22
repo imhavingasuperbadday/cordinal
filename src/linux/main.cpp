@@ -14,6 +14,8 @@
 #include "metadata_fetch.h"
 #include "musicbrainz.h"
 #include "radio_ui.h"
+#include "discover_ui.h"
+#include "search_online_ui.h"
 #include "cover.h"
 #include "panels.h"
 #include "peaks.h"
@@ -64,11 +66,17 @@ void Dispatch(const Message& m) {
         case WM_APP_SPEAKERS: OnSpeakersFound(m.lp); break;
         case WM_APP_IPOD: OnIpodMessage(m.wp, m.lp); break;
         case WM_APP_COVERFETCH: OnCoverFetchMessage(m.wp, m.lp); break;
-        case WM_APP_ARTISTINFO: OnArtistInfoMessage(m.lp); break;
+        case WM_APP_ARTISTINFO: OnArtistInfoMessage(m.wp, m.lp); break;
         case WM_APP_WEBFETCH_ADDED: OnWebFetchAdded(m.lp); break;
         case WM_APP_WEBFETCH_UPDATED: OnWebFetchUpdated(m.wp, m.lp); break;
         case WM_APP_WEBFETCH_NOTICE: OnWebFetchNotice(m.lp); break;
+        case WM_APP_WEBFETCH_LISTS: OnWebFetchLists(m.lp); break;
         case WM_APP_WEBFETCH_DONE: OnWebFetchDone(m.lp); break;
+        case WM_APP_RADAR: OnReleaseRadarMessage(m.wp, m.lp); break;
+        case WM_APP_DISCOVER: OnDiscoverMessage(m.wp, m.lp); break;
+        case WM_APP_ONLINE_SEARCH: OnOnlineSearchMessage(m.wp, m.lp); break;
+        case WM_APP_ONLINE_RESOLVE: OnOnlineResolveMessage(m.wp, m.lp); break;
+        case WM_APP_PICKER_ONLINE: OnPickerOnlineMessage(m.wp, m.lp); break;
         case WM_APP_ALBUMTAG: OnAlbumTagMessage(m.lp); break;
         case WM_APP_DUPLICATES: OnDuplicatesMessage(); break;
         case WM_APP_PLAYLIST_FILE: OnPlaylistFile(m.wp, m.lp); break;
@@ -226,7 +234,7 @@ int Run(int argc, char** argv) {
         if (!full.empty()) paths.push_back(full);
     }
 
-    SDL_SetAppMetadata("cordinal", "0.1.16", "cordinal");
+    SDL_SetAppMetadata("cordinal", "0.1.17", "cordinal");
     SDL_SetHint(SDL_HINT_VIDEO_WAYLAND_PREFER_LIBDECOR, "1");
     if (parity) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
@@ -381,6 +389,7 @@ int Run(int argc, char** argv) {
             timeout = std::min(timeout, 100);
             g.redraw = true;
         }
+        if (OnlineSearchVisible() || PickerOnlinePending()) timeout = std::min(timeout, 50);
         if (g.rowsRevision != g_lib.Revision()) {  // the list is behind the library: catch up shortly
             timeout = 150;
             g.redraw = true;
@@ -397,6 +406,8 @@ int Run(int argc, char** argv) {
         TickCanvasScroll();
         DrainMessages();
         TickPlaylistImport();
+        OnlineSearchTick();
+        PickerOnlineTick();
         RadioTick();
         if (WebRunning()) TickWeb();
         uint64_t now = SDL_GetTicks();
@@ -455,6 +466,9 @@ int Run(int argc, char** argv) {
     StopDuplicates();  // files it already moved take their history with them before the save
     Stop();  // finish the current listening session before saving the library
     ShutdownRadio();
+    DiscoverShutdown();
+    StopOnlineSearch();
+    StopPickerOnline();
     musicbrainz::Stop();
     StopTagWriter();
     StopMpris();

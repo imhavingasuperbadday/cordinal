@@ -17,6 +17,7 @@ enum class RuleField : uint8_t {
     Plays30, Plays365,                                                                              // numbers from the play log (playlog.h)
     SampleRate, Channels, FileSize, TrackGain,                                                      // numbers
     FirstPlayed,                                                                                    // date
+    Favorite,                                                                                       // 0 or 1
     Count
 };
 
@@ -82,6 +83,15 @@ void EvaluateAutoPlaylist(const AutoPlaylist& a, const Library& library, const s
                           std::vector<TrackId>& out, uint32_t seed = 1);
 bool RuleMatches(const Rule& r, TrackId id);
 
-// The default set created on first run: Recently added, Recently played, Top 25 most played,
-// Top rated.
+// The default set created on first run: Favorites, Recently added, Recently played, Top 25 most
+// played, Top rated.
 std::vector<std::pair<std::wstring, AutoPlaylist>> DefaultAutoPlaylists();
+
+// The ready-made local mixes (Step 5 of docs/effortless-library.md), all built from the library
+// alone: the user's Favorites; songs on repeat lately; forgotten favorites; recent additions; and
+// a mix seeded from the playing track's genre and tempo. `MixRules` serializes the rules a menu
+// adds as an auto-playlist; a mix that needs a seed returns "" when the track has no genre or BPM.
+enum class MixPreset : uint8_t { Favorites, OnRepeat, Forgotten, RecentlyAdded, LikeThis, Count };
+const wchar_t* MixName(MixPreset mix);  // "Favorites", "On Repeat", ... ("Mix like this song" for LikeThis)
+bool MixNeedsSeed(MixPreset mix);
+std::string MixRules(MixPreset mix, std::string_view genre = {}, uint16_t bpm = 0);

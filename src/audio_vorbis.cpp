@@ -22,21 +22,25 @@ unsigned Ilog(uint32_t x) { return std::bit_width(x); }
 class PacketBits {
 public:
     explicit PacketBits(const std::vector<uint8_t>& p, size_t skip = 0) : p_(p.data()+skip), end_(p.data()+p.size()) {}
-    uint32_t Peek(unsigned n) {
+    __forceinline uint32_t Peek(unsigned n) {
         if (live_ < n) Refill();
         return (uint32_t)cache_ & (n == 32 ? UINT32_MAX : (1u << n) - 1);
     }
-    uint32_t Get(unsigned n) {
+    __forceinline uint32_t Get(unsigned n) {
         uint32_t v = Peek(n);
         Drop(n);
         return v;
     }
     __declspec(noinline) uint32_t Read(unsigned n) { return Get(n); } // Compact setup/header parsing.
-    void Drop(unsigned n) {
+    __forceinline void Drop(unsigned n) {
         if (live_ < n) { ok_ = false; cache_ = 0; live_ = 0; }
         else { cache_ >>= n; live_ -= n; }
     }
     bool Good() const { return ok_; }
+    __forceinline void Ensure(unsigned n) { if (live_ < n) Refill(); }
+    __forceinline uint32_t Cache() const { return (uint32_t)cache_; }
+    __forceinline unsigned Live() const { return live_; }
+    __forceinline void ConsumeFast(unsigned n) { cache_ >>= n; live_ -= n; }
 private:
     // Top the cache up to 56..63 bits with one 8-byte load where at least 8 bytes remain:
     // whole bytes are counted in, and the rest of the word is the same data loaded again
@@ -69,8 +73,13 @@ struct Book {
     bool Setup(PacketBits& b, size_t& budget);
     __forceinline int Scalar(PacketBits& b) const {
         if (single >= 0) { b.Get(1); return b.Good() ? single : -1; }
-        auto f = fast[b.Peek(kFastBits)];
-        if (f >> 24) { b.Drop(f >> 24); return b.Good() ? (int)(f & 0xFFFFFF)-1 : -1; }
+        b.Ensure(kFastBits);
+        auto f = fast[b.Cache() & ((1u << kFastBits) - 1)];
+        if (const unsigned len = f >> 24; len && b.Live() >= len) {
+            b.ConsumeFast(len);
+            return (int)(f & 0xFFFFFF) - 1;
+        }
+        if (f >> 24) { b.Drop(f >> 24); return b.Good() ? (int)(f & 0xFFFFFF) - 1 : -1; }
         int node = 0;
         for (unsigned i = 0; i < 32; ++i) {
             int v = tree[(size_t)node].child[b.Get(1)];
@@ -803,12 +812,13 @@ bool VorbisDecoder::Audio() {
     if (large) { prevLong = b.Get(1) != 0; nextLong = b.Get(1) != 0; }
     const auto& mapping = mappings_[modes_[mode].mapping];
     bool nonzero[8]{}, floorPresent[8]{};
-    std::fill(spectrum_.begin(),spectrum_.end(),0.0f);
+    const size_t zeroBytes = (size_t)half * sizeof(float);
     for (unsigned c = 0; c < channels_; ++c) {
         floorPresent[c] = floors_[mapping.floor[mapping.mux[c]]].Decode(b,books_,curves_.data()+(size_t)c*stride,half);
         nonzero[c] = floorPresent[c];
     }
     for (auto pair : mapping.couples) if (nonzero[pair.magnitude] || nonzero[pair.angle]) nonzero[pair.magnitude] = nonzero[pair.angle] = true;
+    for (unsigned c = 0; c < channels_; ++c) if (nonzero[c]) memset(spectrum_.data() + (size_t)c * stride, 0, zeroBytes);
     for (unsigned map = 0; map < mapping.submaps; ++map) {
         unsigned bundle[8],count=0;
         for (unsigned c = 0; c < channels_; ++c) if (mapping.mux[c] == map) bundle[count++]=c;

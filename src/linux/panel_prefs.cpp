@@ -8,6 +8,7 @@
 #include "listenbrainz.h"
 #include "metadata_fetch.h"
 #include "musicbrainz.h"
+#include "search_online_ui.h"
 #include "textcase.h"
 #include "waybar.h"
 
@@ -82,6 +83,7 @@ static_assert(std::size(kCrossfadeNames) == std::size(kCrossfadeSeconds) && std:
 const char* const kCoverSourceNames[] = {"Deezer", "iTunes", "MusicBrainz"};
 const char* const kCoverSaveNames[] = {"Save as cover.jpg in the album folder", "Embed in the files' tags",
                                       "Show in cordinal only"};
+const char* const kSearchSaveNames[] = {"Preview until saved", "Play and save automatically"};
 static_assert(std::size(kCoverSourceNames) == online::kCoverSources);
 static_assert(std::size(kReverbNames) == (size_t)ReverbPreset::Count);
 
@@ -351,6 +353,34 @@ const Pref kPrefs[] = {
      "Sends the album's title and artist to musicbrainz.org when you choose Tag album from MusicBrainz, then the ids of the few releases that match, to read their tracks.",
      PrefType::Bool, 0, 1, 0, 1, [] { return (double)online::Config().albumTags; },
      [](double v) { online::Config().albumTags = v != 0; Saved(); }},
+    {"online_save_music", "Online", "Save music from the web",
+     "Downloads the link you paste from that site: the audio, its cover and its details, saved as your own "
+     "file in the library. A Spotify link's audio is the same recording matched on YouTube. A Spotify "
+     "export or CSV playlist imports the same way, skipping every song your library already has.",
+     PrefType::Bool, 0, 1, 0, 1, [] { return (double)online::Config().saveMusic; },
+     [](double v) { online::Config().saveMusic = v != 0; Saved(); }},
+     {"online_release_radar", "Online", "New releases by your favorite artists",
+      "Asks musicbrainz.org about the artists you play and heart most for their albums from the last six "
+      "months, when you open Library > New releases. Saving one downloads its tracks from YouTube, the same "
+      "recording matched there.",
+      PrefType::Bool, 0, 1, 0, 1, [] { return (double)online::Config().releaseRadar; },
+      [](double v) { online::Config().releaseRadar = v != 0; Saved(); }},
+     {"online_discover_radio", "Online", "Discover songs outside your library",
+      "While Keep playing like this is on, every few songs plays one you don't own yet, from an artist related "
+      "to the one playing. MusicBrainz chooses it and the audio is matched on YouTube; it is not added to your "
+      "library until Ctrl+Alt+K keeps it.",
+      PrefType::Bool, 0, 1, 0, 1, [] { return (double)online::Config().discoverRadio; },
+      [](double v) { online::Config().discoverRadio = v != 0; Saved(); }},
+     {"online_search_music", "Online", "Search online for songs not in your library",
+      "When on, the search box and song picker also look up songs not yet in your library. Only the words you type "
+      "are sent to Deezer (and iTunes or YouTube if needed).",
+      PrefType::Bool, 0, 1, 0, 1, [] { return (double)online::Config().searchMusic; },
+      [](double v) { online::Config().searchMusic = v != 0; Saved(); OnlineSearchSettingChanged(); }},
+     {"online_search_save", "Online", "When playing a search result",
+      "Preview plays from a temporary folder and leaves your library untouched until you save it. Save "
+      "automatically puts played search results into your library folder right away.",
+      PrefType::Choice, 0, 1, 0, 1, [] { return (double)online::Config().searchSave; },
+      [](double v) { online::Config().searchSave = std::clamp((int)v, 0, 1); Saved(); }, kSearchSaveNames},
     {"group_albums", "View", "Group tracks by album", "The track list shows a header with the cover above each album's tracks.",
      PrefType::Bool, 0, 1, 1, 1, [] { return (double)Cfg().groupAlbums; },
      [](double v) { Cfg().groupAlbums = v != 0; RebuildRows(); Saved(); }},

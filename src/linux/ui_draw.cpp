@@ -3,6 +3,7 @@
 #include "big_ui.h"
 #include "cover_fade.h"
 #include "discart.h"
+#include "search_online_ui.h"
 #include "taste.h"
 #include "ui_internal.h"
 #include "wind.h"
@@ -1412,6 +1413,36 @@ void DrawStatus(const Palette& p) {
     }
 }
 
+// What the views can show at once, plus two rows of slack: the cover grid's tiles, at the tile size
+// and window the user has. There is no disk thumbnail cache here, so a cover let go is a full file
+// decode when it comes back, and the slack is what keeps scrolling smooth; the count cap alone
+// could hold hundreds of megabytes of large tiles.
+size_t ThumbBudget() {
+    const float tile = S((float)g.settings.coverSize);
+    const int cols = (int)std::max(1.0f, (L.list.w + S(16.0f)) / (tile + S(16.0f)));
+    const size_t rows = (size_t)(L.list.h / (tile + S(60.0f))) + 3;
+    const size_t grid = (size_t)(tile * tile * 4) * (size_t)cols * rows;
+    return std::max<size_t>(grid, 4u << 20);  // never below a screenful of small tiles
+}
+
+// Lets the least recently drawn covers go, oldest first, until the textures fit the budget. A cover
+// drawn this frame is never a candidate, so what is on screen always stays.
+void TrimThumbs() {
+    if (g_thumbBytes <= ThumbBudget()) return;
+    std::vector<std::pair<uint64_t, uint64_t>> done;  // (last drawn, key)
+    for (auto& [k, t] : g_thumbs)
+        if (t.done && t.used < g_frame && t.bytes) done.emplace_back(t.used, k);
+    std::sort(done.begin(), done.end());
+    for (auto& [used, key] : done) {
+        if (g_thumbBytes <= ThumbBudget()) break;
+        auto it = g_thumbs.find(key);
+        if (it == g_thumbs.end()) continue;
+        if (it->second.texture) SDL_DestroyTexture(it->second.texture);
+        g_thumbBytes -= it->second.bytes;
+        g_thumbs.erase(it);
+    }
+}
+
 void Draw() {
     ++g_frame;
     // The library changed (a scan, tags arriving): rebuild what's shown, at most twice a second.
@@ -1445,6 +1476,8 @@ void Draw() {
     if (InternetRadio().active && L.list.w > 0 && L.list.h >= S(68)) DrawRadio(p);
     else if (CanvasActive() && L.list.w > 0 && L.list.h > 0) DrawCanvas(L.list, p, g_popups.empty() ? g_mouseX : -1, g_popups.empty() ? g_mouseY : -1);
     else if (L.list.w > 0 && L.list.h > 0) DrawList(p);
+    if (!InternetRadio().active && L.online.w > 0 && L.online.h > 0)
+        DrawOnlineSearch(L.online, p, g_popups.empty() ? g_mouseX : -1, g_popups.empty() ? g_mouseY : -1);
     if (L.browser.h > 0) {
         DrawBrowser(L.browser, p, g_popups.empty() ? g_mouseX : -1, g_popups.empty() ? g_mouseY : -1);
         Fill(L.splitter, p.surface);
@@ -1456,6 +1489,7 @@ void Draw() {
     if (!DrawAlternate(p)) DrawBand(p);
     DrawVisuals(p);
     DrawStatus(p);
+    DrawLayoutBar(p);
     DrawMenuBar(p);
     if (g_folders.open) DrawFoldersDialog(p);
     if (g_recent.open) DrawRecentAdditions(p);
@@ -1480,6 +1514,7 @@ void Draw() {
     }
     DrawAlternateOverlay(p);
     DrawPopups(p);
+    TrimThumbs();  // every cover the frame asked to keep is marked now, so only the rest may go
 }
 
 // An album's cover filling `r` (cropped to square), or while it loads the surface color, or for an
@@ -1510,6 +1545,7 @@ void DrawAlbumCover(TrackId first, StringPool::Handle album, const std::wstring&
             for (size_t i = 0; i < done.size() / 2; ++i) {
                 auto old = g_thumbs.find(done[i].second);
                 if (old->second.texture) SDL_DestroyTexture(old->second.texture);
+                g_thumbBytes -= old->second.bytes;
                 g_thumbs.erase(old);
             }
         }

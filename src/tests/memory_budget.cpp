@@ -48,7 +48,16 @@ constexpr Budget kBudgets[] = {
 // since, and the image measured 5.51 MB.
 // Raised from 5.75 on November 20, 2026: Save music from the web added the SoundCloud, YouTube
 // and Spotify resolvers and the download queue, and the image measured 5.76 MB.
-constexpr double kProgramBudget = 6.00;
+// Raised from 6.00 to 6.05 on November 21, 2026: discovery in Keep playing like this added the
+// MusicBrainz chooser and its preview queue, and the image measured 6.02 MB. Its code is cold
+// (opt-in, and only a few kilobytes are touched when it runs), so the packed player gains less
+// than the image check assumes.
+// Raised from 6.05 to 6.10 on November 22, 2026, with the maintainer's agreement: the TimeStretch
+// stereo phase vocoder (cb092d4, that morning) grew the image from 6.02 to 6.05 MB, past the
+// budget the day before had set. The same day's unwind re-proof restored tables eight files
+// needed again, offset by seven new no-unwind files, so the rest of that pass nets zero here
+// (docs/memory.md, "Idle work taken out of scans, startup and the caches").
+constexpr double kProgramBudget = 6.10;
 
 // Where the budgets are heading: what the packed release player should show in Task Manager while
 // playing. docs/memory.md has the plan; the log reports the distance on every run.

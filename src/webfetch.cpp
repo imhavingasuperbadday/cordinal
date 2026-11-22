@@ -8,6 +8,8 @@
 #include "webfetch.h"
 
 #include "library.h"    // ToUtf8 / FromUtf8
+#include "metadata_fetch.h"
+#include "mp4_remux.h"   // RemuxFragmentedMp4, IsFragmentedMp4
 #include "organize.h"   // SafePathComponent
 #include "radio_http.h"
 #include "soundcloud.h"
@@ -115,6 +117,28 @@ bool LoadRecord(const std::wstring& path, Record& record) {
     return true;
 }
 
+// Writes `text` beside `path` and moves it into place: the old file or the new one is on
+// disk, never a torn one. The first write has no original for ReplaceFile to swap, so the
+// temp file is moved in instead - the pattern playlist saves use.
+bool WriteAtomic(const std::wstring& path, const std::string& text) {
+    std::wstring tmp = path + L".cordinal-tmp";
+    HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    bool ok = true;
+    for (size_t pos = 0; ok && pos < text.size();) {
+        DWORD chunk = (DWORD)std::min<size_t>(text.size() - pos, 1u << 24), written = 0;
+        ok = WriteFile(h, text.data() + pos, chunk, &written, nullptr) && written == chunk;
+        pos += chunk;
+    }
+    ok = ok && FlushFileBuffers(h);
+    CloseHandle(h);
+    if (!ok || !MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(tmp.c_str());
+        return false;
+    }
+    return true;
+}
+
 bool SaveRecord(const std::wstring& path, const Record& record) {
     std::string out = "{\"saved\":[";
     bool first = true;
@@ -132,25 +156,33 @@ bool SaveRecord(const std::wstring& path, const Record& record) {
                (why.second ? "true" : "false") + "}";
     }
     out += "]}";
-    // The first write has no original for ReplaceFile to swap, so the temp file is
-    // moved into place instead - the pattern playlist saves use, and atomic either
-    // way: the old record or the new one is on disk, never a torn one.
-    std::wstring tmp = path + L".cordinal-tmp";
-    HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    bool ok = true;
-    for (size_t pos = 0; ok && pos < out.size();) {
-        DWORD chunk = (DWORD)std::min<size_t>(out.size() - pos, 1u << 24), written = 0;
-        ok = WriteFile(h, out.data() + pos, chunk, &written, nullptr) && written == chunk;
-        pos += chunk;
+    return WriteAtomic(path, out);
+}
+
+// ---------------------------------------------------------------------------
+// The playlist tabs the saves and imports made: webfetch-tabs.json beside the record,
+// written atomically like it, so a re-import after a restart updates its own tab.
+
+// FNV-1a over each file's UTF-8 bytes and a newline, in order. 0 marks "no list": a saved
+// tab always has files.
+uint64_t FingerprintFiles(const std::vector<std::wstring>& files) {
+    if (files.empty()) return 0;
+    uint64_t hash = 1469598103934665603ull;
+    for (const std::wstring& file : files) {
+        for (unsigned char c : ToUtf8(file)) {
+            hash ^= c;
+            hash *= 1099511628211ull;
+        }
+        hash ^= '\n';
+        hash *= 1099511628211ull;
     }
-    ok = ok && FlushFileBuffers(h);
-    CloseHandle(h);
-    if (!ok || !MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        DeleteFileW(tmp.c_str());
-        return false;
-    }
-    return true;
+    return hash ? hash : 1;
+}
+
+std::string Hex64(uint64_t value) {
+    char buf[17];
+    std::snprintf(buf, sizeof buf, "%016llx", (unsigned long long)value);
+    return buf;
 }
 
 // ---------------------------------------------------------------------------
@@ -172,14 +204,19 @@ std::wstring ExtOfTrack(const WebTrack& t) {
     return L"mp3";
 }
 
-std::wstring TargetPath(const WebTrack& t, const std::wstring& root) {
+std::wstring TargetPath(const WebTrack& t, const std::wstring& root, std::string_view albumArtist = {}) {
     std::vector<std::wstring> parts;
-    parts.push_back(SafePathComponent(FromUtf8(t.artist.empty() ? "Unknown artist" : t.artist)));
+    const std::string_view folderArtist =
+        !albumArtist.empty() ? albumArtist : (t.artist.empty() ? std::string_view("Unknown artist") : std::string_view(t.artist));
+    parts.push_back(SafePathComponent(FromUtf8(std::string(folderArtist))));
     if (!t.album.empty()) parts.push_back(SafePathComponent(FromUtf8(t.album)));
     std::wstring name = FromUtf8(t.title.empty() ? t.id : t.title);
     if (t.trackNo > 0 && t.trackNo <= 999) {
-        wchar_t no[8];
-        std::swprintf(no, 8, L"%02u ", t.trackNo);
+        wchar_t no[16];
+        if (t.discTotal > 1 && t.discNo > 0 && t.discNo <= 99)
+            std::swprintf(no, 16, L"%u-%02u ", t.discNo, t.trackNo);
+        else
+            std::swprintf(no, 16, L"%02u ", t.trackNo);
         name = no + name;
     }
     parts.push_back(SafePathComponent(name) + L"." + ExtOfTrack(t));
@@ -290,6 +327,14 @@ bool DownloadToFile(const std::string& url, const std::wstring& file, const std:
 }
 
 bool FetchBytes(const std::string& url, std::string& bytes) {
+    if (url.starts_with("https://")) {
+        online::Cancel cancel;
+        online::Reply reply = online::Get(url, cancel, 30000, 8u << 20);
+        int w = 0, h = 0;
+        if (reply.status != 200 || online::InspectImage(reply.body, w, h) == online::ImageType::None) return false;
+        bytes = std::move(reply.body);
+        return true;
+    }
     web::HttpReply reply = web::HttpFetch(nullptr, url, "GET", {}, {}, 30000, 8u << 20);
     if (reply.status != 200) return false;
     bytes = std::move(reply.body);
@@ -328,6 +373,56 @@ bool WebFetchForgetFailures(const std::wstring& dataDir) {
     return SaveRecord(WebFetchRecordPath(dataDir), record);
 }
 
+std::wstring WebTabMarkPath(const std::wstring& dataDir) { return Join(dataDir, L"webfetch-tabs.json"); }
+
+bool LoadWebTabMarks(const std::wstring& dataDir, std::vector<WebTabMark>& marks) {
+    marks.clear();
+    std::string text;
+    if (!ReadFileBytes(WebTabMarkPath(dataDir), text) || text.empty()) return false;
+    web::JsonValue json;
+    if (!web::ParseJson(text, json)) return false;
+    for (const web::JsonValue& row : json["tabs"].items) {
+        WebTabMark mark;
+        mark.title = FromUtf8(row["t"].text);
+        mark.name = FromUtf8(row["n"].text);
+        mark.seen = std::strtoull(row["s"].text.c_str(), nullptr, 16);
+        if (!mark.title.empty() && !mark.name.empty()) marks.push_back(std::move(mark));
+    }
+    return true;
+}
+
+bool SaveWebTabMarks(const std::wstring& dataDir, const std::vector<WebTabMark>& marks) {
+    std::string out = "{\"tabs\":[";
+    bool first = true;
+    for (const WebTabMark& mark : marks) {
+        out += first ? "" : ",";
+        first = false;
+        out += "{\"t\":\"" + JsonEscape(ToUtf8(mark.title)) + "\",\"n\":\"" + JsonEscape(ToUtf8(mark.name)) +
+               "\",\"s\":\"" + Hex64(mark.seen) + "\"}";
+    }
+    out += "]}";
+    return WriteAtomic(WebTabMarkPath(dataDir), out);
+}
+
+uint64_t WebTabFingerprint(const std::vector<std::wstring>& files) { return FingerprintFiles(files); }
+
+const WebTabMark* FindWebTabMark(const std::vector<WebTabMark>& marks, const std::wstring& title) {
+    for (const WebTabMark& mark : marks)
+        if (CompareStringOrdinal(mark.title.c_str(), -1, title.c_str(), -1, TRUE) == CSTR_EQUAL) return &mark;
+    return nullptr;
+}
+
+void SetWebTabMark(std::vector<WebTabMark>& marks, const std::wstring& title, const std::wstring& name,
+                   uint64_t seen) {
+    for (WebTabMark& mark : marks) {
+        if (CompareStringOrdinal(mark.title.c_str(), -1, title.c_str(), -1, TRUE) != CSTR_EQUAL) continue;
+        mark.name = name;
+        mark.seen = seen;
+        return;
+    }
+    marks.push_back({title, name, seen});
+}
+
 void SetWebFetchIO(const WebFetchIO& io) { g_io = io; }
 
 namespace {
@@ -362,22 +457,33 @@ void NameList(std::vector<WebTrack>& tracks, const std::string& setTitle, bool a
     }
 }
 
+// Reads one pasted link into the tracks it holds. `isPlaylist` says the link names a list the
+// UI can offer as one cordinal playlist (a Spotify playlist, a YouTube playlist, a SoundCloud
+// set or likes), not an album or a single.
 bool ReadLink(const WebFetchRun& run, const std::string& link, const std::atomic<bool>& cancel,
-              Site& site, std::vector<WebTrack>& tracks, std::string& listTitle, std::string& error,
-              const std::function<void(const std::string&)>& notice) {
+              Site& site, std::vector<WebTrack>& tracks, std::string& listTitle, bool& isPlaylist,
+              std::string& error, const std::function<void(const std::string&)>& notice) {
     site = SiteOf(link);
+    isPlaylist = false;
     if (run.resolvers.link) {
         // The self-test's fake stands in for every site at once: the tracks it returns
         // say their own site, and its listTitle plays the set title.
         bool ok = run.resolvers.link(link, cancel, tracks, listTitle, error, notice);
-        if (ok && !tracks.empty()) site = SiteByName(tracks[0].site);
+        if (ok) {
+            site = SiteByName(tracks.empty() ? "" : tracks[0].site);
+            isPlaylist = !listTitle.empty();
+        }
         return ok;
     }
     switch (site) {
-    case Site::SoundCloud:
+    case Site::SoundCloud: {
+        const soundcloud::Kind kind = soundcloud::Classify(link);
+        isPlaylist = kind == soundcloud::Kind::Playlist || kind == soundcloud::Kind::Likes;
         return soundcloud::Resolve(link, cancel, tracks, listTitle, error, notice);
+    }
     case Site::YouTube: {
         if (yt::Classify(link) == yt::Kind::Playlist) {
+            isPlaylist = true;
             std::string listId = yt::PlaylistIdOf(link);
             if (listId.empty()) {
                 error = "that link's playlist id could not be read";
@@ -403,6 +509,7 @@ bool ReadLink(const WebFetchRun& run, const std::string& link, const std::atomic
             error = "that Spotify page is not a track, album or playlist";
             return false;
         }
+        isPlaylist = kind == spotify::Kind::Playlist;
         // The id is the last path run before any query noise.
         std::string id = link;
         size_t cut = id.find_first_of("?#");
@@ -496,9 +603,13 @@ bool MatchSpotifyTrack(const WebFetchRun& run, const WebTrack& want, const std::
             out.title = want.title;
             out.artist = want.artist;
             out.album = want.album;
-            out.artworkUrl = want.artworkUrl;  // Spotify's own cover is the real item's
+            // Spotify's own cover is the real item's; an imported row that knows no cover
+            // keeps the match's, so an imported file still lands with art of its own.
+            if (!want.artworkUrl.empty()) out.artworkUrl = want.artworkUrl;
             out.trackNo = want.trackNo;
             out.trackTotal = want.trackTotal;
+            out.discNo = want.discNo;
+            out.discTotal = want.discTotal;
             out.unavailable = false;
             out.why.clear();
             return true;
@@ -511,9 +622,11 @@ bool MatchSpotifyTrack(const WebFetchRun& run, const WebTrack& want, const std::
 
 }  // namespace
 
-bool RunWebFetch(const WebFetchRun& run, std::vector<WebFetchItem>& items, std::string& error) {
+bool RunWebFetch(const WebFetchRun& run, std::vector<WebFetchItem>& items, std::string& error,
+                 std::vector<WebFetchList>* lists) {
     items.clear();
-    if (run.links.empty()) {
+    if (lists) lists->clear();
+    if (run.links.empty() && run.importLists.empty()) {
         error = "no links to read";
         return false;
     }
@@ -527,8 +640,25 @@ bool RunWebFetch(const WebFetchRun& run, std::vector<WebFetchItem>& items, std::
     };
 
     // Pass 1: read every link into the list. A link that cannot be read is a notice and
-    // a remembered failure of the run, not the end of the run.
+    // a remembered failure of the run, not the end of the run. An import's rows are already
+    // resolved, so they come first and every one of them is a playlist of its own.
     bool anyRead = false;
+    struct ListMeta { size_t first, count; const WebFetchTrackList* list; };
+    std::vector<ListMeta> listMeta;
+    for (const WebFetchTrackList& pre : run.importLists) {
+        if (IsCancel(run.cancel)) break;
+        anyRead = true;
+        const size_t first = items.size();
+        for (const WebTrack& track : pre.tracks) {
+            WebFetchItem item;
+            item.track = track;
+            items.push_back(item);
+            if (run.added) run.added(items.back());
+        }
+        if (!pre.albumArtist.empty() || !pre.date.empty() || !pre.releaseId.empty() || !pre.releaseGroupId.empty())
+            listMeta.push_back({first, items.size() - first, &pre});
+        if (lists) lists->push_back({pre.title, pre.playlist, first, items.size() - first});
+    }
     for (const std::string& raw : run.links) {
         if (IsCancel(run.cancel)) break;
         std::string link = raw;
@@ -541,7 +671,8 @@ bool RunWebFetch(const WebFetchRun& run, std::vector<WebFetchItem>& items, std::
         Site site = Site::None;
         std::vector<WebTrack> tracks;
         std::string listTitle, linkError;
-        if (!ReadLink(run, link, cancel, site, tracks, listTitle, linkError, notice)) {
+        bool isPlaylist = false;
+        if (!ReadLink(run, link, cancel, site, tracks, listTitle, isPlaylist, linkError, notice)) {
             notice(linkError);
             if (error.empty()) error = linkError;
             continue;
@@ -557,16 +688,19 @@ bool RunWebFetch(const WebFetchRun& run, std::vector<WebFetchItem>& items, std::
                      faked ? !listTitle.empty() : kind == soundcloud::Kind::Playlist,
                      faked ? !listTitle.empty() : kind != soundcloud::Kind::Track);
         }
+        const size_t first = items.size();
         for (const WebTrack& track : tracks) {
             WebFetchItem item;
             item.track = track;
             items.push_back(item);
             if (run.added) run.added(items.back());
         }
+        if (lists) lists->push_back({listTitle, isPlaylist, first, items.size() - first});
     }
     if (!anyRead && items.empty()) return false;
 
     // Pass 2: save each item, one at a time, in order.
+    std::string lastCoverUrl, lastCoverBytes;
     for (size_t i = 0; i < items.size(); ++i) {
         if (IsCancel(run.cancel)) break;
         WebFetchItem& it = items[i];
@@ -613,9 +747,11 @@ bool RunWebFetch(const WebFetchRun& run, std::vector<WebFetchItem>& items, std::
             record.saved.erase(saved);  // the file went away; fetch it again
         }
 
-        // A Spotify track resolves to a stream right before its download, so the list
-        // appears at once and the searches stay paced.
-        if (it.track.site == "spotify" && it.track.streamUrl.empty()) {
+        // A Spotify, MusicBrainz or online-search track resolves to a stream right before its
+        // download, so the list appears at once and the searches stay paced.
+        if ((it.track.site == "spotify" || it.track.site == "musicbrainz" || it.track.site == "deezer" ||
+             it.track.site == "itunes") &&
+            it.track.streamUrl.empty()) {
             notice("Matching \"" + it.track.title + "\" on YouTube...");
             WebTrack matched;
             std::string matchWhy;
@@ -644,7 +780,10 @@ bool RunWebFetch(const WebFetchRun& run, std::vector<WebFetchItem>& items, std::
             if (it.track.durationSec == 0) it.track.durationSec = matched.durationSec;
         }
 
-        std::wstring target = TargetPath(it.track, run.libraryRoot);
+        const WebFetchTrackList* meta = nullptr;
+        for (const ListMeta& lm : listMeta)
+            if (i >= lm.first && i < lm.first + lm.count) { meta = lm.list; break; }
+        std::wstring target = TargetPath(it.track, run.libraryRoot, meta ? meta->albumArtist : std::string_view{});
         EnsureFolder(FolderOf(target));
         // Reaching here means the record does not map this track to that name, so a
         // file already sitting there is a different recording: it gets numbered, not
@@ -705,23 +844,63 @@ bool RunWebFetch(const WebFetchRun& run, std::vector<WebFetchItem>& items, std::
 
         it.state = WebState::Saving;
         upd();
+
+        // YouTube's and SoundCloud's newer streams arrive as fragmented MP4, which no tag
+        // writer takes: rewrite it into one standard fast-start M4A first — the same
+        // compressed frames, byte for byte — so the song lands as a normal tagged library
+        // file. A stream the rewrite cannot represent is saved exactly as it arrived.
+        bool fragmentedKept = false;
+        if (ext == L"m4a" && nativeaudio::IsFragmentedMp4(part)) {
+            const std::wstring remux = target.substr(0, target.size() - ext.size() - 1) + L".remux." + ext;
+            std::wstring remuxError;
+            if (nativeaudio::RemuxFragmentedMp4(part, remux, remuxError)) {
+                DeleteFileW(part.c_str());
+                part = remux;
+            } else {
+                DeleteFileW(remux.c_str());
+                fragmentedKept = true;
+                notice("saved as downloaded (" + ToUtf8(remuxError) + ")");
+            }
+        }
+
         std::string coverBytes;
-        if (!it.track.artworkUrl.empty()) io.fetchBytes(it.track.artworkUrl, coverBytes);
+        if (!it.track.artworkUrl.empty()) {
+            if (it.track.artworkUrl == lastCoverUrl) {
+                coverBytes = lastCoverBytes;
+            } else {
+                if (!io.fetchBytes(it.track.artworkUrl, coverBytes)) coverBytes.clear();
+                lastCoverUrl = it.track.artworkUrl;
+                lastCoverBytes = coverBytes;
+            }
+        }
         bool tagged = false;
-        if (ext == L"mp3" || ext == L"m4a") {
+        const bool canTag = ext == L"mp3" || (ext == L"m4a" && !fragmentedKept);
+        if (canTag) {
             TagEdit edit;
             edit.title = it.track.title;
             edit.artist = it.track.artist;
             if (!it.track.album.empty()) edit.album = it.track.album;
+            if (meta && !meta->albumArtist.empty()) edit.albumArtist = meta->albumArtist;
+            if (meta && !meta->date.empty()) edit.date = meta->date;
             if (it.track.trackNo > 0) edit.track = it.track.trackNo;
             if (it.track.trackTotal > 0) edit.trackTotal = it.track.trackTotal;
+            if (it.track.discNo > 0) edit.disc = it.track.discNo;
+            if (it.track.discTotal > 0) edit.discTotal = it.track.discTotal;
+            if (meta && !meta->releaseId.empty()) edit.musicBrainzRelease = meta->releaseId;
+            if (meta && !meta->releaseGroupId.empty()) edit.musicBrainzReleaseGroup = meta->releaseGroupId;
             if (it.track.site == "spotify")
                 edit.comment = "audio matched on YouTube; tags from Spotify";  // labelled, never a secret
+            else if (it.track.site == "musicbrainz")
+                edit.comment = "audio matched on YouTube; tags from MusicBrainz";
+            else if (it.track.site == "deezer")
+                edit.comment = "audio matched on YouTube; tags from Deezer";
+            else if (it.track.site == "itunes")
+                edit.comment = "audio matched on YouTube; tags from iTunes";
             if (!coverBytes.empty()) edit.cover = coverBytes;
             std::wstring tagError;
             tagged = WriteTags(part, edit, tagError);
             if (!tagged) notice("saved without embedded tags (" + ToUtf8(tagError) + ")");
-        } else {
+        } else if (!fragmentedKept) {
             notice("saved without embedded tags (a " + ToUtf8(ext) + " stream carries no tags cordinal can write)");
         }
         // A stream that cannot carry tags still gets its art: the album folder's own
@@ -741,14 +920,14 @@ bool RunWebFetch(const WebFetchRun& run, std::vector<WebFetchItem>& items, std::
                 const std::wstring tmp = cover + L".cordinal-tmp";
                 HANDLE h =
                     CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-                bool ok = h != INVALID_HANDLE_VALUE;
-                if (ok) {
+                bool coverOk = h != INVALID_HANDLE_VALUE;
+                if (coverOk) {
                     DWORD wrote = 0;
-                    ok = WriteFile(h, coverBytes.data(), (DWORD)coverBytes.size(), &wrote, nullptr) &&
-                         wrote == coverBytes.size();
+                    coverOk = WriteFile(h, coverBytes.data(), (DWORD)coverBytes.size(), &wrote, nullptr) &&
+                              wrote == coverBytes.size();
                     CloseHandle(h);
                 }
-                if (!ok || !MoveFileExW(tmp.c_str(), cover.c_str(), MOVEFILE_WRITE_THROUGH)) DeleteFileW(tmp.c_str());
+                if (!coverOk || !MoveFileExW(tmp.c_str(), cover.c_str(), MOVEFILE_WRITE_THROUGH)) DeleteFileW(tmp.c_str());
             }
         }
 
@@ -775,5 +954,44 @@ bool RunWebFetch(const WebFetchRun& run, std::vector<WebFetchItem>& items, std::
         // A steady pace between requests to the same site.
         Pace(it.track.site == "soundcloud" ? 250 : 600, cancel);
     }
+    return true;
+}
+
+bool WebFetchKeep(const WebTrack& track, const std::wstring& previewFile, const std::wstring& libraryRoot,
+                  const std::wstring& dataDir, std::wstring& keptFile, std::string& error) {
+    keptFile.clear();
+    error.clear();
+    if (!Exists(previewFile)) {
+        error = "the preview is gone";
+        return false;
+    }
+    if (libraryRoot.empty()) {
+        error = "no library folder is set";
+        return false;
+    }
+    WebTrack shaped = track;
+    if (shaped.ext.empty()) shaped.ext = ToUtf8(ExtOfTrack(shaped));
+    std::wstring target = TargetPath(shaped, libraryRoot);
+    EnsureFolder(FolderOf(target));
+    if (Exists(target)) target = FirstFreePath(target);
+    // A temporary beside the destination, so a failed copy leaves no half file in the library.
+    const std::wstring part = target + L".cordinal-tmp";
+    if (!CopyFileW(previewFile.c_str(), part.c_str(), FALSE) ||
+        !MoveFileExW(part.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(part.c_str());
+        error = "the file could not be copied into the library";
+        return false;
+    }
+    Record record;
+    LoadRecord(WebFetchRecordPath(dataDir), record);
+    record.failed.erase(RecordKey(shaped));
+    std::wstring rel = target.size() > libraryRoot.size() &&
+                               _wcsicmp(target.substr(0, libraryRoot.size()).c_str(), libraryRoot.c_str()) == 0
+                           ? target.substr(libraryRoot.size() +
+                                           (target[libraryRoot.size()] == kPathSep ? 1 : 0))
+                           : target;
+    record.saved[RecordKey(shaped)] = rel;
+    SaveRecord(WebFetchRecordPath(dataDir), record);
+    keptFile = std::move(target);
     return true;
 }

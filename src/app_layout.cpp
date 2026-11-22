@@ -43,6 +43,7 @@ void LayoutLibrary(HDWP& dwp, RECT r, bool show) {
     bool radio = show && RadioActive();
     bool library = show && !radio && LibraryActive() && g.size != ViewSize::Compact && (!normal || l.views);
     bool browser = show && !radio && LibraryActive() && g.size != ViewSize::Compact && g.browserVisible, canvas = show && !radio && CanvasActive();
+    bool onlineSearch = show && !radio && OnlineSearchVisible();
     ShowWindow(g.tabs, tabs ? SW_SHOWNA : SW_HIDE);
     ShowWindow(RadioTab(), tabs && RadioTabOpen() ? SW_SHOWNA : SW_HIDE);
     ShowWindow(g.search, search ? SW_SHOWNA : SW_HIDE);
@@ -53,11 +54,13 @@ void LayoutLibrary(HDWP& dwp, RECT r, bool show) {
     for (auto& pane : g.panes) ShowWindow(pane.list, browser ? SW_SHOWNA : SW_HIDE);
     if (g.libView) ShowWindow(g.libView, canvas ? SW_SHOWNA : SW_HIDE);
     ShowWindow(g.list, show && !canvas && !radio ? SW_SHOWNA : SW_HIDE);
+    if (OnlineSearchWindow()) ShowWindow(OnlineSearchWindow(), onlineSearch ? SW_SHOWNA : SW_HIDE);
     if (!show || canvas) ReleaseGroupArt();
     g.splitRect = {};
     if (!show) return;
     // The measurements are shared with the Linux port (ui_spec.h).
-    int pad = S(ui::kPad), x0 = r.left, W = r.right - r.left, rowC = tabs || search ? S(ui::kTabRow) : 0;
+    int pad = S(normal ? std::clamp(l.pad, 0, 16) : ui::kPad), x0 = r.left, W = r.right - r.left,
+        rowC = tabs || search ? S(ui::kTabRow) : 0;
     int searchW = search ? std::min(S(ui::kSearchWidth), W / 3) : 0;
     if (search) place(g.search, r.right - pad - searchW, r.top + S(1), searchW, rowC - S(2));
     int tabW = W - (search ? pad + searchW + S(ui::kSearchGap) : 0);
@@ -69,7 +72,8 @@ void LayoutLibrary(HDWP& dwp, RECT r, bool show) {
     int yL = r.top + rowC, bottom = r.bottom;
     // The side panels take one side under the tabs (the right unless the layout says left), Up next
     // over the lyrics when both are open; the views share what's left.
-    int lyricsW = std::min(LyricsPanelWidth(), W / 2), nextW = upNext ? std::min(S(300), W / 2) : 0;
+    int sideMax = std::clamp(l.sideWidth, 180, 480);
+    int lyricsW = std::min(LyricsPanelWidth(), W / 2), nextW = upNext ? std::min(S(sideMax), W / 2) : 0;
     if (int sideW = std::max(lyricsW, nextW)) {
         bool left = normal && l.panelsLeft;
         int sx = left ? x0 : (int)r.right - sideW, split = lyricsW && nextW ? yL + (bottom - yL) / 2 : bottom;
@@ -100,8 +104,10 @@ void LayoutLibrary(HDWP& dwp, RECT r, bool show) {
         g.splitRect = {x0, yL + h, x0 + W, yL + h + S(5)};
         yL += h + S(5);
     }
-    if (g.libView) place(g.libView, x0, yL, W, bottom - yL);
-    place(g.list, x0, yL, W, bottom - yL);
+    const int onlineH = onlineSearch ? OnlineSearchWantedHeight(bottom - yL) : 0;
+    if (g.libView) place(g.libView, x0, yL, W, bottom - yL - onlineH);
+    place(g.list, x0, yL, W, bottom - yL - onlineH);
+    if (onlineSearch) place(OnlineSearchWindow(), x0, bottom - onlineH, W, onlineH);
 }
 
 // Fixed height of the big / spotlight playback strip, in 96-DPI-scaled pixels.
@@ -251,9 +257,10 @@ void Layout() {
             LayoutLibrary(dwp, {0, y + large + S(6), W, bottom}, true);
         } else {
             // The normal window: the player docked where the layout says, around the Library.
-            if (FoobarMode()) LayoutFoobar(dwp, {0, 0, W, bottom});
-            else if (ApolloMode()) LayoutApollo(dwp, {0, 0, W, bottom});
-            else LayoutNormal(dwp, {0, 0, W, bottom});
+            int top = g.layoutBar ? S(ui::kLayoutBarHeight) : 0;
+            if (FoobarMode()) LayoutFoobar(dwp, {0, top, W, bottom});
+            else if (ApolloMode()) LayoutApollo(dwp, {0, top, W, bottom});
+            else LayoutNormal(dwp, {0, top, W, bottom});
         }
     }
     EndDeferWindowPos(dwp);

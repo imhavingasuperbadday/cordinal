@@ -165,6 +165,7 @@ void ActivatePlaylist(int index) {
     g.restoringView = false;
     ClearSelection();
     RebuildView();
+    OnlineSearchQueryChanged(g.filter);
     InvalidateRect(g.tabs, nullptr, TRUE);
     Layout();  // the Library tab has its own browser and view buttons
     RestorePosition(pl.position);

@@ -892,9 +892,16 @@ std::vector<MenuItem> LayoutShowItems() {
     return items;
 }
 
+bool g_layoutBar = false;
+
 void RunLayoutAction(int action, int arg) {
     WindowLayout l = g.settings.layout;
     switch (action) {
+        case kLayoutBar:
+            if (g.settings.size != ViewSize::Normal) SetViewSize(ViewSize::Normal);
+            g_layoutBar = !g_layoutBar;
+            g.redraw = true;
+            return;
         case kLayoutPreset: {
             const auto& built = PresetLayouts();
             if (arg < (int)built.size()) UseLayout(built[std::max(arg, 0)]);
@@ -943,6 +950,82 @@ void RunLayoutAction(int action, int arg) {
         default: return;
     }
     UseLayout(l);
+}
+
+namespace {
+struct LayoutBarBtn {
+    Rect r;
+    int id = 0;
+    std::string label;
+    bool active = false;
+    bool primary = false;
+};
+
+std::vector<LayoutBarBtn> LayoutBarButtons() {
+    std::vector<LayoutBarBtn> out;
+    if (L.layoutBar.h <= 0) return out;
+    const WindowLayout& l = g.settings.layout;
+    const float bh = S(24), y = L.layoutBar.y + (L.layoutBar.h - bh) / 2, pad = S(8), gap = S(4);
+    auto measure = [&](const std::string& s) { return TextWidth(Font::Normal, s) + S(14); };
+    float rx = L.layoutBar.R() - pad;
+    std::vector<LayoutBarBtn> right;
+    const std::pair<int, const char*> rdefs[] = {{12, "Done"}, {11, "Reset"}, {10, "Save"}};
+    for (const auto& [id, lbl] : rdefs) {
+        float w = measure(lbl);
+        if (rx - w < pad) break;
+        rx -= w;
+        right.push_back({{rx, y, w, bh}, id, lbl, false, id == 12});
+        rx -= gap;
+    }
+    float x = L.layoutBar.x + pad;
+    auto push = [&](int id, const std::string& lbl, bool active, int sp = 4) {
+        float w = measure(lbl);
+        if (x + w > rx) return;
+        out.push_back({{x, y, w, bh}, id, lbl, active, false});
+        x += w + S(sp);
+    };
+    const char* docks[] = {"Top", "Bot", "Left", "Right"};
+    for (int i = 0; i < 4; ++i) push(1 + i, docks[i], l.dock == i, i == 3 ? 8 : 2);
+    const char* waves[] = {"Slim", "Med", "Tall"};
+    for (int i = 0; i < 3; ++i) push(5 + i, waves[i], l.waveSize == i && !(l.hiddenParts & kPartWave), 2);
+    push(8, "Row", l.dock < 2 && !(l.hiddenParts & kPartWave) && l.waveOwnRow, 8);
+    push(9, "Customize...", false, 8);
+    for (const auto& b : right) out.push_back(b);
+    return out;
+}
+}  // namespace
+
+void DrawLayoutBar(const Palette& p) {
+    if (L.layoutBar.h <= 0) return;
+    Fill(L.layoutBar, p.surface);
+    Fill({L.layoutBar.x, L.layoutBar.B() - S(1), L.layoutBar.w, S(1)}, p.border);
+    for (const auto& b : LayoutBarButtons()) {
+        bool hot = g_popups.empty() && b.r.In(g_mouseX, g_mouseY);
+        uint32_t fill = b.primary || b.active ? p.accent : hot ? p.hover : p.surface2;
+        uint32_t border = b.primary || b.active ? p.accent : p.border;
+        uint32_t fg = b.primary || b.active ? TextOn(fill) : p.text;
+        FillRound(b.r, S(5), fill);
+        FrameRound(b.r, S(5), border);
+        DrawText(Font::Normal, b.label, b.r.x, TextY(b.r, Font::Normal), fg, b.r.w, 1);
+    }
+}
+
+bool LayoutBarMouseDown(float x, float y) {
+    if (L.layoutBar.h <= 0 || !L.layoutBar.In(x, y)) return false;
+    for (const auto& b : LayoutBarButtons()) {
+        if (!b.r.In(x, y)) continue;
+        if (b.id >= 1 && b.id <= 4) RunLayoutAction(kLayoutDock, b.id - 1);
+        else if (b.id >= 5 && b.id <= 7) {
+            if (g.settings.layout.hiddenParts & kPartWave) g.settings.layout.hiddenParts &= ~kPartWave;
+            RunLayoutAction(kLayoutWave, b.id - 5);
+        } else if (b.id == 8 && g.settings.layout.dock < 2) RunLayoutAction(kLayoutWaveRow, 0);
+        else if (b.id == 9) OpenLayout();
+        else if (b.id == 10) RunLayoutAction(kLayoutSave, 0);
+        else if (b.id == 11) RunLayoutAction(kLayoutPreset, 0);
+        else if (b.id == 12) RunLayoutAction(kLayoutBar, 0);
+        return true;
+    }
+    return true;
 }
 void OpenOutputDevice() {
     const bool searching = g_dev.searching;

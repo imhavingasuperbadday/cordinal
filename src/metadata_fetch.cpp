@@ -26,7 +26,7 @@ namespace online {
 
 // The version is kept with the others in tools/check-updates.ps1.
 const char kRequestHeaders[] =
-    "User-Agent: cordinal/0.1.16 (https://github.com/imhavingasuperbadday/cordinal)\r\n"
+    "User-Agent: cordinal/0.1.17 (https://github.com/imhavingasuperbadday/cordinal)\r\n"
     "Accept: application/json\r\n";
 
 namespace {
@@ -59,7 +59,7 @@ int Int(const web::JsonValue& value) { return atoi(value.text.c_str()); }
 
 Cancel::Cancel() {
 #ifdef _WIN32
-    session_ = WinHttpOpen(L"cordinal/0.1.16 (https://github.com/imhavingasuperbadday/cordinal)",
+    session_ = WinHttpOpen(L"cordinal/0.1.17 (https://github.com/imhavingasuperbadday/cordinal)",
                            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
 #endif
 }
@@ -484,10 +484,18 @@ struct CacheEntry {
     bool found = false;
 };
 
+// The cache file must stay well under LoadCacheLocked's 16 MiB read limit: past it a load comes
+// back empty and the next Stop would discard everything that was cached. One oversized value (a
+// whole lyric dump, say) is never kept, and the kept content is evicted oldest-first past 6 MiB,
+// which even fully escaped stays comfortably loadable.
+constexpr size_t kMaxEntryValue = 256 * 1024;
+constexpr size_t kCacheBudget = 6u << 20;
+
 struct Cache {
     std::mutex mutex;
     std::wstring path;
     std::map<std::string, CacheEntry> entries;
+    size_t bytes = 0;  // key + value + one line's overhead; the estimate the budget trims to
     bool loaded = false, dirty = false;
 } g_cache;
 
@@ -537,6 +545,8 @@ void LoadCacheLocked() {
         entry.value = Unescape(line.substr(c + 1));
         g_cache.entries[Unescape(line.substr(0, a))] = std::move(entry);
     }
+    g_cache.bytes = 0;
+    for (const auto& [key, entry] : g_cache.entries) g_cache.bytes += key.size() + entry.value.size() + 40;
 }
 
 }  // namespace
@@ -558,7 +568,25 @@ bool CacheGet(const std::string& key, std::string& value, bool& found) {
 void CachePut(const std::string& key, const std::string& value, bool found) {
     std::lock_guard lock(g_cache.mutex);
     LoadCacheLocked();
+    if (value.size() > kMaxEntryValue) return;
+    if (auto old = g_cache.entries.find(key); old != g_cache.entries.end())
+        g_cache.bytes -= key.size() + old->second.value.size() + 40;
+    g_cache.bytes += key.size() + value.size() + 40;
     g_cache.entries[key] = {value, Now(), found};
+    if (g_cache.bytes > kCacheBudget) {
+        // The oldest-checked entries go first: they are the ones Stop's own 180-day filter would
+        // drop soonest anyway.
+        std::vector<std::pair<long long, std::string>> order;
+        order.reserve(g_cache.entries.size());
+        for (const auto& [k, e] : g_cache.entries) order.emplace_back(e.checked, k);
+        std::sort(order.begin(), order.end());
+        for (auto& [checked, k] : order) {
+            if (g_cache.bytes <= kCacheBudget) break;
+            auto it = g_cache.entries.find(k);
+            g_cache.bytes -= k.size() + it->second.value.size() + 40;
+            g_cache.entries.erase(it);
+        }
+    }
     g_cache.dirty = true;
 }
 
@@ -566,6 +594,7 @@ void Start(const std::wstring& dataDir) {
     std::lock_guard lock(g_cache.mutex);
     g_cache.path = dataDir.empty() ? std::wstring{} : dataDir + kPathSep + L"online-cache.txt";
     g_cache.entries.clear();
+    g_cache.bytes = 0;
     g_cache.loaded = g_cache.dirty = false;
 }
 
@@ -1240,11 +1269,11 @@ bool FetchArtistInfo(const std::string& name, const std::string& knownId, Cancel
 
 // --- discography ---------------------------------------------------------------------------------
 
-namespace {
-bool ValidMbid(const std::string& id) {
-    return id.size() == 36 && id.find_first_not_of("0123456789abcdef-") == std::string::npos;
+bool ValidMbid(std::string_view id) {
+    return id.size() == 36 && id.find_first_not_of("0123456789abcdef-") == std::string_view::npos;
 }
 
+namespace {
 // Tabs and line breaks would split the cached record; a title never needs them.
 std::string OneLine(std::string text) {
     for (char& c : text)
@@ -1272,6 +1301,7 @@ std::vector<ReleaseGroup> ParseReleaseGroups(std::string_view json, int* total) 
             r.type = OneLine(secondary.items[0].text);
         if (r.type.empty()) r.type = "Album";
         const std::string& date = item.String("first-release-date");
+        r.firstDate = date;
         if (date.size() >= 4 && std::all_of(date.begin(), date.begin() + 4, [](char c) { return c >= '0' && c <= '9'; }))
             r.year = atoi(date.substr(0, 4).c_str());
         out.push_back(std::move(r));
@@ -1312,6 +1342,43 @@ std::vector<std::string> LibraryAlbumsBy(const ::Library& library, std::string_v
         if (t.album && (matches(t.artist) || matches(t.albumArtist)) && albums.try_emplace(t.album, true).second)
             out.emplace_back(library.View(t.album));
     }
+    return out;
+}
+
+std::vector<uint32_t> LibraryAlbumTracks(const ::Library& library, std::string_view artist, std::string_view album) {
+    std::vector<uint32_t> out;
+    const std::string wantArtist = LooseTitle(artist), wantAlbum = LooseTitle(album);
+    if (wantArtist.empty() || wantAlbum.empty()) return out;
+    const std::string lowerAlbum = Lower(album);
+    StringPool::Handle lastAlbum = 0, exactAlbum = 0, looseAlbum = 0;
+    bool lastAlbumOk = false;
+    for (size_t i = 0; i < library.Count(); ++i) {
+        const Track& t = library[(TrackId)i];
+        if ((t.flags & (Track::kInLibrary | Track::kInbox)) == 0) continue;
+        if (t.flags & (Track::kMissing | Track::kExcluded | Track::kOriginal)) continue;
+        if (!t.album || (!t.artist && !t.albumArtist)) continue;
+        if (t.album != lastAlbum) {
+            lastAlbum = t.album;
+            lastAlbumOk = LooseTitle(library.View(t.album)) == wantAlbum;
+        }
+        if (!lastAlbumOk) continue;
+        const bool artistOk = (t.artist && LooseTitle(library.View(t.artist)) == wantArtist) ||
+                              (t.albumArtist && LooseTitle(library.View(t.albumArtist)) == wantArtist);
+        if (!artistOk) continue;
+        if (!looseAlbum) looseAlbum = t.album;
+        if (!exactAlbum && Lower(library.View(t.album)) == lowerAlbum) exactAlbum = t.album;
+        out.push_back((uint32_t)i);
+    }
+    const StringPool::Handle keepAlbum = exactAlbum ? exactAlbum : looseAlbum;
+    if (!keepAlbum) return {};
+    std::erase_if(out, [&](uint32_t id) { return library[id].album != keepAlbum; });
+    std::sort(out.begin(), out.end(), [&](uint32_t a, uint32_t b) {
+        const Track& ta = library[a], &tb = library[b];
+        const uint32_t da = ta.disc ? ta.disc : 1, db = tb.disc ? tb.disc : 1;
+        if (da != db) return da < db;
+        if (ta.trackNo != tb.trackNo) return ta.trackNo < tb.trackNo;
+        return library.View(ta.title) < library.View(tb.title);
+    });
     return out;
 }
 

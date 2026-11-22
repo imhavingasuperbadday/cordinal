@@ -269,6 +269,55 @@ void TestAudioHashSection(const std::wstring& scratch) {
     g_lib = Library();
 }
 
+// The heart beside a track: its own library.cdb section survives a save and load (also when saved
+// ids renumber), compaction carries it with the track, and the title format can show it.
+void TestFavoritesSection(const std::wstring& scratch) {
+    testlog::Batch batch;
+    std::wstring file = scratch + L"-favorites.cdb";
+    g_lib = Library();
+    TrackId skip = g_lib.Add(L"C:\\Music\\skip.flac");  // not saved: shifts the saved ids
+    TrackId a = g_lib.Add(L"C:\\Music\\a.flac"), b = g_lib.Add(L"C:\\Music\\b.flac");
+    TrackId c = g_lib.Add(L"C:\\Music\\c.flac");
+    // A heart is user data on its own: it keeps a record that nothing else would save.
+    TrackId heartOnly = g_lib.Add(L"C:\\Music\\heart-only.flac");
+    (void)skip;
+    for (TrackId id : {a, b, c}) g_lib[id].flags |= Track::kInLibrary;
+    g_lib.SetFavorite(a, true);
+    g_lib.SetFavorite(c, true);
+    g_lib.SetFavorite(c, false);
+    g_lib.SetFavorite(heartOnly, true);
+    batch.Next(L"LIBRARYDB favorites round trip with renumbered ids, and a cleared heart stays cleared");
+    std::vector<Playlist> none;
+    bool saved = SaveLibrary(file, none);
+    g_lib = Library();
+    std::vector<Playlist> playlists;
+    bool loaded = LoadLibrary(file, playlists);
+    TrackId a2 = g_lib.Find(L"C:\\Music\\a.flac"), b2 = g_lib.Find(L"C:\\Music\\b.flac"), c2 = g_lib.Find(L"C:\\Music\\c.flac");
+    TrackId h2 = g_lib.Find(L"C:\\Music\\heart-only.flac");
+    Check(saved && loaded && a2 != UINT32_MAX && b2 != UINT32_MAX && c2 != UINT32_MAX && h2 != UINT32_MAX &&
+              g_lib.Favorite(a2) && !g_lib.Favorite(b2) && !g_lib.Favorite(c2) && g_lib.Favorite(h2) &&
+              g_lib.FavoriteCount() == 2 && g_lib.Find(L"C:\\Music\\skip.flac") == UINT32_MAX,
+          L"LIBRARYDB favorites round trip (saved=%d loaded=%d a=%d b=%d c=%d count=%zu)", saved, loaded,
+          a2 != UINT32_MAX && g_lib.Favorite(a2), b2 != UINT32_MAX && g_lib.Favorite(b2),
+          c2 != UINT32_MAX && g_lib.Favorite(c2), g_lib.FavoriteCount());
+    DeleteFileW(file.c_str());
+    DeleteFileW((file + L".bak").c_str());
+
+    batch.Next(L"LIBRARYDB a favorite survives compaction with its track and titles can show it");
+    std::vector<TrackId> live{a2, b2, c2, h2};
+    auto mapping = g_lib.Compact(live);
+    TrackId kept = mapping[a2];
+    Check(kept != kInvalidTrack && g_lib.Favorite(kept) && !g_lib.Favorite(mapping[b2]) &&
+              !g_lib.Favorite(mapping[c2]) && g_lib.Favorite(mapping[h2]) && g_lib.Count() == 4,
+          L"LIBRARYDB compaction remaps the heart to the kept track");
+    std::wstring text, value;
+    Check(LookupField(kept, L"favorite", text) && text == L"\x2665" &&
+              LookupField(kept, L"favorite_value", value) && value == L"1" &&
+              !LookupField(mapping[b2], L"favorite", text) && !LookupField(mapping[b2], L"favorite_value", value),
+          L"LIBRARYDB the title format shows a heart and a 1 only for favorites");
+    g_lib = Library();
+}
+
 // library.cdb round trip: every stored field, the three playlist kinds, path lookups, backup on
 // replacement, blocked/corrupt saves, and that truncated or malformed files never overwrite state.
 void TestLibraryDb(const std::wstring& scratch) {
@@ -605,6 +654,17 @@ void TestTasteImpl(const std::wstring& scratch) {
     Check(rated.size() == 3 && rated[0] > rated[1] * 8 && rated[0] > rated[2] * 2,
           L"a five-star song beats a half star and an unheard song (%.3f, %.3f, %.3f)",
           rated.size() == 3 ? rated[0] : 0, rated.size() == 3 ? rated[1] : 0, rated.size() == 3 ? rated[2] : 0);
+
+    batch.Next(L"a heart the user chose outweighs an unheard song even before it is played");
+    ResetPlayState();
+    TrackId hearted = AddTestTrack("Hearted", "Hana", "Hearts", 1, 1, 200, true);
+    TrackId unmarked = AddTestTrack("Unmarked", "Hana", "Hearts", 1, 2, 200, true);
+    g_lib.SetFavorite(hearted, true);
+    g_lib.Touch();
+    auto hearts = score({hearted, unmarked}, kInvalidTrack, afternoon);
+    Check(hearts.size() == 2 && hearts[0] > hearts[1] * 1.2,
+          L"a favorited song weighs more than its neighbor even unplayed (%.3f vs %.3f)",
+          hearts.size() == 2 ? hearts[0] : 0, hearts.size() == 2 ? hearts[1] : 0);
 
     batch.Next(L"finishing beats an unheard song, which beats a run of early skips");
     ResetPlayState();
@@ -1467,5 +1527,36 @@ void TestAutoPlaylists() {
     Check(ParseAutoPlaylist("cordinal-auto 1\ngroup any\nrule mood is happy\t\nrule title contains a\t\nend\n", future) &&
               future.root.rules.size() == 1 && !future.root.all,
           L"AUTOPLAYLIST unknown rule fields are skipped");
+
+    batch.Next(L"MIXES the heart rule and the ready-made mixes select what they promise");
+    g_lib.SetFavorite(ids[2], true);  // Gamma
+    g_lib.SetFavorite(ids[4], true);  // Epsilon
+    g_lib.Touch();
+    auto mix = [](MixPreset which, const char* genre = "", uint16_t bpm = 0) {
+        AutoPlaylist m;
+        ParseAutoPlaylist(MixRules(which, genre, bpm), m);
+        return m;
+    };
+    AutoPlaylist hearts = mix(MixPreset::Favorites);
+    Check(hearts.root.rules.size() == 1 && hearts.root.rules[0].field == RuleField::Favorite &&
+              titles(hearts) == std::vector<std::wstring>{L"Gamma", L"Epsilon"},
+          L"MIXES Favorites holds the hearted tracks, newest additions first");
+    LogPlay(ids[0], now - 3 * 86400, 200, true, false);  // Alpha is on repeat lately
+    Check(titles(mix(MixPreset::OnRepeat)) == std::vector<std::wstring>{L"Alpha"},
+          L"MIXES On Repeat holds what was played in the last 30 days");
+    AutoPlaylist forgotten = mix(MixPreset::Forgotten);
+    Check(titles(forgotten) == std::vector<std::wstring>{L"Delta", L"Gamma"},
+          L"MIXES Forgotten Favorites keeps hearts and high ratings unheard for 90 days");
+    Check(titles(mix(MixPreset::RecentlyAdded)) == std::vector<std::wstring>{L"Gamma", L"Alpha", L"Epsilon"},
+          L"MIXES Recently Added holds the last 30 days, newest first");
+    Check(titles(mix(MixPreset::LikeThis, "Rock")) == std::vector<std::wstring>{L"Alpha", L"Beta"},
+          L"MIXES Mix like this song follows the seed's genre");
+    AutoPlaylist tempo = mix(MixPreset::LikeThis, "", 180);
+    Check(tempo.root.rules.size() == 1 && tempo.root.rules[0].field == RuleField::Bpm &&
+              tempo.root.rules[0].value == "153" && tempo.root.rules[0].value2 == "207",
+          L"MIXES Mix like this song follows a tempo within a sixth either way");
+    Check(MixRules(MixPreset::LikeThis, "", 0).empty() && MixName(MixPreset::Favorites) == std::wstring(L"Favorites") &&
+              MixNeedsSeed(MixPreset::LikeThis) && !MixNeedsSeed(MixPreset::OnRepeat),
+          L"MIXES a seed without genre or BPM makes no mix, and only LikeThis needs one");
     g_lib = Library();
 }

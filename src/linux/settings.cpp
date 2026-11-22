@@ -350,6 +350,11 @@ void LoadSettings() {
     net.lyrics[1] = ToInt(v, "online_lyrics_ovh", 0) != 0;
     net.artistInfo = ToInt(v, "online_artist_info", 0) != 0;
     net.albumTags = ToInt(v, "online_album_tags", 0) != 0;
+    net.saveMusic = ToInt(v, "online_save_music", 0) != 0;
+    net.searchMusic = ToInt(v, "online_search_music", 0) != 0;
+    net.searchSave = std::clamp(ToInt(v, "online_search_save", 0), 0, 1);
+    net.releaseRadar = ToInt(v, "online_release_radar", 0) != 0;
+    net.discoverRadio = ToInt(v, "online_discover_radio", 0) != 0;
     s.convertRecycle = ToInt(v, "convert_recycle", 1) != 0;
     s.convertShowOriginals = ToInt(v, "convert_show_originals", 0) != 0;
     s.convertMemory = (uint8_t)std::clamp(ToInt(v, "convert_undo_days", 3), 0, (int)std::size(kConvertMemoryDays) - 1);
@@ -497,7 +502,12 @@ void SaveSettings() {
             std::to_string(net.coverSave) + "\nonline_cover_overwrite=" + std::to_string(net.coverOverwrite) +
             "\nonline_lyrics_lrclib=" + std::to_string(net.lyrics[0]) + "\nonline_lyrics_ovh=" + std::to_string(net.lyrics[1]) +
             "\nonline_artist_info=" + std::to_string(net.artistInfo) +
-            "\nonline_album_tags=" + std::to_string(net.albumTags) + "\n";
+            "\nonline_album_tags=" + std::to_string(net.albumTags) +
+            "\nonline_save_music=" + std::to_string(net.saveMusic) +
+            "\nonline_search_music=" + std::to_string(net.searchMusic) +
+            "\nonline_search_save=" + std::to_string(net.searchSave) +
+            "\nonline_release_radar=" + std::to_string(net.releaseRadar) +
+            "\nonline_discover_radio=" + std::to_string(net.discoverRadio) + "\n";
     text += "output_device=" + s.outputDevice + "\n";
     text += "view_size=" + std::to_string((int)s.defaultSize) + "\n";
     // The layout keys hold the saved default layout: a Preferences or Customize-layout change

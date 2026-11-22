@@ -252,10 +252,12 @@ double Fraction(const Track& track, const PlayEvent& event) {
     return duration > 0 ? std::min(1.0, event.seconds / duration) : 1;
 }
 
-// What a counted listen earns: how much of the song was heard, scaled by its rating. Skips earn nothing.
-double Credit(const Track& track, const PlayEvent& event) {
+// What a counted listen earns: how much of the song was heard, scaled by its rating and by the
+// heart the user chose. Skips earn nothing.
+double Credit(const Library& library, const Track& track, TrackId id, const PlayEvent& event) {
     if (!(event.flags & PlayEvent::kCounted)) return 0;
     double ratingMul = track.rating >= 10 ? std::pow(track.rating / 50.0, 1.2) : 1;
+    if (library.Favorite(id)) ratingMul *= 1.25;
     return (0.45 + Fraction(track, event)) * ratingMul;
 }
 
@@ -297,7 +299,7 @@ void Rebuild(const Library& library, uint32_t now) {
         int m = (int)moment * 3 + like;
         momentOf[i - start] = (uint8_t)m;
         bool skip = EarlySkip(event);
-        double credit = Credit(track, event);
+        double credit = Credit(library, track, event.id, event);
         byMoment[m].listens += 1;
         byMoment[m].skips += skip;
         creditByMoment[m] += credit;
@@ -353,7 +355,7 @@ void Rebuild(const Library& library, uint32_t now) {
             uint32_t day = (uint32_t)std::max<int64_t>(0, LocalDay(event.time));
             if (days.insert(((uint64_t)event.id << 32) | day).second) ++acc.days;
         }
-        double observed = decay * Credit(track, event), expected = decay * earns[m];
+        double observed = decay * Credit(library, track, event.id, event), expected = decay * earns[m];
         Kinds& kinds = NightAt(event.time) ? g_model.night : g_model.day;
         AddEarned(kinds.artist, track.artist, observed, expected);
         AddEarned(kinds.genre, track.genre, observed, expected);
@@ -383,9 +385,12 @@ double Affinity(const Library& library, TrackId id) {
     bool played = acc.finish > 0 || acc.early > 0 || acc.days > 0;
     double part = PartMultiplier(id);
     double ratingMul = track.rating >= 10 ? std::pow(track.rating / 50.0, 1.7) : 1;
+    const bool favorite = library.Favorite(id);
+    if (favorite) ratingMul *= 1.35;
     double loyalty = acc.days > 1 ? 1.0 + 0.85 * std::log((double)acc.days) : 1;
     double core;
-    if (!played && track.rating < 10) core = 0.52;
+    // A heart is a strong vote even before a listen: it reads as a rated song, not an unknown one.
+    if (!played && track.rating < 10 && !favorite) core = 0.52;
     else if (!played) core = 0.9 * ratingMul;
     else {
         double completion = acc.finish / (acc.finish + 1.0);
@@ -394,7 +399,7 @@ double Affinity(const Library& library, TrackId id) {
     }
     core *= part;
     // Rewinding into a passage is a vote for the song even before it counts as a play.
-    if (!played && track.rating < 10 && part > 1.2) core = std::max(core, 0.85 * part);
+    if (!played && track.rating < 10 && !favorite && part > 1.2) core = std::max(core, 0.85 * part);
     return std::clamp(core, 0.04, 8.0);
 }
 
@@ -620,7 +625,9 @@ std::vector<double> TasteWeights(const Library& library, const std::vector<Track
         const Track& track = library[id];
         auto found = g_model.acc.find(id);
         bool played = found != g_model.acc.end() && (found->second.finish > 0 || found->second.early > 0 || found->second.days > 0);
-        bool cold = !played && track.rating < 10 && PartMultiplier(id) <= 1.02;
+        // A heart is evidence already: it is not a cold unknown, even before a listen.
+        const bool favorite = library.Favorite(id);
+        bool cold = !played && track.rating < 10 && !favorite && PartMultiplier(id) <= 1.02;
         double fit = TasteFit(library, track, night) * MoodFit(id);
         double weight;
         if (seeded) {

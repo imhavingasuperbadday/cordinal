@@ -759,6 +759,8 @@ WindowLayout LayoutOfValues(const IniSection& values) {
     l.tabCounts = flag(L"tab_counts", false);
     l.statusDetails = flag(L"status_details", true);
     l.hints = flag(L"hints", false);
+    if (const auto* sw = values.Get(L"side_width")) l.sideWidth = std::clamp(_wtoi(sw->c_str()), 180, 480);
+    if (const auto* pd = values.Get(L"pad")) l.pad = std::clamp(_wtoi(pd->c_str()), 0, 16);
     if (const auto* dock = values.Get(L"player")) {
         const wchar_t* docks[] = {L"top", L"bottom", L"left", L"right"};
         for (int i = 0; i < 4; ++i) if (_wcsicmp(dock->c_str(), docks[i]) == 0) l.dock = i;
@@ -791,6 +793,8 @@ std::wstring LayoutText(const WindowLayout& l) {
     const std::pair<const wchar_t*, bool> flags[] = {{L"large_cover", l.largeCover}, {L"points", l.points}, {L"up_next", l.upNext},
         {L"menu_bar", l.menuBar}, {L"tab_counts", l.tabCounts}, {L"status_details", l.statusDetails}, {L"hints", l.hints}};
     for (const auto& [key, on] : flags) text += std::wstring(key) + L" = " + bit(on) + L"\n";
+    if (l.sideWidth != 300) text += L"side width = " + std::to_wstring(l.sideWidth) + L"\n";
+    if (l.pad != ui::kPad) text += L"pad = " + std::to_wstring(l.pad) + L"\n";
     return text;
 }
 

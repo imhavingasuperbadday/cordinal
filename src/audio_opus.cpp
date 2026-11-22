@@ -8,6 +8,7 @@
 #include "audio_opus_packet.h"
 #include "audio_opus_celt.h"
 #include "audio_opus_silk.h"
+#include <emmintrin.h>
 #include <numbers>
 #ifdef CORDINAL_CODEC_TRACE
 #include <cstdio>
@@ -63,7 +64,6 @@ private:
             bool redundant=false,atBeginning=false;
             size_t redundantBytes=0;
             uint32_t redundantRange=0;
-            std::vector<float> redundancy;
             // SILK layer (configs 0-15). A switch away from CELT-only invalidates
             // SILK's prediction history.
             if (config<16) {
@@ -90,31 +90,32 @@ private:
                 }
                 auto readRedundancy=[&] {
                     OpusRange red(payload.last(redundantBytes));
-                    if (!celt_.Decode(red,channels,1,0,config<4?13:config<12?17:config<14?19:21,redundancy)) return false;
+                    if (!celt_.Decode(red,channels,1,0,config<4?13:config<12?17:config<14?19:21,redundancy_)) return false;
                     redundantRange=red.FinalRange();return true;
                 };
                 if (redundant && atBeginning && !readRedundancy()) return false;
                 if (config>=12) {
                     if (previous_!=1) celt_.Reset();
-                    std::vector<float> high;
-                    if (!celt_.Decode(range,channels,ms==10?2:3,17,config>=14?21:19,high) || high.size()!=block.size()) return false;
-                    for (size_t i=0;i<block.size();++i) block[i]+=high[i];
+                    if (!celt_.Decode(range,channels,ms==10?2:3,17,config>=14?21:19,high_) || high_.size()!=block.size()) return false;
+                    size_t i=0,sz=block.size();
+                    for (;i+4<=sz;i+=4) _mm_storeu_ps(block.data()+i,_mm_add_ps(_mm_loadu_ps(block.data()+i),_mm_loadu_ps(high_.data()+i)));
+                    for (;i<sz;++i) block[i]+=high_[i];
                 } else if (previous_==1) {
-                    const uint8_t silence[]{255,255};OpusRange fade(silence);std::vector<float> tail;
-                    if (!celt_.Decode(fade,channels,0,0,config<4?13:17,tail)) return false;
-                    for (size_t i=0;i<tail.size();++i) block[i]+=tail[i];
+                    const uint8_t silence[]{255,255};OpusRange fade(silence);
+                    if (!celt_.Decode(fade,channels,0,0,config<4?13:17,high_)) return false;
+                    for (size_t i=0;i<high_.size();++i) block[i]+=high_[i];
                 }
                 if (redundant) {
                     if (!atBeginning) { celt_.Reset();if (!readRedundancy()) return false; }
                     // Overlap-add the redundancy copy into the frame using the
                     // CELT overlap window (240 samples at 48 kHz).
                     size_t start=atBeginning?120:block.size()/2-120,redStart=120;
-                    if (atBeginning) std::copy_n(redundancy.begin(),240,block.begin());
+                    if (atBeginning) std::copy_n(redundancy_.begin(),240,block.begin());
                     for (unsigned i=0;i<120;++i) {
                         double a=std::sin((i+0.5)*(std::numbers::pi/240));
                         float weight=(float)std::pow(std::sin(a*a*(std::numbers::pi/2)),2);
                         for (unsigned ch=0;ch<2;++ch) {
-                            float red=redundancy[(redStart+i)*2+ch];
+                            float red=redundancy_[(redStart+i)*2+ch];
                             float& dst=block[(start+i)*2+ch];
                             dst=atBeginning?red*(1-weight)+dst*weight:dst*(1-weight)+red*weight;
                         }
@@ -132,7 +133,10 @@ private:
             else if (gain_==1) out.insert(out.end(),block.begin(),block.end());
             else {
                 size_t at=out.size();out.resize(at+block.size());
-                for (size_t i=0;i<block.size();++i) out[at+i]=block[i]*gain_;
+                const __m128 g=_mm_set1_ps(gain_);
+                size_t i=0,sz=block.size();
+                for (;i+4<=sz;i+=4) _mm_storeu_ps(out.data()+at+i,_mm_mul_ps(_mm_loadu_ps(block.data()+i),g));
+                for (;i<sz;++i) out[at+i]=block[i]*gain_;
             }
             // Record mode/redundancy so the next packet knows whether each layer
             // needs to be reset (discontinuous history) or may continue.
@@ -143,7 +147,7 @@ private:
     OpusCelt celt_;
     OpusSilk silk_;
     // Per-frame scratch, kept to reuse its storage; a lone unscaled frame is swapped out whole.
-    std::vector<float> block_;
+    std::vector<float> block_,high_,redundancy_;
     // Linear multiplier from the Ogg Opus header output gain.
     float gain_=1;
     // Previous packet's mode (-1 = none) and whether it trailed with CELT

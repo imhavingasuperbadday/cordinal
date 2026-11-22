@@ -9,7 +9,14 @@
 // nothing typed, Space pauses or resumes and Left and Right skip.
 #include "panels_internal.h"
 
+#include "metadata_fetch.h"
+#include "online_search.h"
+#include "search_online_ui.h"
 #include "textcase.h"
+
+#include <atomic>
+#include <memory>
+#include <thread>
 
 namespace lx::panel {
 namespace {
@@ -24,8 +31,23 @@ struct PaletteEntry {
     Pick pick = Pick::None;
     TrackId track = kNone;  // a song, or the first song of an album
     int playlist = -1;
+    bool online = false;
+    online::SearchTrack onlineTrack;
     std::wstring searchable, label;  // folded, as the query is: label is the command's own name
 };
+struct PickerOnlinePost {
+    uint64_t generation = 0;
+    std::vector<online::SearchTrack> tracks;
+};
+struct PickerOnlineState {
+    online::Generation gen;
+    std::shared_ptr<online::Cancel> cancel;
+    std::atomic<bool> busy{false};
+    std::thread worker;
+    std::wstring query;
+    std::vector<online::SearchTrack> rows;
+    uint64_t debounceUntil = 0;
+} po;
 struct PalettePanel {
     TextField query;
     std::vector<PaletteEntry> entries;
@@ -113,10 +135,61 @@ void FindSongs() {
     }
     for (auto* found : {&albums, &songs})
         for (PaletteEntry& e : *found) g_palette.entries.push_back(std::move(e));
+    if (online::Config().searchMusic && g_palette.query.text == po.query) {
+        for (const online::SearchTrack& t : po.rows) {
+            std::string path = t.artist.empty() ? std::string("Online") : "Online \xE2\x80\xBA " + t.artist;
+            std::string dur = t.durationSec > 0 ? Narrow(FormatDuration((double)t.durationSec)) : "";
+            PaletteEntry e = PickEntry(Pick::Song, t.title, path, dur);
+            e.online = true;
+            e.onlineTrack = t;
+            g_palette.entries.push_back(std::move(e));
+        }
+    }
 }
 
-void PaletteFilter() {
-    if (g_palette.songs) FindSongs();
+void CancelPickerOnline() {
+    po.debounceUntil = 0;
+    po.gen.Next();
+    if (po.cancel) po.cancel->Stop();
+}
+
+void StartPickerOnline() {
+    if (!g_palette.songs || !online::Config().searchMusic || !online::SearchableQuery(po.query)) return;
+    if (po.busy.load()) {
+        po.debounceUntil = SDL_GetTicks() + 60;
+        return;
+    }
+    if (po.worker.joinable()) po.worker.join();
+    const uint64_t gen = po.gen.Next();
+    auto cancel = std::make_shared<online::Cancel>();
+    po.cancel = cancel;
+    po.busy = true;
+    const std::string qUtf8 = online::NormalizeSearchQuery(po.query);
+    import::OwnedIndex owned = OnlineSearchOwnedSnapshot();
+    po.worker = std::thread([gen, qUtf8, owned = std::move(owned), cancel] {
+        auto* post = new PickerOnlinePost{gen, {}};
+        auto res = online::SearchTracks(qUtf8, owned, *cancel, 5);
+        if (res.ok) post->tracks = std::move(res.tracks);
+        po.busy = false;
+        if (!PostMessageW(nullptr, WM_APP_PICKER_ONLINE, 0, (LPARAM)post)) delete post;
+    });
+}
+
+void PaletteFilter(bool keepSelection = false) {
+    const int prevSel = keepSelection ? g_palette.selected : 0;
+    const int prevFirst = keepSelection ? g_palette.first : 0;
+    if (g_palette.songs) {
+        if (!keepSelection) {
+            CancelPickerOnline();
+            if (g_palette.query.text != po.query) {
+                po.query = g_palette.query.text;
+                po.rows.clear();
+            }
+            if (online::Config().searchMusic && online::SearchableQuery(g_palette.query.text))
+                po.debounceUntil = SDL_GetTicks() + 400;
+        }
+        FindSongs();
+    }
     const int ranked = g_palette.songs ? (int)g_palette.fixed : (int)g_palette.entries.size();
     std::wstring q = textcase::Fold(g_palette.query.text);
     std::vector<std::wstring> words;
@@ -147,8 +220,8 @@ void PaletteFilter() {
     if (g_palette.songs && !words.empty())
         for (size_t i = g_palette.fixed; i < g_palette.entries.size(); ++i) g_palette.shown.push_back((int)i);
     for (auto& s : scored) g_palette.shown.push_back(s.second);
-    g_palette.selected = 0;
-    g_palette.first = 0;
+    g_palette.selected = keepSelection ? std::clamp(prevSel, 0, std::max(0, (int)g_palette.shown.size() - 1)) : 0;
+    g_palette.first = keepSelection ? std::min(prevFirst, g_palette.selected) : 0;
 }
 
 // The picker after a transport key: rebuilt, so Pause reads Resume, with the same row selected.
@@ -163,6 +236,10 @@ void RefreshSongs() {
 // Plays what was picked: a song now, then on with what was playing (`next` only puts it next); an album or a
 // playlist from its start, or a random place in shuffle.
 void PlayPicked(const PaletteEntry& e, bool next) {
+    if (e.online) {
+        OnlineSearchPlay(e.onlineTrack, next);
+        return;
+    }
     if (e.pick == Pick::Playlist) {
         if (e.playlist < 0 || e.playlist >= (int)g.playlists.size() || g.playlists[e.playlist].items.empty()) return;
         const auto& items = g.playlists[e.playlist].items;
@@ -290,6 +367,9 @@ const Ops kPaletteOps{
     .text = PaletteText,
     .wantsText = [](float x, float y) { return g_palette.field.In(x, y); },
     .close = [] {
+        CancelPickerOnline();
+        po.rows.clear();
+        po.query.clear();
         if (g_palette.songs) LightweightPickerClosed();  // a window shown only for the picker goes away again
     },
     .typing = true,
@@ -328,12 +408,39 @@ void OpenPalette() {
 void OpenSongPicker() {
     if (PanelOpen()) ClosePanel();
     g_palette = PalettePanel{};
+    po.query.clear();
+    po.rows.clear();
+    CancelPickerOnline();
     g_palette.songs = true;
     CollectSongs();
     PaletteFilter();
     g_kind = Kind::Palette;
     SDL_StartTextInput(g.window);
     g.redraw = true;
+}
+
+bool PickerOnlinePending() { return PanelOpen() && g_palette.songs && po.debounceUntil > 0; }
+
+void PickerOnlineTick() {
+    if (PanelOpen() && g_palette.songs && po.debounceUntil > 0 && SDL_GetTicks() >= po.debounceUntil) {
+        po.debounceUntil = 0;
+        StartPickerOnline();
+    }
+}
+
+void OnPickerOnlineMessage(WPARAM, LPARAM lp) {
+    std::unique_ptr<PickerOnlinePost> post(reinterpret_cast<PickerOnlinePost*>(lp));
+    if (!post || !PanelOpen() || !g_palette.songs || !po.gen.Accepts(post->generation)) return;
+    po.rows = std::move(post->tracks);
+    PaletteFilter(true);
+    g.redraw = true;
+}
+
+void StopPickerOnline() {
+    CancelPickerOnline();
+    if (po.worker.joinable()) po.worker.join();
+    po.rows.clear();
+    po.query.clear();
 }
 
 // For the self-test: the shown rows, "label | path", and a query typed into the open picker.

@@ -9,6 +9,77 @@
 #include <immintrin.h>
 
 namespace nativeaudio {
+#pragma float_control(precise, off, push)
+void AudioMpegLong8Avx2(const float* in,unsigned type,float* overlap,float* subbands,
+    const float* pre18,const float* twiddle18,const float* post18,const float* window) {
+    (void)type;
+    struct V { __m256 r, i; };
+    auto mul=[](V a,const float* b) {
+        __m256 r=_mm256_set1_ps(b[0]),i=_mm256_set1_ps(b[1]);
+        return V{_mm256_sub_ps(_mm256_mul_ps(a.r,r),_mm256_mul_ps(a.i,i)),
+                 _mm256_add_ps(_mm256_mul_ps(a.r,i),_mm256_mul_ps(a.i,r))};
+    };
+    const __m256 half=_mm256_set1_ps(0.5f),root=_mm256_set1_ps(0.8660254037844386f),nroot=_mm256_set1_ps(-0.8660254037844386f);
+    auto fft=[&](V a,V b,V c,V* out) {
+        __m256 sr=_mm256_add_ps(b.r,c.r),si=_mm256_add_ps(b.i,c.i);
+        __m256 dr=_mm256_sub_ps(b.r,c.r),di=_mm256_sub_ps(b.i,c.i);
+        __m256 mr=_mm256_sub_ps(a.r,_mm256_mul_ps(sr,half)),mi=_mm256_sub_ps(a.i,_mm256_mul_ps(si,half));
+        __m256 tr=_mm256_mul_ps(di,nroot),ti=_mm256_mul_ps(dr,root);
+        out[0]={_mm256_add_ps(a.r,sr),_mm256_add_ps(a.i,si)};
+        out[1]={_mm256_add_ps(mr,tr),_mm256_add_ps(mi,ti)};
+        out[2]={_mm256_sub_ps(mr,tr),_mm256_sub_ps(mi,ti)};
+    };
+    auto columns18=[](const float* p,__m256* out) {
+        for (unsigned at : {0u,4u,8u,12u,14u}) {
+            __m128 a0=_mm_loadu_ps(p+at),b0=_mm_loadu_ps(p+18+at),c0=_mm_loadu_ps(p+36+at),d0=_mm_loadu_ps(p+54+at);
+            _MM_TRANSPOSE4_PS(a0,b0,c0,d0);
+            __m128 a1=_mm_loadu_ps(p+72+at),b1=_mm_loadu_ps(p+90+at),c1=_mm_loadu_ps(p+108+at),d1=_mm_loadu_ps(p+126+at);
+            _MM_TRANSPOSE4_PS(a1,b1,c1,d1);
+            out[at]=_mm256_insertf128_ps(_mm256_castps128_ps256(a0),a1,1);
+            out[at+1]=_mm256_insertf128_ps(_mm256_castps128_ps256(b0),b1,1);
+            out[at+2]=_mm256_insertf128_ps(_mm256_castps128_ps256(c0),c1,1);
+            out[at+3]=_mm256_insertf128_ps(_mm256_castps128_ps256(d0),d1,1);
+        }
+    };
+    const __m256 sign=_mm256_set1_ps(-0.0f);
+    __m256 lines[18],previous[18];
+    columns18(in,lines);columns18(overlap,previous);
+    V z[9],columns[3][3],result[9];
+    for (unsigned j=0;j<9;++j)
+        z[j]=mul({lines[j*2],_mm256_xor_ps(lines[17-j*2],sign)},pre18+j*2);
+    for (unsigned r=0;r<3;++r) fft(z[r],z[r+3],z[r+6],columns[r]);
+    for (unsigned s=0;s<3;++s) {
+        V v[3];
+        fft(columns[0][s],mul(columns[1][s],twiddle18+(s*3+1)*2),mul(columns[2][s],twiddle18+(s*3+2)*2),v);
+        for (unsigned r=0;r<3;++r) result[s+r*3]=v[r];
+    }
+    __m256 dct[18];
+    for (unsigned j=0;j<9;++j) {
+        V v=mul(result[j],post18+j*2);dct[j*2]=v.r;dct[17-j*2]=v.i;
+    }
+    const __m256 odd=_mm256_setr_ps(0.0f,-0.0f,0.0f,-0.0f,0.0f,-0.0f,0.0f,-0.0f);
+    __m256 next[18];
+    for (unsigned i=0;i<18;++i) {
+        __m256 first=i<9?dct[i+9]:_mm256_xor_ps(dct[26-i],sign);
+        __m256 last=_mm256_xor_ps(i<9?dct[8-i]:dct[i-9],sign);
+        first=_mm256_add_ps(_mm256_mul_ps(first,_mm256_set1_ps(window[i])),previous[i]);
+        if (i&1) first=_mm256_xor_ps(first,odd);
+        _mm256_storeu_ps(subbands+i*32,first);
+        next[i]=_mm256_mul_ps(last,_mm256_set1_ps(window[i+18]));
+    }
+    for (unsigned at : {0u,4u,8u,12u,14u}) {
+        __m128 a0=_mm256_castps256_ps128(next[at]),b0=_mm256_castps256_ps128(next[at+1]);
+        __m128 c0=_mm256_castps256_ps128(next[at+2]),d0=_mm256_castps256_ps128(next[at+3]);
+        _MM_TRANSPOSE4_PS(a0,b0,c0,d0);
+        _mm_storeu_ps(overlap+at,a0);_mm_storeu_ps(overlap+18+at,b0);_mm_storeu_ps(overlap+36+at,c0);_mm_storeu_ps(overlap+54+at,d0);
+        __m128 a1=_mm256_extractf128_ps(next[at],1),b1=_mm256_extractf128_ps(next[at+1],1);
+        __m128 c1=_mm256_extractf128_ps(next[at+2],1),d1=_mm256_extractf128_ps(next[at+3],1);
+        _MM_TRANSPOSE4_PS(a1,b1,c1,d1);
+        _mm_storeu_ps(overlap+72+at,a1);_mm_storeu_ps(overlap+90+at,b1);_mm_storeu_ps(overlap+108+at,c1);_mm_storeu_ps(overlap+126+at,d1);
+    }
+    _mm256_zeroupper();
+}
+#pragma float_control(pop)
 // The channels sit in 32-bit lanes 0 and 2, so pmuldq forms each 64-bit weight*source. Only
 // the low 32 bits of ((product+512)>>10) are kept, where a logical shift equals the
 // arithmetic one. sign(sign(step,source),residual) is +step for matching signs, -step for
@@ -41,6 +112,56 @@ void WavPackPredictAvx2(int32_t* values,size_t frames,int term,int* weight,int s
     }
     weight[0]=_mm_cvtsi128_si32(w);weight[1]=_mm_extract_epi32(w,2);
 }
+void TtaFilterBlockAvx2(int32_t* qm, int32_t* dx, int32_t* dl, int32_t& errorRef, int32_t& predRef,
+    int32_t* values, size_t count, uint32_t round, unsigned shift, unsigned predictionShift) {
+    __m128i qmLo = _mm_loadu_si128((const __m128i*)qm);
+    __m128i qmHi = _mm_loadu_si128((const __m128i*)(qm + 4));
+    __m128i dxLo = _mm_loadu_si128((const __m128i*)dx);
+    __m128i dxHi = _mm_loadu_si128((const __m128i*)(dx + 4));
+    __m128i dlLo = _mm_loadu_si128((const __m128i*)dl);
+    __m128i dlHi = _mm_loadu_si128((const __m128i*)(dl + 4));
+    int32_t err = errorRef, pred = predRef;
+    const __m128i dxOr = _mm_setr_epi32(1, 2, 2, 4);
+    const __m128i dxAnd = _mm_setr_epi32(~0, ~1, ~1, ~3);
+    const __m128i vround = _mm_cvtsi32_si128((int32_t)round);
+    const __m128i vshift = _mm_cvtsi32_si128((int32_t)shift);
+    for (size_t i = 0; i < count; ++i) {
+        const int32_t inRaw = values[i];
+        const __m128i errVec = _mm_set1_epi32(err);
+        qmLo = _mm_add_epi32(qmLo, _mm_sign_epi32(dxLo, errVec));
+        qmHi = _mm_add_epi32(qmHi, _mm_sign_epi32(dxHi, errVec));
+        __m128i s = _mm_add_epi32(_mm_mullo_epi32(qmLo, dlLo), _mm_mullo_epi32(qmHi, dlHi));
+        s = _mm_add_epi32(s, _mm_srli_si128(s, 8));
+        s = _mm_add_epi32(s, _mm_srli_si128(s, 4));
+        s = _mm_add_epi32(s, vround);
+
+        // Prepare dx/dl shifts and prefix sums off the multiplier critical path.
+        dxLo = _mm_alignr_epi8(dxHi, dxLo, 4);
+        dxHi = _mm_and_si128(_mm_or_si128(_mm_srai_epi32(dlHi, 30), dxOr), dxAnd);
+        dlLo = _mm_alignr_epi8(dlHi, dlLo, 4);
+        const __m128i t1 = _mm_srli_si128(dlHi, 4);
+        const __m128i t2 = _mm_srli_si128(t1, 4);
+        const __m128i t3 = _mm_srli_si128(t2, 4);
+        const __m128i off = _mm_add_epi32(_mm_add_epi32(t1, t2), t3);
+
+        err = inRaw;
+        const __m128i inVec = _mm_add_epi32(_mm_cvtsi32_si128(inRaw), _mm_sra_epi32(s, vshift));
+        dlHi = _mm_sub_epi32(_mm_shuffle_epi32(inVec, 0), off);
+        const int32_t in = _mm_cvtsi128_si32(inVec);
+        const uint64_t prev = (uint64_t)(int64_t)pred;
+        const int32_t res = in + (int32_t)(((prev << predictionShift) - prev) >> predictionShift);
+        pred = res;
+        values[i] = res;
+    }
+    _mm_storeu_si128((__m128i*)qm, qmLo);
+    _mm_storeu_si128((__m128i*)(qm + 4), qmHi);
+    _mm_storeu_si128((__m128i*)dx, dxLo);
+    _mm_storeu_si128((__m128i*)(dx + 4), dxHi);
+    _mm_storeu_si128((__m128i*)dl, dlLo);
+    _mm_storeu_si128((__m128i*)(dl + 4), dlHi);
+    errorRef = err;
+    predRef = pred;
+}
 // All eight taps in one register. The products and their sum wrap modulo 2^32 as the scalar
 // loop's do, so the lane order of the sum does not matter.
 uint32_t TtaFilterAvx2(int32_t* weights,const int32_t* dx,const int32_t* history,int32_t error,uint32_t round) {
@@ -51,6 +172,234 @@ uint32_t TtaFilterAvx2(int32_t* weights,const int32_t* dx,const int32_t* history
     __m128i sum=_mm_add_epi32(_mm256_castsi256_si128(products),_mm256_extracti128_si256(products,1));
     sum=_mm_add_epi32(sum,_mm_srli_si128(sum,8));sum=_mm_add_epi32(sum,_mm_srli_si128(sum,4));
     return round+(uint32_t)_mm_cvtsi128_si32(sum);
+}
+namespace {
+__forceinline int ApeOpposite(int32_t v) { return (v < 0) - (v > 0); }
+__forceinline int32_t ApeHsum128(__m128i s) {
+    s = _mm_add_epi32(s, _mm_srli_si128(s, 8));
+    s = _mm_add_epi32(s, _mm_srli_si128(s, 4));
+    return _mm_cvtsi128_si32(s);
+}
+__forceinline int16_t ApeAdaptValue(bool modern, int32_t value, uint32_t& average) {
+    if (!modern) return value ? (int16_t)(((value >> 28) & 8) - 4) : 0;
+    const uint32_t magnitude = value < 0 ? 0u - (uint32_t)value : (uint32_t)value;
+    const unsigned scale = 8u << ((magnitude > uint64_t(average) * 3) + (magnitude > average + average / 3));
+    average += (int32_t)(magnitude - average) / 16;
+    return (int16_t)(ApeOpposite(value) * (int)scale);
+}
+template<bool Modern>
+void ApeFir16Impl(int16_t* weight, int16_t* history, int16_t* adaptation, unsigned precision, uint32_t& average,
+    int32_t* values, size_t count) {
+    __m128i w0 = _mm_loadu_si128((const __m128i*)weight);
+    __m128i w1 = _mm_loadu_si128((const __m128i*)(weight + 8));
+    __m128i h0 = _mm_loadu_si128((const __m128i*)history);
+    __m128i h1 = _mm_loadu_si128((const __m128i*)(history + 8));
+    __m128i a0 = _mm_loadu_si128((const __m128i*)adaptation);
+    __m128i a1 = _mm_loadu_si128((const __m128i*)(adaptation + 8));
+    const int64_t half = int64_t(1) << (precision - 1);
+    uint32_t avg = average;
+    for (size_t i = 0; i < count; ++i) {
+        const int32_t r = values[i];
+        const int32_t dot = ApeHsum128(_mm_add_epi32(_mm_madd_epi16(w0, h0), _mm_madd_epi16(w1, h1)));
+        const __m128i step = _mm_set1_epi16((short)ApeOpposite(r));
+        w0 = _mm_add_epi16(w0, _mm_sign_epi16(a0, step));
+        w1 = _mm_add_epi16(w1, _mm_sign_epi16(a1, step));
+        const int32_t value = (int32_t)(uint32_t)(r + ((int64_t(dot) + half) >> precision));
+        values[i] = value;
+        const int16_t newH = (int16_t)std::clamp(value, -32768, 32767);
+        const int16_t newA = ApeAdaptValue(Modern, value, avg);
+        h0 = _mm_alignr_epi8(h1, h0, 2);
+        h1 = _mm_insert_epi16(_mm_srli_si128(h1, 2), newH, 7);
+        a0 = _mm_alignr_epi8(a1, a0, 2);
+        a1 = _mm_insert_epi16(_mm_srli_si128(a1, 2), newA, 7);
+        a0 = _mm_blend_epi16(a0, _mm_srai_epi16(a0, 1), 0x80);
+        if constexpr (Modern) a1 = _mm_blend_epi16(a1, _mm_srai_epi16(a1, 1), 0x60);
+        else a1 = _mm_blend_epi16(a1, _mm_srai_epi16(a1, 1), 0x08);
+    }
+    _mm_storeu_si128((__m128i*)weight, w0);
+    _mm_storeu_si128((__m128i*)(weight + 8), w1);
+    _mm_storeu_si128((__m128i*)history, h0);
+    _mm_storeu_si128((__m128i*)(history + 8), h1);
+    _mm_storeu_si128((__m128i*)adaptation, a0);
+    _mm_storeu_si128((__m128i*)(adaptation + 8), a1);
+    average = avg;
+}
+template<bool Modern>
+void ApeFir32Impl(int16_t* weight, int16_t* history, int16_t* adaptation, unsigned precision, uint32_t& average,
+    int32_t* values, size_t count) {
+    __m128i w0 = _mm_loadu_si128((const __m128i*)weight);
+    __m128i w1 = _mm_loadu_si128((const __m128i*)(weight + 8));
+    __m128i w2 = _mm_loadu_si128((const __m128i*)(weight + 16));
+    __m128i w3 = _mm_loadu_si128((const __m128i*)(weight + 24));
+    __m128i h0 = _mm_loadu_si128((const __m128i*)history);
+    __m128i h1 = _mm_loadu_si128((const __m128i*)(history + 8));
+    __m128i h2 = _mm_loadu_si128((const __m128i*)(history + 16));
+    __m128i h3 = _mm_loadu_si128((const __m128i*)(history + 24));
+    __m128i a0 = _mm_loadu_si128((const __m128i*)adaptation);
+    __m128i a1 = _mm_loadu_si128((const __m128i*)(adaptation + 8));
+    __m128i a2 = _mm_loadu_si128((const __m128i*)(adaptation + 16));
+    __m128i a3 = _mm_loadu_si128((const __m128i*)(adaptation + 24));
+    const int64_t half = int64_t(1) << (precision - 1);
+    uint32_t avg = average;
+    for (size_t i = 0; i < count; ++i) {
+        const int32_t r = values[i];
+        __m128i s = _mm_add_epi32(_mm_madd_epi16(w0, h0), _mm_madd_epi16(w1, h1));
+        s = _mm_add_epi32(s, _mm_madd_epi16(w2, h2));
+        s = _mm_add_epi32(s, _mm_madd_epi16(w3, h3));
+        const int32_t dot = ApeHsum128(s);
+        const __m128i step = _mm_set1_epi16((short)ApeOpposite(r));
+        w0 = _mm_add_epi16(w0, _mm_sign_epi16(a0, step));
+        w1 = _mm_add_epi16(w1, _mm_sign_epi16(a1, step));
+        w2 = _mm_add_epi16(w2, _mm_sign_epi16(a2, step));
+        w3 = _mm_add_epi16(w3, _mm_sign_epi16(a3, step));
+        const int32_t value = (int32_t)(uint32_t)(r + ((int64_t(dot) + half) >> precision));
+        values[i] = value;
+        const int16_t newH = (int16_t)std::clamp(value, -32768, 32767);
+        const int16_t newA = ApeAdaptValue(Modern, value, avg);
+        h0 = _mm_alignr_epi8(h1, h0, 2);
+        h1 = _mm_alignr_epi8(h2, h1, 2);
+        h2 = _mm_alignr_epi8(h3, h2, 2);
+        h3 = _mm_insert_epi16(_mm_srli_si128(h3, 2), newH, 7);
+        a0 = _mm_alignr_epi8(a1, a0, 2);
+        a1 = _mm_alignr_epi8(a2, a1, 2);
+        a2 = _mm_alignr_epi8(a3, a2, 2);
+        a3 = _mm_insert_epi16(_mm_srli_si128(a3, 2), newA, 7);
+        a2 = _mm_blend_epi16(a2, _mm_srai_epi16(a2, 1), 0x80);
+        if constexpr (Modern) a3 = _mm_blend_epi16(a3, _mm_srai_epi16(a3, 1), 0x60);
+        else a3 = _mm_blend_epi16(a3, _mm_srai_epi16(a3, 1), 0x08);
+    }
+    _mm_storeu_si128((__m128i*)weight, w0); _mm_storeu_si128((__m128i*)(weight + 8), w1);
+    _mm_storeu_si128((__m128i*)(weight + 16), w2); _mm_storeu_si128((__m128i*)(weight + 24), w3);
+    _mm_storeu_si128((__m128i*)history, h0); _mm_storeu_si128((__m128i*)(history + 8), h1);
+    _mm_storeu_si128((__m128i*)(history + 16), h2); _mm_storeu_si128((__m128i*)(history + 24), h3);
+    _mm_storeu_si128((__m128i*)adaptation, a0); _mm_storeu_si128((__m128i*)(adaptation + 8), a1);
+    _mm_storeu_si128((__m128i*)(adaptation + 16), a2); _mm_storeu_si128((__m128i*)(adaptation + 24), a3);
+    average = avg;
+}
+template<bool Modern>
+void ApeFirLargeImpl(int16_t* weight, int16_t* history, int16_t* adaptation, unsigned order,
+    unsigned precision, uint32_t& average, int32_t* values, size_t count) {
+    const unsigned frozen = order - 32;
+    const int64_t half = int64_t(1) << (precision - 1);
+    uint32_t avg = average;
+    size_t i = 0;
+    for (; i + 8 <= count; i += 8) {
+        int16_t dirs[8];
+        for (int m = 0; m < 8; ++m) dirs[m] = (int16_t)ApeOpposite(values[i + m]);
+        __m256i acc0 = _mm256_setzero_si256(), acc1 = acc0, acc2 = acc0, acc3 = acc0;
+        __m256i acc4 = acc0, acc5 = acc0, acc6 = acc0, acc7 = acc0;
+        const int16_t* hBase = history + i;
+        const int16_t* aBase = adaptation + i;
+        for (unsigned j = 0; j < frozen; j += 16) {
+            __m256i w = _mm256_loadu_si256((const __m256i*)(weight + j));
+            const int16_t* hj = hBase + j;
+            const int16_t* aj = aBase + j;
+            acc0 = _mm256_add_epi32(acc0, _mm256_madd_epi16(w, _mm256_loadu_si256((const __m256i*)(hj + 0))));
+            w = _mm256_add_epi16(w, _mm256_sign_epi16(_mm256_loadu_si256((const __m256i*)(aj + 0)), _mm256_set1_epi16(dirs[0])));
+            acc1 = _mm256_add_epi32(acc1, _mm256_madd_epi16(w, _mm256_loadu_si256((const __m256i*)(hj + 1))));
+            w = _mm256_add_epi16(w, _mm256_sign_epi16(_mm256_loadu_si256((const __m256i*)(aj + 1)), _mm256_set1_epi16(dirs[1])));
+            acc2 = _mm256_add_epi32(acc2, _mm256_madd_epi16(w, _mm256_loadu_si256((const __m256i*)(hj + 2))));
+            w = _mm256_add_epi16(w, _mm256_sign_epi16(_mm256_loadu_si256((const __m256i*)(aj + 2)), _mm256_set1_epi16(dirs[2])));
+            acc3 = _mm256_add_epi32(acc3, _mm256_madd_epi16(w, _mm256_loadu_si256((const __m256i*)(hj + 3))));
+            w = _mm256_add_epi16(w, _mm256_sign_epi16(_mm256_loadu_si256((const __m256i*)(aj + 3)), _mm256_set1_epi16(dirs[3])));
+            acc4 = _mm256_add_epi32(acc4, _mm256_madd_epi16(w, _mm256_loadu_si256((const __m256i*)(hj + 4))));
+            w = _mm256_add_epi16(w, _mm256_sign_epi16(_mm256_loadu_si256((const __m256i*)(aj + 4)), _mm256_set1_epi16(dirs[4])));
+            acc5 = _mm256_add_epi32(acc5, _mm256_madd_epi16(w, _mm256_loadu_si256((const __m256i*)(hj + 5))));
+            w = _mm256_add_epi16(w, _mm256_sign_epi16(_mm256_loadu_si256((const __m256i*)(aj + 5)), _mm256_set1_epi16(dirs[5])));
+            acc6 = _mm256_add_epi32(acc6, _mm256_madd_epi16(w, _mm256_loadu_si256((const __m256i*)(hj + 6))));
+            w = _mm256_add_epi16(w, _mm256_sign_epi16(_mm256_loadu_si256((const __m256i*)(aj + 6)), _mm256_set1_epi16(dirs[6])));
+            acc7 = _mm256_add_epi32(acc7, _mm256_madd_epi16(w, _mm256_loadu_si256((const __m256i*)(hj + 7))));
+            w = _mm256_add_epi16(w, _mm256_sign_epi16(_mm256_loadu_si256((const __m256i*)(aj + 7)), _mm256_set1_epi16(dirs[7])));
+            _mm256_storeu_si256((__m256i*)(weight + j), w);
+        }
+        auto hsum256 = [](__m256i v) -> int32_t {
+            return ApeHsum128(_mm_add_epi32(_mm256_castsi256_si128(v), _mm256_extracti128_si256(v, 1)));
+        };
+        const int32_t partials[8] = {
+            hsum256(acc0), hsum256(acc1), hsum256(acc2), hsum256(acc3),
+            hsum256(acc4), hsum256(acc5), hsum256(acc6), hsum256(acc7)
+        };
+        int16_t* tw = weight + frozen;
+        int16_t* th = history + i + frozen;
+        int16_t* ta = adaptation + i + frozen;
+        __m128i w0 = _mm_loadu_si128((const __m128i*)tw), w1 = _mm_loadu_si128((const __m128i*)(tw + 8));
+        __m128i w2 = _mm_loadu_si128((const __m128i*)(tw + 16)), w3 = _mm_loadu_si128((const __m128i*)(tw + 24));
+        __m128i h0 = _mm_loadu_si128((const __m128i*)th), h1 = _mm_loadu_si128((const __m128i*)(th + 8));
+        __m128i h2 = _mm_loadu_si128((const __m128i*)(th + 16)), h3 = _mm_loadu_si128((const __m128i*)(th + 24));
+        __m128i a0 = _mm_loadu_si128((const __m128i*)ta), a1 = _mm_loadu_si128((const __m128i*)(ta + 8));
+        __m128i a2 = _mm_loadu_si128((const __m128i*)(ta + 16)), a3 = _mm_loadu_si128((const __m128i*)(ta + 24));
+        for (int m = 0; m < 8; ++m) {
+            __m128i s = _mm_add_epi32(_mm_madd_epi16(w0, h0), _mm_madd_epi16(w1, h1));
+            s = _mm_add_epi32(s, _mm_madd_epi16(w2, h2));
+            s = _mm_add_epi32(s, _mm_madd_epi16(w3, h3));
+            const int32_t dot = (int32_t)((uint32_t)partials[m] + (uint32_t)ApeHsum128(s));
+            const __m128i step = _mm_set1_epi16(dirs[m]);
+            w0 = _mm_add_epi16(w0, _mm_sign_epi16(a0, step));
+            w1 = _mm_add_epi16(w1, _mm_sign_epi16(a1, step));
+            w2 = _mm_add_epi16(w2, _mm_sign_epi16(a2, step));
+            w3 = _mm_add_epi16(w3, _mm_sign_epi16(a3, step));
+            const int32_t value = (int32_t)(uint32_t)(values[i + m] + ((int64_t(dot) + half) >> precision));
+            values[i + m] = value;
+            const int16_t newH = (int16_t)std::clamp(value, -32768, 32767);
+            const int16_t newA = ApeAdaptValue(Modern, value, avg);
+            h0 = _mm_alignr_epi8(h1, h0, 2);
+            h1 = _mm_alignr_epi8(h2, h1, 2);
+            h2 = _mm_alignr_epi8(h3, h2, 2);
+            h3 = _mm_insert_epi16(_mm_srli_si128(h3, 2), newH, 7);
+            a0 = _mm_alignr_epi8(a1, a0, 2);
+            a1 = _mm_alignr_epi8(a2, a1, 2);
+            a2 = _mm_alignr_epi8(a3, a2, 2);
+            a3 = _mm_insert_epi16(_mm_srli_si128(a3, 2), newA, 7);
+            a2 = _mm_blend_epi16(a2, _mm_srai_epi16(a2, 1), 0x80);
+            if constexpr (Modern) a3 = _mm_blend_epi16(a3, _mm_srai_epi16(a3, 1), 0x60);
+            else a3 = _mm_blend_epi16(a3, _mm_srai_epi16(a3, 1), 0x08);
+        }
+        _mm_storeu_si128((__m128i*)tw, w0); _mm_storeu_si128((__m128i*)(tw + 8), w1);
+        _mm_storeu_si128((__m128i*)(tw + 16), w2); _mm_storeu_si128((__m128i*)(tw + 24), w3);
+        _mm_storeu_si128((__m128i*)(th + 8), h0); _mm_storeu_si128((__m128i*)(th + 16), h1);
+        _mm_storeu_si128((__m128i*)(th + 24), h2); _mm_storeu_si128((__m128i*)(th + 32), h3);
+        _mm_storeu_si128((__m128i*)(ta + 8), a0); _mm_storeu_si128((__m128i*)(ta + 16), a1);
+        _mm_storeu_si128((__m128i*)(ta + 24), a2); _mm_storeu_si128((__m128i*)(ta + 32), a3);
+    }
+    for (; i < count; ++i) {
+        const int32_t r = values[i];
+        const int32_t dot = ApeFilterAvx2(weight, history + i, adaptation + i, order, ApeOpposite(r));
+        const int32_t value = (int32_t)(uint32_t)(r + ((int64_t(dot) + half) >> precision));
+        values[i] = value;
+        history[i + order] = (int16_t)std::clamp(value, -32768, 32767);
+        adaptation[i + order] = ApeAdaptValue(Modern, value, avg);
+        if constexpr (Modern) {
+            adaptation[i + order - 1] >>= 1;
+            adaptation[i + order - 2] >>= 1;
+            adaptation[i + order - 8] >>= 1;
+        } else {
+            adaptation[i + order - 4] >>= 1;
+            adaptation[i + order - 8] >>= 1;
+        }
+    }
+    if (count >= order) {
+        memcpy(history, history + count, size_t(order) * sizeof(int16_t));
+        memcpy(adaptation, adaptation + count, size_t(order) * sizeof(int16_t));
+    } else if (count) {
+        memmove(history, history + count, size_t(order) * sizeof(int16_t));
+        memmove(adaptation, adaptation + count, size_t(order) * sizeof(int16_t));
+    }
+    average = avg;
+}
+} // namespace
+void ApeFirChunkAvx2(int16_t* weight, int16_t* history, int16_t* adaptation, unsigned order,
+    unsigned precision, bool modern, uint32_t& average, int32_t* values, size_t count) {
+    if (order == 16) {
+        if (modern) ApeFir16Impl<true>(weight, history, adaptation, precision, average, values, count);
+        else ApeFir16Impl<false>(weight, history, adaptation, precision, average, values, count);
+    } else if (order == 32) {
+        if (modern) ApeFir32Impl<true>(weight, history, adaptation, precision, average, values, count);
+        else ApeFir32Impl<false>(weight, history, adaptation, precision, average, values, count);
+    } else {
+        if (modern) ApeFirLargeImpl<true>(weight, history, adaptation, order, precision, average, values, count);
+        else ApeFirLargeImpl<false>(weight, history, adaptation, order, precision, average, values, count);
+    }
+    _mm256_zeroupper();
 }
 // Thirty-two taps per iteration in two accumulators. Pair sums and the accumulators wrap modulo
 // 2^32 exactly as the SSE2 loop's do, so the total is the same in any order; vpsignw applies the
@@ -150,6 +499,30 @@ void AudioResampleAvx2(const float* history,const float* table,unsigned taps,siz
     unsigned denominator,size_t& index,uint64_t& numerator,float* output) {
     if (denominator<=256) ResampleAvx2<true>(history,table,taps,frames,step,remainder,denominator,index,numerator,output);
     else ResampleAvx2<false>(history,table,taps,frames,step,remainder,denominator,index,numerator,output);
+}
+void AudioSilkResampleStereoAvx2(const int16_t* upLeft,const int16_t* upRight,size_t frames,uint32_t increment,
+    const int16_t* taps,float* output) {
+    uint32_t at=0;
+    for (size_t i=0;i<frames;++i,at+=increment) {
+        unsigned phase=((at&65535)*12)>>16,offset=at>>16;
+        __m128i t=_mm_loadu_si128((const __m128i*)(taps+phase*8));
+        __m256i taps2=_mm256_broadcastsi128_si256(t);
+        __m256i lr=_mm256_set_m128i(_mm_loadu_si128((const __m128i*)(upRight+offset)),
+                                     _mm_loadu_si128((const __m128i*)(upLeft+offset)));
+        __m256i pairs=_mm256_madd_epi16(lr,taps2);
+        __m256i lo=_mm256_cvtepi32_epi64(_mm256_castsi256_si128(pairs));
+        __m256i hi=_mm256_cvtepi32_epi64(_mm256_extracti128_si256(pairs,1));
+        __m128i sl=_mm_add_epi64(_mm256_castsi256_si128(lo),_mm256_extracti128_si256(lo,1));
+        __m128i sr=_mm_add_epi64(_mm256_castsi256_si128(hi),_mm256_extracti128_si256(hi,1));
+        int64_t lsum=_mm_cvtsi128_si64(_mm_add_epi64(sl,_mm_srli_si128(sl,8)));
+        int64_t rsum=_mm_cvtsi128_si64(_mm_add_epi64(sr,_mm_srli_si128(sr,8)));
+        int l=(int)((lsum+16384)>>15),r=(int)((rsum+16384)>>15);
+        l=l<-32768?-32768:l>32767?32767:l;
+        r=r<-32768?-32768:r>32767?32767:r;
+        output[i*2]=l*(1.0f/32768);
+        output[i*2+1]=r*(1.0f/32768);
+    }
+    _mm256_zeroupper();
 }
 // Four pre-rotated fold values z_j..z_j+3 as real and imaginary parts: z_j is
 // (in[2j], -in[m-1-2j]) times pre[j]. A curve (Vorbis's floor) multiplies each input first.
@@ -474,14 +847,14 @@ static void MpegWindow(const float* dct,float* history,unsigned head,float* out)
         _mm256_xor_ps(_mm256_blend_ps(p[0],p[1],1),sign),_mm256_xor_ps(d[0],sign),_mm256_xor_ps(d[1],sign)};
     for (unsigned i = 0; i < 8; ++i) { _mm256_storeu_ps(v+i*8,block[i]); _mm256_storeu_ps(v+1024+i*8,block[i]); }
     for (unsigned j = 0; j < 32; j += 8) {
-        __m256 a = _mm256_setzero_ps(),b=a,c=a,d=a;
+        __m256 a = _mm256_setzero_ps(),b=a,c=a,sumD=a;
         for (unsigned i = 0; i < 8; i+=2) {
             a = _mm256_fmadd_ps(_mm256_loadu_ps(history+head+i*128+j),_mm256_loadu_ps(mpeg::synthesisWindow+i*64+j),a);
             b = _mm256_fmadd_ps(_mm256_loadu_ps(history+head+i*128+96+j),_mm256_loadu_ps(mpeg::synthesisWindow+i*64+32+j),b);
             c = _mm256_fmadd_ps(_mm256_loadu_ps(history+head+i*128+128+j),_mm256_loadu_ps(mpeg::synthesisWindow+i*64+64+j),c);
-            d = _mm256_fmadd_ps(_mm256_loadu_ps(history+head+i*128+224+j),_mm256_loadu_ps(mpeg::synthesisWindow+i*64+96+j),d);
+            sumD = _mm256_fmadd_ps(_mm256_loadu_ps(history+head+i*128+224+j),_mm256_loadu_ps(mpeg::synthesisWindow+i*64+96+j),sumD);
         }
-        _mm256_storeu_ps(out+j,_mm256_add_ps(_mm256_add_ps(a,b),_mm256_add_ps(c,d)));
+        _mm256_storeu_ps(out+j,_mm256_add_ps(_mm256_add_ps(a,b),_mm256_add_ps(c,sumD)));
     }
 }
 // One 32-subband polyphase step for Layer I/II; the Layer III entry point batches

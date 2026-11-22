@@ -96,6 +96,7 @@ public:
 #endif
     }
     __forceinline void Drop(unsigned n) { buffer_ >>= n; available_ -= n; }
+    __forceinline uint32_t Peek(unsigned n) const { return (uint32_t)(buffer_ & ((uint64_t(1) << n) - 1)); }
     // n is 1..32 and no more than the buffered bits.
     __forceinline uint32_t Get(unsigned n) {
         uint32_t value = (uint32_t)(buffer_ & ((uint64_t(1) << n) - 1)); Drop(n);

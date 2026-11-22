@@ -93,6 +93,7 @@ HMENU BuildMenu() {
     AppendMenuW(edit, MF_STRING, IDM_EDIT_ALBUM_TAGS, L"Edit al&bum tags...");
     AppendMenuW(edit, MF_STRING, IDM_MAKE_ALBUM, L"&Make album...");
     AppendMenuW(edit, MF_STRING, IDM_TAG_ALBUM_MB, L"Tag album from MusicBrain&z...");
+    AppendMenuW(edit, MF_STRING, IDM_FAVORITE, L"&Favorite\tCtrl+D");
     AppendMenuW(edit, MF_STRING, IDM_TAG_UNDO, L"Undo last ta&g edit");
     AppendHelperTools(edit, true);  // the tools of the helpers that are on, when there are any
 
@@ -146,6 +147,13 @@ HMENU BuildMenu() {
     AppendMenuW(playlist, MF_STRING, IDM_NEW_PL, L"&New playlist\tCtrl+N");
     AppendMenuW(playlist, MF_STRING, IDM_NEW_AUTO, L"New &auto-playlist...");
     AppendMenuW(playlist, MF_STRING, IDM_EDIT_AUTO, L"&Edit auto-playlist rules...");
+    HMENU mixes = CreatePopupMenu();
+    static const wchar_t* const mixMenuNames[] = {L"&Favorites", L"On Re&peat", L"For&gotten Favorites",
+                                                  L"&Recently Added", L"Mix like this &song"};
+    static_assert(std::size(mixMenuNames) == (size_t)MixPreset::Count);
+    for (int i = 0; i < (int)MixPreset::Count; ++i)
+        AppendMenuW(mixes, MF_STRING, IDM_MIX_BASE + i, mixMenuNames[i]);
+    AppendMenuW(playlist, MF_POPUP, (UINT_PTR)mixes, L"Mixe&s");
     AppendPackAutoPlaylists(playlist);
     AppendMenuW(playlist, MF_STRING, IDM_RENAME_PL, L"&Rename playlist\tF2");
     AppendMenuW(playlist, MF_STRING, IDM_REMOVE_PL, L"&Close playlist\tCtrl+W");
@@ -168,6 +176,8 @@ HMENU BuildMenu() {
     AppendMenuW(library, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(library, MF_STRING, IDM_ORGANIZE, L"&Organize files...");
     AppendMenuW(library, MF_STRING, IDM_WEBFETCH, L"Save music from the &web...");
+    AppendMenuW(library, MF_STRING, IDM_RELEASE_RADAR, L"New releases &by your favorite artists...");
+    AppendMenuW(library, MF_STRING, IDM_KEEP_DISCOVERY, L"&Keep the discovered song\tCtrl+Alt+K");
     AppendMenuW(library, MF_STRING, IDM_ORGANIZE_UNDO, L"&Undo last organize");
     AppendMenuW(library, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(library, MF_STRING, IDM_CONVERT, L"Con&vert...");
@@ -258,6 +268,7 @@ std::vector<ACCEL> BuiltInAccelerators() {
         {FCONTROL | FVIRTKEY, 'S', IDM_EXPORT_M3U},
         {FCONTROL | FVIRTKEY, 'F', IDM_FIND},
         {FCONTROL | FVIRTKEY, 'N', IDM_NEW_PL},
+        {FCONTROL | FVIRTKEY, 'D', IDM_FAVORITE},
         {FCONTROL | FVIRTKEY, 'W', IDM_REMOVE_PL},
         {FCONTROL | FVIRTKEY, 'E', IDM_EQUALIZER},
         {FCONTROL | FVIRTKEY, 'M', IDM_MUTE},
@@ -271,6 +282,7 @@ std::vector<ACCEL> BuiltInAccelerators() {
         {FCONTROL | FVIRTKEY, 'L', IDM_LYRICS},
         {FCONTROL | FVIRTKEY, VK_OEM_COMMA, IDM_PREFERENCES},
         {FCONTROL | FSHIFT | FVIRTKEY, 'P', IDM_COMMAND_PALETTE},
+        {FCONTROL | FALT | FVIRTKEY, 'K', IDM_KEEP_DISCOVERY},
         {FCONTROL | FVIRTKEY, 'H', IDC_SHUFFLE},
         {FCONTROL | FVIRTKEY, 'R', IDM_REPEAT_BASE + (int)Repeat::All},
         {FVIRTKEY, VK_F2, IDM_RENAME_PL},
@@ -307,6 +319,8 @@ void UpdateMainMenu(HMENU m) {
         {IDM_EQUALIZER, g.eq.enabled || g.eq.crossfeed}, {IDM_ALWAYS_ON_TOP, g.alwaysOnTop},
         {IDM_GROUP_ALBUMS, g.groupAlbums}, {IDM_LYRICS, LyricsPanelShown()},
         {IDM_QUEUE_SHOW, QueueShown()}, {IDM_LIGHTWEIGHT, g.lightweight},
+        {IDM_FAVORITE, !SelectedTracks().empty() && std::all_of(SelectedTracks().begin(), SelectedTracks().end(),
+                                                               [](TrackId id) { return g_lib.Favorite(id); })},
     };
     for (const auto& item : checks) CheckMenuItem(m, item.id, MF_BYCOMMAND | (item.checked ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuRadioItem(m, IDM_REVERB_BASE, IDM_REVERB_BASE + (int)ReverbPreset::Count - 1,
@@ -345,6 +359,9 @@ void UpdateMainMenu(HMENU m) {
         {IDM_RG_SCAN_ALL, replaygain::HasLibraryTracks() && !manualScan},
         {IDM_RG_CLEAR, selected && !manualScan},
         {IDM_RG_WRITE_TAGS, selected && !manualScan},
+        {IDM_FAVORITE, selected},
+        {IDM_KEEP_DISCOVERY, DiscoverCanKeep()},
+        {IDM_MIX_BASE + (int)MixPreset::LikeThis, g.playing != kNone || SelectedTracks().size() == 1},
     };
     for (const auto& item : enables) EnableMenuItem(m, item.id, MF_BYCOMMAND | (item.enabled ? MF_ENABLED : MF_GRAYED));
     // Undo names what it will undo: the newer of the active playlist's last change and a tag edit.

@@ -41,6 +41,9 @@ struct Release {
 // Release search replies (/ws/2/release?query=...) and release lookups (/ws/2/release/<id>).
 std::vector<Release> ParseReleaseSearch(std::string_view json);
 bool ParseRelease(std::string_view json, Release& out);
+// A release-group's releases with their tracks (/ws/2/release?release-group=<id>&inc=recordings),
+// each parsed like ParseRelease. `best` is the fullest tracklist, earliest on a tie.
+bool ParseReleaseBrowse(std::string_view json, std::vector<Release>& all, Release* best = nullptr);
 // A disc id lookup (/ws/2/discid/<id>?toc=...): each release with only the medium holding that disc
 // (or, for a lookup by table of contents, the first medium with `discTracks` tracks) in `tracks`.
 std::vector<Release> ParseDiscLookup(std::string_view json, const std::string& discId, size_t discTracks);

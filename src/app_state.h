@@ -93,7 +93,12 @@ constexpr UINT WM_APP_COVERFETCH = WM_APP + 71;    // cover search results and p
 constexpr UINT WM_APP_COLLECTION = WM_APP + 72;    // collection export/import progress (0), or its result (1: lParam owns it)
 constexpr UINT WM_APP_KEYS = WM_APP + 73;          // a Lightweight mode numpad key: wParam = keymap numpad index, lParam = repeat
 constexpr UINT WM_APP_SPEAKERS = WM_APP + 74;      // lParam owns the network speakers a search found
+constexpr UINT WM_APP_DISCOVER = WM_APP + 75;      // lParam owns a discovered preview (app_discover.cpp)
+constexpr UINT WM_APP_ONLINE_SEARCH = WM_APP + 76;  // lParam owns online search results (app_search_online.cpp)
+constexpr UINT WM_APP_ONLINE_RESOLVE = WM_APP + 77; // lParam owns a resolved online song (app_search_online.cpp)
+constexpr UINT WM_APP_ARTIST_PLAY = WM_APP + 78;    // lParam owns a resolved album track (app_artistinfo.cpp)
 constexpr UINT_PTR kSearchTimer = 3;
+constexpr UINT_PTR kOnlineSearchTimer = 7;
 constexpr UINT_PTR kUiTimer = 1;
 constexpr UINT_PTR kBusyTimer = 5;  // animates the busy spinners (app_badges.cpp)
 constexpr UINT_PTR kStripTimer = 2;  // the strip's controls show while the mouse is over it
@@ -172,6 +177,8 @@ enum : int {
     IDM_THEME_BASE = 3220,
     IDM_THEME_ROBOTIC = 3239,  // the DELTARUNE theme's Chapter 2 sounds (app_deltarune.cpp), after the themes
     IDM_RATE_BASE = 3260,    // + 0..10 half stars
+    IDM_FAVORITE = 3271,     // the heart (library.h favorites), beside the rating range
+    IDM_KEEP_DISCOVERY = 3272,  // keep the song discovered by Keep playing like this
     IDM_LOOPS_BASE = 3280,   // + 0..3 passes through a game-music loop
     IDM_PANEL_BASE = 3285,   // + big mode panel (app_big.cpp)
     IDM_SIZE_BASE = 3290,    // + ViewSize
@@ -232,9 +239,14 @@ enum : int {
     IDM_SPEAKERS = 4350, IDM_SPEAKER_HERE, IDM_SPEAKER_SEARCH,
     IDM_SPEAKER_BASE = 4360,  // + found speaker index, up to kMaxSpeakers
     // The Layout menu's own starts (app_custom.cpp): a blank canvas, and the layouts you saved.
-    IDM_LAYOUT_BLANK = 4400, IDM_LAYOUT_SAVE,
+    IDM_LAYOUT_BLANK = 4400, IDM_LAYOUT_SAVE, IDM_LAYOUT_BAR,
     IDM_LAYOUT_SAVED_BASE = 4410,   // + saved layout, up to ui::kSavedLayouts
     IDM_LAYOUT_FORGET_BASE = 4420,  // + saved layout
+    IDM_THEME_RESET_LIGHT = 4430, IDM_THEME_RESET_DARK,
+    // Mi&xes (autoplaylist.h): Favorites, On Repeat, Forgotten Favorites, Recently Added,
+    // Mix like this song. Each makes a tab, or brings the one with the same rules to the front.
+    IDM_MIX_BASE = 4440,     // + MixPreset
+    IDM_RELEASE_RADAR = 4450,  // Library > New releases by your favorite artists...
 };
 constexpr int kMaxPacks = 64, kMaxPackThemes = 64, kMaxPackAutoPlaylists = 64, kMaxPackColumnSets = 30;
 constexpr int kMaxHelpers = 32, kMaxHelperVisualizers = 16, kMaxHelperTools = 40;
@@ -270,6 +282,8 @@ struct MainLayout {
     // Extras that crowd the window, off unless asked for: the item count after each tab's name and
     // how-to hints in the now playing line.
     bool tabCounts = false, hints = false;
+    int sideWidth = 300;   // side panels' width in 96-DPI pixels (180..480)
+    int pad = ui::kPad;    // outer window margin in 96-DPI pixels (0..16)
     bool operator==(const MainLayout&) const = default;
 };
 
@@ -481,6 +495,7 @@ struct App {
     MainLayout defaultLayout;
     RECT stripRect{};  // the spotlight's and big mode's playback strip, when shown
     MainLayout layout;
+    bool layoutBar = false;        // the live Layout Top Bar (app_custom.cpp)
     RECT gripRect{};               // the normal window's player handle: drag to dock, click for the layout menu
     std::vector<RECT> dividers;    // lines between the docked player and the rest, painted by the window
     RECT playerRect{};             // the docked player's column or band, on its own background

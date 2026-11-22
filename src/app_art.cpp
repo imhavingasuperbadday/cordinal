@@ -128,7 +128,8 @@ void LoadArtFor(TrackId id, bool refresh) {
         if (!g.art.Empty()) {
             KillTimer(g.hwnd, kArtFadeTimer);
             s_fade = ArtFade{};
-            s_fade.from = g.art;
+            // g.art is cleared below, so the fade's copy can take the pixels instead of duplicating them.
+            s_fade.from = std::move(g.art);
         }
         s_fade.waiting = true;
         if (id == kNone) BeginFrames();  // nothing to wait for: straight to the placeholder

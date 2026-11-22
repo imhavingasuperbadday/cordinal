@@ -9,7 +9,7 @@ One program, under 2 MB. No installer, no runtime, no codecs to add.
 
 <div align="center">
 
-Current release: **0.1.16** · `cordinal.exe`, 2,027,520 bytes<br>
+Current release: **0.1.17** · `cordinal.exe`, 2,027,520 bytes<br>
 **[Download](https://github.com/imhavingasuperbadday/cordinal/releases/latest)** ·
 [Getting started](#getting-started) · [Guide](#guide) · [Building](#building) ·
 [Issues](https://github.com/imhavingasuperbadday/cordinal/issues)
@@ -104,6 +104,7 @@ settings** shows every page at once, and the search box looks through all of the
 | Ctrl+Z / Ctrl+Y | Undo the last playlist change or tag edit / redo a playlist change |
 | Ctrl+S | Save the playlist as M3U8 |
 | Ctrl+N / F2 / Ctrl+W | New / rename / close playlist |
+| Ctrl+D | Favorite the selected tracks (or clear their hearts) |
 | Ctrl+E | Equalizer |
 | Ctrl+L | Lyrics panel |
 | Ctrl+Shift+M | Mini player |
@@ -158,14 +159,60 @@ own, filed as `Artist\Album\[track] Title`. SoundCloud tracks, sets, likes and a
 YouTube videos and playlists, and Spotify tracks, albums and playlists all work. A Spotify link is
 matched to the same recording on YouTube — Spotify's own audio is encrypted, and cordinal does not
 break that — and the file's comment says where its audio came from. SoundCloud's and YouTube's
-streams today are fragmented MP4: they play everywhere, but nothing can write tags into them yet, so
-those songs keep their identity in their file name and their cover as `cover.jpg` beside them; a
-stream that can carry tags is tagged fully, cover and all. The first save asks before contacting
-anyone, and the answer lives in **Preferences ▸ Online ▸ Save music from the web**. A song already
-saved is never downloaded twice, an interrupted download is tried again the
+streams arrive as fragmented MP4, so cordinal rewrites each one losslessly into a standard `.m4a`
+as it saves: the audio is copied exactly, never re-encoded, and the song carries its title, artist,
+album, track number, comment and cover in the file itself. An unusual stream that cannot be
+rewritten is kept as it arrived, with its cover as `cover.jpg` beside it. The first save asks
+before contacting anyone, and the answer lives in **Preferences ▸ Online ▸ Save music from the
+web**; Linux asks the same question before its first save and remembers the answer in the same row.
+A song already saved is never downloaded twice, an interrupted download is tried again the
 next time, and a track that is gone for good is remembered instead of failing on every run; **Forgot
 what failed** tries those again. Files land in the first library folder and appear in the library on
 their own as the scanner picks them up.
+
+A link that holds a playlist — a Spotify playlist, a YouTube playlist, a SoundCloud set or likes —
+also becomes a playlist tab of its own once the run is through. The tab takes the list's own name
+and holds every track in the list's exact order: the ones just saved, the ones already in your
+library, and any that failed to save but were already there. Running the same link again updates
+that tab, and **Ctrl+Z** undoes it; a playlist you made yourself is never overwritten — a new name
+is found instead.
+
+**Import file...** in that window (and the same button on Linux) imports a list you already have.
+Spotify's own account data export works: `YourLibrary.json` brings in your saved tracks (Liked
+Songs) and saved albums, and `Playlist1.json` brings in every playlist, private ones included and
+however many tracks they hold. CSV playlists from Exportify, TuneMyMusic and Soundiiz work too, and
+a `Playlist Name` column splits one file into several lists. Drop the file on the window, paste the
+path of a `.json` or `.csv` into the box, or paste the import text itself. Songs your library
+already owns are matched by artist and title (case and spacing forgiven, and "A, B" finds A's file),
+skipped, and no site is asked about them. Only the missing ones are matched on YouTube the way a
+Spotify link is, and a stopped import starts again where it stopped. A large import says how many
+tracks it is bringing in and how many you already had. Saved albums in `YourLibrary.json` are read
+from Spotify's album page and arrive as complete tagged albums, not playlists. Saved tracks are also
+hearted, so **Playlist ▸ Mixes ▸ Favorites** lists them from the start.
+
+**Library ▸ New releases by your favorite artists...** is a quiet Release Radar: once it is on in
+**Preferences ▸ Online**, it asks MusicBrainz about the artists you play and heart most and lists
+their albums and EPs from the last six months. **Save selected** and **Save all** read each album's
+tracklist and save it through the same queue, as tagged files rather than a playlist. Nothing is
+asked until you open the list, the first look asks first, and nothing is downloaded until you choose
+Save.
+
+**Discover outside my library.** With **Preferences ▸ Online ▸ Discover songs outside your library**
+on, **Keep playing like this** now and then follows a local song with one you don't own, from an
+artist related to the one playing. MusicBrainz chooses it and the audio is matched on YouTube. It
+plays as a preview from the data folder, shows in Now Playing and the queue like any other song, and
+is not counted as a play or added to your library until **Library ▸ Keep the discovered song**
+(Ctrl+Alt+K) keeps it. Turning radio or the preference off stops new looks, and a preview is deleted
+once it plays or is skipped; nothing is fetched while the preference is off.
+
+**Online song search.** **Preferences ▸ Online ▸ Search online for songs not in your library** is off
+by default. When a library search finds nothing while it is off, an inline **Search online...** bar
+asks once before turning it on. When enabled, typing in **Ctrl+F** shows up to 15 unowned songs in
+an **Online (not in your library)** pane below local matches (and up to 5 in the **Win+Alt+Space**
+song picker). Playing a result either plays a temporary preview until you click **Save** (or
+**Ctrl+Alt+K**), or saves it straight into your library folder when **When playing a search result**
+is set to **Play and save automatically**; right-clicking a result with an album also lets you
+**Save full album to library...** through **Save music from the web**.
 
 ### Album editions
 
@@ -185,10 +232,22 @@ Playlists open as tabs. **Ctrl+Z** undoes a change to a playlist (adding, removi
 or clearing) and **Ctrl+Y** redoes it. If a tag edit came last, Ctrl+Z undoes that instead.
 
 **Auto-playlists** fill themselves from rules, such as "rated 4 stars or more, not played this month".
-Rules can use tags, file details, ratings, play and skip counts, dates, length, BPM, loudness and
-more, in nested ALL/ANY groups with an optional limit. Auto-playlists share one tab: click it to
-switch between them, make a new one or edit the rules (on Windows, Down opens this menu from the
-keyboard). To give each its own tab, turn off **Preferences ▸ View ▸ One tab for auto-playlists**.
+Rules can use tags, file details, ratings, play counts, dates, length, BPM, loudness and more, in
+nested ALL/ANY groups with an optional limit. Auto-playlists share one tab: click it to switch
+between them, make a new one or edit the rules (on Windows, Down opens this menu from the keyboard).
+To give each its own tab, turn off **Preferences ▸ View ▸ One tab for auto-playlists**.
+
+**Favorites and Mixes.** **Ctrl+D** (or **Edit ▸ Favorite**, or the track list's right-click menu)
+hearts the selected tracks; pressing it on a selection that is all hearts clears them. A heart is
+kept with the library like a rating, and **Edit ▸ Favorite** shows a tick when every selected track
+has one. Hearts also show beside the title of a track in the album view, and the header menu offers
+a **Favorite** column. **Playlist ▸ Mixes** makes ready-made local playlists from what you already
+own: **Favorites** (newest hearts first), **On Repeat** (played in the last 30 days, most played
+first), **Forgotten Favorites** (hearted or rated 4 stars or more, not played in 90 days), **Recently
+Added**, and **Mix like this song** (same genre, or a tempo within a sixth, as the song playing or
+selected). Choosing a mix that already exists brings its tab to the front instead of making another.
+A new profile starts with Favorites among its auto-playlists. Hearts count toward **Choose by taste**
+too.
 
 While an album is playing, the **Now Playing** tab shows only that album. Type in its search box to
 see the whole list again. **Preferences ▸ View ▸ Now Playing shows the playing album** turns this off.
@@ -355,6 +414,9 @@ as .lrc file**.
 **View ▸ Artist info...** shows the start of the artist's English Wikipedia article, links to
 MusicBrainz, Wikipedia and their website, and their albums from MusicBrainz. Albums you already have
 are marked **In library**; tick **Only albums not in my library** to see what you are missing.
+Select an album to see its tracklist: owned albums offer **Play album** and **Show in library**, and
+missing albums fetch their tracklist from MusicBrainz so you can **Play album** (or any track in it)
+or **Save album to library** with tags and artwork.
 
 ### Scrobbling
 
@@ -500,7 +562,8 @@ closes.
 | Cover and waveform caches | `%LOCALAPPDATA%\cordinal` | `$XDG_CACHE_HOME/cordinal` |
 
 cordinal only goes online for features you turn on: radio, scrobbling, Discord covers, the browser
-player, the album-edition lookup, and the cover, lyrics and artist-info sources.
+player, the album-edition lookup, saving music from the web, Release Radar, discovery in Keep playing
+like this, and the cover, lyrics and artist-info sources.
 
 **Back up.** **File ▸ Back up library and settings** saves everything into an ordinary folder. **File
 ▸ Restore backup** brings it back, even on a new computer where the music is in a different place.

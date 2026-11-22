@@ -396,7 +396,7 @@ void Open(bool history) {
 // Called just before the playing song is left on purpose (another song chosen, Next, Stop): its
 // place joins the list, newest first. A song that plays to its end leaves through ForgetSpot instead.
 void RememberSpot() {
-    if (!g.resumeOn || g.playing == kNone || RadioPlaying()) return;
+    if (!g.resumeOn || g.playing == kNone || RadioPlaying() || DiscoverIsPreview(g.playing)) return;
     Keep(g.spots, g.playing, g.engine.Position());
     g.spotLeft = g.playing;
 }

@@ -224,9 +224,20 @@ void CrossPower(const float* x,const float* y,int n,double& cross,double& power)
 }
 // Rescales `v` to unit energy times `gain`, so band shape is gain-independent.
 void Normalize(float* v,int n,float gain) {
-    double energy=0; for (int i=0;i<n;++i) energy+=double(v[i])*v[i];
+    __m128d p0=_mm_setzero_pd(),p1=p0;
+    int i=0;
+    for (;i+4<=n;i+=4) {
+        __m128 a=_mm_loadu_ps(v+i);
+        __m128d al=_mm_cvtps_pd(a),ah=_mm_cvtps_pd(_mm_movehl_ps(a,a));
+        p0=_mm_add_pd(p0,_mm_mul_pd(al,al));p1=_mm_add_pd(p1,_mm_mul_pd(ah,ah));
+    }
+    __m128d p=_mm_add_pd(p0,p1);
+    double energy=_mm_cvtsd_f64(_mm_add_sd(p,_mm_unpackhi_pd(p,p)));
+    for (;i<n;++i) energy+=double(v[i])*v[i];
     float scale=gain/(float)std::sqrt(energy+1e-20);
-    for (int i=0;i<n;++i) v[i]*=scale;
+    const __m128 s=_mm_set1_ps(scale);
+    for (i=0;i+4<=n;i+=4) _mm_storeu_ps(v+i,_mm_mul_ps(_mm_loadu_ps(v+i),s));
+    for (;i<n;++i) v[i]*=scale;
 }
 // In-place Haar butterfly over `count` points spaced by `stride` (CELT's TF transform).
 void Haar(float* v,int count,int stride) {
@@ -264,12 +275,16 @@ struct OpusCelt::State {
 };
 struct OpusCelt::Impl : State {
     Mdct mdct[4];
-    std::array<float,120> window{};
+    std::array<float,120> window{},winSq{};
     float wave_[2][960+120];
     Impl() {
         for (unsigned lm=0;lm<4;++lm) mdct[lm].Init(240u<<lm);
         // 120-sample power-complementary overlap window, shared by all frame sizes.
-        for (unsigned i=0;i<120;++i) { double s=std::sin(pi*(i+0.5)/240);window[i]=(float)std::sin(pi*0.5*s*s); }
+        for (unsigned i=0;i<120;++i) {
+            double s=std::sin(pi*(i+0.5)/240);
+            window[i]=(float)std::sin(pi*0.5*s*s);
+            winSq[i]=window[i]*window[i];
+        }
         Reset();
     }
     // Resets to the stream-start sentinel: -28 (dB) log energy and zeroed memory.
@@ -304,7 +319,7 @@ namespace {
 // row. Counts above 32 bits saturate to UINT32_MAX; no valid codebook reaches them.
 using PulseTable=std::array<std::array<uint32_t,178>,177>;
 PulseTable pulseCounts;
-const PulseTable& PulseCounts() {
+void InitPulseCounts() {
     static const bool filled=[] {
         pulseCounts[0][0]=1;
         for (int n=1;n<=176;++n) for (int k=1;k<=177;++k)
@@ -312,8 +327,8 @@ const PulseTable& PulseCounts() {
         return true;
     }();
     (void)filled;
-    return pulseCounts;
 }
+inline const PulseTable& PulseCounts() { return pulseCounts; }
 // Decodes codeword `index` of k pulses in n dimensions into y (the enumeration of RFC 6716
 // 4.3.4.2, in the U form libopus uses) and returns the sum of squares. Codewords from
 // U(n,k+1) on have a negative first value. The pulses left after this dimension are then the
@@ -325,6 +340,13 @@ uint32_t PulseVector(const PulseTable& table,int n,int k,uint32_t index,int* y) 
     auto put=[&](int value) { *y++=value;energy+=uint32_t(value*value); };
     if (n==1) { int sign=-int(index!=0);put((k+sign)^sign);return energy; }
     for (;n>2;--n) {
+        if (!k) { std::fill_n(y,n,0); return energy; }
+        if (k==1) {
+            std::fill_n(y,n,0);
+            if ((int)index<n) y[index]=1;
+            else y[2*n-1-(int)index]=-1;
+            return energy+1;
+        }
         // Row n increases with the count from U(n,0) = 0, so every search ends.
         const uint32_t* row=table[n].data();
         uint32_t q=row[k+1];int sign=-int(index>=q);index-=q&sign;
@@ -353,6 +375,24 @@ void Rotate(float* x,int n,int stride,float c,float s) {
         float b=x[n-2];
         for (int i=n-3;i>=0;--i) { float v=x[i];x[i+1]=c*b+s*v;b=c*v-s*b; }
         x[0]=b;
+        return;
+    }
+    if (stride>=4) {
+        const __m128 vc=_mm_set1_ps(c),vs=_mm_set1_ps(s);
+        int i=0;
+        for (;i+4<=n-stride;i+=4) {
+            __m128 a=_mm_loadu_ps(x+i),b=_mm_loadu_ps(x+i+stride);
+            _mm_storeu_ps(x+i,_mm_sub_ps(_mm_mul_ps(vc,a),_mm_mul_ps(vs,b)));
+            _mm_storeu_ps(x+i+stride,_mm_add_ps(_mm_mul_ps(vc,b),_mm_mul_ps(vs,a)));
+        }
+        for (;i<n-stride;++i) { float a=x[i],b=x[i+stride];x[i]=c*a-s*b;x[i+stride]=c*b+s*a; }
+        i=n-2*stride-1;
+        for (;i>=3;i-=4) {
+            __m128 a=_mm_loadu_ps(x+i-3),b=_mm_loadu_ps(x+i-3+stride);
+            _mm_storeu_ps(x+i-3,_mm_sub_ps(_mm_mul_ps(vc,a),_mm_mul_ps(vs,b)));
+            _mm_storeu_ps(x+i-3+stride,_mm_add_ps(_mm_mul_ps(vc,b),_mm_mul_ps(vs,a)));
+        }
+        for (;i>=0;--i) { float a=x[i],b=x[i+stride];x[i]=c*a-s*b;x[i+stride]=c*b+s*a; }
         return;
     }
     auto turn=[&](int i) { float a=x[i],b=x[i+stride];x[i]=c*a-s*b;x[i+stride]=c*b+s*a; };
@@ -405,19 +445,44 @@ int PulseIndex(const uint8_t* cache,int budget) {
 // Decodes a PVQ codeword of k pulses over n samples using the combinadic pulse
 // counts, then normalises and spreads; returns the per-block nonzero mask.
 unsigned OpusCelt::Impl::Frame::Pulses(float* out,int n,int k,int blocks,float gain) {
+    if (k==1 && n>=1 && n<=176) {
+        uint32_t index=range.Uniform((uint32_t)(2*n));
+        int pos=(int)index<n?(int)index:2*n-1-(int)index;
+        std::fill_n(out,n,0.0f);
+        out[pos]=(int)index<n?gain:-gain;
+        unsigned mask=blocks==1?1u:(1u<<std::min(blocks-1,pos/(n/blocks)));
+        Spread(out,n,1,blocks,spread);
+        return mask;
+    }
     const auto& table=PulseCounts();
     uint64_t total=n>=1 && n<=176 && k>=1 && k<=128?uint64_t(table[n][k])+table[n][k+1]:UINT32_MAX;
     if (total>=UINT32_MAX) { range.Fail(); return 0; }
     int y[176];
     uint32_t squares=PulseVector(table,n,k,range.Uniform((uint32_t)total),y);
-    // A block's mask bit says it received a pulse (a single block always does); a ragged tail
-    // belongs to the last block.
     unsigned mask=blocks==1;
-    if (blocks>1) for (int b=0,perBlock=n/blocks;b<blocks;++b)
-        for (int i=b*perBlock,end=b+1<blocks?i+perBlock:n;i<end;++i) if (y[i]) { mask|=1u<<b;break; }
     // The squared pulse counts sum exactly, so this matches Normalize's double sum.
-    float scale=gain/(float)std::sqrt(squares+1e-20);
-    for (int i=0;i<n;++i) out[i]=(float)y[i]*scale;
+    const float scale=gain/(float)std::sqrt(squares+1e-20);
+    const __m128 vs=_mm_set1_ps(scale);
+    if (blocks==1) {
+        int i=0;
+        for (;i+4<=n;i+=4)
+            _mm_storeu_ps(out+i,_mm_mul_ps(_mm_cvtepi32_ps(_mm_loadu_si128((const __m128i*)(y+i))),vs));
+        for (;i<n;++i) out[i]=(float)y[i]*scale;
+    } else {
+        const __m128i zero=_mm_setzero_si128();
+        for (int b=0,perBlock=n/blocks;b<blocks;++b) {
+            int i=b*perBlock,end=b+1<blocks?i+perBlock:n;
+            __m128i nz=zero;
+            for (;i+4<=end;i+=4) {
+                __m128i vy=_mm_loadu_si128((const __m128i*)(y+i));
+                nz=_mm_or_si128(nz,vy);
+                _mm_storeu_ps(out+i,_mm_mul_ps(_mm_cvtepi32_ps(vy),vs));
+            }
+            bool any=_mm_movemask_epi8(_mm_cmpeq_epi32(nz,zero))!=0xFFFF;
+            for (;i<end;++i) { any|=y[i]!=0; out[i]=(float)y[i]*scale; }
+            if (any) mask|=1u<<b;
+        }
+    }
     Spread(out,n,k,blocks,spread);
     return mask;
 }
@@ -732,7 +797,10 @@ bool OpusCelt::Impl::Decode(OpusRange& range,unsigned channels,unsigned lm,unsig
         // Apply the decoded log energies (band mean + residual) as band amplitudes.
         for (unsigned ch=0;ch<channels;++ch) for (unsigned i=first;i<last;++i) {
             float amplitude=(float)std::exp2(std::min(32.0f,energy[ch][i]+d::means[i]/16.0f));
-            for (int j=d::bands[i]*multiple;j<d::bands[i+1]*multiple;++j) spectrum[ch][j]*=amplitude;
+            const __m128 amp=_mm_set1_ps(amplitude);
+            int j=d::bands[i]*multiple,end=d::bands[i+1]*multiple;
+            for (;j+4<=end;j+=4) _mm_storeu_ps(spectrum[ch]+j,_mm_mul_ps(_mm_loadu_ps(spectrum[ch]+j),amp));
+            for (;j<end;++j) spectrum[ch][j]*=amplitude;
         }
     } else {
         for (auto& c:energy) std::fill_n(c,21,-28.0f);
@@ -758,12 +826,11 @@ void OpusCelt::Impl::Synthesis(float spectrum[2][960],unsigned channels,unsigned
     static constexpr float taps[3][3]={{0.306640625f,0.217041015625f,0.129638671875f},
         {0.4638671875f,0.26806640625f,0},{0.7998046875f,0.10009765625f,0}};
     const bool comb=previous.gain || latest.gain || filter.gain;
-    float filtered[2][960];
     for (unsigned ch=0;ch<2;++ch) {
         float* wave=wave_[ch];
-        // A mono frame feeds both outputs the same transform; only the histories differ.
-        if (ch && channels==1) std::copy_n(wave_[0],n+120,wave);
-        else {
+        // A mono frame feeds both outputs the same transform; copy wave_[0] before ch 0
+        // folds overlap and comb-filter contributions in place into wave_[0].
+        if (!ch || channels>1) {
             memset(wave,0,(n+120)*sizeof(float));
             const float* source=spectrum[channels==1?0:ch];
             for (unsigned b=0;b<blocks;++b) {
@@ -772,40 +839,89 @@ void OpusCelt::Impl::Synthesis(float spectrum[2][960],unsigned channels,unsigned
                 mdct[transient?0:lm].Dct(blocks>1?input:source,dct);
                 OverlapAdd(dct,window.data(),wave+b*block,block);
             }
+            if (channels==1) std::copy_n(wave,n+120,wave_[1]);
         }
-        float* result=filtered[ch];
-        for (unsigned i=0;i<120;++i) { result[i]=wave[i]+overlap[ch][i];overlap[ch][i]=wave[n+i]; }
-        std::copy_n(wave+120,n-120,result+120);
+        for (unsigned i=0;i<120;i+=4)
+            _mm_storeu_ps(wave+i,_mm_add_ps(_mm_loadu_ps(wave+i),_mm_loadu_ps(overlap[ch]+i)));
+        std::copy_n(wave+n,120,overlap[ch]);
         if (!comb) {
             // The ring holds 2048 samples, so a frame wraps at most once.
             unsigned at=position&2047,head=std::min(n,2048-at);
-            std::copy_n(result,head,post[ch]+at);std::copy_n(result+head,n-head,post[ch]);
+            std::copy_n(wave,head,post[ch]+at);std::copy_n(wave+head,n-head,post[ch]);
             continue;
         }
+        const int prevPeriod=std::max(15,previous.period),latestPeriod=std::max(15,latest.period),curPeriod=std::max(15,filter.period);
         // Post-filter output at sample `at`, from the 3-tap comb around the period.
-        auto contribution=[&](const Filter& f,uint32_t at) {
+        auto contribution=[&](const Filter& f,int period,uint32_t at) {
             if (!f.gain) return 0.0f;
-            float value=post[ch][(at-std::max(15,f.period))&2047]*taps[f.taps][0];
-            for (unsigned j=1;j<3;++j) value+=(post[ch][(at-std::max(15,f.period)-j)&2047]+post[ch][(at-std::max(15,f.period)+j)&2047])*taps[f.taps][j];
+            float value=post[ch][(at-period)&2047]*taps[f.taps][0];
+            for (unsigned j=1;j<3;++j) value+=(post[ch][(at-period-j)&2047]+post[ch][(at-period+j)&2047])*taps[f.taps][j];
             return value*f.gain;
         };
-        for (unsigned i=0;i<n;++i) {
-            float value=result[i];
-            // Cross-fade between the previous/latest/current post-filter settings
-            // over the first two 120-sample halves of the frame.
-            if (i<120) { float mix=window[i]*window[i];value+=(1-mix)*contribution(previous,position+i)+mix*contribution(latest,position+i); }
-            else if (i<240) { float mix=window[i-120]*window[i-120];value+=(1-mix)*contribution(latest,position+i)+mix*contribution(filter,position+i); }
-            else value+=contribution(filter,position+i);
-            post[ch][(position+i)&2047]=result[i]=value;
+        const unsigned fadeEnd=std::min(n,120u);
+        for (unsigned i=0;i<fadeEnd;++i) {
+            const float mix=winSq[i];
+            const float value=wave[i]+(1-mix)*contribution(previous,prevPeriod,position+i)+mix*contribution(latest,latestPeriod,position+i);
+            post[ch][(position+i)&2047]=wave[i]=value;
+        }
+        const unsigned fade2End=std::min(n,240u);
+        for (unsigned i=120;i<fade2End;++i) {
+            const float mix=winSq[i-120];
+            const float value=wave[i]+(1-mix)*contribution(latest,latestPeriod,position+i)+mix*contribution(filter,curPeriod,position+i);
+            post[ch][(position+i)&2047]=wave[i]=value;
+        }
+        if (n>240) {
+            if (!filter.gain) {
+                unsigned at=(position+240)&2047,rem=n-240,head=std::min(rem,2048-at);
+                std::copy_n(wave+240,head,post[ch]+at);
+                if (rem>head) std::copy_n(wave+240+head,rem-head,post[ch]);
+            } else {
+                const float g0=taps[filter.taps][0]*filter.gain;
+                const float g1=taps[filter.taps][1]*filter.gain;
+                const float g2=taps[filter.taps][2]*filter.gain;
+                const __m128 vg0=_mm_set1_ps(g0),vg1=_mm_set1_ps(g1),vg2=_mm_set1_ps(g2);
+                float* p=post[ch];
+                unsigned i=240;
+                // curPeriod >= 15 ensures 4-wide reads from (at - curPeriod - 2 .. +5) never
+                // overlap writes to (at .. at + 3) inside any contiguous ring slice.
+                while (i+4<=n) {
+                    const uint32_t at=(position+i)&2047,src=(position+i-(uint32_t)curPeriod)&2047;
+                    if (src>=2 && src+5<2048 && at+4<=2048) {
+                        const __m128 p0=_mm_loadu_ps(p+src);
+                        const __m128 pm1=_mm_loadu_ps(p+src-1),pp1=_mm_loadu_ps(p+src+1);
+                        const __m128 pm2=_mm_loadu_ps(p+src-2),pp2=_mm_loadu_ps(p+src+2);
+                        __m128 v=_mm_add_ps(_mm_loadu_ps(wave+i),_mm_mul_ps(p0,vg0));
+                        v=_mm_add_ps(v,_mm_mul_ps(_mm_add_ps(pm1,pp1),vg1));
+                        v=_mm_add_ps(v,_mm_mul_ps(_mm_add_ps(pm2,pp2),vg2));
+                        _mm_storeu_ps(wave+i,v);
+                        _mm_storeu_ps(p+at,v);
+                        i+=4;
+                    } else {
+                        const uint32_t s=position+i;
+                        const float value=wave[i]+p[(s-curPeriod)&2047]*g0+
+                            (p[(s-curPeriod-1)&2047]+p[(s-curPeriod+1)&2047])*g1+
+                            (p[(s-curPeriod-2)&2047]+p[(s-curPeriod+2)&2047])*g2;
+                        p[s&2047]=wave[i]=value;
+                        ++i;
+                    }
+                }
+                for (;i<n;++i) {
+                    const uint32_t s=position+i;
+                    const float value=wave[i]+p[(s-curPeriod)&2047]*g0+
+                        (p[(s-curPeriod-1)&2047]+p[(s-curPeriod+1)&2047])*g1+
+                        (p[(s-curPeriod-2)&2047]+p[(s-curPeriod+2)&2047])*g2;
+                    p[s&2047]=wave[i]=value;
+                }
+            }
         }
     }
-    Deemphasis(filtered[0],filtered[1],n,deemphasis,out.data());
+    Deemphasis(wave_[0],wave_[1],n,deemphasis,out.data());
     // A short (transient) frame collapses the post-filter history to the current one.
     previous=latest;latest=filter;if (lm) previous=latest;
     position+=n;
 }
 
-OpusCelt::OpusCelt():impl_(std::make_unique<Impl>()) { (void)PulseCounts(); }  // build the combinadics once, off the decode path
+OpusCelt::OpusCelt():impl_(std::make_unique<Impl>()) { InitPulseCounts(); }  // build the combinadics once, off the decode path
 OpusCelt::~OpusCelt()=default;
 void OpusCelt::Reset() { impl_->Reset(); }
 std::shared_ptr<const OpusCelt::State> OpusCelt::Save() const { return std::make_shared<State>(*impl_); }

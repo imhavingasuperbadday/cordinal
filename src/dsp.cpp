@@ -711,107 +711,302 @@ void Reverb::Process(float* x, size_t frames) {
 }
 
 // ---------------------------------------------------------------------------
-// WSOLA. Output frame k * hop_ stands for input frame nominal_ at that time; nominal_ advances by
-// hop_ * tempo per segment. A segment's first half overlaps the previous segment's second half
-// (tail_), and the periodic Hann window sums to exactly 1 across that overlap.
+// Stereo-coherent phase-locked phase vocoder with transient phase reset.
+// 75% overlapping Hann windows (hop_ = fftSize_ / 4) give exact COLA unity gain (sum w^2 = 1.5).
+// Both channels are packed into one complex FFT (L + i*R) so each hop pays only one forward and
+// one inverse FFT. Spectral peaks are found on the combined stereo magnitude and rotated by the
+// dominant channel's phase advance; every bin in a peak's region of influence receives the exact
+// same complex rotation in both L and R, preserving stereo imaging and avoiding phasiness.
+
+namespace {
+inline float WrapPhase(float d) {
+    constexpr float kTwoPi = (float)(2.0 * kPi);
+    return d - std::nearbyintf(d * (1.0f / kTwoPi)) * kTwoPi;
+}
+
+void PackedFft(float* data, size_t n, const uint32_t* bitrev, const float* twiddles, bool inverse) {
+    for (size_t i = 0; i < n; ++i) {
+        size_t j = bitrev[i];
+        if (i < j) {
+            std::swap(data[i * 2], data[j * 2]);
+            std::swap(data[i * 2 + 1], data[j * 2 + 1]);
+        }
+    }
+    const float sign = inverse ? -1.0f : 1.0f;
+    size_t twOffset = 0;
+    for (size_t len = 2; len <= n; len <<= 1) {
+        const size_t half = len >> 1;
+        const float* tw = twiddles + twOffset * 2;
+        for (size_t i = 0; i < n; i += len) {
+            for (size_t k = 0; k < half; ++k) {
+                const float wr = tw[k * 2];
+                const float wi = tw[k * 2 + 1] * sign;
+                const size_t e = (i + k) * 2;
+                const size_t o = (i + k + half) * 2;
+                const float vr = data[o] * wr - data[o + 1] * wi;
+                const float vi = data[o] * wi + data[o + 1] * wr;
+                const float ur = data[e], ui = data[e + 1];
+                data[e] = ur + vr;
+                data[e + 1] = ui + vi;
+                data[o] = ur - vr;
+                data[o + 1] = ui - vi;
+            }
+        }
+        twOffset += half;
+    }
+}
+}  // namespace
 
 void TimeStretch::Configure(unsigned rate, double tempo) {
     tempo_ = std::isfinite(tempo) ? std::clamp(tempo, 0.25, 4.0) : 1.0;
-    hop_ = std::max<size_t>(64, rate / 50);
-    search_ = std::max<size_t>(16, rate / 100);
-    window_.resize(hop_ * 2);
-    for (size_t n = 0; n < window_.size(); ++n) window_[n] = (float)(0.5 - 0.5 * std::cos(kPi * n / hop_));
-    tail_.assign(hop_ * 2, 0.0f);
+    if (tempo_ == 1.0 || !rate) {
+        fftSize_ = hop_ = 0;
+        in_.clear(); win_.clear(); overlap_.clear();
+        mag_.clear(); prevMag_.clear();
+        prevAnaL_.clear(); prevAnaR_.clear(); prevSynL_.clear(); prevSynR_.clear();
+        fft_.clear(); specL_.clear(); specR_.clear(); twiddles_.clear();
+        bitrev_.clear(); peaks_.clear();
+        Reset();
+        return;
+    }
+    fftSize_ = rate <= 24000 ? 2048 : rate <= 64000 ? 4096 : rate <= 128000 ? 8192 : 16384;
+    hop_ = fftSize_ / 4;
+    const size_t bins = fftSize_ / 2 + 1;
+
+    win_.resize(fftSize_);
+    for (size_t n = 0; n < fftSize_; ++n)
+        win_[n] = (float)(0.5 - 0.5 * std::cos(2.0 * kPi * n / fftSize_));
+
+    bitrev_.resize(fftSize_);
+    unsigned bits = 0;
+    while ((size_t(1) << bits) < fftSize_) ++bits;
+    for (size_t i = 0; i < fftSize_; ++i) {
+        size_t r = 0, x = i;
+        for (unsigned b = 0; b < bits; ++b) { r = (r << 1) | (x & 1); x >>= 1; }
+        bitrev_[i] = (uint32_t)r;
+    }
+    twiddles_.resize((fftSize_ - 1) * 2);
+    size_t tw = 0;
+    for (size_t len = 2; len <= fftSize_; len <<= 1) {
+        const size_t half = len >> 1;
+        for (size_t k = 0; k < half; ++k) {
+            const double angle = -2.0 * kPi * k / len;
+            twiddles_[tw++] = (float)std::cos(angle);
+            twiddles_[tw++] = (float)std::sin(angle);
+        }
+    }
+
+    overlap_.assign(fftSize_ * 2, 0.0f);
+    mag_.assign(bins, 0.0f);
+    prevMag_.assign(bins, 0.0f);
+    prevAnaL_.assign(bins, 0.0f);
+    prevAnaR_.assign(bins, 0.0f);
+    prevSynL_.assign(bins, 0.0f);
+    prevSynR_.assign(bins, 0.0f);
+    fft_.assign(fftSize_ * 2, 0.0f);
+    specL_.assign(bins * 2, 0.0f);
+    specR_.assign(bins * 2, 0.0f);
+    peaks_.reserve(bins / 2);
     Reset();
 }
 
 void TimeStretch::Reset() {
     in_.clear();
-    base_ = prev_ = 0;
+    base_ = prevPos_ = totalIn_ = emitted_ = 0;
     nominal_ = 0;
-    primed_ = false;
-    std::fill(tail_.begin(), tail_.end(), 0.0f);
+    skipOut_ = fftSize_ / 2;
+    sinceTransient_ = 0;
+    fluxAvg_ = 0;
+    hasPrev_ = false;
+    std::fill(overlap_.begin(), overlap_.end(), 0.0f);
+    std::fill(prevMag_.begin(), prevMag_.end(), 0.0f);
+    std::fill(prevAnaL_.begin(), prevAnaL_.end(), 0.0f);
+    std::fill(prevAnaR_.begin(), prevAnaR_.end(), 0.0f);
+    std::fill(prevSynL_.begin(), prevSynL_.end(), 0.0f);
+    std::fill(prevSynR_.begin(), prevSynR_.end(), 0.0f);
 }
 
 double TimeStretch::PendingOutput() const {
     if (!Active()) return 0;
-    return std::max(0.0, ((double)base_ + in_.size() / 2 - nominal_) / tempo_);
+    return std::max(0.0, (double)totalIn_ / tempo_ - (double)emitted_);
 }
 
 void TimeStretch::Process(const float* in, size_t frames, std::vector<float>& out) {
     out.clear();
+    if (!fftSize_ || !frames) return;
     in_.insert(in_.end(), in, in + frames * 2);
-    Run(out);
+    totalIn_ += frames;
+    Run(out, false);
 }
 
 void TimeStretch::Flush(std::vector<float>& out) {
-    if (!hop_ || (in_.empty() && !primed_)) return Reset();
-    const double end = (double)base_ + in_.size() / 2;
-    in_.resize(in_.size() + (hop_ + search_ + 1) * 4, 0.0f);  // enough silence to pass the end
+    if (!fftSize_ || !totalIn_) return Reset();
+    const uint64_t target = (uint64_t)std::llround((double)totalIn_ / tempo_);
     std::vector<float> more;
-    Run(more);
-    // What was made from the padding past the end is cut, so the output length matches the input.
-    const size_t extra = (size_t)std::clamp(std::llround((nominal_ - end) / tempo_), 0ll, (long long)more.size() / 2);
-    out.insert(out.end(), more.begin(), more.end() - (ptrdiff_t)extra * 2);
+    Run(more, true);
+    while (emitted_ < target) {
+        const uint64_t pos = (uint64_t)std::llround(nominal_);
+        Step(pos, more);
+        prevPos_ = pos;
+        nominal_ += (double)hop_ * tempo_;
+    }
+    if (emitted_ > target) {
+        const size_t trim = std::min<size_t>(more.size() / 2, (size_t)(emitted_ - target));
+        more.resize(more.size() - trim * 2);
+    }
+    out.insert(out.end(), more.begin(), more.end());
     Reset();
 }
 
-void TimeStretch::Run(std::vector<float>& out) {
-    if (!hop_) return;
-    const size_t length = hop_ * 2;
-    for (;;) {
-        const uint64_t end = base_ + in_.size() / 2;
-        const uint64_t center = (uint64_t)std::llround(nominal_);
-        if (center + (primed_ ? search_ : 0) + length > end) break;
-        uint64_t best = std::max<uint64_t>(center, base_);
-        if (primed_) {
-            // The candidate whose start best matches how the previous segment would have gone on
-            // (normalised cross-correlation on the mono mix): coarsely every other frame, then refined.
-            const uint64_t lo = std::max<uint64_t>(base_, center > search_ ? center - search_ : 0), hi = center + search_;
-            const uint64_t target = prev_ + hop_;
-            mono_.resize((size_t)(end - base_));
-            for (uint64_t f = std::min(lo, target); f < end; ++f) {
-                const float* p = &in_[(size_t)(f - base_) * 2];
-                mono_[(size_t)(f - base_)] = p[0] + p[1];
+void TimeStretch::Step(uint64_t pos, std::vector<float>& out) {
+    const size_t N = fftSize_, half = N / 2, bins = half + 1;
+    const uint64_t end = base_ + in_.size() / 2;
+    for (size_t n = 0; n < N; ++n) {
+        const int64_t idx = (int64_t)pos - (int64_t)half + (int64_t)n;
+        float l = 0, r = 0;
+        if (idx >= (int64_t)base_ && (uint64_t)idx < end) {
+            const size_t off = (size_t)((uint64_t)idx - base_) * 2;
+            l = in_[off];
+            r = in_[off + 1];
+        }
+        const float w = win_[n];
+        fft_[n * 2] = l * w;
+        fft_[n * 2 + 1] = r * w;
+    }
+
+    PackedFft(fft_.data(), N, bitrev_.data(), twiddles_.data(), false);
+
+    specL_[0] = fft_[0]; specL_[1] = 0;
+    specR_[0] = fft_[1]; specR_[1] = 0;
+    specL_[half * 2] = fft_[half * 2]; specL_[half * 2 + 1] = 0;
+    specR_[half * 2] = fft_[half * 2 + 1]; specR_[half * 2 + 1] = 0;
+    for (size_t k = 1; k < half; ++k) {
+        const float a0 = fft_[k * 2], a1 = fft_[k * 2 + 1];
+        const float b0 = fft_[(N - k) * 2], b1 = fft_[(N - k) * 2 + 1];
+        specL_[k * 2] = 0.5f * (a0 + b0);
+        specL_[k * 2 + 1] = 0.5f * (a1 - b1);
+        specR_[k * 2] = 0.5f * (a1 + b1);
+        specR_[k * 2 + 1] = 0.5f * (b0 - a0);
+    }
+
+    float flux = 0, energy = 0;
+    for (size_t k = 0; k < bins; ++k) {
+        const float ml = std::hypot(specL_[k * 2], specL_[k * 2 + 1]);
+        const float mr = std::hypot(specR_[k * 2], specR_[k * 2 + 1]);
+        const float m = ml + mr;
+        mag_[k] = m;
+        if (k > 0) {
+            const float diff = m - prevMag_[k];
+            if (diff > 0) flux += (float)k * diff;
+            energy += (float)k * m;
+        }
+    }
+    const bool isTransient =
+        hasPrev_ && sinceTransient_ >= 3 && energy > 1e-4f * (float)N && flux > 2.8f * fluxAvg_ && flux > 0.01f * energy;
+    fluxAvg_ = hasPrev_ ? 0.85f * fluxAvg_ + 0.15f * flux : flux;
+
+    if (!hasPrev_ || isTransient) {
+        if (isTransient) sinceTransient_ = 0;
+        for (size_t k = 0; k < bins; ++k) {
+            prevAnaL_[k] = prevSynL_[k] = std::atan2(specL_[k * 2 + 1], specL_[k * 2]);
+            prevAnaR_[k] = prevSynR_[k] = std::atan2(specR_[k * 2 + 1], specR_[k * 2]);
+        }
+        hasPrev_ = true;
+    } else {
+        ++sinceTransient_;
+        const float dt = (float)(pos - prevPos_);
+        const float invN = (float)(2.0 * kPi / N);
+        peaks_.clear();
+        for (size_t k = 1; k + 1 < bins; ++k) {
+            if (mag_[k] > 0 && mag_[k] >= mag_[k - 1] && mag_[k] >= mag_[k + 1])
+                peaks_.push_back((uint16_t)k);
+        }
+        for (size_t idx = 0; idx < peaks_.size(); ++idx) {
+            const size_t p = peaks_[idx];
+            const size_t lo = idx == 0 ? 1 : (peaks_[idx - 1] + p + 1) / 2;
+            const size_t hi = idx + 1 == peaks_.size() ? bins - 1 : (p + peaks_[idx + 1] + 1) / 2;
+            const float pL = specL_[p * 2] * specL_[p * 2] + specL_[p * 2 + 1] * specL_[p * 2 + 1];
+            const float pR = specR_[p * 2] * specR_[p * 2] + specR_[p * 2 + 1] * specR_[p * 2 + 1];
+            const bool useL = pL >= pR;
+            const float anaP = useL ? std::atan2(specL_[p * 2 + 1], specL_[p * 2])
+                                    : std::atan2(specR_[p * 2 + 1], specR_[p * 2]);
+            const float prevAnaP = useL ? prevAnaL_[p] : prevAnaR_[p];
+            const float prevSynP = useL ? prevSynL_[p] : prevSynR_[p];
+            float synP = prevSynP;
+            if (dt > 0) {
+                const float expected = invN * (float)p * dt;
+                const float dev = WrapPhase(anaP - prevAnaP - expected);
+                const float omega = invN * (float)p + dev / dt;
+                synP = WrapPhase(prevSynP + omega * (float)hop_);
             }
-            const float* t = &mono_[(size_t)(target - base_)];
-            auto score = [&](uint64_t c, size_t stride) {
-                const float* m = &mono_[(size_t)(c - base_)];
-                double dot = 0, energy = 1e-9;
-                for (size_t n = 0; n < hop_; n += stride) {
-                    dot += (double)m[n] * t[n];
-                    energy += (double)m[n] * m[n];
-                }
-                return dot / std::sqrt(energy);
-            };
-            double top = -1e300;
-            for (uint64_t c = lo; c <= hi; c += 2) {
-                const double v = score(c, 2);
-                if (v > top) { top = v; best = c; }
-            }
-            const uint64_t coarse = best;
-            top = -1e300;
-            for (uint64_t c = coarse > lo ? coarse - 1 : lo; c <= std::min(hi, coarse + 1); ++c) {
-                const double v = score(c, 1);
-                if (v > top) { top = v; best = c; }
+            const float theta = synP - anaP;
+            const float rotRe = std::cos(theta), rotIm = std::sin(theta);
+            for (size_t k = lo; k < hi; ++k) {
+                const float lr = specL_[k * 2], li = specL_[k * 2 + 1];
+                const float rr = specR_[k * 2], ri = specR_[k * 2 + 1];
+                const float aL = std::atan2(li, lr), aR = std::atan2(ri, rr);
+                prevAnaL_[k] = aL;
+                prevAnaR_[k] = aR;
+                prevSynL_[k] = WrapPhase(aL + theta);
+                prevSynR_[k] = WrapPhase(aR + theta);
+                specL_[k * 2] = lr * rotRe - li * rotIm;
+                specL_[k * 2 + 1] = lr * rotIm + li * rotRe;
+                specR_[k * 2] = rr * rotRe - ri * rotIm;
+                specR_[k * 2 + 1] = rr * rotIm + ri * rotRe;
             }
         }
-        const float* x = &in_[(size_t)(best - base_) * 2];
-        const size_t at = out.size();
-        out.resize(at + hop_ * 2);
-        for (size_t n = 0; n < hop_; ++n)
-            for (int ch = 0; ch < 2; ++ch) {
-                out[at + n * 2 + ch] = tail_[n * 2 + ch] + (primed_ ? window_[n] : 1.0f) * x[n * 2 + ch];
-                tail_[n * 2 + ch] = window_[n + hop_] * x[(n + hop_) * 2 + ch];
-            }
-        prev_ = best;
-        nominal_ += hop_ * tempo_;
-        primed_ = true;
     }
-    // Keep what the next search can reach and the previous segment's continuation.
-    const double reach = std::floor(nominal_) - (double)search_;
-    uint64_t keep = primed_ ? std::min<uint64_t>(prev_ + hop_, reach > 0 ? (uint64_t)reach : 0) : (uint64_t)std::floor(nominal_);
-    keep = std::clamp<uint64_t>(keep, base_, base_ + in_.size() / 2);
+    std::copy(mag_.begin(), mag_.end(), prevMag_.begin());
+
+    fft_[0] = specL_[0];
+    fft_[1] = specR_[0];
+    fft_[half * 2] = specL_[half * 2];
+    fft_[half * 2 + 1] = specR_[half * 2];
+    for (size_t k = 1; k < half; ++k) {
+        const float lr = specL_[k * 2], li = specL_[k * 2 + 1];
+        const float rr = specR_[k * 2], ri = specR_[k * 2 + 1];
+        fft_[k * 2] = lr - ri;
+        fft_[k * 2 + 1] = li + rr;
+        fft_[(N - k) * 2] = lr + ri;
+        fft_[(N - k) * 2 + 1] = rr - li;
+    }
+
+    PackedFft(fft_.data(), N, bitrev_.data(), twiddles_.data(), true);
+
+    const float norm = 1.0f / (1.5f * (float)N);
+    for (size_t n = 0; n < N; ++n) {
+        const float s = win_[n] * norm;
+        overlap_[n * 2] += fft_[n * 2] * s;
+        overlap_[n * 2 + 1] += fft_[n * 2 + 1] * s;
+    }
+
+    if (skipOut_ >= hop_) {
+        skipOut_ -= hop_;
+    } else {
+        const size_t start = skipOut_;
+        skipOut_ = 0;
+        const size_t emit = hop_ - start;
+        out.insert(out.end(), overlap_.begin() + (ptrdiff_t)start * 2, overlap_.begin() + (ptrdiff_t)hop_ * 2);
+        emitted_ += emit;
+    }
+    std::move(overlap_.begin() + (ptrdiff_t)hop_ * 2, overlap_.end(), overlap_.begin());
+    std::fill(overlap_.end() - (ptrdiff_t)hop_ * 2, overlap_.end(), 0.0f);
+}
+
+void TimeStretch::Run(std::vector<float>& out, bool flushing) {
+    if (!fftSize_) return;
+    const size_t half = fftSize_ / 2;
+    const uint64_t end = base_ + in_.size() / 2;
+    for (;;) {
+        const uint64_t pos = (uint64_t)std::llround(nominal_);
+        if (!flushing && pos + half > end) break;
+        if (flushing && pos > totalIn_ + half) break;
+        Step(pos, out);
+        prevPos_ = pos;
+        nominal_ += (double)hop_ * tempo_;
+    }
+    const int64_t nextNeeded = (int64_t)std::llround(nominal_) - (int64_t)half;
+    const uint64_t keep = std::clamp<uint64_t>(nextNeeded > 0 ? (uint64_t)nextNeeded : 0, base_, end);
     in_.erase(in_.begin(), in_.begin() + (ptrdiff_t)(keep - base_) * 2);
     base_ = keep;
 }

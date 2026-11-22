@@ -19,12 +19,26 @@ unsigned Log(unsigned n) { return n?31-std::countl_zero(n):0; }
 constexpr double pi=3.14159265358979323846;
 // A run/level codebook: prefix codewords plus, per codeword length, the number of symbols
 // at that length. Built from the raw table at first use.
+// fastSigned[1024] resolves symbols <= 9 bits together with their sign bit in one load:
+// bits 0..3 = total bits (1..10), bits 4..15 = run, bits 16..31 = signed int16 level (0 = EOB).
 struct Codebook {
     PrefixBook prefix;
     std::vector<uint16_t> run,level;
+    std::array<uint32_t,1024> fastSigned{};
     Codebook(std::span<const uint16_t> codes,std::span<const uint16_t> counts):prefix(codes),run(codes.size()),level(codes.size()) {
         size_t at=2;
         for (unsigned l=0;l<counts.size();++l) for (unsigned r=0;r<counts[l];++r) { run[at]=(uint16_t)r; level[at++]=(uint16_t)(l+1); }
+        for (unsigned p=0;p<1024;++p) {
+            int node=0; unsigned n=0;
+            while (n<10 && node>=0) node=prefix.nodes[node].child[(p>>(9-n++))&1];
+            if (node>=0) continue;
+            unsigned sym=(unsigned)(-node-1);
+            if (sym==1) { fastSigned[p]=n; continue; }
+            if (sym>=2 && n<=9 && run[sym]<4096) {
+                int s=(p>>(9-n))&1?(int)level[sym]:-(int)level[sym];
+                fastSigned[p]=(uint32_t(uint16_t(int16_t(s)))<<16)|(uint32_t(run[sym])<<4)|(n+1);
+            }
+        }
     }
 };
 const std::array<Codebook,6>& Codebooks() {
@@ -50,12 +64,19 @@ struct BitString {
     size_t bits=0;
     bool Append(Bits& input,size_t count) {
         if (count>input.Left() || bits+count>1024*1024*8) return false;
-        while (count) {
+        if (bits&7) {
             unsigned take=(unsigned)std::min<size_t>(count,8-(bits&7));
-            if (!(bits&7)) bytes.push_back(0);
             bytes.back()|=(uint8_t)(input.Get(take)<<(8-(bits&7)-take));
             bits+=take; count-=take;
         }
+        while (count>=32) {
+            uint32_t w=(uint32_t)input.Get(32);
+            size_t at=bytes.size(); bytes.resize(at+4);
+            bytes[at]=(uint8_t)(w>>24); bytes[at+1]=(uint8_t)(w>>16); bytes[at+2]=(uint8_t)(w>>8); bytes[at+3]=(uint8_t)w;
+            bits+=32; count-=32;
+        }
+        while (count>=8) { bytes.push_back((uint8_t)input.Get(8)); bits+=8; count-=8; }
+        if (count) { bytes.push_back((uint8_t)(input.Get((unsigned)count)<<(8-count))); bits+=count; }
         return input.Good();
     }
     void Clear() { bytes.clear(); bits=0; }
@@ -64,6 +85,7 @@ struct BitString {
 struct Block {
     std::vector<unsigned> bands,highBands;
     std::vector<float> window;
+    std::vector<double> lspCos;
     Mdct mdct;
     unsigned end=0,high=0;
 };
@@ -142,9 +164,13 @@ public:
                 bin+=width;
             }
             block.window.resize(n); for (unsigned i=0;i<n;++i) block.window[i]=(float)std::sin(pi*(i+0.5)/(2*n));
+            if (!exponentVlc_) { block.lspCos.resize(n); for (unsigned i=0;i<n;++i) block.lspCos[i]=2*std::cos(pi*i/n); }
             block.mdct.Init(n*2);
         }
         for (auto& c:channel_) { c.exponent.resize(frame_); c.history.resize(frame_*2); }
+        for (auto& v:spectrum_) v.resize(frame_);
+        for (auto& v:quant_) v.resize(frame_);
+        dct_.resize(frame_);
         // With a bit reservoir the packet's first nibble encodes how many frames it holds.
         media_.frames=0; bool previous=false;
         for (size_t i=0;i<media_.packets.size();++i) {
@@ -219,66 +245,128 @@ private:
             float points[10];
             for (unsigned i=0;i<10;++i) points[i]=w::lsp[i][(size_t)bits.Get(i==0 || i>=8?3:4)];
             c.maxExponent=0;
+            const double* cosTab=blocks_[block].lspCos.data();
             for (unsigned i=0;i<n;++i) {
-                double angle=2*std::cos(pi*i/n),p=0.5,q=0.5;
+                double angle=cosTab[i],p=0.5,q=0.5;
                 for (unsigned j=0;j<10;j+=2) { p*=angle-points[j+1]; q*=angle-points[j]; }
                 double power=p*p*(2-angle)+q*q*(2+angle);
                 if (power<=0) return false;
-                c.exponent[i]=(float)std::pow(power,-0.25); c.maxExponent=std::max(c.maxExponent,c.exponent[i]);
+                c.exponent[i]=(float)(1.0/std::sqrt(std::sqrt(power))); c.maxExponent=std::max(c.maxExponent,c.exponent[i]);
             }
         }
         c.exponentSize=block; c.initialized=true;
         return bits.Good() && Finite(c.maxExponent) && c.maxExponent>0;
     }
     // Run/level codewords for one channel; a symbol of 1 terminates the list early.
-    bool Levels(Bits& bits,std::vector<float>& values,unsigned count,unsigned escapeBits,unsigned which) {
-        const auto& table=Codebooks()[which]; unsigned at=0;
-        while (at<count && bits.Good()) {
-            unsigned symbol=table.prefix.Read(bits); if (symbol==1) return true;
-            unsigned run,level;
-            if (!symbol) { level=(unsigned)bits.Get(escapeBits); run=(unsigned)bits.Get(frameBits_); }
-            else { run=table.run[symbol]; level=table.level[symbol]; }
-            if (run>=count-at) return false;
-            // The sign bit is random, so set it arithmetically instead of branching on it.
-            at+=run; values[at++]=std::bit_cast<float>(std::bit_cast<uint32_t>((float)level)^uint32_t(bits.Get(1)^1)<<31);
+    bool Levels(Bits& bits,float* values,unsigned count,unsigned escapeBits,unsigned which) {
+        const auto& table=Codebooks()[which];
+        const uint32_t* fastSigned=table.fastSigned.data();
+        const PrefixBook& prefix=table.prefix;
+        FastBits::Tail tail;
+        FastBits f(bits);
+        unsigned at=0;
+        while (at<count) {
+            if (!f.Safe() && !f.Pad(tail)) return false;
+            f.Refill();
+            uint32_t entry=fastSigned[f.Peek(10)];
+            if (entry) {
+                f.Drop(entry&15);
+                int32_t signedLevel=int32_t(entry)>>16;
+                if (!signedLevel) return f.Commit();
+                at+=(entry>>4)&4095;
+                if (at>=count) return false;
+                values[at++]=(float)signedLevel;
+            } else {
+                unsigned v=prefix.fast[f.Peek(PrefixBook::lookupBits)];
+                unsigned symbol;
+                if (v&31) { f.Drop(v&31); symbol=v>>5; }
+                else {
+                    f.Drop(PrefixBook::lookupBits); int node=(int)(v>>5);
+                    for (int i=0;i<31;++i) {
+                        node=prefix.nodes[node].child[f.Get(1)];
+                        if (node<0) { symbol=(unsigned)(-node-1); goto resolved; }
+                        if (!node) return false;
+                    }
+                    return false;
+                }
+            resolved:
+                if (symbol==1) return f.Commit();
+                f.Refill();
+                unsigned run,level;
+                if (!symbol) { level=f.Get(escapeBits); run=f.Get(frameBits_); }
+                else { run=table.run[symbol]; level=table.level[symbol]; }
+                if (run>=count-at) return false;
+                at+=run;
+                values[at++]=std::bit_cast<float>(std::bit_cast<uint32_t>((float)level)^(f.Get(1)^1u)<<31);
+            }
         }
-        return bits.Good();
+        return f.Commit();
     }
-    // Transform one block and overlap-add it. Neighbouring sizes change how the window is
-    // substituted at the edges, letting long and short blocks butt against each other.
-    // A smaller neighbour narrows the slope to its own window, centred, with the block's
-    // outer part zero and its inner part unit weight; each region is a separate loop.
-    void Overlap(unsigned ch,const std::vector<float>& spectrum,unsigned position) {
+    // Transform one block and overlap-add it directly from DCT-IV output, skipping the full
+    // time-domain Reorder copy. Neighbouring sizes change how the window is substituted at edges.
+    void Overlap(unsigned ch,const float* spectrum,unsigned position) {
         const unsigned n=frame_>>current_,prev=frame_>>previous_,next=frame_>>next_;
-        wave_.resize(n*2); blocks_[current_].mdct.Run(spectrum.data(),wave_.data());
+        const unsigned q=n/2;
+        blocks_[current_].mdct.Dct(spectrum,dct_.data());
+        const float* dct=dct_.data();
         float* h=channel_[ch].history.data()+frame_/2+position-n/2;
-        const float* w=wave_.data();
-        auto add=[](float* h,const float* w,unsigned count) {
-            for (unsigned i=0;i<count;i+=4) _mm_storeu_ps(h+i,_mm_add_ps(_mm_loadu_ps(h+i),_mm_loadu_ps(w+i)));
+        const __m128 sign=_mm_set1_ps(-0.0f);
+        auto add=[](float* dst,const float* src,unsigned count) {
+            for (unsigned i=0;i<count;i+=4) _mm_storeu_ps(dst+i,_mm_add_ps(_mm_loadu_ps(dst+i),_mm_loadu_ps(src+i)));
         };
-        // h[i] += w[i]*window[i], or with the window read backwards from window[last].
-        auto weigh=[](float* h,const float* w,const float* window,unsigned count) {
-            for (unsigned i=0;i<count;i+=4)
-                _mm_storeu_ps(h+i,_mm_add_ps(_mm_loadu_ps(h+i),_mm_mul_ps(_mm_loadu_ps(w+i),_mm_loadu_ps(window+i))));
-        };
-        auto weighBack=[](float* h,const float* w,const float* last,unsigned count) {
+        auto addNegRev=[&](float* dst,const float* srcLast,unsigned count) {
             for (unsigned i=0;i<count;i+=4) {
-                __m128 v=_mm_loadu_ps(last-3-i);
-                _mm_storeu_ps(h+i,_mm_add_ps(_mm_loadu_ps(h+i),_mm_mul_ps(_mm_loadu_ps(w+i),_mm_shuffle_ps(v,v,0x1B))));
+                __m128 v=_mm_loadu_ps(srcLast-3-i);
+                _mm_storeu_ps(dst+i,_mm_add_ps(_mm_loadu_ps(dst+i),_mm_xor_ps(_mm_shuffle_ps(v,v,0x1B),sign)));
             }
         };
-        if (prev>=n) weigh(h,w,blocks_[current_].window.data(),n);
-        else {
-            unsigned pad=(n-prev)/2;
-            weigh(h+pad,w+pad,blocks_[previous_].window.data(),prev);
-            add(h+pad+prev,w+pad+prev,n-pad-prev);
+        auto weigh=[](float* dst,const float* src,const float* window,unsigned count) {
+            for (unsigned i=0;i<count;i+=4)
+                _mm_storeu_ps(dst+i,_mm_add_ps(_mm_loadu_ps(dst+i),_mm_mul_ps(_mm_loadu_ps(src+i),_mm_loadu_ps(window+i))));
+        };
+        auto weighNegRev=[&](float* dst,const float* srcLast,const float* window,unsigned count) {
+            for (unsigned i=0;i<count;i+=4) {
+                __m128 v=_mm_xor_ps(_mm_shuffle_ps(_mm_loadu_ps(srcLast-3-i),_mm_loadu_ps(srcLast-3-i),0x1B),sign);
+                _mm_storeu_ps(dst+i,_mm_add_ps(_mm_loadu_ps(dst+i),_mm_mul_ps(v,_mm_loadu_ps(window+i))));
+            }
+        };
+        auto weighNegRevWinBack=[&](float* dst,const float* srcLast,const float* winLast,unsigned count) {
+            for (unsigned i=0;i<count;i+=4) {
+                __m128 v=_mm_xor_ps(_mm_shuffle_ps(_mm_loadu_ps(srcLast-3-i),_mm_loadu_ps(srcLast-3-i),0x1B),sign);
+                __m128 win=_mm_shuffle_ps(_mm_loadu_ps(winLast-3-i),_mm_loadu_ps(winLast-3-i),0x1B);
+                _mm_storeu_ps(dst+i,_mm_add_ps(_mm_loadu_ps(dst+i),_mm_mul_ps(v,win)));
+            }
+        };
+        auto weighNegWinBack=[&](float* dst,const float* src,const float* winLast,unsigned count) {
+            for (unsigned i=0;i<count;i+=4) {
+                __m128 v=_mm_xor_ps(_mm_loadu_ps(src+i),sign);
+                __m128 win=_mm_shuffle_ps(_mm_loadu_ps(winLast-3-i),_mm_loadu_ps(winLast-3-i),0x1B);
+                _mm_storeu_ps(dst+i,_mm_add_ps(_mm_loadu_ps(dst+i),_mm_mul_ps(v,win)));
+            }
+        };
+        // First half of time block: [0..q) = dct[q..2q), [q..2q) = -dct[2q-1..q].
+        const float* win=blocks_[current_].window.data();
+        if (prev>=n) {
+            weigh(h,dct+q,win,q);
+            weighNegRev(h+q,dct+2*q-1,win+q,q);
+        } else {
+            unsigned pad=(n-prev)/2,half=prev/2;
+            const float* pwin=blocks_[previous_].window.data();
+            weigh(h+pad,dct+q+pad,pwin,half);
+            weighNegRev(h+q,dct+2*q-1,pwin+half,half);
+            addNegRev(h+q+half,dct+2*q-1-half,q-half);
         }
-        h+=n;w+=n;
-        if (next>=n) weighBack(h,w,blocks_[current_].window.data()+n-1,n);
-        else {
-            unsigned pad=(n-next)/2;
-            add(h,w,pad);
-            weighBack(h+pad,w+pad,blocks_[next_].window.data()+next-1,next);
+        // Second half of time block: [0..q) = -dct[q-1..0], [q..2q) = -dct[0..q).
+        h+=n;
+        if (next>=n) {
+            weighNegRevWinBack(h,dct+q-1,win+n-1,q);
+            weighNegWinBack(h+q,dct,win+q-1,q);
+        } else {
+            unsigned pad=(n-next)/2,half=next/2;
+            const float* nwin=blocks_[next_].window.data();
+            addNegRev(h,dct+q-1,pad);
+            weighNegRevWinBack(h+pad,dct+q-1-pad,nwin+next-1,half);
+            weighNegWinBack(h+q,dct,nwin+half-1,half);
         }
     }
     // Decode one frame as a sequence of transform blocks, then shift the overlap history.
@@ -298,7 +386,7 @@ private:
             for (unsigned ch=0;ch<channels_;++ch) coded[ch]=bits.Get(1)!=0;
             // These buffers are scratch, not packet history. Keep their storage across
             // blocks while resetting every coefficient before decoding the next block.
-            auto& spectrum=spectrum_; for (auto& v:spectrum) v.assign(n,0);
+            auto& spectrum=spectrum_;
             if (coded[0] || coded[1]) {
                 unsigned gain=1,part;
                 do { part=(unsigned)bits.Get(7); gain+=part; if (!bits.Good() || gain>512) return false; } while (part==127);
@@ -322,14 +410,18 @@ private:
                 }
                 bool fresh=current_==0 || bits.Get(1);
                 for (unsigned ch=0;ch<channels_;++ch) if (coded[ch] && fresh && !Exponents(bits,ch,current_)) return false;
-                auto& quant=quant_; for (auto& v:quant) v.assign(n,0);
+                auto& quant=quant_;
                 for (unsigned ch=0;ch<channels_;++ch) {
-                    if (coded[ch] && (!channel_[ch].initialized || !Levels(bits,quant[ch],count[ch],escape,book_+unsigned(ch==1 && midSide)))) return false;
+                    if (coded[ch]) {
+                        memset(quant[ch].data(),0,count[ch]*sizeof(float));
+                        if (!channel_[ch].initialized || !Levels(bits,quant[ch].data(),count[ch],escape,book_+unsigned(ch==1 && midSide))) return false;
+                    }
                     if (version_==1 && channels_==2) bits.Align();
                 }
                 double norm=-(version_==1?std::sqrt(n/2.0):1)*(2.0/n)/32768;
                 double gainPower=std::pow(10.0,gain/20.0);
-                for (unsigned ch=0;ch<channels_;++ch) if (coded[ch]) {
+                for (unsigned ch=0;ch<channels_;++ch) {
+                    if (!coded[ch]) { memset(spectrum[ch].data(),0,n*sizeof(float)); continue; }
                     auto& c=channel_[ch];
                     auto envelope=[&](unsigned i) { return c.exponent[(i<<current_)>>c.exponentSize]; };
                     float scale=(float)(gainPower*norm/c.maxExponent);
@@ -358,16 +450,37 @@ private:
                     } else if (current_==c.exponentSize) {
                         // The envelope was coded at this block size, so it maps bin for bin.
                         const float* e=c.exponent.data();const float* v=quant[ch].data();float* s=spectrum[ch].data();
-                        for (unsigned i=start;i<end;++i) s[i]=v[i-start]*e[i]*scale;
-                    } else for (unsigned i=start;i<end;++i) spectrum[ch][i]=quant[ch][q++]*envelope(i)*scale;
+                        if (start) memset(s,0,start*sizeof(float));
+                        const __m128 vs=_mm_set1_ps(scale);
+                        unsigned i=start;
+                        for (;i+4<=end;i+=4)
+                            _mm_storeu_ps(s+i,_mm_mul_ps(_mm_mul_ps(_mm_loadu_ps(v+i-start),_mm_loadu_ps(e+i)),vs));
+                        for (;i<end;++i) s[i]=v[i-start]*e[i]*scale;
+                        memset(s+end,0,(n-end)*sizeof(float));
+                    } else {
+                        float* s=spectrum[ch].data();
+                        if (start) memset(s,0,start*sizeof(float));
+                        for (unsigned i=start;i<end;++i) s[i]=quant[ch][q++]*envelope(i)*scale;
+                        memset(s+end,0,(n-end)*sizeof(float));
+                    }
                 }
                 if (midSide) {
-                    if (coded[1]) for (unsigned i=0;i<n;++i) { float l=spectrum[0][i],r=spectrum[1][i]; spectrum[0][i]=l+r; spectrum[1][i]=l-r; }
-                    else spectrum[1]=spectrum[0];
+                    if (coded[1]) {
+                        float* l=spectrum[0].data(); float* r=spectrum[1].data();
+                        unsigned i=0;
+                        for (;i+4<=n;i+=4) {
+                            __m128 a=_mm_loadu_ps(l+i),b=_mm_loadu_ps(r+i);
+                            _mm_storeu_ps(l+i,_mm_add_ps(a,b));
+                            _mm_storeu_ps(r+i,_mm_sub_ps(a,b));
+                        }
+                        for (;i<n;++i) { float a=l[i],b=r[i]; l[i]=a+b; r[i]=a-b; }
+                    } else memcpy(spectrum[1].data(),spectrum[0].data(),n*sizeof(float));
                 }
+                if (!bits.Good()) return false;
+                for (unsigned ch=0;ch<channels_;++ch) Overlap(ch,spectrum[ch].data(),position);
+            } else {
+                if (!bits.Good()) return false;
             }
-            if (!bits.Good()) return false;
-            for (unsigned ch=0;ch<channels_;++ch) Overlap(ch,spectrum[ch],position);
             position+=n;
         }
         size_t at=out.size(); out.resize(at+frame_*2);
@@ -378,7 +491,11 @@ private:
             _mm_storeu_ps(o+i*2,_mm_unpacklo_ps(l,r));_mm_storeu_ps(o+i*2+4,_mm_unpackhi_ps(l,r));
         }
         if (!AllFinite(o,frame_*2)) return false;
-        for (auto& c:channel_) { std::copy(c.history.begin()+frame_,c.history.end(),c.history.begin()); std::fill(c.history.begin()+frame_,c.history.end(),0.0f); }
+        for (unsigned ch=0;ch<channels_;++ch) {
+            float* h=channel_[ch].history.data();
+            memcpy(h,h+frame_,frame_*sizeof(float));
+            memset(h+frame_,0,frame_*sizeof(float));
+        }
         return true;
     }
     // Empty input flushes the final overlap. With a reservoir, the current packet's bytes
@@ -409,7 +526,7 @@ private:
     unsigned noisePosition_=0; uint32_t noiseSeed_=1;
     std::vector<Block> blocks_;
     Channel channel_[2];
-    std::vector<float> wave_,spectrum_[2],quant_[2];
+    std::vector<float> dct_,spectrum_[2],quant_[2];
     BitString carry_;
 };
 } // namespace

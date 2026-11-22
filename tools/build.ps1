@@ -256,9 +256,10 @@ $common += $themeDefine
 $size = @('/O1', '/Oi', '/Gy', '/Gw', '/D_USE_STD_VECTOR_ALGORITHMS=0')
 $hot = @('/O2', '/Ob3', '/Oi', '/Gy', '/Gw', '/D_USE_STD_VECTOR_ALGORITHMS=0')
 $unicode = @('/DUNICODE', '/D_UNICODE')
-$slowCodecs = @('audio_pcm', 'audio_ac3', 'audio_wma', 'cord_encode')
+$slowCodecs = @('audio_pcm', 'cord_encode')
 $hotCodecs = @('audio_flac', 'audio_mpeg', 'audio_alac', 'audio_aac', 'audio_resample', 'engine', 'audio_cord',
-    'audio_vorbis', 'audio_wavpack', 'audio_opus_celt', 'audio_tta', 'audio_opus_silk', 'audio_ape')
+    'audio_vorbis', 'audio_wavpack', 'audio_opus_celt', 'audio_tta', 'audio_opus_silk', 'audio_ape',
+    'audio_ac3', 'audio_wma')
 
 $groups = [ordered]@{}
 function Add-Group([string]$Name, [string]$ObjSubdir, [string[]]$Flags, $Sources) {
@@ -281,26 +282,30 @@ $plainApp = @($appSources | Where-Object {
 # keeps unwinding anyway. The group links last, so a template that code with unwinding also uses keeps
 # the copy that unwinds. CORDINAL_UNWIND_ALL=1 builds every file with unwinding, the checker's baseline.
 $noUnwindNames = @(
-    'album_editions_edit', 'album_editions_title', 'album_maker', 'app', 'app_albummaker', 'app_apollo',
-    'app_art', 'app_artistinfo', 'app_autoplaylist', 'app_badges', 'app_big', 'app_browser', 'app_columns',
-    'app_commands', 'app_controls', 'app_convert', 'app_copy', 'app_coverfetch', 'app_custom',
-    'app_deltarune', 'app_dialogs', 'app_editions', 'app_eq', 'app_foobar', 'app_format', 'app_fountain',
-    'app_groups', 'app_headphones', 'app_helpers', 'app_import', 'app_layout', 'app_library',
-    'app_lifecycle', 'app_lightweight', 'app_lyrics', 'app_menus', 'app_mini', 'app_organize',
-    'app_packfiles', 'app_packs', 'app_palette', 'app_panels', 'app_playlists', 'app_points',
-    'app_preferences', 'app_recent', 'app_review', 'app_settings', 'app_sizes', 'app_spots', 'app_tabs',
-    'app_tabstrip', 'app_taskbar', 'app_toast', 'app_tray', 'app_tweaks', 'app_ui', 'app_ui_controls',
-    'app_ui_menu', 'app_ui_trackbar', 'app_waveform', 'app_window', 'app_workers', 'art',
-    'asio_output', 'audio_kernels', 'audio_live', 'convert', 'cord_export', 'cover_fade', 'coverfetch',
-    'coverupload', 'crashdump', 'delayload', 'devicecopy', 'discart', 'eq_profile', 'headsets', 'inflate',
-    'keymap', 'libview', 'libview_draw', 'libview_input', 'md5', 'memory_report', 'musicbrainz',
-    'packed_image', 'packs', 'playlist_files', 'qr', 'recycle', 'rediscover', 'replaygain', 'sfx',
-    'sfx_output', 'smtc', 'soft_canvas', 'streamfile', 'tag_suggest', 'tagundo', 'tagwriter',
-    'tagwriter_cord', 'tagwriter_flacogg', 'tagwriter_mp3mp4', 'tempo', 'theme_palette', 'theme_win', 'upmix')
+    'album_editions_edit', 'album_editions_title', 'album_maker',
+    'app', 'app_albummaker', 'app_albumtag', 'app_apollo', 'app_art', 'app_artistinfo',
+    'app_badges', 'app_big', 'app_browser', 'app_columns', 'app_commands', 'app_controls',
+    'app_convert', 'app_copy', 'app_coverfetch', 'app_custom', 'app_deltarune', 'app_dialogs', 'app_discover',
+    'app_duplicates', 'app_editions', 'app_eq', 'app_foobar', 'app_format', 'app_fountain', 'app_groups', 'app_headphones', 'app_helpers', 'app_import', 'app_ini', 'app_layout', 'app_library',
+    'app_lifecycle', 'app_lightweight', 'app_lyrics', 'app_memory', 'app_menus', 'app_mini', 'app_organize',
+    'app_packfiles', 'app_packs', 'app_palette', 'app_panels', 'app_playback', 'app_points',
+    'app_preferences', 'app_radio', 'app_recent', 'app_region', 'app_releaseradar', 'app_review', 'app_rip',
+    'app_search_online', 'app_settings', 'app_sizes', 'app_spots', 'app_tabs', 'app_tabstrip', 'app_tageditor',
+    'app_taskbar', 'app_toast', 'app_tray', 'app_tweaks', 'app_ui', 'app_ui_controls', 'app_ui_menu',
+    'app_ui_trackbar', 'app_waveform', 'app_web', 'app_webfetch', 'app_window', 'app_workers', 'art',
+    'asio_output', 'audio_kernels', 'cdrip', 'column_layout', 'convert', 'cord_export', 'cover_fade',
+    'coverupload', 'crashdump', 'delayload', 'devicecopy', 'discart',
+    'discord', 'duplicates', 'eq_profile', 'headsets', 'inflate', 'keymap', 'libview', 'libview_draw', 'libview_input', 'md5',
+    'memory_report', 'mp4_remux', 'musicbrainz', 'online_search', 'packed_image', 'playlist_files', 'playlist_import', 'qr',
+    'recycle', 'rediscover', 'release_radar', 'replaygain', 'sfx', 'sfx_output', 'smtc',
+    'soft_canvas', 'soundcloud', 'speakers', 'spotifylink', 'streamfile', 'tag_suggest', 'tagundo', 'tagwriter', 'tagwriter_cord',
+    'tagwriter_flacogg', 'tagwriter_mp3mp4', 'tempo', 'theme_palette', 'theme_win', 'thumbs',
+    'upmix', 'web_library', 'web_remote', 'webfetch', 'ytaudio')
 $noUnwind = @(if (!$env:CORDINAL_UNWIND_ALL) {
     $plainApp | Where-Object {
-        $noUnwindNames -contains $_.BaseName -and
-        !(Select-String -LiteralPath $_.FullName -Pattern '\b(try|catch|throw)\b' -Quiet)
+        if ($noUnwindNames -notcontains $_.BaseName) { return $false }
+        $code = ((Get-Content -LiteralPath $_.FullName -Raw) -replace '//[^\r\n]*', '')
+        $code -notmatch '\btry\s*\{|\bcatch\s*\(|\bthrow\b'
     }
 })
 $plainApp = @($plainApp | Where-Object { $noUnwind -notcontains $_ })

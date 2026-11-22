@@ -25,13 +25,13 @@ namespace {
 const char* const kFieldKeys[] = {"any", "title", "artist", "albumartist", "album", "genre", "composer", "comment", "grouping",
                                   "label", "path", "codec", "year", "rating", "plays", "skips", "length", "bitrate", "track",
                                   "disc", "bpm", "lastplayed", "added", "plays30", "plays365", "samplerate",
-                                  "channels", "size", "gain", "firstplayed"};
+                                  "channels", "size", "gain", "firstplayed", "favorite"};
 const wchar_t* const kFieldNames[] = {L"Any text", L"Title", L"Artist", L"Album artist", L"Album", L"Genre", L"Composer",
                                       L"Comment", L"Grouping", L"Label", L"Path", L"Codec", L"Year", L"Rating", L"Play count",
                                       L"Skip count", L"Length (seconds)", L"Bitrate (kbps)", L"Track number", L"Disc number",
                                       L"BPM", L"Last played", L"Date added", L"Plays in the last 30 days",
                                       L"Plays in the last 365 days", L"Sample rate (kHz)", L"Channels",
-                                      L"File size (MB)", L"Track gain (dB)", L"First played"};
+                                      L"File size (MB)", L"Track gain (dB)", L"First played", L"Favorite (0 or 1)"};
 const char* const kOpKeys[] = {"contains", "notcontains", "is", "isnot", "starts", "ends", "empty", "notempty",
                                "eq", "ne", "atleast", "atmost", "between", "inlast", "notinlast", "never",
                                "before", "after"};
@@ -111,7 +111,7 @@ public:
         }
         if (!IsTextField(r.field)) {
             double v = r.field == RuleField::Plays30 || r.field == RuleField::Plays365 ? RecentPlays(r.field, id)
-                                                                                    : Number(r.field, t);
+                                                                                    : Number(r.field, t, id);
             double a = ParseNumber(r.value), b = ParseNumber(r.value2);
             // A small tolerance: the values are typed in as text and compared as doubles.
             switch (r.op) {
@@ -226,7 +226,7 @@ private:
         }
     }
 
-    double Number(RuleField f, const Track& t) {
+    double Number(RuleField f, const Track& t, TrackId id) {
         switch (f) {
             case RuleField::Year: {
                 std::string_view d = library_.View(t.date);
@@ -246,6 +246,7 @@ private:
                 return (double)(neg ? -v : v);
             }
             case RuleField::Rating: return t.rating / 20.0;
+            case RuleField::Favorite: return library_.Favorite(id) ? 1 : 0;
             case RuleField::PlayCount: return t.playCount;
             case RuleField::SkipCount: return t.skipCount;
             case RuleField::Length: return t.durationMs / 1000.0;
@@ -516,6 +517,10 @@ void EvaluateAutoPlaylist(const AutoPlaylist& a, const Library& library, const s
 
 std::vector<std::pair<std::wstring, AutoPlaylist>> DefaultAutoPlaylists() {
     std::vector<std::pair<std::wstring, AutoPlaylist>> r;
+    AutoPlaylist favorites;
+    favorites.root.rules.push_back({RuleField::Favorite, RuleOp::Equals, "1", ""});
+    favorites.pick = PickBy::RecentlyAdded;
+    r.emplace_back(L"Favorites", favorites);
     AutoPlaylist added;
     added.root.rules.push_back({RuleField::DateAdded, RuleOp::InLastDays, "30", ""});
     added.pick = PickBy::RecentlyAdded;
@@ -538,4 +543,73 @@ std::vector<std::pair<std::wstring, AutoPlaylist>> DefaultAutoPlaylists() {
     rated.ordered = true;
     r.emplace_back(L"Top rated", rated);
     return r;
+}
+
+const wchar_t* MixName(MixPreset mix) {
+    switch (mix) {
+    case MixPreset::Favorites: return L"Favorites";
+    case MixPreset::OnRepeat: return L"On Repeat";
+    case MixPreset::Forgotten: return L"Forgotten Favorites";
+    case MixPreset::RecentlyAdded: return L"Recently Added";
+    case MixPreset::LikeThis: return L"Mix like this song";
+    case MixPreset::Count: break;
+    }
+    return L"";
+}
+
+bool MixNeedsSeed(MixPreset mix) { return mix == MixPreset::LikeThis; }
+
+std::string MixRules(MixPreset mix, std::string_view genre, uint16_t bpm) {
+    AutoPlaylist a;
+    switch (mix) {
+    case MixPreset::Favorites:
+        // The heart is the rule: newest additions first, like Spotify's Liked Songs.
+        a.root.rules.push_back({RuleField::Favorite, RuleOp::Equals, "1", ""});
+        a.pick = PickBy::RecentlyAdded;
+        a.ordered = true;
+        break;
+    case MixPreset::OnRepeat:
+        // Played lately, most played first: what a listener keeps coming back to this month.
+        a.root.rules.push_back({RuleField::Plays30, RuleOp::AtLeast, "1", ""});
+        a.pick = PickBy::MostPlayed;
+        a.limit = 50;
+        a.ordered = true;
+        break;
+    case MixPreset::Forgotten:
+        // A heart or a high rating, and nothing heard in three months.
+        {
+            RuleGroup liked;
+            liked.all = false;
+            liked.rules.push_back({RuleField::Favorite, RuleOp::Equals, "1", ""});
+            liked.rules.push_back({RuleField::Rating, RuleOp::AtLeast, "4", ""});
+            a.root.groups.push_back(std::move(liked));
+        }
+        a.root.rules.push_back({RuleField::LastPlayed, RuleOp::NotInLastDays, "90", ""});
+        a.pick = PickBy::MostPlayed;
+        a.limit = 50;
+        a.ordered = true;
+        break;
+    case MixPreset::RecentlyAdded:
+        a.root.rules.push_back({RuleField::DateAdded, RuleOp::InLastDays, "30", ""});
+        a.pick = PickBy::RecentlyAdded;
+        a.limit = 100;
+        a.ordered = true;
+        break;
+    case MixPreset::LikeThis: {
+        // Same genre, or a tempo within a sixth either way: enough like it to follow it, wide
+        // enough to surprise. With only one of the two tags, that one carries the mix.
+        if (!genre.empty()) a.root.rules.push_back({RuleField::Genre, RuleOp::Is, std::string(genre), ""});
+        if (bpm) {
+            const int low = std::max(1, (int)std::lround(bpm * 0.85)), high = std::max(low, (int)std::lround(bpm * 1.15));
+            a.root.rules.push_back({RuleField::Bpm, RuleOp::Between, std::to_string(low), std::to_string(high)});
+        }
+        if (a.root.rules.empty()) return {};
+        a.root.all = false;
+        a.pick = PickBy::Random;
+        a.limit = 50;
+        break;
+    }
+    case MixPreset::Count: return {};
+    }
+    return SerializeAutoPlaylist(a);
 }

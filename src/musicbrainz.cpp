@@ -117,12 +117,17 @@ struct State {
     std::deque<Candidate> queue;
     std::set<std::string> queued;
     std::map<std::string, Entry> cache;
+    size_t cacheBytes = 0;  // key + release group + one line's overhead; trimmed past the budget
     std::vector<LookupResult> results;
     std::atomic<bool> stop{false}, enabled{false}, started{false};
     bool cacheLoaded = false;
     Clock::time_point nextRequest{};
     Clock::time_point lastQueueCheck{};
 };
+
+// Kept well under LoadCache's 4 MiB read limit, so a load can never come back empty and make the
+// next save discard everything that was cached.
+constexpr size_t kCacheBudget = 3u << 20;
 
 State s;
 
@@ -179,6 +184,8 @@ void LoadCache() {
         entry.found = line.substr(c + 1, 1) == "1";
         if (!line.substr(0, a).empty()) s.cache[line.substr(0, a)] = std::move(entry);
     }
+    s.cacheBytes = 0;
+    for (const auto& [key, e] : s.cache) s.cacheBytes += key.size() + e.releaseGroup.size() + 40;
     s.cacheLoaded = true;
 }
 
@@ -196,7 +203,7 @@ std::string Fetch(const Candidate& candidate, bool& offline) {
     offline = false;
     std::string query = "releasegroup:\"" + candidate.title + "\" AND artist:\"" + candidate.artist + "\"";
     std::string url = "https://musicbrainz.org/ws/2/release-group?query=" + Encode(query) + "&fmt=json&limit=25";
-    std::string headers = "User-Agent: cordinal/0.1.16 (https://github.com/imhavingasuperbadday/cordinal)\r\n"
+    std::string headers = "User-Agent: cordinal/0.1.17 (https://github.com/imhavingasuperbadday/cordinal)\r\n"
                           "Accept: application/json\r\n";
 #ifdef _WIN32
     void* session = nullptr;
@@ -229,6 +236,7 @@ void Worker() {
         std::lock_guard lock(s.mutex);
         LoadCache();
     }
+    auto nextSave = Wall::now() + std::chrono::seconds(60);
     for (;;) {
         Candidate candidate;
         {
@@ -254,18 +262,44 @@ void Worker() {
         }
         bool offline = false;
         std::string group = Fetch(candidate, offline);
+        bool drained = false;
         {
             std::lock_guard lock(s.mutex);
             Entry entry;
             entry.releaseGroup = group;
             entry.checked = Wall::now();
             entry.found = !group.empty();
-            s.cache[Key(candidate)] = std::move(entry);
+            std::string key = Key(candidate);
+            if (auto old = s.cache.find(key); old != s.cache.end())
+                s.cacheBytes -= key.size() + old->second.releaseGroup.size() + 40;
+            s.cacheBytes += key.size() + entry.releaseGroup.size() + 40;
+            s.cache[key] = std::move(entry);
+            if (s.cacheBytes > kCacheBudget) {
+                // The oldest-checked entries go first: they are what SaveCache's own 180-day
+                // filter would drop soonest anyway.
+                std::vector<std::pair<Wall::time_point, std::string>> order;
+                order.reserve(s.cache.size());
+                for (const auto& [k, e] : s.cache) order.emplace_back(e.checked, k);
+                std::sort(order.begin(), order.end());
+                for (auto& [checked, k] : order) {
+                    if (s.cacheBytes <= kCacheBudget) break;
+                    auto it = s.cache.find(k);
+                    s.cacheBytes -= k.size() + it->second.releaseGroup.size() + 40;
+                    s.cache.erase(it);
+                }
+            }
             if (offline) s.nextRequest = Clock::now() + std::chrono::seconds(60);
             PushResult(candidate, group);
+            drained = s.queue.empty();
             s.wake.notify_all();
         }
-        SaveCache();
+        // The cache is advisory: one rewrite per lookup was a temp file, an fsync and a rename for
+        // every rate-limited second of a run that can last hours. It is written when the queue
+        // drains, at most once a minute, and Stop writes whatever is left.
+        if (drained || Wall::now() >= nextSave) {
+            SaveCache();
+            nextSave = Wall::now() + std::chrono::seconds(60);
+        }
     }
 }
 

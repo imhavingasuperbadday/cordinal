@@ -338,7 +338,12 @@ void SaveBeforeClose() {
 // state), then window, player, ReplayGain, EQ and per-view column/browser settings.
 void SaveState() {
     FlushAutomaticPreferences();
-    SaveLibraryNow();
+    if (g.hwnd && IsWindow(g.list) && !g.playlists.empty() && !RadioActive()) {
+        const PlaylistPosition before = Active().position;
+        CapturePlaylistPosition();
+        if (Active().position != before) g.dirty = true;
+    }
+    if (g.dirty || GetFileAttributesW(g.libraryPath.c_str()) == INVALID_FILE_ATTRIBUTES) SaveLibraryNow();
     WINDOWPLACEMENT wp{sizeof(wp)};
     if (GetWindowPlacement(g.hwnd, &wp)) {
         if (g.size == ViewSize::Compact) wp = g.fullPlacement;  // the full size it goes back to

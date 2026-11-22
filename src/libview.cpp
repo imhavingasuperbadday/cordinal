@@ -539,6 +539,35 @@ void LibViewShowGroup(uint32_t group) {
     }
 }
 
+bool LibViewShowTrack(TrackId id) {
+    if (!CanvasActive() || id == kNone) return false;
+    if (g.libMode == LibraryMode::Artists) SetLibraryMode(LibraryMode::Albums);
+    for (int i = 0; i < (int)v.albums.size(); ++i) {
+        const auto tracks = Tracks(v.albums[i]);
+        if (std::find(tracks.begin(), tracks.end(), id) == tracks.end()) continue;
+        ClearCanvasSelection();
+        v.focus = i;
+        if (g.libMode == LibraryMode::Albums) {
+            v.expanded = i;
+            v.selAlbum[i] = 1;
+        } else {
+            v.selTrack.insert(id);
+            v.anchorTrack = id;
+        }
+        LayoutItems();
+        if (g.libMode == LibraryMode::Albums) {
+            for (const auto& item : v.items)
+                if (item.kind == ItemKind::Panel) { EnsureVisible(item.rc); break; }
+        } else if (i < (int)v.albumItem.size() && v.albumItem[i] >= 0 && v.albumItem[i] < (int)v.items.size()) {
+            EnsureVisible(v.items[v.albumItem[i]].rc);
+        }
+        InvalidateRect(v.hwnd, nullptr, FALSE);
+        SetFocus(v.hwnd);
+        return true;
+    }
+    return false;
+}
+
 void LibViewSelectAll() {
     ClearCanvasSelection();
     if (g.libMode == LibraryMode::Artists)

@@ -5,6 +5,7 @@
 // the setting already has, so the window and the menus can never disagree about what a change does.
 // Pages also link to the windows that hold the rest of their area's settings.
 #include "app.h"
+#include <commdlg.h>
 
 #include "metadata_fetch.h"
 #include "peaks.h"
@@ -37,6 +38,7 @@ const wchar_t* const kNewMusicNames[] = {L"Add automatically", L"Review in Inbox
 const wchar_t* const kCoverSourceNames[] = {L"Deezer", L"iTunes", L"MusicBrainz"};
 const wchar_t* const kCoverSaveNames[] = {L"Save as cover.jpg in the album folder", L"Embed in the files' tags",
                                           L"Show in cordinal only"};
+const wchar_t* const kSearchSaveNames[] = {L"Preview until saved", L"Play and save automatically"};
 const wchar_t* const kBandWaveSizes[] = {L"Use layout size", L"Slim (26 px)", L"Medium (44 px)", L"Tall (72 px)",
                                        L"Extra tall (108 px)", L"Largest (144 px)"};
 static_assert(std::size(kBandWaveSizes) == std::size(ui::kBandWaveHeights));
@@ -529,6 +531,22 @@ const Tweak kTweaks[] = {
      // Nothing to refresh when this changes: the window reads the switch when a save is
      // asked for, so the apply callback is an honest no-op.
      [](double v) { online::Config().saveMusic = v != 0; }, 0, [] {}},
+     {"online.release_radar", L"Online", L"ReleaseRadar", L"New releases by your favorite artists",
+      L"Asks musicbrainz.org about the artists you play and heart most for their albums from the last six months, when you open Library > New releases. Saving one downloads its tracks from YouTube, the same recording matched there.",
+      TweakType::Bool, 0, 1, 0, [] { return (double)online::Config().releaseRadar; },
+      [](double v) { online::Config().releaseRadar = v != 0; }, 0, [] {}},
+      {"online.discover_radio", L"Online", L"DiscoverRadio", L"Discover songs outside your library",
+       L"While Keep playing like this is on, every few songs plays one you don't own yet, from an artist related to the one playing. MusicBrainz chooses it and the audio is matched on YouTube; it is not added to your library until Ctrl+Alt+K keeps it.",
+       TweakType::Bool, 0, 1, 0, [] { return (double)online::Config().discoverRadio; },
+       [](double v) { online::Config().discoverRadio = v != 0; }, 0, [] {}},
+      {"online.search_music", L"Online", L"SearchMusic", L"Search online for songs not in your library",
+       L"Sends what you type in Search to api.deezer.com (and itunes.apple.com or youtube.com if needed) to show songs you don't own yet under your local results. Playing one matches it on YouTube.",
+       TweakType::Bool, 0, 1, 0, [] { return (double)online::Config().searchMusic; },
+       [](double v) { online::Config().searchMusic = v != 0; }, 0, OnlineSearchSettingChanged},
+      {"online.search_save", L"Online", L"SearchSave", L"Save played search results automatically",
+       L"Whether playing a song from online search keeps it as a temporary preview until you save it, or saves it straight into your library folder.",
+       TweakType::Choice, 0, 1, 0, [] { return (double)online::Config().searchSave; },
+       [](double v) { online::Config().searchSave = std::clamp((int)v, 0, 1); }, 0, [] {}, kSearchSaveNames},
     {"library.explorer_menu", L"Explorer", L"FolderMenu", L"Play folders from Explorer",
      L"Right-clicking a folder offers Play with cordinal and Add to cordinal; a folder plays its tracks like a "
      L"command line does.", TweakType::Bool, 0, 1, 1, [] { return (double)g.explorerMenu; },
@@ -713,6 +731,60 @@ const Tweak kTweaks[] = {
      L"How-to hints in the now playing line.",
      TweakType::Bool, 0, 1, 0, [] { return (double)g.layout.hints; },
      [](double v) { g.layout.hints = v != 0; }, 0, ApplyMainLayout},
+    {"window.layout_bar", L"Layout", L"LayoutBar", L"Show layout top bar",
+     L"Shows a live customization bar at the top of the normal window for presets, docking, parts and colours.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)g.layoutBar; },
+     [](double v) { g.layoutBar = v != 0; }, IDM_LAYOUT_BAR},
+    {"window.side_panel_width", L"Layout", L"SideWidth", L"Side panel width",
+     L"Width of the Up next and lyrics side panels in 96-DPI pixels.",
+     TweakType::Float, 180, 480, 300, [] { return (double)g.layout.sideWidth; },
+     [](double v) { g.layout.sideWidth = std::clamp((int)std::lround(v), 180, 480); }, 0, ApplyMainLayout, nullptr, L"px"},
+    {"window.pad", L"Layout", L"Pad", L"Window padding",
+     L"Outer margin around the player and library controls in 96-DPI pixels.",
+     TweakType::Float, 0, 16, 4, [] { return (double)g.layout.pad; },
+     [](double v) { g.layout.pad = std::clamp((int)std::lround(v), 0, 16); }, 0, ApplyMainLayout, nullptr, L"px"},
+#define COLOR_TWEAK(key, sec, ini, lbl, hlp, isDark, field) \
+    {key, sec, ini, lbl, hlp, TweakType::Color, -1, 16777215, -1, \
+     [] { Rgb c = CustomThemeColors(isDark).field; return c == kNoRgb ? -1.0 : (double)c; }, \
+     [](double v) { CustomThemeColors(isDark).field = v < 0 ? kNoRgb : (Rgb)std::clamp((int)std::lround(v), 0, 0xFFFFFF); }, \
+     0, [] { ApplyTheme(); }}
+    COLOR_TWEAK("theme.light_accent", L"ThemeLight", L"Accent", L"Accent colour",
+                L"Marks what is playing and primary actions in Light mode.", false, accent),
+    COLOR_TWEAK("theme.light_bg", L"ThemeLight", L"Bg", L"Background",
+                L"Main track list and content background in Light mode.", false, bg),
+    COLOR_TWEAK("theme.light_surface", L"ThemeLight", L"Surface", L"Chrome surface",
+                L"Player bar, tabs, status bar and toolbar surface in Light mode.", false, surface),
+    COLOR_TWEAK("theme.light_surface2", L"ThemeLight", L"Surface2", L"Elevated surface",
+                L"Inputs, buttons and card surfaces in Light mode.", false, surface2),
+    COLOR_TWEAK("theme.light_border", L"ThemeLight", L"Border", L"Borders and dividers",
+                L"Hairline dividers and control borders in Light mode.", false, border),
+    COLOR_TWEAK("theme.light_text", L"ThemeLight", L"Text", L"Primary text",
+                L"Track titles and main labels in Light mode.", false, text),
+    COLOR_TWEAK("theme.light_sub", L"ThemeLight", L"Sub", L"Secondary text",
+                L"Artist names, durations and captions in Light mode.", false, sub),
+    COLOR_TWEAK("theme.light_select", L"ThemeLight", L"Select", L"Selection highlight",
+                L"Selected rows and active items in Light mode.", false, select),
+    COLOR_TWEAK("theme.light_playing", L"ThemeLight", L"Playing", L"Playing highlight",
+                L"Playing track highlight in Light mode.", false, playing),
+    COLOR_TWEAK("theme.dark_accent", L"ThemeDark", L"Accent", L"Accent colour",
+                L"Marks what is playing and primary actions in Dark mode.", true, accent),
+    COLOR_TWEAK("theme.dark_bg", L"ThemeDark", L"Bg", L"Background",
+                L"Main track list and content background in Dark mode.", true, bg),
+    COLOR_TWEAK("theme.dark_surface", L"ThemeDark", L"Surface", L"Chrome surface",
+                L"Player bar, tabs, status bar and toolbar surface in Dark mode.", true, surface),
+    COLOR_TWEAK("theme.dark_surface2", L"ThemeDark", L"Surface2", L"Elevated surface",
+                L"Inputs, buttons and card surfaces in Dark mode.", true, surface2),
+    COLOR_TWEAK("theme.dark_border", L"ThemeDark", L"Border", L"Borders and dividers",
+                L"Hairline dividers and control borders in Dark mode.", true, border),
+    COLOR_TWEAK("theme.dark_text", L"ThemeDark", L"Text", L"Primary text",
+                L"Track titles and main labels in Dark mode.", true, text),
+    COLOR_TWEAK("theme.dark_sub", L"ThemeDark", L"Sub", L"Secondary text",
+                L"Artist names, durations and captions in Dark mode.", true, sub),
+    COLOR_TWEAK("theme.dark_select", L"ThemeDark", L"Select", L"Selection highlight",
+                L"Selected rows and active items in Dark mode.", true, select),
+    COLOR_TWEAK("theme.dark_playing", L"ThemeDark", L"Playing", L"Playing highlight",
+                L"Playing track highlight in Dark mode.", true, playing),
+#undef COLOR_TWEAK
 };
 
 // The window's pages: All settings, then one per key prefix, in the groups the page list captions.
@@ -741,8 +813,12 @@ const Page kPages[] = {
      {{IDM_EQUALIZER, L"&Equalizer..."}}},
     {"view.", L"View", L"The seek bar and its colours, and how the window behaves.", L"Look",
      {{IDM_FORMAT, L"Title &formatting..."}, {IDM_KEYBOARD, L"&Keyboard shortcuts..."}}},
-    {"window.", L"Layout", L"Where the player sits and which parts of the normal window show.", nullptr,
-     {{IDM_STARTUP_DEFAULTS, L"&Startup defaults..."}}},
+    {"window.", L"Layout", L"Where the player sits, which parts show, and spacing.", nullptr,
+     {{IDM_LAYOUT_BAR, L"&Customize layout bar"}, {IDM_LAYOUT_SAVE, L"&Save this layout"},
+      {IDM_LAYOUT_PRESET_BASE, L"&Reset layout"}, {IDM_STARTUP_DEFAULTS, L"&Startup defaults..."}}},
+    {"theme.", L"Theme & colours", L"Independent Light and Dark palette colours, kept across mode switches.", nullptr,
+     {{IDM_THEME_RESET_LIGHT, L"Reset &Light colours"}, {IDM_THEME_RESET_DARK, L"Reset &Dark colours"},
+      {IDM_LAYOUT_BAR, L"&Customize layout bar"}}},
     {"library.", L"Library", L"New music, sizes in the library views, and Explorer and the web server.", L"Collection",
      {{IDM_LIBRARY_FOLDERS, L"Library &folders..."}, {IDM_WEB_SERVER, L"&Web server..."}}},
     {"convert.", L"Conversion", L"Converting between formats, putting the originals back, and ripping CDs.", nullptr, {}},
@@ -774,9 +850,12 @@ const Heading kHeadings[] = {
     {"view.group_albums", L"Window"}, {"view.sound_effects", L"Sounds"}, {"view.wave_style", L"Dark Fountain"},
     {"view.apollo_analyzer", L"Apollo"}, {"view.foobar_view", L"Album List"},
     {"window.player_dock", L"Arrangement"}, {"window.transport", L"Parts shown"},
+    {"window.side_panel_width", L"Sizes and spacing"},
+    {"theme.light_accent", L"Light theme"}, {"theme.dark_accent", L"Dark theme"},
     {"library.new_music", L"Adding music"}, {"library.explorer_menu", L"Outside cordinal"},
     {"library.cover_size", L"Sizes"},
     {"online.covers_deezer", L"Covers"}, {"online.lyrics_lrclib", L"Lyrics"}, {"online.artist_info", L"Artist info"},
+    {"online.discover_radio", L"Discovery"},
 };
 
 bool OnPage(const Tweak& t, int page) {
@@ -1076,7 +1155,7 @@ void RefreshValues() {
         const SheetRow& row = w.rows[i];
         if (row.tweak < 0) continue;
         const Tweak& t = kTweaks[row.tweak];
-        if (t.type == TweakType::Bool) InvalidateRect(row.control, nullptr, FALSE);
+        if (t.type == TweakType::Bool || t.type == TweakType::Color) InvalidateRect(row.control, nullptr, FALSE);
         else if (t.type == TweakType::Choice) {
             const int value = std::clamp((int)t.get(), 0, (int)t.max);
             if (SendMessageW(row.control, CB_GETCURSEL, 0, 0) != value) SendMessageW(row.control, CB_SETCURSEL, value, 0);
@@ -1129,6 +1208,8 @@ void MakeRowWindows(size_t i) {
     const int id = kIdRow0 + row.tweak;
     if (t.type == TweakType::Bool) {
         // An owner-drawn switch named for its setting, so a screen reader says what it turns on.
+        row.control = make(0, WC_BUTTONW, t.label, BS_OWNERDRAW | BS_NOTIFY | WS_TABSTOP, id, g.font);
+    } else if (t.type == TweakType::Color) {
         row.control = make(0, WC_BUTTONW, t.label, BS_OWNERDRAW | BS_NOTIFY | WS_TABSTOP, id, g.font);
     } else if (t.type == TweakType::Choice) {
         row.control = make(0, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, id, g.font);
@@ -1368,6 +1449,46 @@ void DrawSwitch(const DRAWITEMSTRUCT* di) {
     SelectObject(di->hDC, oldFont);
 }
 
+void DrawColorButton(DRAWITEMSTRUCT* di, const Tweak& t) {
+    const RECT r = di->rcItem;
+    const bool current = t.get() >= 0;
+    const bool darkTweak = !strncmp(t.key, "theme.dark_", 11);
+    const Rgb shown = current ? (Rgb)t.get() : [&] {
+        const Palette& base = darkTweak ? DarkPalette() : LightPalette();
+        if (strstr(t.key, "_accent")) return base.accent;
+        if (strstr(t.key, "_bg")) return base.bg;
+        if (strstr(t.key, "_surface2")) return base.surface2;
+        if (strstr(t.key, "_surface")) return base.surface;
+        if (strstr(t.key, "_border")) return base.border;
+        if (strstr(t.key, "_text")) return base.text;
+        if (strstr(t.key, "_sub")) return base.sub;
+        if (strstr(t.key, "_select")) return base.select;
+        return base.playing;
+    }();
+    FillSolid(di->hDC, r, Ref(P().surface2));
+    HPEN border = CreatePen(PS_SOLID, 1, Ref((di->itemState & ODS_FOCUS) ? P().accent : P().border));
+    HGDIOBJ oldPen = SelectObject(di->hDC, border);
+    HGDIOBJ oldBrush = SelectObject(di->hDC, GetStockObject(HOLLOW_BRUSH));
+    Rectangle(di->hDC, r.left, r.top, r.right, r.bottom);
+    const int sw = std::max(S(18), (int)(r.bottom - r.top) - S(8));
+    RECT swatch{r.left + S(5), r.top + (r.bottom - r.top - sw) / 2, r.left + S(5) + sw,
+                r.top + (r.bottom - r.top - sw) / 2 + sw};
+    FillSolid(di->hDC, swatch, Ref(shown));
+    Rectangle(di->hDC, swatch.left, swatch.top, swatch.right, swatch.bottom);
+    SelectObject(di->hDC, oldBrush);
+    SelectObject(di->hDC, oldPen);
+    DeleteObject(border);
+    wchar_t label[32];
+    if (current) swprintf_s(label, L"#%06X", (unsigned)shown);
+    else swprintf_s(label, L"Default (#%06X)", (unsigned)shown);
+    RECT text{swatch.right + S(8), r.top, r.right - S(6), r.bottom};
+    SetBkMode(di->hDC, TRANSPARENT);
+    SetTextColor(di->hDC, Ref(P().text));
+    HGDIOBJ oldFont = SelectObject(di->hDC, g.font);
+    DrawTextW(di->hDC, label, -1, &text, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+    SelectObject(di->hDC, oldFont);
+}
+
 // The sheet's own paint: row backgrounds, the focused row's accent, the rules between rows and a
 // note when nothing is shown. Labels, help and headings are static controls on top.
 void PaintSheet(HDC dc, const RECT& rc) {
@@ -1474,9 +1595,16 @@ LRESULT CALLBACK SheetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_CTLCOLOREDIT:
         case WM_CTLCOLORLISTBOX:
             return FieldControlColor((HDC)wp);
-        case WM_DRAWITEM:
-            DrawSwitch(reinterpret_cast<DRAWITEMSTRUCT*>(lp));
+        case WM_DRAWITEM: {
+            DRAWITEMSTRUCT* di = reinterpret_cast<DRAWITEMSTRUCT*>(lp);
+            int id = (int)di->CtlID;
+            if (id >= kIdRow0 && id < kIdRow0 + (int)std::size(kTweaks) &&
+                kTweaks[id - kIdRow0].type == TweakType::Color)
+                DrawColorButton(di, kTweaks[id - kIdRow0]);
+            else
+                DrawSwitch(di);
             return TRUE;
+        }
         case WM_COMMAND: {
             const int id = LOWORD(wp), code = HIWORD(wp);
             if (id >= kIdReset0 && id < kIdReset0 + (int)std::size(kTweaks)) {
@@ -1497,6 +1625,16 @@ LRESULT CALLBACK SheetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             } else if (t.type == TweakType::Bool && (code == BN_CLICKED || code == BN_DOUBLECLICKED)) {
                 SetTweak(t, t.get() == 0);
                 RefreshValues();
+            } else if (t.type == TweakType::Color && (code == BN_CLICKED || code == BN_DOUBLECLICKED)) {
+                static COLORREF custom[16]{};
+                Rgb cur = t.get() >= 0 ? (Rgb)t.get() : (!strncmp(t.key, "theme.dark_", 11) ? DarkPalette().accent : LightPalette().accent);
+                CHOOSECOLORW cc{sizeof(cc), w.hwnd, nullptr, Ref(cur), custom, CC_RGBINIT | CC_FULLOPEN, 0, nullptr, nullptr};
+                if (ChooseColorW(&cc)) {
+                    Rgb picked = ((Rgb)GetRValue(cc.rgbResult) << 16) | ((Rgb)GetGValue(cc.rgbResult) << 8) |
+                                 (Rgb)GetBValue(cc.rgbResult);
+                    SetTweak(t, (double)picked);
+                    RefreshValues();
+                }
             } else if (t.type == TweakType::Choice && code == CBN_SELCHANGE && !w.filling) {
                 SetTweak(t, (double)SendMessageW((HWND)lp, CB_GETCURSEL, 0, 0));
                 RefreshValues();
@@ -1607,8 +1745,15 @@ LRESULT CALLBACK PreferencesProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 Rebuild(w.current);
             } else if (id >= kIdLink0 && id < kIdLink0 + kLinks) {
                 const Link& link = kPages[w.page].links[id - kIdLink0];
-                if (int command = link.command; command && LinkShown(link) && LinkEnabled(command))
-                    PostMessageW(g.hwnd, WM_COMMAND, MAKEWPARAM(command, 0), 0);
+                if (int command = link.command; command && LinkShown(link) && LinkEnabled(command)) {
+                    if (command == IDM_THEME_RESET_LIGHT || command == IDM_THEME_RESET_DARK ||
+                        command == IDM_LAYOUT_BAR || command == IDM_LAYOUT_SAVE || command == IDM_LAYOUT_PRESET_BASE) {
+                        SendMessageW(g.hwnd, WM_COMMAND, MAKEWPARAM(command, 0), 0);
+                        RefreshValues();
+                    } else {
+                        PostMessageW(g.hwnd, WM_COMMAND, MAKEWPARAM(command, 0), 0);
+                    }
+                }
             } else if (id == kIdResetAll) {
                 int count = 0;
                 std::vector<int> shown;
@@ -1672,6 +1817,12 @@ const wchar_t* TweakPage(const Tweak& t) { return kPages[PageOf(t)].name; }
 bool TweakChanged(const Tweak& t) { return std::fabs(t.get() - t.def) > 0.004; }
 
 std::wstring TweakText(const Tweak& t, double value) {
+    if (t.type == TweakType::Color) {
+        if (value < 0) return L"theme colour";
+        wchar_t text[16];
+        swprintf_s(text, L"#%06X", (unsigned)std::clamp((int)std::lround(value), 0, 0xFFFFFF));
+        return text;
+    }
     if (t.type == TweakType::Float) {
         wchar_t text[48];
         swprintf_s(text, t.unit ? L"%.2f %ls" : L"%.2f", value, t.unit);
@@ -1736,6 +1887,15 @@ static void PersistTweak(const Tweak& t) {
                                        !strcmp(t.key, "effects.reverb_mix_choice")))
         return;
     double v = t.get();
+    if (t.type == TweakType::Color) {
+        if (v < 0) IniDelete(t.section, t.iniKey);
+        else {
+            wchar_t hex[16];
+            swprintf_s(hex, L"#%06X", (unsigned)std::clamp((int)std::lround(v), 0, 0xFFFFFF));
+            IniWrite(t.section, t.iniKey, hex);
+        }
+        return;
+    }
     IniWrite(t.section, t.iniKey, t.type == TweakType::Float ? F2S((float)v) : std::to_wstring((int)v));
 }
 
@@ -1756,11 +1916,27 @@ void SetTweak(const Tweak& t, double value) {
     if (w.hwnd) RefreshValues();
 }
 
+static bool ParseHexColor(const std::wstring& s, Rgb& out) {
+    if (s.empty()) return false;
+    const wchar_t* p = s[0] == L'#' ? s.c_str() + 1 : s.c_str();
+    if (wcslen(p) != 6) return false;
+    wchar_t* end = nullptr;
+    unsigned long v = wcstoul(p, &end, 16);
+    if (!end || *end) return false;
+    out = (Rgb)(v & 0xFFFFFFu);
+    return true;
+}
+
 void LoadTweaks() {
     SeekBarKeys(false);
     for (const Tweak& t : kTweaks) {
         if (t.flags & (kTweakLegacyLoad | kTweakOutside)) continue;
         if (!TweakHasOwnIniRow(t)) continue;
+        if (t.type == TweakType::Color) {
+            Rgb c = 0;
+            t.put(ParseHexColor(IniRead(t.section, t.iniKey, L""), c) ? (double)c : -1.0);
+            continue;
+        }
         double v = t.type == TweakType::Float ? IniFloat(t.section, t.iniKey, t.def)
                                               : (double)IniInt(t.section, t.iniKey, (int)t.def);
         if (!std::isfinite(v)) v = t.def;
@@ -1783,6 +1959,15 @@ void SaveTweaks() {
                                            !strcmp(t.key, "effects.reverb_mix_choice")))
             continue;
         double v = t.get();
+        if (t.type == TweakType::Color) {
+            if (v < 0) IniDelete(t.section, t.iniKey);
+            else {
+                wchar_t hex[16];
+                swprintf_s(hex, L"#%06X", (unsigned)std::clamp((int)std::lround(v), 0, 0xFFFFFF));
+                IniWrite(t.section, t.iniKey, hex);
+            }
+            continue;
+        }
         IniWrite(t.section, t.iniKey, t.type == TweakType::Float ? F2S((float)v) : std::to_wstring((int)v));
     }
 }

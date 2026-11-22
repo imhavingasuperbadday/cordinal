@@ -504,6 +504,7 @@ void TestAudioHash(const std::wstring& media, const std::wstring& scratch) {
     g_lib[iw2].firstPlayed = 100;
     g_lib[iw2].added = 400;
     g_lib[iw2].rating = 80;
+    g_lib.SetFavorite(iw2, true);  // the removed copy's heart moves to the copy kept, and comes back on undo
     const std::vector<PlayEvent> savedLog = PlayLog();
     SetPlayLog({{iw2, 1500, 60, PlayEvent::kCounted}, {iw, 1600, 60, PlayEvent::kCounted}, {ia, 1700, 60, PlayEvent::kCounted}});
     std::vector<Playlist> playlists(2);
@@ -525,19 +526,21 @@ void TestAudioHash(const std::wstring& media, const std::wstring& scratch) {
     const auto cleanup = duplicates::Merge(g_lib, playlists, moves, {true});
     const Track& keep = g_lib[iw];
     Check(keep.playCount == 7 && keep.skipCount == 1 && keep.lastPlayed == 2000 && keep.firstPlayed == 100 && keep.added == 400 &&
-              keep.rating == 80 && g_lib[iw2].playCount == 0 && (g_lib[iw2].flags & Track::kMissing) && PlayLog()[0].id == iw &&
+              keep.rating == 80 && g_lib.Favorite(iw) && !g_lib.Favorite(iw2) &&
+              g_lib[iw2].playCount == 0 && (g_lib[iw2].flags & Track::kMissing) && PlayLog()[0].id == iw &&
               PlayLog()[2].id == ia && playlists[0].items == std::vector<TrackId>{ia, iw} &&
               playlists[1].items == std::vector<TrackId>{iw, ia} && !playlists[0].history.undo.empty(),
-          L"DUPLICATES plays, skips, dates, rating, listens and playlist places move to the copy kept");
+          L"DUPLICATES plays, skips, dates, rating, favorites, listens and playlist places move to the copy kept");
     Check(duplicates::Merge(g_lib, playlists, moves, {false}).Empty(), L"DUPLICATES a copy that stayed on disk keeps its history");
 
     playlists[1].items.push_back(ia);  // changed since: left as it is
     size_t skipped = 0;
     const auto reread = duplicates::Undo(g_lib, playlists, cleanup, {true}, &skipped);
     Check(reread == std::vector<TrackId>{iw2} && g_lib[iw].playCount == 2 && g_lib[iw].lastPlayed == 1000 && g_lib[iw].added == 500 &&
-              g_lib[iw].rating == 0 && g_lib[iw2].playCount == 5 && g_lib[iw2].rating == 80 && !(g_lib[iw2].flags & Track::kMissing) &&
+              g_lib[iw].rating == 0 && g_lib.Favorite(iw2) && !g_lib.Favorite(iw) &&
+              g_lib[iw2].playCount == 5 && g_lib[iw2].rating == 80 && !(g_lib[iw2].flags & Track::kMissing) &&
               PlayLog()[0].id == iw2 && PlayLog()[1].id == iw && playlists[0].items == std::vector<TrackId>{iw2, ia, iw} && skipped == 1,
-          L"DUPLICATES undo returns the history, listens and unchanged playlists to the restored copy");
+          L"DUPLICATES undo returns the history, favorites, listens and unchanged playlists to the restored copy");
     SetPlayLog(std::vector<PlayEvent>(savedLog));
     g_lib = Library();
 }

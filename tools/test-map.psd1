@@ -16,7 +16,7 @@
         @{ Paths = @('src/tests/testlog.h', 'src/tests/test_report.*', 'src/stub/*'); Suites = @('harness') }
         @{ Paths = @('src/tests/*bench*', 'src/tests/reference_audio.*', 'src/tests/g726_reference.*')
            Suites = @('native-codecs', 'exact-pcm') }
-        @{ Paths = @('src/tests/metadata_checks.h'); Suites = @('metadata', 'cd-rip') }
+        @{ Paths = @('src/tests/metadata_checks.h'); Suites = @('metadata', 'cd-rip', 'discovery') }
         @{ Paths = @('src/tests/cdrip_checks.h'); Suites = @('cd-rip') }
         @{ Paths = @('src/tests/selftest_linux_*', 'src/tests/selftest_hls.cpp', 'src/tests/selftest_radio_stream.cpp')
            Suites = @('radio', 'live-audio'); Note = 'Linux test sources also run under .\linux.bat.' }
@@ -91,6 +91,22 @@
                      'src/app_webfetch.*', 'src/tests/selftest_soundcloud.cpp', 'src/tests/selftest_ytaudio.cpp',
                      'src/tests/selftest_spotifylink.cpp')
             Suites = @('webfetch', 'ui'); Note = 'Resolvers are pure C++ shared with Linux: also run .\linux.bat.' }
+        # Spotify exports and CSV playlists: pure parsers shared with the Linux panel, feeding the queue.
+        @{ Paths = @('src/playlist_import.*')
+            Suites = @('webfetch', 'ui'); Note = 'Pure parsers shared with Linux: also run .\linux.bat.' }
+        # Release Radar: the MusicBrainz check, the album parser and the two front ends that save through
+        # the web-save queue.
+        @{ Paths = @('src/release_radar.*', 'src/app_releaseradar.*', 'src/linux/panel_radar.cpp')
+            Suites = @('metadata', 'webfetch', 'ui'); Note = 'Shared with Linux: also run .\linux.bat.' }
+        # Discover outside my library: MusicBrainz choices and the preview the radio queue plays.
+        @{ Paths = @('src/discovery.*', 'src/app_discover.*', 'src/linux/discover_ui.cpp')
+            Suites = @('discovery', 'webfetch', 'ui'); Note = 'Shared with Linux: also run .\linux.bat.' }
+        # Unified online search: track search parsers, dedup/cache and Windows/Linux search panes.
+        @{ Paths = @('src/online_search.*', 'src/app_search_online.*', 'src/linux/search_online_ui.*')
+            Suites = @('metadata', 'webfetch', 'ui'); Note = 'Shared with Linux: also run .\linux.bat.' }
+        # The fragmented-MP4 rewrite runs on the save queue and reuses audio_mp4.cpp's parser.
+        @{ Paths = @('src/mp4_remux.*')
+            Suites = @('webfetch', 'native-codecs'); Note = 'Shared with the Linux build: also run .\linux.bat.' }
         @{ Paths = @('src/metadata_fetch.*', 'src/coverfetch.*', 'src/customcover.*', 'src/musicbrainz.*',
                      'src/coverupload.*', 'src/app_coverfetch.*', 'src/app_artistinfo.*', 'src/app_review.*')
            Suites = @('metadata') }

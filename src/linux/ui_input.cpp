@@ -1,6 +1,7 @@
 // The Linux window's input: hit testing, the mouse, the keyboard and the drags that reorder tracks.
 #include "alternate_ui.h"
 #include "big_ui.h"
+#include "search_online_ui.h"
 #include "ui_internal.h"
 
 namespace lx {
@@ -273,6 +274,7 @@ void MouseDown(const SDL_MouseButtonEvent& e) {
         OpenBarMenu(bar);
         return;
     }
+    if (LayoutBarMouseDown(x, y)) return;
     if (AlternateMouseDown(x, y, e.button, e.clicks)) return;
     if (PresentationMouseDown(x, y, e.button, e.clicks)) return;
     bool wasSearch = g.searchFocused;
@@ -294,6 +296,7 @@ void MouseDown(const SDL_MouseButtonEvent& e) {
     }
     if (QueueMouseDown(x, y, e.button, e.clicks, SDL_GetModState())) return;
     if (!L.browser.In(x, y)) BrowserBlur();
+    if (!InternetRadio().active && OnlineSearchMouseDown(x, y, e.button, e.clicks)) return;
     if (e.button == SDL_BUTTON_RIGHT) {
         if (InternetRadio().active && L.list.In(x, y)) return;
         if (L.buttons[kBtnResume].In(x, y) && g.settings.resumeOn) { OpenComebacks(false); return; }  // the remembered songs
@@ -618,6 +621,7 @@ void Wheel(const SDL_MouseWheelEvent& e) {
         BrowserWheel(L.browser, x, y, e.y);
         return;
     }
+    if (!InternetRadio().active && OnlineSearchWheel(x, y, e.y)) return;
     if (CanvasActive() && L.list.In(x, y)) {
         CanvasWheel(L.list, e.y, SDL_GetModState() & SDL_KMOD_CTRL);
         return;
@@ -793,7 +797,10 @@ void Key(const SDL_KeyboardEvent& e) {
             case SDLK_J: RevealPlaying(); return;
             case SDLK_N: NewPlaylist(); return;
             case SDLK_W: if (InternetRadio().active) CloseRadio(); else ClosePlaylist(g.active); return;
-            case SDLK_D: if (shift) { DuplicatePlaylist(); return; } break;
+            case SDLK_D:
+                if (shift) DuplicatePlaylist();
+                else ToggleFavorites(SelectedTracks());
+                return;
             case SDLK_T: if (shift) { ReopenPlaylist(); return; } break;
             case SDLK_PAGEUP: if (shift) { ReorderPlaylist(-1); return; } break;
             case SDLK_PAGEDOWN: if (shift) { ReorderPlaylist(1); return; } break;
@@ -864,6 +871,7 @@ void Key(const SDL_KeyboardEvent& e) {
             if (!g.search.empty()) {
                 g.search.clear();
                 RebuildRows();
+                OnlineSearchQueryChanged(g.search);
             } else {
                 g.searchFocused = false;
                 SDL_StopTextInput(g.window);
@@ -872,11 +880,16 @@ void Key(const SDL_KeyboardEvent& e) {
             if (ctrl) g.search.clear();
             else g.search.pop_back();
             RebuildRows();
+            OnlineSearchQueryChanged(g.search);
         } else if (e.key == SDLK_RETURN || e.key == SDLK_DOWN) {
             g.searchFocused = false;
             SDL_StopTextInput(g.window);
-            if (!g.rows.empty()) MoveFocus(0, false);
-            if (e.key == SDLK_RETURN && !g.rows.empty()) PlayRow(0);
+            if (!g.rows.empty()) {
+                MoveFocus(0, false);
+                if (e.key == SDLK_RETURN) PlayRow(0);
+            } else {
+                OnlineSearchActivateDefault();
+            }
         }
         return;
     }
@@ -898,6 +911,7 @@ void Key(const SDL_KeyboardEvent& e) {
         g.redraw = true; return;
     }
     if (BrowserKey(e)) return;
+    if (OnlineSearchKey(e)) return;
     if (CanvasActive() && CanvasKey(e)) return;
     int page =std::max(1, (int)(L.rows.h / L.rowH) - 1);
     switch (e.key) {
@@ -990,7 +1004,7 @@ void TextInput(const SDL_TextInputEvent& e) {
     if (!g.searchFocused || !e.text) return;
     g.search += compat::Widen(e.text);
     if (InternetRadio().active) { InternetRadio().query = g.search; if (!InternetRadio().discover) RadioRebuild(); }
-    else RebuildRows();
+    else { RebuildRows(); OnlineSearchQueryChanged(g.search); }
     g.redraw = true;
 }
 

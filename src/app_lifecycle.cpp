@@ -82,6 +82,8 @@ void FinishStartup(HWND hwnd) {
 // freed and nothing is left in the message queue when the window is destroyed.
 void StopAppWorkers(HWND hwnd) {
     DestroyRadio();
+    DiscoverShutdown();
+    StopOnlineSearch();
     musicbrainz::Stop();
     StopHelpers();  // first: it ends helper programs that workers below may be waiting on
     StopLyrics();
@@ -94,6 +96,7 @@ void StopAppWorkers(HWND hwnd) {
     KillTimer(hwnd, kUiTimer);
     KillTimer(hwnd, kBusyTimer);
     KillTimer(hwnd, kSearchTimer);
+    KillTimer(hwnd, kOnlineSearchTimer);
     KillTimer(hwnd, kPrefsTimer);
     g.scanner.Stop();
     StopTagWriter();
@@ -154,6 +157,7 @@ void DestroyMainWindow(HWND hwnd) {
 // refresh, status/now-playing/tray/panels/lyrics — then autosave on a long interval.
 void MainTick() {
     RadioTick();
+    DiscoverTick();
     HeadphonesTick();
     ReplayGainEqTick();
     if (g.compactPending && !g.searchPending) CompactLibrary();
@@ -163,7 +167,11 @@ void MainTick() {
     MusicBrainzTick();
     MaybeAutoMeasure(false);
     if (!g.busyTimer && AnyTrackBusy()) g.busyTimer = SetTimer(g.hwnd, kBusyTimer, 90, nullptr) != 0;
-    if (g.viewRevision != g_lib.Revision() && Active().IsView() && GetTickCount64() - g.viewBuilt > 1000)
+    // A window put away (Lightweight mode, the mini player) or minimized shows nothing, so the
+    // rebuild waits for the show/restore hook in the window procedure instead: a scan running
+    // under a hidden window would otherwise sort the library every second for rows no one sees.
+    if (g.viewRevision != g_lib.Revision() && Active().IsView() && GetTickCount64() - g.viewBuilt > 1000 &&
+        IsWindowVisible(g.hwnd) && !IsIconic(g.hwnd))
         RefreshViewKeepingSelection();
     UpdateStatus();
     if (g.playing != kNone) UpdateNowPlaying();

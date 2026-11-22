@@ -155,6 +155,7 @@ int PanelColumns(const Album& a, float width);
 float PanelHeight(const Album& a, float width);
 void BuildGroups();
 void GridMetrics(float itemW, int& cols, float& gap);
+size_t CoverBudget();
 void LayoutItems();
 bool EnsureGraphics();
 size_t CoverBudget();

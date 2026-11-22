@@ -36,7 +36,7 @@ std::vector<Suite> Suites(const std::wstring& root) {
         {L"storage", L"storage and playlist protections", L"src/tests/port_regressions.cpp", 0, 0,
             [](const auto& s) { TestPortedStorage(s); }},
         {L"library-db", L"library.cdb and audio hash sections", L"src/tests/selftest_library.cpp", 0, 0,
-            [](const auto& s) { TestLibraryDb(s + L"\\library"); TestAudioHashSection(s + L"\\hash"); }},
+            [](const auto& s) { TestLibraryDb(s + L"\\library"); TestAudioHashSection(s + L"\\hash"); TestFavoritesSection(s + L"\\favorites"); }},
         {L"album-editions", L"album groups, editions, correspondence and migration", L"src/tests/selftest_albums.cpp", 0, 0,
             [](const auto& s) { TestAlbumEditions(s + L"\\albums"); }},
         {L"album-maker", L"making an album from tracks: starting values, order and tag edits", L"src/tests/selftest_albums.cpp", 0, 0,
@@ -78,7 +78,11 @@ std::vector<Suite> Suites(const std::wstring& root) {
                 TestYtAudio();
                 TestSpotifyLink();
                 TestWebFetch(s, root + L"\\media");
+                TestPlaylistImport();
             }},
+        {L"discovery", L"discover outside my library: related artists, unowned songs and keeping a preview",
+            L"src/tests/selftest_discovery.cpp", 0, 0,
+            [](const auto& s) { TestDiscovery(s + L"\\discovery"); }},
         {L"speakers", L"network speakers: descriptions, control and the stream", L"src/tests/selftest_speakers.cpp", 0, 0,
             [](const auto&) { TestSpeakers(); }},
         {L"exact-pcm", L"exact PCM and MD5", L"src/tests/selftest_exact.cpp", Media | Gap | Rg | Tags | Native, 0,

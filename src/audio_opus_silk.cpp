@@ -4,6 +4,7 @@
 // internal 8/12/16 kHz signal to 48 kHz. Fixed-point parsing feeds float synthesis.
 #include "audio_opus_silk.h"
 #include "audio_opus_silk_tables.h"
+#include "audio_kernels.h"
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -137,7 +138,7 @@ bool Stable(const std::array<int32_t,16>& coefficients,unsigned order) {
 
 // Converts NLSFs to LPC coefficients (RFC 4.2.7.5.6): builds the two polynomials
 // from the roots, then bandwidth-expands until the filter is stable.
-std::array<double,16> Lpc(const std::array<int,16>& lsf,unsigned d) {
+std::array<int32_t,16> Lpc(const std::array<int,16>& lsf,unsigned d) {
     // These are the normative piecewise cosine values, which deliberately
     // differ from a freshly rounded cosine at several indices.
     const auto& cosines=LSFCosTab_FIX_Q12;
@@ -172,11 +173,11 @@ std::array<double,16> Lpc(const std::array<int,16>& lsf,unsigned d) {
         if (pass==9) for (unsigned i=0;i<d;++i) a[i]=std::clamp(Rounded(a[i],5),-32768,32767)*32;
     }
     for (unsigned pass=0;pass<16 && !Stable(a,d);++pass) Expand(a,d,65536-(2<<pass));
-    std::array<double,16> out{};
-    for (unsigned i=0;i<d;++i) out[i]=Rounded(a[i],5)/4096.0;
+    std::array<int32_t,16> out{};
+    for (unsigned i=0;i<d;++i) out[i]=Rounded(a[i],5);
 #ifdef CORDINAL_CODEC_TRACE
     if (std::getenv("CORDINAL_SILK_NATIVE")) {
-        fprintf(stderr,"lpc");for (unsigned i=0;i<d;++i) fprintf(stderr," %d",Rounded(a[i],5));fprintf(stderr,"\n");
+        fprintf(stderr,"lpc");for (unsigned i=0;i<d;++i) fprintf(stderr," %d",out[i]);fprintf(stderr,"\n");
     }
 #endif
     return out;
@@ -184,22 +185,22 @@ std::array<double,16> Lpc(const std::array<int,16>& lsf,unsigned d) {
 
 // Maps a decoded log-gain index (0-63) to a linear Q16 gain via the RFC's
 // piecewise exponential (a fractional-power approximation).
-double Gain(int log) {
+int64_t Gain(int log) {
     int value=(0x1d1c71*log>>16)+2090;
     int64_t base=1ll<<(value>>7),fraction=value&127;
-    return (base+(((-174*fraction*(128-fraction)>>16)+fraction)*(base>>7)))/65536.0;
+    return base+(((-174*fraction*(128-fraction)>>16)+fraction)*(base>>7));
 }
 
 // All decoded parameters for one SILK frame: gains, NLSF/interpolation, pitch and
 // LTP (voiced frames), excitation pulses, plus the type/offset and LTP scale.
 struct Parameters {
     unsigned type=0,offset=0,interpolation=4,seed=0,order=0;
-    std::array<double,4> gains{};
+    std::array<int64_t,4> gains{};
     std::array<int,4> pitch{};
-    std::array<std::array<double,5>,4> ltp{};
+    std::array<std::array<int32_t,5>,4> ltp{};
     std::array<int,16> lsf{};
     std::array<int,320> pulses{};
-    double scale=15565.0/16384;
+    int32_t scale=15565;
 };
 // Per-channel persistent synthesis state. pcm/scaled hold 512 samples of history
 // (10 ms at 48 kHz) followed by up to one 320-sample frame, for LTP lookback.
@@ -236,11 +237,11 @@ void ReadPulses(OpusRange& r,Parameters& p,unsigned samples) {
         }
     }
     for (unsigned b=0;b<blocks;++b) Shell(r,p.pulses.data()+b*16,sums[b],16);
-    for (unsigned b=0;b<blocks;++b) for (unsigned j=0;j<16;++j)
-        for (unsigned bit=0;bit<extra[b];++bit) p.pulses[b*16+j]=p.pulses[b*16+j]*2+r.Icdf(lsb_iCDF);
+    for (unsigned b=0;b<blocks;++b) if (extra[b]) for (unsigned j=0;j<16;++j)
+        for (unsigned bit=0;bit<extra[b];++bit) p.pulses[b*16+j]=p.pulses[b*16+j]*2+r.Icdf2(lsb_iCDF[0]);
     for (unsigned b=0;b<blocks;++b) {
-        uint8_t model[]{sign_iCDF[7*(2*p.type+p.offset)+std::min(sums[b],6u)],0};
-        for (unsigned j=0;j<16;++j) if (p.pulses[b*16+j] && !r.Icdf(model)) p.pulses[b*16+j]=-p.pulses[b*16+j];
+        uint8_t prob=sign_iCDF[7*(2*p.type+p.offset)+std::min(sums[b],6u)];
+        for (unsigned j=0;j<16;++j) if (p.pulses[b*16+j] && !r.Icdf2(prob)) p.pulses[b*16+j]=-p.pulses[b*16+j];
     }
 }
 
@@ -285,9 +286,9 @@ Parameters ReadParameters(OpusRange& r,Channel& state,unsigned rate,unsigned sub
         const int8_t* cb=family==0?LTP_gain_vq_0:family==1?LTP_gain_vq_1:LTP_gain_vq_2;
         for (unsigned s=0;s<subframes;++s) {
             unsigned index=r.Icdf(ltpModel);
-            for (unsigned k=0;k<5;++k) p.ltp[s][k]=cb[index*5+k]/128.0;
+            for (unsigned k=0;k<5;++k) p.ltp[s][k]=(int32_t)cb[index*5+k]*128;
         }
-        if (scale) p.scale=LTPScales_table_Q14[r.Icdf(LTPscale_iCDF)]/16384.0;
+        if (scale) p.scale=LTPScales_table_Q14[r.Icdf(LTPscale_iCDF)];
     }
     state.type=p.type;
     p.seed=r.Icdf(uniform4_iCDF);
@@ -307,74 +308,85 @@ std::array<int,2> StereoWeights(OpusRange& r) {
 }
 
 // Runs LPC/LTP excitation and synthesis for one channel at `rate` for subframes
-// (rate/200 samples each). Returns the new samples and shifts the 512-sample
-// history window forward; output stays at `rate` and Resample() lifts it to 48 kHz.
-std::vector<int16_t> Synthesize(Channel& ch,const Parameters& p,unsigned rate,unsigned subframes) {
-    unsigned count=rate/200,samples=count*subframes;
+// (rate/200 samples each), writing into `out` and shifting the 512-sample history.
+template<unsigned Order,bool Voiced>
+void SynthesizeSubframes(Channel& ch,const Parameters& p,const std::array<int32_t,16>& first,
+                         const std::array<int32_t,16>& coefficients,unsigned count,unsigned subframes) {
     std::array<int32_t,832> residual{};
-    auto coefficients=Lpc(p.lsf,p.order),first=coefficients;
-    if (p.interpolation<4) {
-        std::array<int,16> interpolated{};
-        for (unsigned k=0;k<p.order;++k) interpolated[k]=ch.lsf[k]+((int(p.interpolation)*(p.lsf[k]-ch.lsf[k]))>>2);
-        first=Lpc(interpolated,p.order);
-    }
     auto saturate=[](int64_t v) { return (int32_t)std::clamp<int64_t>(v,INT32_MIN,INT32_MAX); };
     auto pcm=[](int64_t v) { return std::clamp<int64_t>(v,-32768,32767); };
     auto multiply=[](int64_t a,int64_t b) { return (a*b)>>16; };
     uint32_t seed=p.seed;
+    const int offset=Voiced?(p.offset?25:8):(p.offset?60:25);
+    int32_t* __restrict scaled=ch.scaled.data();
+    int16_t* __restrict pcmOut=ch.pcm.data();
     for (unsigned s=0;s<subframes;++s) {
-        unsigned start=512+s*count;
-        const auto& a=s<2?first:coefficients;
-        std::array<int32_t,16> filter{};
-        for (unsigned k=0;k<p.order;++k) filter[k]=(int32_t)std::lround(a[k]*4096);
-        int64_t gain=(int64_t)std::llround(p.gains[s]*65536),adjustment=(ch.previousGain*65536)/gain;
+        const unsigned start=512+s*count;
+        const auto& filter=s<2?first:coefficients;
+        const int64_t gain=p.gains[s],adjustment=(ch.previousGain*65536)/gain;
         // Rescale the history when the gain changes, so LTP does not mix samples
         // captured at different gain stages.
         if (adjustment!=65536) for (unsigned i=start-16;i<start;++i)
-            ch.scaled[i]=saturate(multiply(ch.scaled[i],adjustment));
+            scaled[i]=saturate(multiply(scaled[i],adjustment));
         ch.previousGain=gain;
-        if (p.type==2) {
+        if constexpr (Voiced) {
             if (!s || (s==2 && p.interpolation<4)) {
                 int64_t inverse=(1ll<<47)/gain;
-                if (!s) inverse=multiply(inverse,(int64_t)std::lround(p.scale*16384))*4;
+                if (!s) inverse=multiply(inverse,p.scale)*4;
                 for (unsigned i=start-p.pitch[s]-2;i<start;++i) {
-                    int64_t value=(int64_t)ch.pcm[i]<<12;
-                    for (unsigned k=0;k<p.order;++k) value-=(int64_t)filter[k]*ch.pcm[i-k-1];
+                    int64_t value=(int64_t)pcmOut[i]<<12;
+                    for (unsigned k=0;k<Order;++k) value-=(int64_t)filter[k]*pcmOut[i-k-1];
                     residual[i]=saturate(multiply(inverse,pcm(Rounded(value,12))));
                 }
             } else if (adjustment!=65536) {
                 for (unsigned i=start-p.pitch[s]-2;i<start;++i) residual[i]=saturate(multiply(residual[i],adjustment));
             }
         }
-        // Add the pseudo-random-sign excitation, then LTP (voiced) and LPC (short-term)
-        // prediction, to produce the output sample.
-        const int offset=p.type==2?(p.offset?25:8):(p.offset?60:25);
-        int32_t ltp[5]{};
-        if (p.type==2) for (unsigned k=0;k<5;++k) ltp[k]=(int32_t)std::lround(p.ltp[s][k]*16384);
+        const int32_t* ltp=p.ltp[s].data();
+        const int pitch=p.pitch[s];
         const int* pulses=p.pulses.data()+s*count;
         for (unsigned j=0;j<count;++j) {
             const unsigned i=start+j;
-            int pulse=pulses[j];
+            const int pulse=pulses[j];
             int64_t excitation=pulse*16384ll-Sign(pulse)*1280+offset*64;
             seed=seed*196314165u+907633515u;
             if (seed&0x80000000) excitation=-excitation;
             seed+=pulse;
-            if (p.type==2) {
+            if constexpr (Voiced) {
                 int64_t prediction=2;
-                for (unsigned k=0;k<5;++k) prediction+=multiply(residual[i-p.pitch[s]+2-k],ltp[k]);
+                const int32_t* r=residual.data()+i-pitch+2;
+                for (unsigned k=0;k<5;++k) prediction+=multiply(r[-(int)k],ltp[k]);
                 excitation+=2*prediction;residual[i]=saturate(excitation*2);
             }
-            int64_t prediction=p.order/2;
-            for (unsigned k=0;k<p.order;++k) prediction+=multiply(ch.scaled[i-k-1],filter[k]);
-            ch.scaled[i]=saturate(excitation+16*prediction);
-            ch.pcm[i]=(int16_t)pcm(Rounded(multiply(ch.scaled[i],gain>>6),8));
+            int64_t prediction=Order/2;
+            const int32_t* hist=scaled+i-1;
+            for (unsigned k=1;k<Order;++k) prediction+=multiply(hist[-(int)k],filter[k]);
+            prediction+=multiply(hist[0],filter[0]);
+            scaled[i]=saturate(excitation+16*prediction);
+            pcmOut[i]=(int16_t)pcm(Rounded(multiply(scaled[i],gain>>6),8));
         }
     }
-    std::vector<int16_t> out(ch.pcm.begin()+512,ch.pcm.begin()+512+samples);
+}
+
+void Synthesize(Channel& ch,const Parameters& p,unsigned rate,unsigned subframes,int16_t* out) {
+    unsigned count=rate/200,samples=count*subframes;
+    auto coefficients=Lpc(p.lsf,p.order),first=coefficients;
+    if (p.interpolation<4) {
+        std::array<int,16> interpolated{};
+        for (unsigned k=0;k<p.order;++k) interpolated[k]=ch.lsf[k]+((int(p.interpolation)*(p.lsf[k]-ch.lsf[k]))>>2);
+        first=Lpc(interpolated,p.order);
+    }
+    if (p.order==16) {
+        if (p.type==2) SynthesizeSubframes<16,true>(ch,p,first,coefficients,count,subframes);
+        else SynthesizeSubframes<16,false>(ch,p,first,coefficients,count,subframes);
+    } else {
+        if (p.type==2) SynthesizeSubframes<10,true>(ch,p,first,coefficients,count,subframes);
+        else SynthesizeSubframes<10,false>(ch,p,first,coefficients,count,subframes);
+    }
+    std::copy_n(ch.pcm.data()+512,samples,out);
     std::memmove(ch.pcm.data(),ch.pcm.data()+samples,512*sizeof(ch.pcm[0]));
     std::memmove(ch.scaled.data(),ch.scaled.data()+samples,512*sizeof(int32_t));
     ch.lsf=p.lsf;ch.have=true;
-    return out;
 }
 } // namespace
 
@@ -424,78 +436,89 @@ struct OpusSilk::Impl : State {
     // generically rather than via reference routines. A mono packet's unmix produces
     // identical channels, so only one is filtered and both outputs take its value.
     template<class Sample>
-    void Resample(const std::vector<Sample>& left,const std::vector<Sample>& right,std::vector<float>& out,bool mono) {
+    void Resample(const Sample* left,const Sample* right,size_t count,std::vector<float>& out,bool mono) {
 #ifdef CORDINAL_CODEC_TRACE
         auto real=[](Sample v) {
             if constexpr (std::is_same_v<Sample,int16_t>) return double(v)/32768.0;
             else return double(v);
         };
         if (std::getenv("CORDINAL_SILK_NATIVE"))
-            for (size_t i=0;i<left.size();++i) fprintf(stderr,"lp %.12g %.12g\n",real(left[i]),real(right[i]));
+            for (size_t i=0;i<count;++i) fprintf(stderr,"lp %.12g %.12g\n",real(left[i]),real(right[i]));
 #endif
-        size_t start=out.size();out.resize(start+left.size()*ratio*2);
+        size_t start=out.size();out.resize(start+count*ratio*2);
         // Published SILK filter-design coefficients, applied by this generic
         // allpass cascade and polyphase convolution. No reference routines.
         constexpr int32_t coefficients[2][3]={{1746,14986,39083},{6854,25769,55542}};
         // 16.16 phase increment per output sample; `ratio` is the integer decimation factor.
         uint32_t increment=(uint32_t)((uint64_t(rate)*2*65536+47999)/48000);
-        const size_t upCount=left.size()*2+8;
+        const size_t upCount=count*2+8;
         if (upScratch_.size()<upCount*2) upScratch_.resize(upCount*2);
         int16_t* upChannels[2]={upScratch_.data(),upScratch_.data()+upCount};
         // Both channels are upsampled before the convolution, which then runs once per
         // output sample for the pair and stores them as one 8-byte interleaved write.
         const unsigned used=mono?1:2;
         for (unsigned ch=0;ch<used;++ch) {
-            const auto& input=ch?right:left;
+            const Sample* input=ch?right:left;
             int16_t* up=upChannels[ch];
             std::copy(fir[ch].begin(),fir[ch].end(),up);
-            int32_t* state=allpass[ch].data();
-            for (size_t i=0;i<input.size();++i) {
-                int16_t sample;
-                if constexpr (std::is_same_v<Sample,int16_t>) sample=input[i];
-                else sample=(int16_t)std::clamp((int)std::lround(input[i]*32768),-32768,32767);
-                if (inputDelay) {
-                    int16_t before=delay[ch][0];
-                    std::move(delay[ch].begin()+1,delay[ch].begin()+inputDelay,delay[ch].begin());
-                    delay[ch][inputDelay-1]=sample;sample=before;
+            int16_t delayed[1024];
+            const int16_t* delayedIn=nullptr;
+            if (inputDelay) {
+                for (unsigned d=0;d<inputDelay;++d) delayed[d]=delay[ch][d];
+                for (size_t i=0;i<count;++i) {
+                    if constexpr (std::is_same_v<Sample,int16_t>) delayed[inputDelay+i]=input[i];
+                    else delayed[inputDelay+i]=(int16_t)std::clamp((int)std::lround(input[i]*32768),-32768,32767);
                 }
+                for (unsigned d=0;d<inputDelay;++d) delay[ch][d]=delayed[count+d];
+                delayedIn=delayed;
+            }
+            int32_t* state=allpass[ch].data();
+            int32_t a0=state[0],b0=state[1],c0=state[2],a1=state[3],b1=state[4],c1=state[5];
+            for (size_t i=0;i<count;++i) {
+                int16_t sample;
+                if (delayedIn) sample=delayedIn[i];
+                else if constexpr (std::is_same_v<Sample,int16_t>) sample=input[i];
+                else sample=(int16_t)std::clamp((int)std::lround(input[i]*32768),-32768,32767);
                 // The two allpass branches share their input and stay independent, so they
                 // are unrolled side by side with their six states held in locals.
                 int64_t v0=sample*1024,v1=v0;
-                int32_t a0=state[0],a1=state[3];
                 int64_t e0=((v0-a0)*coefficients[0][0])>>16,e1=((v1-a1)*coefficients[1][0])>>16;
                 int32_t t0=(int32_t)(v0+e0),t1=(int32_t)(v1+e1);
                 v0=a0+e0;v1=a1+e1;a0=t0;a1=t1;
-                int32_t b0=state[1],b1=state[4];
                 e0=((v0-b0)*coefficients[0][1])>>16;e1=((v1-b1)*coefficients[1][1])>>16;
                 t0=(int32_t)(v0+e0);t1=(int32_t)(v1+e1);
                 v0=b0+e0;v1=b1+e1;b0=t0;b1=t1;
-                int32_t c0=state[2],c1=state[5];
                 e0=((v0-c0)*coefficients[0][2])>>16;e1=((v1-c1)*coefficients[1][2])>>16;
                 t0=(int32_t)(v0+e0);t1=(int32_t)(v1+e1);
                 v0=c0+e0;v1=c1+e1;c0=t0;c1=t1;
-                state[0]=a0;state[1]=b0;state[2]=c0;state[3]=a1;state[4]=b1;state[5]=c1;
                 up[8+i*2]=(int16_t)std::clamp(Rounded(v0,10),-32768,32767);
                 up[8+i*2+1]=(int16_t)std::clamp(Rounded(v1,10),-32768,32767);
             }
+            state[0]=a0;state[1]=b0;state[2]=c0;state[3]=a1;state[4]=b1;state[5]=c1;
         }
-        uint32_t at=0;
         const int16_t* upLeft=upChannels[0];
         const int16_t* upRight=upChannels[1];
-        for (size_t i=0;i<left.size()*ratio;++i,at+=increment) {
-            unsigned phase=((at&65535)*12)>>16,offset=at>>16;
-            const __m128i taps=_mm_loadu_si128((const __m128i*)resamplerTaps[phase].data());
-            auto dot=[&](const int16_t* up) {
-                // Four 32-bit pair sums; no pair can overflow (|tap| <= 30567). They are
-                // widened before adding, since the eight-tap total can exceed 32 bits.
-                __m128i pairs=_mm_madd_epi16(_mm_loadu_si128((const __m128i*)(up+offset)),taps);
-                __m128i signs=_mm_srai_epi32(pairs,31);
-                __m128i halves=_mm_add_epi64(_mm_unpacklo_epi32(pairs,signs),_mm_unpackhi_epi32(pairs,signs));
-                int64_t sum=_mm_cvtsi128_si64(halves)+_mm_cvtsi128_si64(_mm_unpackhi_epi64(halves,halves));
-                return std::clamp(Rounded(sum,15),-32768,32767)*(1.0f/32768);
-            };
-            out[start+i*2]=dot(upLeft);
-            out[start+i*2+1]=mono?out[start+i*2]:dot(upRight);
+        if (!mono && FastAudioKernels()) {
+            AudioSilkResampleStereoAvx2(upLeft,upRight,count*ratio,increment,resamplerTaps[0].data(),out.data()+start);
+        } else {
+            uint32_t at=0;
+            float* __restrict dst=out.data()+start;
+            for (size_t i=0;i<count*ratio;++i,at+=increment) {
+                unsigned phase=((at&65535)*12)>>16,offset=at>>16;
+                const __m128i taps=_mm_loadu_si128((const __m128i*)resamplerTaps[phase].data());
+                auto dot=[&](const int16_t* up) {
+                    // Four 32-bit pair sums; no pair can overflow (|tap| <= 30567). They are
+                    // widened before adding, since the eight-tap total can exceed 32 bits.
+                    __m128i pairs=_mm_madd_epi16(_mm_loadu_si128((const __m128i*)(up+offset)),taps);
+                    __m128i signs=_mm_srai_epi32(pairs,31);
+                    __m128i halves=_mm_add_epi64(_mm_unpacklo_epi32(pairs,signs),_mm_unpackhi_epi32(pairs,signs));
+                    int64_t sum=_mm_cvtsi128_si64(halves)+_mm_cvtsi128_si64(_mm_unpackhi_epi64(halves,halves));
+                    return std::clamp(Rounded(sum,15),-32768,32767)*(1.0f/32768);
+                };
+                float s=dot(upLeft);
+                dst[i*2]=s;
+                dst[i*2+1]=mono?s:dot(upRight);
+            }
         }
         std::copy_n(upLeft+upCount-8,8,fir[0].begin());
         if (!mono) std::copy_n(upRight+upCount-8,8,fir[1].begin());
@@ -523,18 +546,19 @@ struct OpusSilk::Impl : State {
             ReadParameters(r,redundant[ch],hz,subframes,true,previous,!previous);
         }
         bool sideCoded=true;
+        const size_t samples=(size_t)(hz/200)*subframes;
         // Main frames: stereo weights, mid-only flag, then mid (and side) parameters.
         for (unsigned f=0;f<frames;++f) {
             auto nextWeights=count==2?StereoWeights(r):std::array<int,2>{};
             bool midOnly=count==2 && !active[1][f] && r.Icdf(stereo_only_code_mid_iCDF);
             auto midParameters=ReadParameters(r,channels[0],hz,subframes,active[0][f],f!=0,f==0);
-            std::vector<int16_t> mid=Synthesize(channels[0],midParameters,hz,subframes),side(mid.size());
+            int16_t mid[320],side[320]{},left[320],right[320];
+            Synthesize(channels[0],midParameters,hz,subframes,mid);
             if (count==2 && !midOnly) {
                 auto sideParameters=ReadParameters(r,channels[1],hz,subframes,active[1][f],f!=0 && sideCoded,f==0);
-                side=Synthesize(channels[1],sideParameters,hz,subframes);
+                Synthesize(channels[1],sideParameters,hz,subframes,side);
             } else if (count==2) channels[1]=Channel{};
             sideCoded=!midOnly;
-            std::vector<int16_t> left(mid.size()),right(mid.size());
             // Ramp the stereo weights over ~8 ms, then unmix mid/side to left/right
             // with the 3-tap inter-frame prediction (RFC 4.2.8).
             int ramp=8*hz/1000,step[2]{};
@@ -543,7 +567,7 @@ struct OpusSilk::Impl : State {
             // units once per frame and predict in integers, like the rest of the unmix.
             int32_t middle1=(int32_t)std::lround(mid1*32768),middle2=(int32_t)std::lround(mid2*32768);
             int32_t sideHistory=(int32_t)std::lround(side1*32768);
-            for (unsigned i=0;i<mid.size();++i) {
+            for (unsigned i=0;i<samples;++i) {
                 int w0=(int)i<ramp?weights[0]+((int)i+1)*step[0]:nextWeights[0];
                 int w1=(int)i<ramp?weights[1]+((int)i+1)*step[1]:nextWeights[1];
                 int64_t middle=middle1,sum=middle2+2*middle+mid[i];
@@ -558,7 +582,7 @@ struct OpusSilk::Impl : State {
 #ifdef CORDINAL_CODEC_TRACE
             fprintf(stderr,"silk %u %u %u %u %08x\n",hz,count,midParameters.type,r.Tell(),r.FinalRange());
 #endif
-            Resample(left,right,out,count==1 && !std::exchange(collapse,false));
+            Resample(left,right,samples,out,count==1 && !std::exchange(collapse,false));
         }
         // SILK reads a fixed number of bounded symbols and permits arithmetic
         // zero extension at the end of a frame. CELT enforces its own bit budget.
@@ -586,7 +610,7 @@ struct OpusSilk::Impl : State {
             mid2=mid1;mid1=values[0];side1=values[1];
             concealGain*=decay;
         }
-        Resample(left,right,out,count==1 && !std::exchange(collapse,false));return true;
+        Resample(left.data(),right.data(),left.size(),out,count==1 && !std::exchange(collapse,false));return true;
     }
 };
 

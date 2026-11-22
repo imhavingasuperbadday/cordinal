@@ -22,3 +22,5 @@
 #include "app_packs.h"
 #include "app_helpers.h"
 #include "app_radio.h"
+#include "app_discover.h"
+#include "app_search_online.h"

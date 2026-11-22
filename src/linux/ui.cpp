@@ -79,6 +79,7 @@ std::vector<int> g_lineOfRow;
 // kThumbsKept.
 uint64_t g_frame = 0;
 std::unordered_map<uint64_t, Thumb> g_thumbs;
+size_t g_thumbBytes = 0;
 std::unordered_map<TrackId, uint64_t> g_thumbFor;  // requests in flight
 int g_thumbsPending = 0;
 
@@ -210,7 +211,7 @@ void UpdateWindowTitle() {
 
 namespace {
 const Palette& ThemeBase() {
-    if (g.settings.theme == ThemeMode::System) return SDL_GetSystemTheme() == SDL_SYSTEM_THEME_DARK ? DarkPalette() : LightPalette();
+    if (g.settings.theme == ThemeMode::System) return CustomPalette(SDL_GetSystemTheme() == SDL_SYSTEM_THEME_DARK);
     return ThemePalette(g.settings.theme);
 }
 }  // namespace
@@ -297,6 +298,7 @@ void ShutdownUi() {
     for (auto& [key, t] : g_thumbs)
         if (t.texture) SDL_DestroyTexture(t.texture);
     g_thumbs.clear();
+    g_thumbBytes = 0;
 }
 
 // Release renderer-owned caches before replacing the renderer. CPU copies retain open editors and
@@ -393,6 +395,7 @@ void ForgetCoverArt() {
     for (auto it = g_thumbs.begin(); it != g_thumbs.end();) {
         if (!it->second.done) { ++it; continue; }
         if (it->second.texture) SDL_DestroyTexture(it->second.texture);
+        g_thumbBytes -= it->second.bytes;
         it = g_thumbs.erase(it);
     }
     g_coverWanted = kNone;  // the next frame asks for the now-playing cover again
@@ -415,6 +418,8 @@ void SetThumb(CoverImage* image) {
             SDL_UpdateTexture(t, nullptr, image->rgba.data(), image->width * 4);
             SDL_SetTextureScaleMode(t, SDL_SCALEMODE_LINEAR);
             it->second.texture = t;
+            it->second.bytes = (size_t)image->width * image->height * 4;
+            g_thumbBytes += it->second.bytes;
             it->second.hue = CoverHue(image->rgba.data(), (size_t)image->width * image->height, false);
         }
     }
@@ -491,6 +496,8 @@ void HandleEvent(const SDL_Event& e) {
             break;
         case SDL_EVENT_DROP_FILE:
             if (CoverPanelDrop(e.drop.data, true)) break;  // the cover picker takes it as an image
+            // The web save panel takes an export or a CSV as an import while it is open.
+            if (WebFetchPanelDrop(compat::Widen(e.drop.data))) break;
             // One picture dropped on its own is a cover for the album it lands on, not music to add.
             if (DropCover(e.drop.data, e.drop.x * Density(), e.drop.y * Density())) break;
             if (e.drop.data) {

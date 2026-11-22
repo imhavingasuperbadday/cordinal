@@ -57,6 +57,8 @@ void AudioMdctPostAvx2(const float* work,const float* post,float* out,unsigned q
 // MPEG history has two identical 1024-float halves to make wrapped reads contiguous.
 void AudioMpegSynthesisAvx2(const float* in,float* history,unsigned head,const float* factors,float* out);
 void AudioMpegSynthesis18Avx2(const float* in,float* history,unsigned& head,const float* factors,float* out);
+void AudioMpegLong8Avx2(const float* in,unsigned type,float* overlap,float* subbands,
+    const float* pre18,const float* twiddle18,const float* post18,const float* window);
 // Compact the interpolated weights for every reachable rational phase in place.
 // denominator <= 256 ensures that no destination overwrites an unread source row.
 // taps must be a multiple of eight in both resampler kernels.
@@ -65,13 +67,24 @@ void AudioResamplePrepareAvx2(float* table,unsigned taps,unsigned denominator);
 void AudioResampleLayoutAvx2(float* table,unsigned taps,unsigned rows);
 void AudioResampleAvx2(const float* history,const float* table,unsigned taps,size_t frames,unsigned step,unsigned remainder,
     unsigned denominator,size_t& index,uint64_t& numerator,float* output);
+// Stereo SILK 12-phase 8-tap polyphase FIR from upsampled int16 channels to interleaved float32.
+void AudioSilkResampleStereoAvx2(const int16_t* upLeft,const int16_t* upRight,size_t frames,uint32_t increment,
+    const int16_t* taps,float* output);
 // One WavPack decorrelation pass with a positive term (1-8, 17 or 18) over a stereo block of
 // interleaved values, both channels at once; memory is each channel's stored history and
 // weight the two adaptive weights, updated in place. Same integer results as the scalar pass.
 void WavPackPredictAvx2(int32_t* values,size_t frames,int term,int* weight,int step,const int32_t (*memory)[8]);
+// Chunked Monkey's Audio adaptive FIR stage: processes `count` samples of `values` linearly
+// in-place using history/adaptation buffers sized `order + count`. After returning, the trailing
+// `order` elements of history/adaptation hold the state for the next chunk.
+void ApeFirChunkAvx2(int16_t* weight, int16_t* history, int16_t* adaptation, unsigned order,
+    unsigned precision, bool modern, uint32_t& average, int32_t* values, size_t count);
 // One step of a Monkey's Audio adaptive filter whose order is a multiple of 32: the wrapping
 // 32-bit dot product of weight and input, then weight += direction*adapt for direction -1, 0 or 1.
 int32_t ApeFilterAvx2(int16_t* weight,const int16_t* input,const int16_t* adapt,unsigned order,int direction);
+// Chunked True Audio eight-tap LMS filter + fixed first-order predictor over `count` samples of one channel.
+void TtaFilterBlockAvx2(int32_t* qm, int32_t* dx, int32_t* dl, int32_t& error, int32_t& predictor,
+    int32_t* values, size_t count, uint32_t round, unsigned shift, unsigned predictionShift);
 // One step of True Audio's eight-tap filter: weights += sign(error)*dx, then round plus the
 // wrapping dot product of history and the new weights.
 uint32_t TtaFilterAvx2(int32_t* weights,const int32_t* dx,const int32_t* history,int32_t error,uint32_t round);

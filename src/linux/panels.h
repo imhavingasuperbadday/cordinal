@@ -4,6 +4,7 @@
 // panels.cpp dispatches to them; each lives in its own panel_*.cpp (panels_internal.h lists them).
 #pragma once
 #include "app.h"
+#include "webfetch.h"
 
 namespace lx {
 
@@ -22,7 +23,8 @@ enum FilePurpose : int {
     kFileCoverDirect = 8,  // the track menu's Cover > Choose image file...
     kFileAlbumCover = 9,   // the album maker's Choose cover...
     kFileConvertDest = 10,  // the Convert panel's Browse...
-    kFileRipDest = 11       // the Rip CD panel's Browse...
+    kFileRipDest = 11,      // the Rip CD panel's Browse...
+    kFileImportWeb = 12     // the web save panel's Import file... (a Spotify export or CSV)
 };
 
 void OpenEqualizer();
@@ -127,10 +129,11 @@ void ShowCoverPanel(bool overTags);
 void CoverPanelDone();
 // artistinfo_ui.cpp: Artist info (View > Artist info...), a panel like the others; panels.cpp shows it.
 void OpenArtistInfo();
-void OnArtistInfoMessage(LPARAM lp);  // WM_APP_ARTISTINFO
+void OpenArtistInfoFor(const std::string& artist);
+void OnArtistInfoMessage(WPARAM wp, LPARAM lp);  // WM_APP_ARTISTINFO
 void StopArtistInfo();
 void DrawArtistPanel(const Palette& p);
-void ArtistPanelMouseDown(float x, float y);
+void ArtistPanelMouseDown(float x, float y, int clicks);
 void ArtistPanelKey(const SDL_KeyboardEvent& e);
 void ArtistPanelWheel(float x, float y, float dy);
 void ArtistPanelClose();
@@ -141,6 +144,7 @@ void OpenWebFetch();
 void OnWebFetchAdded(LPARAM lp);                  // WM_APP_WEBFETCH_ADDED
 void OnWebFetchUpdated(WPARAM index, LPARAM lp);  // WM_APP_WEBFETCH_UPDATED
 void OnWebFetchNotice(LPARAM lp);                 // WM_APP_WEBFETCH_NOTICE
+void OnWebFetchLists(LPARAM lp);                  // WM_APP_WEBFETCH_LISTS
 void OnWebFetchDone(LPARAM lp);                   // WM_APP_WEBFETCH_DONE
 void StopWebFetch();
 void DrawWebFetchPanel(const Palette& p);
@@ -150,7 +154,15 @@ void WebFetchPanelText(const char* text);
 void WebFetchPanelWheel(float x, float y, float dy);
 bool WebFetchPanelWantsText(float x, float y);
 void WebFetchPanelClose();
+void WebFetchPanelFile(const std::wstring& path);  // an export or CSV the dialog chose or a drop landed
+bool WebFetchPanelDrop(const std::wstring& path);  // a drop the open panel takes as an import
 void ShowWebFetchPanel();  // panels.cpp
+// Albums' tracks straight into the save queue (Release Radar): files, not playlist tabs.
+void WebFetchLists(std::vector<WebFetchTrackList> lists);
+// Quiet Release Radar (panel_radar.cpp): recent albums by the artists the library plays and
+// hearts most, one MusicBrainz request at a time, saved through the web-save queue.
+void OpenReleaseRadar();
+void OnReleaseRadarMessage(WPARAM kind, LPARAM lp);
 // collection_run.cpp: File > Export collection's Select what to export, a panel like the others;
 // panels.cpp shows it, and ClosePanel calls ExportPanelClose last (Export... then asks for the file).
 void ShowExportPanel();  // panels.cpp
@@ -176,5 +188,9 @@ void PanelKey(const SDL_KeyboardEvent& e);
 void PanelText(const char* text);
 void PanelFileChosen(int purpose, const std::wstring& path);
 bool PanelWantsText(float x, float y);  // over a text field (for the I-beam cursor)
+bool PickerOnlinePending();
+void PickerOnlineTick();
+void OnPickerOnlineMessage(WPARAM wp, LPARAM lp);
+void StopPickerOnline();
 
 }  // namespace lx

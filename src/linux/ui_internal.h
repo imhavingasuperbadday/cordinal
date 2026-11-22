@@ -46,8 +46,8 @@ inline constexpr double kTempos[] = {0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0};
 // --- geometry ------------------------------------------------------------------------------------
 // The window's parts, from DoLayout. The names follow ui::kLayout.
 struct Layout {
-    Rect player, upNext, menuBar, grip, buttons[6], elapsed, seek, remaining, speaker, volume, cover, title, subtitle, chip, lyrics;
-    Rect tabs, radioTab, search, viewRow, browser, splitter, list, header, rows, scrollbar, status, visuals[2];
+    Rect player, upNext, menuBar, layoutBar, grip, buttons[6], elapsed, seek, remaining, speaker, volume, cover, title, subtitle, chip, lyrics;
+    Rect tabs, radioTab, search, viewRow, browser, splitter, list, header, rows, scrollbar, online, status, visuals[2];
     Rect radioSaved, radioDiscover, radioGenre, radioCountry, radioState, radioSearch, radioGrid;
     std::vector<Rect> tabRects, barItems;
     std::vector<int> tabSlots;  // the playlist each of tabRects shows (TabSlots): auto-playlists can share one
@@ -103,11 +103,13 @@ struct Thumb {
     SDL_Texture* texture = nullptr;
     bool done = false;
     uint64_t used = 0;  // the frame it was last drawn in
+    size_t bytes = 0;   // the texture's pixels, counted toward the frame-end byte budget
     double hue = -1;    // the cover's hue (CoverHue), which an open album's panel is washed with
 };
 inline constexpr size_t kThumbsKept = 600;
 extern uint64_t g_frame;
 extern std::unordered_map<uint64_t, Thumb> g_thumbs;
+extern size_t g_thumbBytes;  // the sum of every Thumb::bytes
 extern std::unordered_map<TrackId, uint64_t> g_thumbFor;  // requests in flight
 extern int g_thumbsPending;
 
@@ -118,7 +120,7 @@ enum Action {
     kAddFiles, kAddFolder, kOpenPlaylistFile, kSavePlaylistFile, kExit,
     kBackup, kRestore, kStatistics, kExportCollection, kImportCollection, kCancelCollection,
     kSelectAll, kRemove, kKeepSelected, kClear, kReloadTags, kRemoveDuplicates, kRemoveDead, kCancelDead, kFind,
-    kPlayPause, kStopAction, kMute, kPrevAction, kNextAction, kShuffleAction, kShuffleAlbumsAction, kRadio, kTaste, kRepeatSet, kStopAfter, kSpots, kPlayHistory, kSpeed, kTempo, kShared, kExclusive,
+    kPlayPause, kStopAction, kMute, kPrevAction, kNextAction, kShuffleAction, kShuffleAlbumsAction, kRadio, kTaste, kKeepDiscovery, kRepeatSet, kStopAfter, kSpots, kPlayHistory, kSpeed, kTempo, kShared, kExclusive,
     kNewPl, kRenamePl, kClosePl, kDuplicatePl, kReopenPl, kMovePlLeft, kMovePlRight, kNextPl, kPrevPl, kReveal,
     kFolders, kRescan, kAcceptInbox, kAcceptAllInbox, kExcludeLibrary, kDuplicateAudio,
     kSteam, kCancelSteam, kWebServer, kConvert, kConvertUndo, kCancelConvert, kOrganize, kOrganizeUndo, kWebFetch, kCopyTo, kCancelCopy,
@@ -127,14 +129,15 @@ enum Action {
     kAbout,
     kPlay, kPlayNext, kAddToQueue, kClearQueue, kAddToNowPlaying, kAddToPlaylist, kRemoveFromNowPlaying, kOpenFolder, kColumnToggle, kPackColumnSet,
     kSectionPlay, kSectionLoop, kSectionStart, kSectionEnd, kSectionClear,
-    kRating, kEditTags, kUndoTags, kUndo, kRedo, kEqualizer, kPreferences, kListenBrainz, kRgEnable, kRgScanSel, kRgScanPl, kRgCancel, kRgClear, kRgWrite, kWriteStatistics,
-    kNewAuto, kEditAuto, kChoice, kGroupEditions, kPreferredEdition, kRemoveEdition, kSplitEditions,
+    kRating, kFavorite, kEditTags, kUndoTags, kUndo, kRedo, kEqualizer, kPreferences, kListenBrainz, kRgEnable, kRgScanSel, kRgScanPl, kRgCancel, kRgClear, kRgWrite, kWriteStatistics,
+    kReleaseRadar,
+    kNewAuto, kEditAuto, kMix, kChoice, kGroupEditions, kPreferredEdition, kRemoveEdition, kSplitEditions,
     kAlbumEditions, kEditionVersions, kRgScanAll, kFindCover, kFetchCovers, kCancelFetchCovers, kRecentAdditions,
     kSaveLyricsTags, kSaveLyricsLrc, kArtistInfo, kRestoreCover,
     kCoverFile, kCoverPaste, kEditAlbumTags, kMissingInfo, kQueuePanel, kQueueEdit, kMakeAlbum, kTagAlbum, kTopBar,
     // The Layout menu (panel_setup.cpp RunLayoutAction): arg is the preset, saved slot, dock, size or row.
     kLayoutPreset, kLayoutBlank, kLayoutSave, kLayoutSaved, kLayoutForget, kLayoutDock, kLayoutWave, kLayoutWaveRow,
-    kLayoutPart, kColumnBrowser, kRipCd, kCancelRip,
+    kLayoutPart, kLayoutBar, kColumnBrowser, kRipCd, kCancelRip, kOnlineAction,
 };
 extern std::function<void(int)> g_choicePick;  // the choice a panel's OpenChoice menu is for
 struct MenuItem {
@@ -328,6 +331,8 @@ int LineAt(float y);
 std::vector<TrackId> SelectedTracks();
 void AcceptInbox(const std::vector<TrackId>& ids);
 void SetRating(const std::vector<TrackId>& ids, uint8_t rating);
+// The heart beside a track: all of `ids` become favorites, or stop being them when every one is.
+void ToggleFavorites(const std::vector<TrackId>& ids);
 void ExcludeFromLibrary(const std::vector<TrackId>& ids);
 void ConfirmExclude(bool confirm);
 std::vector<MenuItem> ReplayGainMenu();
@@ -339,6 +344,9 @@ std::vector<MenuItem> BarMenu(int m);
 std::vector<MenuItem> LayoutStartItems();
 std::vector<MenuItem> LayoutShowItems();
 void RunLayoutAction(int action, int arg);  // the kLayout* actions and kColumnBrowser
+extern bool g_layoutBar;
+void DrawLayoutBar(const Palette& p);
+bool LayoutBarMouseDown(float x, float y);
 std::vector<int> BarMenus();
 float PopupItemHeight(const MenuItem& it);
 void OpenPopup(float x, float y, std::vector<MenuItem> items, bool submenu = false);
@@ -391,6 +399,9 @@ void EndRename(bool commit);
 void BeginRename(int index);
 void NewPlaylist();
 void DuplicatePlaylist();
+// Playlist > Mixes: the ready-made local mixes (autoplaylist.h MixPreset), seeded from the playing or
+// selected track where one is needed; a tab with the same rules comes to the front.
+void OpenMix(MixPreset mix);
 void ClosePlaylist(int index);
 void ReopenPlaylist();
 void ReorderPlaylist(int direction);

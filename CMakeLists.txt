@@ -9,7 +9,7 @@
 # D-Bus is spoken by its own client (src/linux/dbus.cpp), and sound goes to PipeWire or PulseAudio
 # through their native protocols (src/linux/pw_native.cpp, pulse_native.cpp), not a library.
 cmake_minimum_required(VERSION 3.20)
-project(cordinal VERSION 0.1.16 LANGUAGES C CXX)
+project(cordinal VERSION 0.1.17 LANGUAGES C CXX)
 
 if(WIN32)
     message(FATAL_ERROR "On Windows, build with build.bat")
@@ -87,7 +87,8 @@ add_library(cordinal_core STATIC
     src/titleformat.cpp src/peaks.cpp src/tempo.cpp src/theme_palette.cpp src/replaygain.cpp src/eq_profile.cpp
     src/tag_suggest.cpp src/keymap.cpp src/packs.cpp src/web_audio.cpp src/web_catalog.cpp src/web_http.cpp src/web_library.cpp src/web_server.cpp src/web_ui.cpp
     src/web_aac.cpp src/web_acme.cpp src/web_dlna.cpp src/web_reach.cpp src/web_remote.cpp src/qr.cpp src/speakers.cpp src/linux/tls_bearssl.cpp src/linux/tls_der.cpp
-    src/soundcloud.cpp src/ytaudio.cpp src/spotifylink.cpp src/webfetch.cpp
+    src/soundcloud.cpp src/ytaudio.cpp src/spotifylink.cpp src/webfetch.cpp src/mp4_remux.cpp
+    src/playlist_import.cpp src/release_radar.cpp src/discovery.cpp src/online_search.cpp
     ${AUDIO} ${CHIPS} ${ENCODE} ${IPOD} src/linux/compat/compat.cpp src/linux/audio_linux.cpp src/linux/sfx_linux.cpp
     src/linux/sound_stream.cpp src/linux/spa_pod.cpp src/linux/pw_native.cpp src/linux/pulse_native.cpp)
 target_include_directories(cordinal_core PUBLIC src src/linux/compat src/ipod/gpod/include)
@@ -129,8 +130,9 @@ add_executable(cordinal
     src/linux/tagwrite.cpp src/linux/panels.cpp src/linux/panel_album.cpp src/linux/albumtag_ui.cpp src/linux/duplicates_ui.cpp src/linux/panel_eq.cpp src/linux/panel_organize.cpp
     src/linux/panel_comeback.cpp src/linux/panel_palette.cpp src/linux/panel_points.cpp src/linux/panel_prefs.cpp src/linux/panel_rules.cpp src/linux/panel_setup.cpp
     src/linux/panel_tags.cpp src/linux/panel_convert.cpp src/linux/panel_rip.cpp src/linux/convert_run.cpp src/linux/expand.cpp
-    src/linux/organize_run.cpp src/linux/copy_run.cpp src/linux/collection_run.cpp src/linux/ipod_run.cpp src/linux/libview.cpp src/linux/libview_canvas.cpp src/linux/scrobble.cpp src/linux/sounds.cpp src/linux/points_ui.cpp src/linux/lyrics.cpp src/linux/mini.cpp src/linux/lightweight.cpp src/linux/keys.cpp src/linux/panel_keys.cpp src/linux/packs_ui.cpp src/linux/helpers_ui.cpp src/linux/preferences_ui.cpp src/linux/games.cpp src/linux/editions_ui.cpp src/linux/coverfetch_ui.cpp src/linux/artistinfo_ui.cpp src/linux/webfetch_ui.cpp
+    src/linux/organize_run.cpp src/linux/copy_run.cpp src/linux/collection_run.cpp src/linux/ipod_run.cpp src/linux/libview.cpp src/linux/libview_canvas.cpp src/linux/scrobble.cpp src/linux/sounds.cpp src/linux/points_ui.cpp src/linux/lyrics.cpp src/linux/mini.cpp src/linux/lightweight.cpp src/linux/keys.cpp src/linux/panel_keys.cpp src/linux/packs_ui.cpp src/linux/helpers_ui.cpp src/linux/preferences_ui.cpp src/linux/games.cpp src/linux/editions_ui.cpp src/linux/coverfetch_ui.cpp src/linux/artistinfo_ui.cpp src/linux/webfetch_ui.cpp src/linux/panel_radar.cpp
     src/linux/ui_model.cpp src/linux/ui_layout.cpp src/linux/ui_menus.cpp src/linux/ui_dialogs.cpp
+    src/linux/discover_ui.cpp src/linux/search_online_ui.cpp
     src/linux/ui_draw.cpp src/linux/icons.cpp src/linux/ui_input.cpp src/linux/ui_files.cpp src/linux/ui_checks.cpp src/linux/queue_ui.cpp
     src/tests/selftest_linux_packs.cpp src/tests/selftest_linux_headsets.cpp
     src/linux/headsets.cpp src/linux/headphones_ui.cpp src/linux/output_profiles.cpp

@@ -56,6 +56,9 @@ struct History {
 struct Merged {
     std::wstring extra, keep;
     History extraBefore, keepBefore, keepAfter;
+    // Favorites live beside Track, not in History: Merge joins them on the kept copy, and Undo
+    // puts each back the way it was (unless the user has changed the kept copy since).
+    bool extraFavorite = false, keepBeforeFavorite = false, keepAfterFavorite = false;
 };
 struct PlaylistChange {
     uint64_t identity = 0;

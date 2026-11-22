@@ -72,14 +72,23 @@ public:
     // packet (about 2 bytes a packet). Any other group keeps its packets whole. Count(), At() and
     // Find() read either form, so a decoder that never packs still works.
     size_t Count() const { return packets.empty()?count_:packets.size(); }
+    // The last packet starting at or before `sample`, or 0.
     Packet At(size_t i) const {
         if (!packets.empty()) return packets[i];
         const Group& g=groups_[i/kGroup];
         if (g.whole) return whole_[g.at+i%kGroup];
+        const size_t offsetInGroup=i%kGroup;
+        if (offsetInGroup && i==cachedIndex_+1) {
+            Packet p=cachedPacket_;
+            p.offset+=p.bytes+g.gap;p.start+=p.frames;p.bytes=sizes_[g.at+offsetInGroup];
+            cachedIndex_=i;cachedPacket_=p;
+            return p;
+        }
         Packet p=g.first;
-        for (size_t k=1;k<=i%kGroup;++k) {
+        for (size_t k=1;k<=offsetInGroup;++k) {
             p.offset+=p.bytes+g.gap;p.start+=p.frames;p.bytes=sizes_[g.at+k];
         }
+        cachedIndex_=i;cachedPacket_=p;
         return p;
     }
     // The last packet starting at or before `sample`, or 0.
@@ -96,7 +105,7 @@ public:
     }
     void Pack() {
         if (packets.empty()) return;
-        groups_.clear();sizes_.clear();whole_.clear();count_=packets.size();
+        groups_.clear();sizes_.clear();whole_.clear();count_=packets.size();cachedIndex_=SIZE_MAX;
         for (size_t at=0;at<count_;at+=kGroup) {
             const size_t n=std::min(kGroup,count_-at);
             const Packet* p=packets.data()+at;
@@ -123,8 +132,7 @@ public:
     // with a prefix or multiple segments (Matroska block groups in a lace) are
     // gathered into scratch_, so the returned pointer is valid only until the next
     // Data() call. Returns nullptr if a segment cannot be mapped.
-    const uint8_t* Data(size_t packet) {
-        const Packet p=At(packet);
+    const uint8_t* Data(const Packet& p) {
         static constexpr uint8_t empty=0;
         if (!p.bytes) return &empty;
         if (!p.pieces && prefix.empty()) return file.View(p.offset,p.bytes);
@@ -141,6 +149,7 @@ public:
         }
         return scratch_.size()==p.bytes?scratch_.data():nullptr;
     }
+    const uint8_t* Data(size_t packet) { return Data(At(packet)); }
     File file;
     std::vector<Packet> packets;
     std::vector<Segment> segments;
@@ -163,6 +172,8 @@ private:
     std::vector<uint16_t> sizes_;
     std::vector<Packet> whole_;
     size_t count_=0;
+    mutable size_t cachedIndex_=SIZE_MAX;
+    mutable Packet cachedPacket_{};
     std::vector<uint8_t> scratch_;
 };
 
@@ -178,9 +189,10 @@ public:
         while (done < count && pos_ < total_) {
             if (used_ == pcm_.size()/2) {
                 if (next_ == media_.Count()) { failed_=true;break; }
-                if (!previewing_) Remember(next_);
                 const Packet packet = media_.At(next_);
-                const uint8_t* bytes = media_.Data(next_++);
+                if (!previewing_) Remember(next_, packet.start);
+                const uint8_t* bytes = media_.Data(packet);
+                ++next_;
                 if (!overwritePcm_) pcm_.clear();
                 used_ = 0;
                 bool decoded=false;
@@ -265,9 +277,9 @@ protected:
 private:
     // Capture codec state at most every checkpointSeconds_ of playback; a codec
     // that opts out of preroll (Preroll() == SIZE_MAX) is not checkpointed.
-    void Remember(size_t packet) {
+    void Remember(size_t packet, uint64_t frame) {
         if (Preroll()!=SIZE_MAX || checkpoints_.contains(packet)) return;
-        uint64_t frame=media_.At(packet).start,interval=uint64_t(rate_)*checkpointSeconds_;
+        uint64_t interval=uint64_t(rate_)*checkpointSeconds_;
         auto previous=checkpoints_.upper_bound(packet);
         if (previous!=checkpoints_.begin() && frame-media_.At(std::prev(previous)->first).start<interval) return;
         auto state=Capture();if (!state) return;

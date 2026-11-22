@@ -1,5 +1,6 @@
 // The Linux window's list model: what the active tab shows, how it is sorted, selected and changed.
 #include "alternate_ui.h"
+#include "search_online_ui.h"
 #include "ui_internal.h"
 
 namespace lx {
@@ -244,6 +245,19 @@ void SetRating(const std::vector<TrackId>& ids, uint8_t rating) {
     if (ids.empty()) return;
     for (TrackId id : ids) if (g_lib.Contains(id)) g_lib[id].rating = rating;
     PlaySfx(rating ? Sfx::Rate : Sfx::Unrate, rating / 10);
+    g_lib.Touch();
+    g.libraryDirty = true;
+    RebuildRows();
+}
+
+// A favorite is a heart the user chose, not a rating: pressing Favorite on a selection that is
+// entirely favorited clears them, otherwise it hearts them all, so one key both goes both ways.
+void ToggleFavorites(const std::vector<TrackId>& ids) {
+    if (ids.empty()) return;
+    bool all = true;
+    for (TrackId id : ids) all = all && g_lib.Contains(id) && g_lib.Favorite(id);
+    for (TrackId id : ids) if (g_lib.Contains(id)) g_lib.SetFavorite(id, !all);
+    PlaySfx(all ? Sfx::Unrate : Sfx::Sparkle, 0);
     g_lib.Touch();
     g.libraryDirty = true;
     RebuildRows();
@@ -534,6 +548,7 @@ void RebuildRows() {
     CanvasRebuild();
     g.rowsRevision = g_lib.Revision();
     g_lastRebuild = SDL_GetTicks();
+    OnlineSearchViewUpdated();
     ClampScroll();
     g.redraw = true;
 }
@@ -553,6 +568,7 @@ void SetActiveTab(int tab) {
     }
     if (leavingInbox) UpdateInboxTab();
     g.search.clear();
+    OnlineSearchQueryChanged(g.search);
     g.selected.clear();
     g.rows.clear();
     g.rowItems.clear();

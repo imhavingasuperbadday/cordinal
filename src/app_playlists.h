@@ -41,6 +41,9 @@ void DrawStars(HDC dc, RECT r, uint8_t rating, bool selected, bool hover);
 LONG CellTextRight(int row, int sub, LONG right);
 uint8_t RatingAt(int x, uint8_t current);
 void SetRating(const std::vector<TrackId>& ids, uint8_t rating);
+// Makes every selected track a favorite, or clears them all when they all are one; the library
+// is marked dirty so the choice is saved beside the ratings and play counts.
+void ToggleFavorites(const std::vector<TrackId>& ids);
 HMENU RatingMenu();
 void BrowserValues(TrackId id, BrowseField field, std::vector<StringPool::Handle>& out);
 void FilterLibrary(std::vector<TrackId>& items);
@@ -83,6 +86,7 @@ std::vector<AlbumSelection> LibViewSelectedAlbums();
 bool LibViewFocusedEdition(uint32_t& group, uint32_t& edition);
 void LibViewChooseEdition(uint32_t group, uint32_t edition);
 void LibViewShowGroup(uint32_t group);
+bool LibViewShowTrack(TrackId id);
 void SortLibraryOrder(std::vector<TrackId>& items);
 void SortItems(std::vector<TrackId>& items, int column, bool ascending, std::vector<uint32_t>* mapping = nullptr);
 void RebuildViewItems(Playlist& pl);

@@ -440,6 +440,7 @@ void RebuildView(bool preserveSelection) {
     if (preserveSelection) RestorePosition(position);
     if (g.playing == kNone && g.npSub) UpdateNowPlaying();  // the hint depends on what's shown
     g.statsDirty = true;
+    OnlineSearchViewUpdated();
 }
 
 // Selected indices into the active playlist's items (not list rows).
@@ -728,6 +729,10 @@ HMENU BuildListContextMenu() {
         AppendMenuW(m, MF_STRING | en, IDM_CROP, L"&Keep only selected tracks");
     }
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    const std::vector<TrackId> selected = SelectedTracks();
+    const bool allFavorites = !selected.empty() &&
+        std::all_of(selected.begin(), selected.end(), [](TrackId id) { return g_lib.Favorite(id); });
+    AppendMenuW(m, MF_STRING | en | (allFavorites ? MF_CHECKED : 0), IDM_FAVORITE, L"&Favorite\tCtrl+D");
     AppendMenuW(m, MF_POPUP | en, (UINT_PTR)RatingMenu(), L"Rat&ing");
     // ReplayGain for the selection, named as in Playback > ReplayGain.
     HMENU gain = CreatePopupMenu();
@@ -762,7 +767,7 @@ HMENU BuildListContextMenu() {
     AppendEditionMenu(m);
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, IDM_ADD_FILES, L"&Add files...");
-    AppendMenuW(m, MF_STRING, IDM_ADD_FOLDER, L"Import &folder once...");
+    AppendMenuW(m, MF_STRING, IDM_ADD_FOLDER, L"Import fol&der once...");
     return m;
 }
 

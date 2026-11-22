@@ -93,7 +93,10 @@ private:
         const uint64_t start = at & ~uint64_t(4095);
         const size_t length = (size_t)std::min<uint64_t>(size_ - start, std::max<uint64_t>(chunk_, at - start + bytes));
         Unmap();
-        if (!buffer_) buffer_ = std::make_unique_for_overwrite<uint8_t[]>(kRead + 4096);
+        // A file smaller than one window never reads past its own size, so the buffer grows only
+        // as far as the larger of the two.
+        if (!buffer_)
+            buffer_ = std::make_unique_for_overwrite<uint8_t[]>((size_t)(std::min<uint64_t>(kRead, size_) + 4096));
         LARGE_INTEGER position{};
         position.QuadPart = (LONGLONG)start;
         DWORD got = 0;

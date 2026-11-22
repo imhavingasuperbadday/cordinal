@@ -62,10 +62,10 @@ int Pill(HDC dc, int x, const RECT& cell, const std::wstring& text, COLORREF fil
 }  // namespace
 
 // True when the cell's track earns a badge: the codec column (when known), or the title of a
-// long recording or of a busy track.
+// long recording, of a busy track, or of a favorite.
 bool HasBadge(int column, TrackId id) {
     if (column == 7) return g_lib[id].codec != Codec::Unknown;
-    return column == 2 && (g_lib[id].Duration() >= kMixSeconds || TrackBusy(id));
+    return column == 2 && (g_lib[id].Duration() >= kMixSeconds || TrackBusy(id) || g_lib.Favorite(id));
 }
 
 // A track something in cordinal is using right now: the ReplayGain scanner measuring it, the tag
@@ -158,6 +158,15 @@ void DrawBadgeCell(HDC dc, int row, int subitem, TrackId id, COLORREF text, COLO
     RECT client{};
     GetClientRect(g.list, &client);
     cell.right = std::min<LONG>(cell.right, client.right - S(4));
+    // A favorite's heart leads the title, in the accent color (or the selection's text).
+    if (g_lib.Favorite(id)) {
+        HGDIOBJ old = SelectObject(dc, g.fontSymbol);
+        SetTextColor(dc, selected ? text : Ref(P().accent));
+        RECT heart{cell.left, cell.top, cell.left + S(16), cell.bottom};
+        DrawTextW(dc, L"\x2665", -1, &heart, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(dc, old);
+        cell.left += S(18);
+    }
     if (TrackBusy(id)) {
         int save = SaveDC(dc);
         IntersectClipRect(dc, r.left, r.top, r.right, r.bottom);

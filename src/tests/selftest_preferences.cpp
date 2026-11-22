@@ -1653,6 +1653,40 @@ void TestThemes() {
     }
     OnCommand(IDM_THEME_BASE + (int)original, 0, nullptr);
 }
+
+void TestCustomThemeColors() {
+    using namespace app;
+    testlog::Batch batch;
+    const ThemeMode original = g.themeMode;
+    const ThemeCustomColors savedLight = CustomThemeColors(false), savedDark = CustomThemeColors(true);
+    ResetCustomThemeColors(false);
+    ResetCustomThemeColors(true);
+
+    batch.Next(L"custom theme colours: Light and Dark keep independent accents and reset cleanly");
+    const Tweak* lightAccent = FindTweak("theme.light_accent");
+    const Tweak* darkAccent = FindTweak("theme.dark_accent");
+    Check(lightAccent && darkAccent, L"custom theme colours: theme.light_accent and theme.dark_accent tweaks exist");
+    if (lightAccent && darkAccent) {
+        SetTweak(*lightAccent, 0x1E64B4);
+        SetTweak(*darkAccent, 0x4DA3FF);
+        const bool bothSet = ThemePalette(ThemeMode::Light).accent == 0x1E64B4 &&
+                             ThemePalette(ThemeMode::Dark).accent == 0x4DA3FF &&
+                             LightPalette().accent != 0x1E64B4 && DarkPalette().accent != 0x4DA3FF;
+        OnCommand(IDM_THEME_RESET_LIGHT, 0, nullptr);
+        const bool lightResetOnly = !HasCustomThemeColors(false) && ThemePalette(ThemeMode::Light).accent == LightPalette().accent &&
+                                    ThemePalette(ThemeMode::Dark).accent == 0x4DA3FF;
+        OnCommand(IDM_THEME_RESET_DARK, 0, nullptr);
+        const bool darkReset = !HasCustomThemeColors(true) && ThemePalette(ThemeMode::Dark).accent == DarkPalette().accent;
+        Check(bothSet && lightResetOnly && darkReset,
+              L"custom theme colours: Light and Dark keep independent accents and reset cleanly");
+    }
+
+    CustomThemeColors(false) = savedLight;
+    CustomThemeColors(true) = savedDark;
+    g.themeMode = original;
+    ApplyTheme();
+    batch.End();
+}
 }  // namespace
 
 void TestPersonalization(const std::wstring& scratch) {
@@ -2031,6 +2065,7 @@ void TestPersonalization(const std::wstring& scratch) {
     TestWaveform(scratch);
     TestTabOverflow();
     TestThemes();
+    TestCustomThemeColors();
     TestPackIntegration(scratch);
     TestHelperIntegration(scratch);
 

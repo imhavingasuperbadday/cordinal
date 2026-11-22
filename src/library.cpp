@@ -13,6 +13,7 @@
 #include <shlwapi.h>
 
 #include <algorithm>
+#include <bit>
 #include <cwctype>
 #include <optional>
 #include <charconv>
@@ -475,7 +476,9 @@ TrackId Library::Add(const std::wstring& input) {
 TrackId Library::ImportTrack(const Library& source, TrackId id) {
     if (!source.Contains(id)) return UINT32_MAX;
     TrackId dest = Add(source.Path(id));
-    if (dest == UINT32_MAX || tracks_[dest].Loaded()) return dest;
+    if (dest == UINT32_MAX) return dest;
+    if (source.Favorite(id)) SetFavorite(dest, true);
+    if (tracks_[dest].Loaded()) return dest;
     Track copy = source[id];
     copy.dir = tracks_[dest].dir;
     copy.file = tracks_[dest].file;
@@ -651,7 +654,14 @@ std::vector<TrackId> Library::Compact(const std::vector<TrackId>& live) {
 }
 
 size_t Library::MemoryBytes() const {
-    return tracks_.Bytes() + byPath_.capacity() * sizeof(TrackId) + strings_.Bytes();
+    return tracks_.Bytes() + byPath_.capacity() * sizeof(TrackId) + strings_.Bytes() +
+           favorites_.capacity() * sizeof(uint64_t);
+}
+
+size_t Library::FavoriteCount() const {
+    size_t count = 0;
+    for (uint64_t word : favorites_) count += (size_t)std::popcount(word);
+    return count;
 }
 
 std::vector<TrackId> TracksAddedSince(uint32_t since) {
@@ -823,6 +833,8 @@ bool LookupField(TrackId id, const std::wstring& name, std::wstring& out) {
         return set(buf);
     }
     if (name == L"rating_stars") return set(RatingStars(t.rating));
+    if (name == L"favorite") return g_lib.Favorite(id) && set(L"\x2665");
+    if (name == L"favorite_value") return g_lib.Favorite(id) ? num(1) : false;
     if (name == L"last_played" || name == L"first_played" || name == L"added") {
         uint32_t when = name == L"added" ? t.added : name == L"first_played" ? t.firstPlayed : t.lastPlayed;
         if (!when) return false;

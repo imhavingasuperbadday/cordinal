@@ -169,16 +169,21 @@ Cleanup Merge(Library& library, std::vector<Playlist>& playlists, const std::vec
         Track& e = library[extra];
         Track& k = library[keep];
         Merged m{moves[i].extra, moves[i].keep, Of(e), Of(k), {}};
+        m.extraFavorite = library.Favorite(extra);
+        m.keepBeforeFavorite = library.Favorite(keep);
         k.playCount = (uint32_t)std::min<uint64_t>((uint64_t)k.playCount + e.playCount, UINT32_MAX);
         k.skipCount = (uint32_t)std::min<uint64_t>((uint64_t)k.skipCount + e.skipCount, UINT32_MAX);
         k.lastPlayed = std::max(k.lastPlayed, e.lastPlayed);
         k.firstPlayed = Earliest(k.firstPlayed, e.firstPlayed);
         k.added = Earliest(k.added, e.added);
         if (!k.rating) k.rating = e.rating;
+        if (m.extraFavorite) library.SetFavorite(keep, true);
+        library.SetFavorite(extra, false);
         e.playCount = e.skipCount = 0;
         e.lastPlayed = e.firstPlayed = 0;
         e.rating = 0;
         e.flags |= Track::kMissing;  // its file is in the Recycle Bin; a rescan would say the same
+        m.keepAfterFavorite = library.Favorite(keep);
         m.keepAfter = Of(k);
         forward[extra] = {keep, c.merged.size()};
         c.merged.push_back(std::move(m));
@@ -250,6 +255,7 @@ std::vector<TrackId> Undo(Library& library, std::vector<Playlist>& playlists, co
             if (k.firstPlayed == m.keepAfter.firstPlayed) k.firstPlayed = m.keepBefore.firstPlayed;
             if (k.added == m.keepAfter.added) k.added = m.keepBefore.added;
             if (k.rating == m.keepAfter.rating) k.rating = m.keepBefore.rating;
+            if (library.Favorite(keep) == m.keepAfterFavorite) library.SetFavorite(keep, m.keepBeforeFavorite);
         }
         TrackId extra = Find(library, m.extra);
         if (extra == kInvalidTrack) {  // tidied away meanwhile: back as a new track with its history
@@ -258,6 +264,7 @@ std::vector<TrackId> Undo(Library& library, std::vector<Playlist>& playlists, co
         }
         Track& e = library[extra];
         Restore(e, m.extraBefore);
+        if (m.extraFavorite) library.SetFavorite(extra, true);
         e.flags &= (uint16_t)~Track::kMissing;
         extras[i] = extra;
         reread.push_back(extra);
