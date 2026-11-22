@@ -126,7 +126,10 @@ public:
             zeros += run;
             if (zeros > limit) { good_ = false; return 0; }
             if (run < available_) {
-                cache_ <<= run + 1; available_ -= run + 1;
+                // The 8-byte fill can hold a full 64 bits, so eating the stop bit after 63 zeros
+                // shifts by 64, which is undefined; an empty window is simply zero.
+                available_ -= run + 1;
+                cache_ = available_ ? cache_ << (run + 1) : 0;
                 return (uint32_t)zeros;
             }
             cache_ = 0; available_ = 0;
