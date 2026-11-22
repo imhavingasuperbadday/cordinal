@@ -3,647 +3,433 @@
 <h1 align="center">cordinal</h1>
 
 <p align="center">
-A small, fast music player for Windows, with a Linux preview.<br>
-One program, under 2 MB. No installer, no runtime, no codecs to add.
+A fast, native music player packed into one ~2 MB executable.<br>
+No installer, no runtime, no codec packs, no telemetry. Just drop it anywhere and play.
 </p>
 
 <div align="center">
 
 Current release: **0.1.17** · `cordinal.exe`, 2,113,536 bytes<br>
 **[Download](https://github.com/imhavingasuperbadday/cordinal/releases/latest)** ·
-[Getting started](#getting-started) · [Guide](#guide) · [Building](#building) ·
+[Quick start](#quick-start) · [Guide](#guide) · [Linux](#linux-preview) · [Building](#building) ·
 [Issues](https://github.com/imhavingasuperbadday/cordinal/issues)
 
 </div>
 
-**cordinal** is a free music player and library for Windows. It plays almost any audio file with
-its own built-in decoders, remembers your ratings and listening history, and leaves your music in the
-folders where you keep it. The whole player is a single file: download it and run it. A native Linux
-version is available as a preview.
+**cordinal** is a free, open-source (GPLv3+) music player and library for Windows, with a native Linux
+preview. It's written in C++20 straight against Win32 — no framework, no web view, no bundled DLLs. It
+opens instantly, plays pretty much any audio format you throw at it using its own built-in decoders, and
+leaves your music right where you keep it.
 
-cordinal is written in C++ and is free software under the GNU GPL.
+## Why cordinal?
 
-## Why cordinal
+- **Everything in one file.** Decoders, encoders, a 10-band EQ, ReplayGain scanner, tag editor, CD
+  ripper, duplicate finder, web player, and scrobbler — all inside a single ~2 MB `.exe`.
+- **Your files don't get mangled.** Every tag, playlist, and library write is atomic: if anything fails
+  mid-write, your original file stays untouched byte for byte. Multi-file tag edits and conversions can
+  be undone.
+- **Actually tested on broken files.** Every decoder, tag parser, and cover-art reader is fuzzed under
+  AddressSanitizer and UndefinedBehaviorSanitizer in CI on every push. The Opus decoder passes the
+  official conformance vectors. Nothing ships unless CI is green.
+- **Zero lock-in.** Your music stays in your own folders. Tags, ratings, play counts, and playlists can
+  all be written in standard formats that other players read.
+- **Quiet by default.** cordinal doesn't touch the network until you turn on a feature that needs it, and
+  it collects nothing about you.
 
-- **Everything is built in.** Decoders, the equalizer, loudness scanning, tag editing and
-  scrobbling are all part of the one program.
-- **Your files are safe.** If saving a tag fails, the file stays exactly as it was. Edits to many
-  files at once can be undone.
-- **Tested against broken files.** Every decoder, the tag reader and the cover-art reader are
-  fuzzed under AddressSanitizer and UndefinedBehaviorSanitizer in CI on every push, and the Linux
-  core self-tests run under both sanitizers too. The Opus decoder passes the official conformance
-  vectors. A release is published only when all of this passes, and anyone can read the CI logs.
-- **Your music stays yours.** Files stay in your own folders, and tags, ratings and playlists can be
-  saved in standard forms that other players read.
-- **Private by default.** cordinal does not go online until you turn on a feature that needs to. It
-  collects nothing about you.
+## What's inside
 
-## Features
+- **Playback:** Gapless playback or crossfade. Bit-perfect Exclusive and ASIO output, plus native DSD
+  for DACs that take it. Independent speed and tempo control (phase-locked vocoder). ReplayGain with a
+  built-in loudness scanner. 10-band EQ with headphone (AutoEq) profiles, crossfeed, reverb, night mode,
+  bitcrusher, and 5.1/7.1 stereo upmixing. Internet radio, a browser player for your phone, and
+  UPnP/DLNA network speakers.
+- **30+ built-in formats:** FLAC (including Ogg FLAC), WAV, AIFF, MP3, MP4/M4A, Ogg Vorbis, Opus, AAC,
+  ALAC, WMA, APE, WavPack, Musepack, AC-3/E-AC-3, TTA, Matroska audio, DSD, Apple CAF, Sun AU, Creative
+  VOC, Amiga 8SVX, CRI ADX, GSM 06.10, G.722, G.726, ComputerCraft DFPWM, CUE sheets, tracker modules,
+  MIDI, retro game music (NES, SNES, Game Boy, Genesis, C64), and cordinal's own lossless `.cord`
+  format.
+- **Library & playlists:** Watched folders that track new and moved files without losing history. Track
+  list, cover grid, albums, artists, and column browser. Album editions (remasters, deluxe releases, etc.)
+  grouped under one cover. Playlists, rule-based auto-playlists, drag-to-reorder queue, M3U/M3U8/PLS,
+  Steam soundtrack import, device copying, and classic iPod sync.
+- **Tags, ripping & conversion:** Edit tags, covers, and lyrics for one song or hundreds with undo.
+  Rename and organize files from tags. Convert to FLAC, WAV, MP3, AAC, or `.cord` (as copies or undoable
+  replacements). Rip audio CDs to FLAC or `.cord` with two-pass sector verification. Find exact-audio or
+  same-song duplicates and missing tags. Optional online covers, lyrics, artist info, web saving, and
+  Release Radar.
+- **History & taste:** Half-star ratings, favorites (hearts), play/skip counts, play log, and a year in
+  review. Ready-made local Mixes and a shuffle mode that learns your taste. Last.fm, ListenBrainz, and
+  Libre.fm scrobbling, plus Discord status.
+- **Make it yours:** Light and Dark themes with optional album-cover colour tinting. Layouts from Big
+  mode down to a mini player or tray-only Lightweight mode. Waveform and moodbar seek bars. Shareable
+  `.cordpack` customization packs, external visualizer helpers, and a command palette (`Ctrl+Shift+P`)
+  for every command and setting.
 
-**Playback.** Gapless playback or crossfade. Bit-perfect Exclusive and ASIO output, and native DSD
-to a DAC that takes it. Speed and tempo control. ReplayGain with a built-in loudness scanner. A
-ten-band equalizer with headphone (AutoEq) profiles and crossfeed. Reverb, night mode and a
-bitcrusher. Stereo upmixed to 5.1 or 7.1. Internet radio, a browser player for your phone, and
-network (UPnP/DLNA) speakers.
+## Quick start
 
-**Formats.** FLAC (also in Ogg), WAV, AIFF, MP3, MP4/M4A, Ogg Vorbis, Opus, AAC, ALAC, WMA, APE,
-WavPack, Musepack, AC3 and E-AC-3, TTA, Matroska audio, DSD, Apple CAF, Sun AU, Creative VOC, Amiga
-8SVX, CRI ADX, GSM 06.10, G.722, G.726, ComputerCraft DFPWM, CUE sheets, tracker modules, MIDI, video
-game music (NES, SNES, Game Boy, Genesis, Commodore 64) and cordinal's own lossless `.cord`.
-
-**Library.** Watched folders that keep up with new and moved files. Track list, cover grid, albums,
-artists and a column browser. Album editions (remaster, deluxe and so on) under one cover.
-Playlists, rule-based auto-playlists and a drag-to-reorder queue. M3U, M3U8 and PLS. Steam
-soundtrack import, copying to devices, and classic iPod sync.
-
-**Tags and artwork.** Edit tags, covers and lyrics for one track or hundreds, with undo. Rename and
-move files from their tags. Convert to FLAC, WAV, MP3, AAC or `.cord`, as copies or as undoable
-replacements. Rip audio CDs to FLAC or `.cord`, every sector checked. Find duplicates and missing tags. Covers, lyrics and artist info from your files or,
-if you turn them on, from online sources.
-
-**Listening history.** Half-star ratings, play and skip counts, a play log and a year in review.
-Shuffle that can learn your taste. Last.fm, ListenBrainz and Libre.fm scrobbling. Discord status.
-
-**Look and feel.** Light and Dark themes, tinted by the playing album's cover if you like. Window
-sizes from Big mode down to a mini player. Lightweight mode for playing in the background. A
-waveform or moodbar seek bar. Packs and helpers for customization. A command palette
-(Ctrl+Shift+P) that finds any command or setting.
-
-## Getting started
-
-1. Download `cordinal.exe` from
+1. Grab `cordinal.exe` from
    [Releases](https://github.com/imhavingasuperbadday/cordinal/releases/latest) and run it.
-2. Add your music folders in **Preferences ▸ Library ▸ Library folders** (Ctrl+,), or from the
-   **Library** menu. Nothing is scanned until you do this.
-3. Double-click a track to play it. Press **Ctrl+F** to search, and **Ctrl+Shift+P** to find any
-   command or setting by name.
-4. Online features are off until you turn them on in **Preferences ▸ Online** and
+2. Add your music folders in **Preferences ▸ Library ▸ Library folders** (`Ctrl+,`) or the **Library**
+   menu. cordinal won't scan anything until you point it at a folder.
+3. Double-click a track to play. Hit `Ctrl+F` to search, or `Ctrl+Shift+P` to jump to any command or
+   setting.
+4. Online features are off out of the box — turn on what you want in **Preferences ▸ Online** and
    **Preferences ▸ Scrobbling**.
 
-To update, replace `cordinal.exe` with the new download. Your library, playlists, ratings and
-settings are kept. To move them to another computer, use **File ▸ Back up library and settings**.
+**Updating:** just replace `cordinal.exe` with the new download. Your library, playlists, ratings, and
+settings carry over automatically. Moving to another PC? Use **File ▸ Back up library and settings**.
 
-cordinal runs on 64-bit Windows 10 and 11. For Linux, see [Linux](#linux-preview).
+Runs on 64-bit Windows 10 and 11. On Linux, see [Linux (preview)](#linux-preview).
 
-**Preferences** (Ctrl+,) are grouped under Sound, Look, Collection and General. Every setting has
-its explanation beside it, and a **Reset** button appears when it differs from the default. **All
-settings** shows every page at once, and the search box looks through all of them.
+Every setting in **Preferences** (`Ctrl+,`) has an explanation right beside it, a **Reset** button when
+changed from default, and a search box that filters across all pages (**All settings** shows everything
+at once).
 
-## Keyboard
+## Keyboard shortcuts
 
 | Key | Action |
 |---|---|
-| Space | Play / pause |
-| Enter / double-click | Play |
-| Left / Right | Seek 5 seconds |
-| Ctrl+Left / Ctrl+Right | Previous / next |
-| Ctrl+Enter / Ctrl+Q | Play next / add to queue |
-| Ctrl+Shift+Q | Up next (the queue) |
-| Ctrl+F | Search |
-| Alt+Enter | Edit tags |
-| Ctrl+Z / Ctrl+Y | Undo the last playlist change or tag edit / redo a playlist change |
-| Ctrl+S | Save the playlist as M3U8 |
-| Ctrl+N / F2 / Ctrl+W | New / rename / close playlist |
-| Ctrl+D | Favorite the selected tracks (or clear their hearts) |
-| Ctrl+E | Equalizer |
-| Ctrl+L | Lyrics panel |
-| Ctrl+Shift+M | Mini player |
-| Ctrl+Shift+L | Lightweight mode |
-| Win+Alt+Space | In Lightweight mode, from any program: pick a song |
-| Ctrl+Shift+P | Command palette |
-| Ctrl+, | Preferences |
+| `Space` | Play / pause |
+| `Enter` / double-click | Play |
+| `Left` / `Right` | Seek 5 seconds |
+| `Ctrl+Left` / `Ctrl+Right` | Previous / next |
+| `Ctrl+Enter` / `Ctrl+Q` | Play next / add to queue |
+| `Ctrl+Shift+Q` | Up next (queue) |
+| `Ctrl+F` | Search |
+| `Alt+Enter` | Edit tags |
+| `Ctrl+Z` / `Ctrl+Y` | Undo last playlist change or tag edit / redo playlist change |
+| `Ctrl+S` | Save playlist as M3U8 |
+| `Ctrl+N` / `F2` / `Ctrl+W` | New / rename / close playlist |
+| `Ctrl+D` | Favorite selected tracks (or clear hearts) |
+| `Ctrl+E` | Equalizer |
+| `Ctrl+L` | Lyrics panel |
+| `Ctrl+Shift+M` | Mini player |
+| `Ctrl+Shift+L` | Lightweight mode |
+| `Win+Alt+Space` | Song picker from any app (in Lightweight mode) |
+| `Ctrl+Shift+P` | Command palette |
+| `Ctrl+,` | Preferences |
 
-You can change any key in **File ▸ Keyboard shortcuts**. Pick a command, press **Set in cordinal**
-or **Set from any program**, then press the key. Letters need Ctrl or Alt so that typing still
-works; F-keys, media keys and the numpad can be used alone. Keys set "from any program" work even
-when another window is in front. **Clear** removes a command's keys and **Reset all** brings back the
-defaults. Your keys are saved in `settings.ini` under `[Keys]` and `[Global keys]`, as lines such as
-`Ctrl+Shift+K=Playback > Next`. On Windows, every menu item also has its own underlined access key.
+Rebind anything in **File ▸ Keyboard shortcuts** — pick a command, choose **Set in cordinal** or
+**Set from any program** (global hotkey), and press the key. Letters require `Ctrl` or `Alt`; F-keys,
+media keys, and numpad keys work on their own. Shortcuts are stored in `settings.ini` under `[Keys]`
+and `[Global keys]` (e.g. `Ctrl+Shift+K=Playback > Next`).
 
 ## Guide
 
-- [Library](#library)
-- [Album editions](#album-editions)
-- [Playlists and the queue](#playlists-and-the-queue)
-- [Sound](#sound)
-- [Tags](#tags)
-- [Covers](#covers)
-- [Lyrics and artist info](#lyrics-and-artist-info)
-- [Scrobbling](#scrobbling)
-- [Discord status](#discord-status)
-- [Devices and iPod sync](#devices-and-ipod-sync)
-- [Network speakers and sharing](#network-speakers-and-sharing)
-- [Seek bar, waveform and moodbar](#seek-bar-waveform-and-moodbar)
-- [Album colours](#album-colours)
-- [Lightweight mode](#lightweight-mode)
-- [Layouts, packs and helpers](#layouts-packs-and-helpers)
-- [Your data](#your-data)
-
-### Library
-
-Add folders in **Preferences ▸ Library ▸ Library folders** or from the **Library** menu. cordinal
-scans every subfolder and then watches for changes. New files are added on their own, moved files
-keep their history, and an unplugged drive loses nothing. Empty placeholder files are skipped until
-something fills them. If you want to review new music before it joins the library, turn on the Inbox
-in **Preferences ▸ Library**.
-
-**Library ▸ Add Steam soundtracks** finds the soundtracks you have installed through Steam, on both
-Windows and Linux. It runs in the background and can be cancelled from the Library menu. When a
-soundtrack comes in more than one format, you choose whether to keep one copy of each song or all of
-them. Files already in your library are skipped. Folders where games keep their sound effects (such
-as `sfx` or `sound`) are left out unless you turn on **Include game sound effects** in
-**Preferences ▸ Library**.
-
-**Library ▸ Save music from the web...** downloads pasted links into your library as real files you
-own, filed as `Artist\Album\[track] Title`. SoundCloud tracks, sets, likes and artists' pages,
-YouTube videos and playlists, and Spotify tracks, albums and playlists all work. A Spotify link is
-matched to the same recording on YouTube — Spotify's own audio is encrypted, and cordinal does not
-break that — and the file's comment says where its audio came from. SoundCloud's and YouTube's
-streams arrive as fragmented MP4, so cordinal rewrites each one losslessly into a standard `.m4a`
-as it saves: the audio is copied exactly, never re-encoded, and the song carries its title, artist,
-album, track number, comment and cover in the file itself. An unusual stream that cannot be
-rewritten is kept as it arrived, with its cover as `cover.jpg` beside it. The first save asks
-before contacting anyone, and the answer lives in **Preferences ▸ Online ▸ Save music from the
-web**; Linux asks the same question before its first save and remembers the answer in the same row.
-A song already saved is never downloaded twice, an interrupted download is tried again the
-next time, and a track that is gone for good is remembered instead of failing on every run; **Forgot
-what failed** tries those again. Files land in the first library folder and appear in the library on
-their own as the scanner picks them up.
-
-A link that holds a playlist — a Spotify playlist, a YouTube playlist, a SoundCloud set or likes —
-also becomes a playlist tab of its own once the run is through. The tab takes the list's own name
-and holds every track in the list's exact order: the ones just saved, the ones already in your
-library, and any that failed to save but were already there. Running the same link again updates
-that tab, and **Ctrl+Z** undoes it; a playlist you made yourself is never overwritten — a new name
-is found instead.
-
-**Import file...** in that window (and the same button on Linux) imports a list you already have.
-Spotify's own account data export works: `YourLibrary.json` brings in your saved tracks (Liked
-Songs) and saved albums, and `Playlist1.json` brings in every playlist, private ones included and
-however many tracks they hold. CSV playlists from Exportify, TuneMyMusic and Soundiiz work too, and
-a `Playlist Name` column splits one file into several lists. Drop the file on the window, paste the
-path of a `.json` or `.csv` into the box, or paste the import text itself. Songs your library
-already owns are matched by artist and title (case and spacing forgiven, and "A, B" finds A's file),
-skipped, and no site is asked about them. Only the missing ones are matched on YouTube the way a
-Spotify link is, and a stopped import starts again where it stopped. A large import says how many
-tracks it is bringing in and how many you already had. Saved albums in `YourLibrary.json` are read
-from Spotify's album page and arrive as complete tagged albums, not playlists. Saved tracks are also
-hearted, so **Playlist ▸ Mixes ▸ Favorites** lists them from the start.
-
-**Library ▸ New releases by your favorite artists...** is a quiet Release Radar: once it is on in
-**Preferences ▸ Online**, it asks MusicBrainz about the artists you play and heart most and lists
-their albums and EPs from the last six months. **Save selected** and **Save all** read each album's
-tracklist and save it through the same queue, as tagged files rather than a playlist. Nothing is
-asked until you open the list, the first look asks first, and nothing is downloaded until you choose
-Save.
-
-**Discover outside my library.** With **Preferences ▸ Online ▸ Discover songs outside your library**
-on, **Keep playing like this** now and then follows a local song with one you don't own, from an
-artist related to the one playing. MusicBrainz chooses it and the audio is matched on YouTube. It
-plays as a preview from the data folder, shows in Now Playing and the queue like any other song, and
-is not counted as a play or added to your library until **Library ▸ Keep the discovered song**
-(Ctrl+Alt+K) keeps it. Turning radio or the preference off stops new looks, and a preview is deleted
-once it plays or is skipped; nothing is fetched while the preference is off.
-
-**Online song search.** **Preferences ▸ Online ▸ Search online for songs not in your library** is off
-by default. When a library search finds nothing while it is off, an inline **Search online...** bar
-asks once before turning it on. When enabled, typing in **Ctrl+F** shows up to 15 unowned songs in
-an **Online (not in your library)** pane below local matches (and up to 5 in the **Win+Alt+Space**
-song picker). Playing a result either plays a temporary preview until you click **Save** (or
-**Ctrl+Alt+K**), or saves it straight into your library folder when **When playing a search result**
-is set to **Play and save automatically**; right-clicking a result with an album also lets you
-**Save full album to library...** through **Save music from the web**.
-
-### Album editions
-
-Many albums have more than one edition: the original, a remaster, a deluxe or regional release. cordinal
-can show these under one album tile with an edition selector. It recognizes clear edition names and
-MusicBrainz release-group tags, and each edition keeps its own files, track list and artwork.
-
-**Library ▸ Album editions** lets you group, split, rename and compare editions, and choose the
-preferred edition and cover. An optional MusicBrainz lookup can fill in missing release-group ids;
-turn it on in Preferences (on Linux, in **Library ▸ Album editions**). Everything else works offline.
-Playlists always keep pointing at the exact files they list, and `%edition%` in a title format shows
-which edition a track belongs to.
-
-### Playlists and the queue
-
-Playlists open as tabs. **Ctrl+Z** undoes a change to a playlist (adding, removing, moving, sorting
-or clearing) and **Ctrl+Y** redoes it. If a tag edit came last, Ctrl+Z undoes that instead.
-
-**Auto-playlists** fill themselves from rules, such as "rated 4 stars or more, not played this month".
-Rules can use tags, file details, ratings, play counts, dates, length, BPM, loudness and more, in
-nested ALL/ANY groups with an optional limit. Auto-playlists share one tab: click it to switch
-between them, make a new one or edit the rules (on Windows, Down opens this menu from the keyboard).
-To give each its own tab, turn off **Preferences ▸ View ▸ One tab for auto-playlists**.
-
-**Favorites and Mixes.** **Ctrl+D** (or **Edit ▸ Favorite**, or the track list's right-click menu)
-hearts the selected tracks; pressing it on a selection that is all hearts clears them. A heart is
-kept with the library like a rating, and **Edit ▸ Favorite** shows a tick when every selected track
-has one. Hearts also show beside the title of a track in the album view, and the header menu offers
-a **Favorite** column. **Playlist ▸ Mixes** makes ready-made local playlists from what you already
-own: **Favorites** (newest hearts first), **On Repeat** (played in the last 30 days, most played
-first), **Forgotten Favorites** (hearted or rated 4 stars or more, not played in 90 days), **Recently
-Added**, and **Mix like this song** (same genre, or a tempo within a sixth, as the song playing or
-selected). Choosing a mix that already exists brings its tab to the front instead of making another.
-A new profile starts with Favorites among its auto-playlists. Hearts count toward **Choose by taste**
-too.
-
-While an album is playing, the **Now Playing** tab shows only that album. Type in its search box to
-see the whole list again. **Preferences ▸ View ▸ Now Playing shows the playing album** turns this off.
-
-**Columns.** Drag a divider to resize a column (double-click it to reset), and drag a heading to move
-it. Click a heading to sort, click again to reverse, and a third time to go back to the original
-order. Right-click the headings to choose which columns show.
-
-**Up next.** **Layout ▸ Up next** (Ctrl+Shift+Q) shows the queue: what you queued, then what the
-playlist plays after it. Drag tracks to reorder them, or drag them in from the list. Delete removes
-tracks, Alt+Up and Alt+Down move them, and Enter plays one now.
-
-**Choose by taste.** **Playback ▸ Choose by taste** is off until you turn it on. Then track shuffle
-and **Keep playing like this** lean toward songs you finish, rate, replay and come back to, and toward
-the sound of the songs you like. A skip while you are just flipping through songs counts for less,
-and one just before you close cordinal doesn't count. About one pick in seven is still random, so
-forgotten songs keep coming up. Album shuffle still plays each album in order. The next five picks
-wait in the queue under **Picked by taste**: remove one to skip it, choose **Keep** to make sure it
-plays, or click **New picks** for others.
-
-**Resume where you left off.** With this on (the clock button on the toolbar), cordinal remembers where
-you stopped in up to twelve songs. When you come back, **Pick up where you left off** lets you carry on
-from that point. It also suggests a few albums and songs you used to play a lot but haven't heard in a
-while. **Playback ▸ Play history** lists the songs you played to the end, newest first.
-
-When **Playback ▸ Speed** or **Tempo** is changed, the Duration and BPM columns and the total time
-show what you will actually hear.
-
-### Sound
-
-**Output mode.** **Preferences ▸ Output ▸ Output** has three choices:
-
-- **Shared** plays through the Windows mixer, alongside other programs.
-- **Exclusive** gives cordinal the device to itself.
-- **ASIO** (Windows only) plays through an installed ASIO driver. **ASIO driver...** on the same page
-  chooses the driver and opens its own settings.
-
-Exclusive and ASIO play each track at its own sample rate, bit-perfect at 100% volume, with the EQ,
-effects and ReplayGain turned off. If the device can't be opened, cordinal falls back to Shared and
-the status bar says why. Click the output name in the status bar to switch modes. On Linux, Exclusive
-asks PipeWire to run at the track's sample rate.
-
-**Native DSD** (Windows only, off by default) plays DSF and DSDIFF files as DSD to a DAC that accepts
-it: over DoP in Exclusive mode, or ASIO's own DSD mode when the driver has one. Volume (other than
-mute), EQ, effects and ReplayGain don't apply to a DSD stream; the status bar names the rate and transport. A DAC
-without DoP support plays noise, so leave it off unless your DAC supports DSD.
-
-**Crossfade.** **Preferences ▸ Playback ▸ Crossfade between tracks** fades one track into the next (1
-to 8 seconds, off by default). Tracks from the same album stay gapless unless you also turn on
-**Crossfade within an album**.
-
-**Volume.** **Preferences ▸ Output** sets the volume curve. It can also turn off cordinal's own volume
-control, so only Windows, PipeWire or your amplifier sets the level.
-
-**Surround.** **Upmix to surround** (off by default) plays stereo through every speaker of a 5.1 or 7.1
-setup in Shared mode. Voices stay at the front while the room sound spreads around you.
-
-**Headphones.** **Preferences ▸ Headphones** keeps separate EQ, crossfeed and ReplayGain settings for
-each output. Some headsets also offer battery, sidetone, auto power-off and onboard EQ controls. On
-Linux, these need read and write access to the headset's hidraw device.
-
-**Effects.** The bitcrusher is in **Playback ▸ Bitcrush**, and its settings are in
-**Preferences ▸ Effects**.
-
-**ReplayGain.** **Preferences ▸ ReplayGain** can scan the selection, the playlist or the whole
-library. Results are kept in the library. **Playback ▸ ReplayGain ▸ Write ReplayGain tags** saves them
-into the files.
-
-### Tags
-
-Press **Alt+Enter** to edit the tags, cover and lyrics of one track or many. Artist, album and genre
-fields suggest names already in your library, so spellings stay consistent. Every save is all or
-nothing, so a failure leaves the file as it was, and Ctrl+Z undoes the last ten edits.
-
-- **Edit album tags...** edits every track of an album when you select just one of its songs.
-- **Organize files** renames and moves music based on its tags, with a preview and undo.
-- **Library ▸ Find missing information** lists tracks with missing tags. You can also type
-  `missing:year`, `missing:genre` or `missing:any` in the search box.
-- When a track has no title, artist or track number, the editor suggests them from the file name
-  (such as `03 - Artist - Title`).
-- **Make album...** turns the selected tracks into one album, or tidies an existing one: title,
-  album artist, year, genre, cover, track order and numbering.
-- **Tag album from MusicBrainz...** finds matching releases, shows every change before you apply it,
-  and saves it as one edit you can undo. Turn it on or off in **Preferences ▸ Online ▸ Album tags from
-  MusicBrainz**.
-
-All of these are in the **Edit** menu or a track's right-click menu.
-
-**Finding duplicates.** **Library ▸ Find duplicates...** finds two kinds:
-
-- **Identical audio**: the same sound, even with different tags or file names. Songs that haven't
-  been measured yet can be measured from this window.
-- **Same song**: the same artist, title and length in different files, such as a FLAC and an MP3.
-
-The best copy is listed first. Extra copies of identical audio are ticked for you; same-song copies
-are not, since you may want both. **Move checked to Recycle Bin** removes the ticked files and moves
-their ratings, plays and playlist places to the copy you keep. **Undo clean-up** brings them back
-while cordinal is still open.
-
-**Converting.** **Library ▸ Convert...** (also on a track's right-click menu) converts the selected
-songs, or the whole library when nothing is selected, to `.cord`, FLAC, WAV, MP3 or AAC (`.m4a`), with
-their tags and covers. cordinal has its own encoders, so there is nothing else to install. Choose:
-
-- **Copies, and keep the originals**: next to each original, or in a folder you pick, where each
-  album keeps its own folder. The library and the originals stay as they are.
-- **Replacements for the originals in the library**: the library switches to each new file and keeps
-  its plays, ratings and playlists. The originals go to the Recycle Bin, or stay where they are, as
-  set in **Preferences ▸ Convert**. **Library ▸ Undo last conversion** brings them back.
-
-Every new file is read back and checked before it counts (lossless ones sample for sample), and
-existing files are never overwritten. MP3 and AAC can come from any song cordinal plays, and play
-without gaps between tracks. Lossless formats need a lossless original: FLAC, WAV, AIFF, ALAC, WavPack,
-Monkey's Audio, TTA or `.cord` (mono or stereo, up to 24 bits for the last four), since a lossless copy
-of a lossy file would only be bigger.
-
-**Ripping CDs.** Put an audio CD in the drive and choose **Library ▸ Rip CD...**. cordinal reads the
-disc's track list and any CD-Text on it. **Look up** asks MusicBrainz for the disc's names (this
-uses **Album tags from MusicBrainz** in **Preferences ▸ Online**, and asks before turning it on);
-once it is on, every disc is looked up as soon as it is read. When MusicBrainz knows the disc as
-several releases, **Names** lets you pick one. Edit the artist, album, date and each track's title
-(select a track, then type in **Title**), choose FLAC or `.cord` and a folder, and press **Rip**.
-
-Each album goes in `<folder>\<artist>\<album>\`, one file per track (`01 Title.flac`), tagged with
-the names, the track and disc numbers, the MusicBrainz ids and, when **MusicBrainz** covers are on,
-the release's front cover. The tracks join the library when the rip ends. Progress shows in the
-status bar, and **Library ▸ Cancel rip** stops at once, leaving out the unfinished track. Every
-sector is read twice; a sector whose two reads differ is read again until two reads agree, and the
-status line says if any never did. Set your drive's read offset correction in **Preferences ▸ Conversion** (AccurateRip's
-list of drives gives it) so rips match other drives sample for sample. Existing files are never
-overwritten. On Linux the drive is `/dev/sr0` and the like, which your account must be allowed to
-read (usually the `cdrom` or `optical` group).
-
-### Covers
-
-The quickest way to add a cover is to drag a JPEG or PNG onto one of the album's tracks. You can also
-right-click a track and choose **Cover ▸ Choose image file...** or **Cover ▸ Paste image from
-clipboard**. The cover applies to the whole album.
-
-To look online, right-click and choose **Cover ▸ Search online...** (in the tag editor, **Find cover
-online...**). You can paste an image, drag one in from a browser, or pick a file. **Google Images**
-opens a search in your browser; cordinal never contacts Google itself. Deezer, iTunes and MusicBrainz
-results appear too, once you turn those sources on in **Preferences ▸ Online**.
-
-By default, a chosen cover is **shown in cordinal only** and no music file changes. **Restore original
-cover** undoes it. You can instead save covers as `cover.jpg` in the album folder, or embed them in
-the files.
-
-**Library ▸ Fetch missing covers...** searches for every album without a cover and lets you check the
-results before saving.
-
-**Disc art.** If an album folder (or its `Artwork` or `Scans` folder) has `cd.png`, `cd2.png`,
-`disc.png` or `vinyl.png`, the disc peeks out from behind the cover.
-
-**Preferences ▸ View ▸ Cover change** (off by default) adds a transition: the old cover breaks up like a
-badly saved JPEG, and the new one appears block by block.
-
-### Lyrics and artist info
-
-The lyrics panel (**Layout ▸ Show ▸ Lyrics panel**, Ctrl+L) shows lyrics from the song's tags or from a `.lrc`
-file beside it. With an online source turned on, it asks LrcLib and then lyrics.ovh, and prefers timed
-lyrics. Nothing is saved until you right-click the panel and choose **Save lyrics to tags** or **Save
-as .lrc file**.
-
-**View ▸ Artist info...** shows the start of the artist's English Wikipedia article, links to
-MusicBrainz, Wikipedia and their website, and their albums from MusicBrainz. Albums you already have
-are marked **In library**; tick **Only albums not in my library** to see what you are missing.
-Select an album to see its tracklist: owned albums offer **Play album** and **Show in library**, and
-missing albums fetch their tracklist from MusicBrainz so you can **Play album** (or any track in it)
-or **Save album to library** with tags and artwork.
-
-### Scrobbling
-
-Open **File ▸ Scrobbling...** to connect Last.fm, ListenBrainz or Libre.fm, in any combination.
-ListenBrainz needs your user token. Last.fm and Libre.fm need an API key and secret (**Get API key**
-opens the sign-up page), then approval in your browser and **Finish sign-in**.
-
-- Your sign-in details are encrypted with your Windows account, or kept in a private file on Linux.
-- Listens made offline are queued and sent later.
-- You can pause scrobbling, or turn off "now playing" updates.
-- A song counts after half its length or four minutes of listening. Last.fm and Libre.fm also need it
-  to be longer than 30 seconds.
-
-### Discord status
-
-**Preferences ▸ Scrobbling ▸ Discord status** shows what you are playing on Discord, either the
-**Song** or the **Album**. It talks only to the Discord app on your computer and shows nothing while
-paused. It is off by default.
-
-Discord can only show pictures from the web. Covers you picked online work as they are. For covers
-from your own files, cordinal uses a matching cover from your online sources, or you can set an
-upload command in `settings.ini`:
-
-```ini
-[Scrobbling]
-DiscordCoverUpload=C:\Tools\upload.exe --json
-```
-
-cordinal runs the command with the image's path, uses the first https address it prints, and
-remembers it, so each image is uploaded only once.
-
-### Devices and iPod sync
-
-**Copy to folder or device** copies music to SD cards, music players and phones.
-
-**Library ▸ Sync to iPod...** copies the selected tracks (or the current playlist) to a classic iPod,
-keeping a backup of its previous database. It accepts MP3, AAC, ALAC, WAV, AIFF and audiobooks. iPhones,
-iPads and copy-protected purchases are not supported.
-
-### Network speakers and sharing
-
-**Preferences ▸ Output ▸ Network speaker...** (on Linux, **Output device...**) lists the UPnP/DLNA
-players on your network, such as TVs, receivers, smart speakers or media software on another
-device, and plays there instead. EQ, ReplayGain, crossfade and effects all carry over, and the queue
-stays in cordinal. The speaker plays a few seconds behind. Choose **This computer** to switch back.
-If the speaker never starts, allow cordinal through the firewall on private networks.
-
-**Web server... ▸ Share with network players** lets players on your home network browse and play your
-library. DLNA has no passwords, so anyone on that network can use it while it is on. It is off by
-default and never reachable from the internet.
-
-In the **browser player**, **⋯ ▸ Download to this device** saves a song's original file, and
-**Download** above an album or playlist saves all of it as one ZIP (up to 4 GB).
-
-### Seek bar, waveform and moodbar
-
-**Preferences ▸ View ▸ Seek bar** sets how the seek bar looks:
-
-- **Progress bar**, **Waveform**, **Moodbar** (a stripe coloured by the sound) or **Mood waveform**.
-- **Seek bar shows** the **Whole song** or **Live audio**, a moving picture of what you hear. Radio
-  always shows live audio.
-- **Seek bar glow** adds a soft halo that pulses with the beat. **60 frames a second** makes motion
-  smoother at a small CPU cost.
-- **Moodbar colours**, **Waveform colour**, **Waveform reflection** and **Smooth seek bar** change its
-  colours and shape.
-- **Fade the waveform when pausing** fades it to amber when you pause.
-- **Wind behind the track list** (off by default) draws soft ribbons that drift with the music.
-- **Smooth scrolling** (off by default) eases the library list instead of jumping.
-
-The track list's **Mood** column shows each track's moodbar.
-
-### Album colours
-
-**Preferences ▸ View ▸ Album colours** sets how much of the window takes on the colour of the playing
-album's cover: just the **Player background** (the default), the **Whole interface**, or **Off**.
-**Album colour strength** goes from Subtle to Bold. Text always stays readable.
-
-### Lightweight mode
-
-**View ▸ Lightweight mode** (Ctrl+Shift+L, or the icon by the clock) keeps the music playing while
-cordinal uses as little memory and CPU as it can. The window closes, but the music and every effect
-keep going. In **Preferences ▸ Lightweight mode** you choose what stays on screen: just the tray icon,
-the mini player or the compact window.
-
-You can still control the music from any program:
-
-- **Win+Alt+Space** (or clicking the tray icon) opens a small song picker. Type part of a song, album
-  or artist and press Enter to play it now, or Shift+Enter to play it next.
-- **The numpad** works as a remote while Num Lock is off: 5 pauses, 4 and 6 skip, 8 and 2 change the
-  volume, 7 and 9 seek, 1 mutes, 3 shuffles, 0 opens the song picker and `.` brings the window back.
-- **Right-click the tray icon** for playback controls, Up next, playlists, volume and more.
-
-Ctrl+Shift+L, Esc in the mini player, or the numpad's `.` brings the window back. If another program
-already uses one of these keys, cordinal tells you. Lightweight mode works the same way on Linux,
-where keys from other programs go through the desktop's shortcut settings.
-
-### Layouts, packs and helpers
-
-The **Layout** menu arranges the window. Start from a preset (**Layout ▸ Start from a preset**: Classic,
-Player at the bottom, Player on the side, Waveform studio, Minimal and any a pack adds), or from a blank
-canvas, which hides everything but the menu bar and the track list. Then build it up: **Player
-position** docks the player at any edge (or drag its handle there), **Waveform** sets its size and
-look, and **Show** turns each part on or off, from the transport buttons and the times to the tabs,
-search box, side panels and status bar. **Save this layout** keeps the result as **My layout 1** to
-**8** among the presets; **Forget a saved layout** removes one. Right-click the player for the same
-menu.
-
-**Layout ▸ Window size** offers Compact, Big mode plus and Big mode, and the mini player
-(Ctrl+Shift+M). Big mode has panels you can drag, split and dock. From the keyboard, F6 moves between
-panel groups and Ctrl+Up or Ctrl+Down moves a panel between areas. Reopen closed panels from **Layout ▸
-Big mode panels**. **Startup defaults** chooses the size and layout to use next time.
-
-**Packs** are folders or `.cordpack` files (a ZIP) that add themes, columns, group headers, title
-formats, shortcuts, EQ and layout presets, auto-playlists and fonts. Nothing in a pack runs as a
-program. Install and turn them on in **View ▸ Packs**, or drop one on the window. Turning a pack off
-removes what it added. Pack layout presets join **Layout ▸ Start from a preset**, with **Reset the
-layout**. **Make a pack from my setup** in **View ▸ Packs** writes your current look as a new pack,
-with a commented example of every file; edit it, then choose **Reload packs**. Every file is optional:
-
-| File | What it holds |
-|---|---|
-| `pack.ini` | `[pack]`: `name`, `version`, `author`, `description`, `format = 1` |
-| `theme.ini`, `themes/*.ini` | `[theme]`: `name`, `base` (light or dark), `font`, `size`, `playing mark`, `rating mark`, `message prefix`; `[palette]`: `#RRGGBB` colours by role, held to the built-in themes' contrast rules; `[waveform]`: `played`, `unplayed`; `[sounds]`: WAV or FLAC files for sound effects |
-| `columns.ini` | A section per column: `title`, `format`, `sort`, `width`, `align = right`. A `[set.name]` section with `name` and `show` (columns left to right) is a column set |
-| `groups.ini` | `[groups]`: `by` (tracks whose `by` text matches share a header), `title`, `subtitle`, `right`, `cover = no`; `%group_tracks%` and `%group_length%` describe the group |
-| `formats.ini` | `[formats]`: `window title`, `status bar`, `now playing`, `now playing 2`, `tray tip` |
-| `fields.ini`, `functions.tf` | `[fields]`: `name = format` adds `%name%`; `$define(name, args, body)` adds a title-format function |
-| `keys.ini` | `[keys]` and `[global keys]`: `Ctrl+Alt+N = Playback > Next`, a command as the command palette names it |
-| `eq.ini`, `eq/*.ini` | A section per preset: `name`, `bands` (ten gains in dB) |
-| `layout.ini`, `layouts/*.ini` | `[layout]`: `name`, `player`, `waveform size`, then `1` or `0` for each part |
-| `autoplaylists/*.txt`, `fonts/*.ttf` | Auto-playlist rules (offered in the Playlist menu), and fonts loaded only for cordinal |
-
-**Helpers** are separate programs that cordinal can run, such as visualizers in their own windows
-(**View ▸ Helpers ▸ Visualizers**). A helper can only read the audio, and it stops when cordinal
-closes.
-
-### Your data
-
-| | Windows | Linux |
+Everything below is optional reading — expand whatever you're curious about.
+
+<details>
+<summary><strong>Library, Steam soundtracks, web saving &amp; online discovery</strong></summary>
+
+### Watched folders &amp; Inbox
+Add folders in **Preferences ▸ Library ▸ Library folders** or the **Library** menu. cordinal scans
+subfolders and watches for changes: new files appear on their own, moved files keep their stats,
+unplugged drives don't lose anything, and empty placeholder files are skipped. Turn on **Inbox** in
+**Preferences ▸ Library** if you'd rather review new music before it enters your library.
+
+### Steam soundtracks
+**Library ▸ Add Steam soundtracks** finds installed Steam soundtracks on Windows and Linux in the
+background (cancel anytime from the Library menu). When a soundtrack ships in multiple formats, pick
+one copy per song or keep all of them. Existing tracks are skipped, and game SFX folders (`sfx`,
+`sound`) are ignored unless you enable **Include game sound effects**.
+
+### Save music from the web &amp; playlist imports
+**Library ▸ Save music from the web...** downloads pasted links into your first library folder as real
+local files (`Artist\Album\[track] Title`). Supports SoundCloud (tracks, sets, likes, artist pages),
+YouTube (videos and playlists), and Spotify (tracks, albums, playlists — matched to the same recording
+on YouTube without breaking Spotify's encryption, with the source noted in the comment tag).
+
+- Fragmented MP4 streams from SoundCloud and YouTube are remuxed losslessly into standard `.m4a` files
+  (never re-encoded) with full tags and embedded cover art. Unusual streams fall back to saving as-is
+  with `cover.jpg` beside them.
+- Playlist links automatically create a playlist tab in the exact original order (including songs you
+  already owned). Re-running the link updates that tab (undoable with `Ctrl+Z`) and never overwrites a
+  playlist you made yourself.
+- Already-saved tracks are skipped, interrupted downloads resume next time, and permanently gone tracks
+  are remembered until you click **Forgot what failed**.
+- **Import file...** brings in Spotify account data exports (`YourLibrary.json` for Liked Songs + saved
+  albums, `Playlist1.json` for any playlist including private ones) and CSV playlists from Exportify,
+  TuneMyMusic, and Soundiiz (with `Playlist Name` splitting). Drag and drop a file, paste its path, or
+  paste the text. Tracks you already own are matched locally and skipped; saved tracks are hearted
+  automatically.
+- Asks before going online the first time (**Preferences ▸ Online ▸ Save music from the web**).
+
+### Release Radar, discovery &amp; online search
+- **Library ▸ New releases by your favorite artists...** checks MusicBrainz for albums and EPs from the
+  last six months by the artists you play and heart most. **Save selected** / **Save all** pulls the
+  album tracklist through the web-save queue as properly tagged albums. Nothing is fetched until you
+  open it, and nothing downloads until you click Save.
+- **Discover outside my library** (**Preferences ▸ Online**) lets **Keep playing like this**
+  occasionally slip in an unowned track by a related artist (picked via MusicBrainz, audio matched on
+  YouTube) as a temporary preview. It isn't counted as a play and gets deleted after playing or skipping
+  unless you press `Ctrl+Alt+K` (**Library ▸ Keep the discovered song**).
+- **Online song search** (**Preferences ▸ Online**, off by default) adds an **Online (not in your
+  library)** pane below local `Ctrl+F` matches (up to 15 results, and up to 5 in `Win+Alt+Space`). Play
+  as a preview until you save, or switch **When playing a search result** to **Play and save
+  automatically**. Right-click an album result to **Save full album to library...**.
+
+</details>
+
+<details>
+<summary><strong>Album editions</strong></summary>
+
+Remasters, deluxe releases, and regional editions can live under one album tile with an edition
+switcher. cordinal detects common edition names and MusicBrainz release-group tags while keeping each
+edition's files, tracklist, and artwork separate.
+
+Use **Library ▸ Album editions** to group, split, rename, compare, or pick a preferred edition and
+cover. Everything works offline; an optional MusicBrainz lookup fills in missing release-group IDs.
+Playlists always point at exact files, and `%edition%` works in title formats.
+
+</details>
+
+<details>
+<summary><strong>Playlists, Mixes, queue &amp; taste shuffle</strong></summary>
+
+- **Tabs &amp; undo:** Playlists open as tabs. `Ctrl+Z` undoes playlist edits (add, remove, move, sort,
+  clear) or your last tag edit; `Ctrl+Y` redoes playlist edits.
+- **Auto-playlists:** Rule-based playlists using tags, file info, ratings, favorites, play counts,
+  dates, BPM, loudness, and nested ALL/ANY groups. They share one tab by default (turn off
+  **Preferences ▸ View ▸ One tab for auto-playlists** to separate them).
+- **Favorites &amp; Mixes:** Hit `Ctrl+D` to heart tracks (or un-heart if all selected are hearted).
+  **Playlist ▸ Mixes** builds instant local playlists: **Favorites**, **On Repeat** (most played in the
+  last 30 days), **Forgotten Favorites** (hearted or 4+ stars, unplayed for 90 days), **Recently Added**,
+  and **Mix like this song** (matching genre or similar tempo).
+- **Now Playing focus:** While playing an album, the **Now Playing** tab focuses on that album (type in
+  search to see everything again, or disable in **Preferences ▸ View**).
+- **Columns:** Drag dividers to resize (double-click to reset), drag headings to reorder, click to sort
+  (asc / desc / original), right-click headings to toggle columns.
+- **Up next (`Ctrl+Shift+Q`):** Shows your queue followed by what's coming from the playlist. Drag to
+  reorder, `Alt+Up`/`Alt+Down` to move, `Delete` to remove, `Enter` to play now.
+- **Choose by taste (`Playback ▸ Choose by taste`, off by default):** Biases shuffle and **Keep playing
+  like this** toward songs you finish, rate, heart, and replay — ignoring quick skips while flipping
+  through tracks, and keeping ~1 in 7 picks random so forgotten songs still surface. The next five picks
+  sit in **Picked by taste** where you can keep, skip, or reroll them.
+- **Resume where you left off:** The toolbar clock remembers your spot in up to 12 tracks and suggests
+  old favorites you haven't played lately. **Playback ▸ Play history** shows your recent full plays.
+- Changing **Speed** or **Tempo** updates the Duration, BPM, and total time columns to match what you'll
+  actually hear.
+
+</details>
+
+<details>
+<summary><strong>Sound, Exclusive/ASIO, DSD, EQ &amp; ReplayGain</strong></summary>
+
+- **Output modes** (**Preferences ▸ Output**, or click the output name in the status bar):
+  - **Shared:** standard OS mixer alongside other apps.
+  - **Exclusive:** gives cordinal direct access to the device (on Linux, asks PipeWire for the track's
+    native sample rate).
+  - **ASIO** (Windows): plays through an installed ASIO driver.
+  - Exclusive and ASIO play bit-perfect at each track's native sample rate (100% volume, EQ/effects/RG
+    bypassed), falling back to Shared with a status bar note if the device can't be opened.
+- **Native DSD** (Windows, off by default): sends DSF/DSDIFF directly over DoP (Exclusive) or native
+  ASIO DSD. Leave off unless your DAC supports DSD, as non-DoP DACs will play noise.
+- **Crossfade:** 1–8 seconds between tracks (**Preferences ▸ Playback**), keeping tracks on the same
+  album gapless unless you also enable **Crossfade within an album**.
+- **Volume &amp; Surround:** Configurable volume curve (or disable internal volume control completely).
+  **Upmix to surround** (Shared mode) spreads stereo across 5.1/7.1 while keeping vocals centered.
+- **Headphones:** Per-output EQ, crossfeed, and ReplayGain profiles, plus battery/sidetone/auto-off/EQ
+  controls for supported headsets (needs hidraw read/write access on Linux).
+- **Effects &amp; ReplayGain:** Built-in bitcrusher (**Playback ▸ Bitcrush**), reverb, night mode, and
+  ReplayGain scanning (**Preferences ▸ ReplayGain**; write tags to files via **Playback ▸ ReplayGain ▸
+  Write ReplayGain tags**).
+
+</details>
+
+<details>
+<summary><strong>Tags, duplicates, converting &amp; CD ripping</strong></summary>
+
+- **Tag editor (`Alt+Enter`):** Edit tags, covers, and lyrics for one track or hundreds, with library
+  autocomplete for artists/albums/genres and filename guessing for untagged tracks. Atomic writes with
+  10-step `Ctrl+Z` undo. Also in the **Edit** / right-click menus: **Edit album tags...**, **Organize
+  files** (rename/move from tags with preview &amp; undo), **Make album...**, **Tag album from
+  MusicBrainz...** (preview before applying), and **Library ▸ Find missing information** (or search
+  `missing:year`, `missing:genre`, `missing:any`).
+- **Duplicates (`Library ▸ Find duplicates...`):** Finds both **Identical audio** (same sound regardless
+  of tags/filenames) and **Same song** (same artist/title/length across formats like FLAC + MP3). Moving
+  checked copies to the Recycle Bin migrates their ratings, plays, and playlist spots to the kept copy,
+  with **Undo clean-up** while cordinal stays open.
+- **Converting (`Library ▸ Convert...`):** Built-in encoders for `.cord`, FLAC, WAV, MP3, and AAC
+  (`.m4a`) with tags and covers — no external tools needed. Save as **Copies** or **Replacements**
+  (swapping in-place in your library while keeping stats/playlists, undoable via **Library ▸ Undo last
+  conversion**). Every output is read back and verified (sample-for-sample for lossless); lossless
+  targets require lossless inputs.
+- **CD ripping (`Library ▸ Rip CD...`):** Reads CD-Text offline or looks up discs on MusicBrainz (with
+  optional Cover Art Archive front covers), rips to `<folder>\<artist>\<album>\` in FLAC or `.cord`,
+  and adds tracks to your library. Every sector is read twice and re-read on mismatch; drive read-offset
+  correction lives in **Preferences ▸ Conversion**. Existing files are never overwritten. On Linux, your
+  user needs read access to the drive (typically the `cdrom` or `optical` group).
+
+</details>
+
+<details>
+<summary><strong>Covers, lyrics &amp; artist info</strong></summary>
+
+- **Covers:** Drag a JPEG/PNG onto any track, or right-click ▸ **Cover ▸ Choose image file / Paste image
+  from clipboard**. **Cover ▸ Search online...** lets you paste, drop from a browser, open a Google
+  Images tab (cordinal never contacts Google), or pull from Deezer, iTunes, and MusicBrainz when enabled.
+  By default, picked covers are stored in cordinal only without touching your audio files (or save as
+  `cover.jpg` / embed in tags). **Library ▸ Fetch missing covers...** batch-searches missing artwork for
+  review. Drop `cd.png`, `cd2.png`, `disc.png`, or `vinyl.png` in an album folder (or `Artwork`/`Scans`)
+  for peeking disc art.
+- **Lyrics (`Ctrl+L`):** Reads embedded tags and sidecar `.lrc` files. With online sources enabled,
+  checks LrcLib then lyrics.ovh (preferring synced lyrics). Nothing is written until you right-click and
+  save to tags or `.lrc`.
+- **Artist info (`View ▸ Artist info...`):** Shows a Wikipedia intro, links, and the artist's
+  MusicBrainz discography with your owned albums highlighted. Filter to missing albums, inspect
+  tracklists, preview tracks, or save full missing albums straight to your library.
+
+</details>
+
+<details>
+<summary><strong>Scrobbling &amp; Discord status</strong></summary>
+
+- **Scrobbling (`File ▸ Scrobbling...`):** Connect Last.fm, ListenBrainz, and/or Libre.fm in any
+  combination. Credentials are encrypted with your Windows account (or stored in a private file on
+  Linux). Offline plays queue up and submit later. Tracks count after half their length or 4 minutes
+  (plus >30s for Last.fm/Libre.fm).
+- **Discord status (`Preferences ▸ Scrobbling`, off by default):** Shows the playing song or album via
+  the local Discord client (hidden when paused). Online covers work automatically; for local covers,
+  cordinal matches via your enabled online sources or runs a custom uploader from `settings.ini`:
+  ```ini
+  [Scrobbling]
+  DiscordCoverUpload=C:\Tools\upload.exe --json
+  ```
+  It passes the image path, grabs the first `https://` URL printed, and caches it so each cover uploads
+  once.
+
+</details>
+
+<details>
+<summary><strong>Devices, classic iPod sync &amp; network speakers</strong></summary>
+
+- **Devices &amp; iPod:** **Copy to folder or device** copies music to SD cards, DAPs, and phones.
+  **Library ▸ Sync to iPod...** syncs MP3, AAC, ALAC, WAV, AIFF, and audiobooks to classic iPods while
+  backing up the previous iPod database (no iPhones/iPads or DRM files).
+- **Network speakers:** **Preferences ▸ Output ▸ Network speaker...** (Linux: **Output device...**)
+  streams to UPnP/DLNA speakers, TVs, and receivers with your EQ, ReplayGain, crossfade, and effects
+  intact. Allow cordinal through the firewall on private networks if a speaker won't start.
+- **Browser player &amp; DLNA sharing:** **Web server... ▸ Share with network players** exposes your
+  library over DLNA on your LAN (off by default, never exposed to the internet; note DLNA has no
+  passwords). In the browser player, download individual original files or grab an entire album/playlist
+  as a ZIP (up to 4 GB).
+
+</details>
+
+<details>
+<summary><strong>Seek bar, album colours &amp; Lightweight mode</strong></summary>
+
+- **Seek bar (`Preferences ▸ View`):** Progress bar, Waveform, Moodbar, or Mood waveform — showing the
+  whole song or live audio (radio is always live). Optional beat glow, 60 fps motion, reflection,
+  pause-to-amber fade, drifting background wind ribbons, smooth scrolling, and a **Mood** track-list
+  column.
+- **Album colours (`Preferences ▸ View`):** Tint the player background, the whole interface, or nothing
+  from the playing cover, with Subtle-to-Bold strength and guaranteed text readability.
+- **Lightweight mode (`Ctrl+Shift+L`):** Closes the main window and trims memory/CPU while playback and
+  effects keep running. Keep just the tray icon, the mini player, or the compact window. Control music
+  from anywhere with `Win+Alt+Space` (song picker), the numpad with Num Lock off (`5` pause, `4`/`6`
+  skip, `8`/`2` volume, `7`/`9` seek, `1` mute, `3` shuffle, `0` picker, `.` restore), or right-clicking
+  the tray icon.
+
+</details>
+
+<details>
+<summary><strong>Layouts, packs &amp; helpers</strong></summary>
+
+- **Layouts:** Use the **Layout** menu to pick a preset (Classic, Player at the bottom, Player on the
+  side, Waveform studio, Minimal, or pack presets), start from a blank canvas, dock the player on any
+  edge, toggle individual parts, or save up to 8 custom layouts (**My layout 1–8**). **Layout ▸ Window
+  size** switches between Compact, Big mode, Big mode plus, and Mini player (`Ctrl+Shift+M`). In Big
+  mode, drag/split/dock panels freely (`F6` switches panel groups, `Ctrl+Up`/`Ctrl+Down` moves panels).
+- **Packs (`.cordpack` or folders):** Pure data — nothing in a pack executes code. Install via
+  **View ▸ Packs** or drag-and-drop onto the window; toggle off to cleanly undo. Use **Make a pack from
+  my setup** to export your current look with commented templates for every optional file:
+  - `pack.ini` — metadata (`name`, `version`, `author`, `description`, `format = 1`)
+  - `theme.ini`, `themes/*.ini` — palette (`#RRGGBB`, held to built-in contrast rules), font, marks,
+    waveform colours, WAV/FLAC sound effects
+  - `columns.ini`, `groups.ini` — custom columns, column sets, and group headers
+  - `formats.ini`, `fields.ini`, `functions.tf` — window/status/tray formats, `%field%` definitions, and
+    `$define(...)` functions
+  - `keys.ini`, `eq.ini`, `eq/*.ini`, `layout.ini`, `layouts/*.ini` — shortcuts, EQ presets, and layouts
+  - `autoplaylists/*.txt`, `fonts/*.ttf` — auto-playlist rules and app-local fonts
+- **Helpers:** External programs (like standalone visualizers under **View ▸ Helpers ▸ Visualizers**)
+  that only receive audio and exit when cordinal closes.
+
+</details>
+
+<details>
+<summary><strong>Your data, backups &amp; leaving cordinal</strong></summary>
+
+| Data | Windows | Linux |
 |---|---|---|
-| Library, playlists, statistics | `%APPDATA%\cordinal` | `$XDG_DATA_HOME/cordinal` |
+| Library, playlists, stats | `%APPDATA%\cordinal` | `$XDG_DATA_HOME/cordinal` |
 | Settings | `%APPDATA%\cordinal` | `$XDG_CONFIG_HOME/cordinal` |
-| Cover and waveform caches | `%LOCALAPPDATA%\cordinal` | `$XDG_CACHE_HOME/cordinal` |
+| Cover &amp; waveform caches | `%LOCALAPPDATA%\cordinal` | `$XDG_CACHE_HOME/cordinal` |
 
-cordinal only goes online for features you turn on: radio, scrobbling, Discord covers, the browser
-player, the album-edition lookup, saving music from the web, Release Radar, discovery in Keep playing
-like this, and the cover, lyrics and artist-info sources.
+- **Self-healing library:** Every save verifies `library.cdb` was written intact and keeps the previous
+  copy as `library.cdb.bak`, plus daily snapshots in `library-history/` (last 7 days + first of each of
+  the last 3 months). If disk corruption ever flips a byte, cordinal automatically recovers from the
+  newest intact copy and tells you.
+- **Backup &amp; export:** **File ▸ Back up library and settings** writes a plain folder you can restore
+  even on a machine with different music paths. **File ▸ Export collection...** bundles chosen artists,
+  albums, or playlists (with covers and lyrics) into one `.zip`; **Import collection...** unpacks it
+  without overwriting existing files.
+- **No lock-in:** Tags live in standard fields inside your audio files. Ratings and play counts can be
+  written to files (`FMPS_RATING`, `FMPS_PLAYCOUNT`, MP3 `POPM`) from the right-click **Rating** menu.
+  Playlists export to `.m3u8` (`Ctrl+S`), and backups include plain `statistics.csv` and `history.csv`.
 
-**Back up.** **File ▸ Back up library and settings** saves everything into an ordinary folder. **File
-▸ Restore backup** brings it back, even on a new computer where the music is in a different place.
-
-**Your library looks after itself.** Every save checks that `library.cdb` was written whole, and keeps the
-save before it as `library.cdb.bak`. Once a day cordinal also keeps a dated copy in the `library-history`
-folder beside it: the last seven days, plus the first copy of each of the last three months. If the
-library file is ever damaged (a failing disk can change a byte years later), cordinal notices when it
-starts and opens the previous save, or else the newest dated copy, and tells you which one it used.
-
-**Export your music.** **File ▸ Export collection...** saves your music, or the artists, albums and
-playlists you pick, into one `.zip` file, with covers, lyrics and playlists. **File ▸ Import
-collection...** unpacks such a file into your library. It never overwrites a file, so importing twice
-only adds what is missing. Ratings and play counts are not included; use a backup for those.
-
-**Leaving cordinal.** Nothing is locked in:
-
-- **Tags** are saved in the music files, in standard fields.
-- **Ratings and play counts** can be written into the files: select tracks, then right-click ▸
-  **Rating ▸ Write ratings and play counts to files**. They are saved as `FMPS_RATING` and
-  `FMPS_PLAYCOUNT` (and `POPM` for MP3).
-- **Playlists** save as `.m3u8` with Ctrl+S.
-- **A backup folder** holds `statistics.csv`, `history.csv` and every playlist, all readable without
-  cordinal.
+</details>
 
 ## Linux (preview)
 
-The Linux version shares its library, decoders, tags and playback engine with the Windows version, and
-has the same features and look. It is less tested, and the Windows version remains the reference.
+The Linux port shares the same engine, decoders, library, tags, and look as Windows (Windows is still
+the reference and gets more mileage).
 
-It runs on Wayland or X11 and plays through PipeWire or PulseAudio. It is one static file with no
-shared libraries at all: it brings its own C library, talks to the display and sound servers itself,
-draws its own text, and has HTTPS built in (BearSSL). It runs on any 64-bit x86 Linux kernel, old
-distributions and musl systems such as Alpine included. To install or update it:
+What makes the Linux build unusual: it's **one completely static x86-64 binary with zero shared
+libraries**. It brings its own C library, talks straight to Wayland/X11 and PipeWire/PulseAudio, draws
+its own text, and bundles BearSSL for HTTPS. Same binary runs on any 64-bit x86 Linux distro — old
+glibc, Alpine/musl, whatever.
+
+Install or update:
 
 ```sh
 curl -fsSL https://github.com/imhavingasuperbadday/cordinal/releases/latest/download/install.sh | sh
 ```
 
-The download is checked against the release checksum. To remove cordinal, replace the final `sh` with
-`sh -s -- --uninstall` (your library and settings are kept). `sh -s -- --dry-run` shows what it would
-do. The same file runs on every distribution: there is no separate musl build and nothing to install
-besides cordinal itself.
+The installer verifies the release checksum. Swap the final `sh` for `sh -s -- --uninstall` to remove it
+(your library and settings stay untouched), or `sh -s -- --dry-run` to preview.
 
-**Omarchy and Waybar.** On Omarchy, and other Hyprland or Sway desktops with Waybar, turn on **Show on
-the top bar** (Preferences ▸ Startup, or the View menu) to put cordinal on the top bar. It adds a small
-marked module to your Waybar config and removes it again when you turn it off. Click it to show
-cordinal, right-click to pause, and middle-click to skip.
+**Waybar / Omarchy:** Turn on **Show on the top bar** (**Preferences ▸ Startup** or **View**) to add a
+cleanly marked Waybar module (click to show, right-click to pause, middle-click to skip). Turning it off
+removes the module again.
 
 ## Building
 
-**Windows** needs Visual Studio 2022 (or its Build Tools) with the C++ x64 workload:
+**Windows** requires Visual Studio 2022 (or Build Tools) with the C++ x64 workload:
 
 ```bat
 build.bat unpacked
 ```
 
-This makes a quick development build. Plain `build.bat` also compresses the program with the pinned
-UPX packer, which it downloads and checks. Releases use cordinal's own packer: `build.bat cdpack`, which
-also needs [LLVM-MinGW](https://github.com/mstorsjo/llvm-mingw)'s `clang++` on `PATH` and Python 3.14
-(see [cdpack/README.md](cdpack/README.md)). Every mode writes `build\cordinal.exe`.
+That gives you a fast incremental dev build. Plain `build.bat` packs it with pinned UPX. Official
+releases use cordinal's own packer (`build.bat cdpack`), which also needs
+[LLVM-MinGW](https://github.com/mstorsjo/llvm-mingw)'s `clang++` on `PATH` and Python 3.14 (see
+[cdpack/README.md](cdpack/README.md)). Every mode outputs `build\cordinal.exe`. New `.cpp` files in
+existing folders are picked up automatically; new folders go in [tools/build.ps1](tools/build.ps1).
 
-Builds are incremental: only changed files and the files that include them are recompiled. New `.cpp`
-files in the existing source folders are found on their own; a new folder needs an entry in
-[tools/build.ps1](tools/build.ps1).
-
-**Linux** needs CMake, a C compiler and a C++20 compiler, and no libraries:
+**Linux** needs CMake, a C compiler, and a C++20 compiler — no external libraries:
 
 ```sh
 cmake -S . -B build-linux && cmake --build build-linux
 ```
 
-`-DCORDINAL_PORTABLE=OFF` uses the system's C++ runtime instead of building it in.
-`-DCORDINAL_SELAWIK=ON` builds in the Selawik font for the Windows look (it is off by default because
-its licence, SIL OFL 1.1, is not GPL-compatible).
+Pass `-DCORDINAL_PORTABLE=OFF` to use the system C++ runtime instead, or `-DCORDINAL_SELAWIK=ON` to
+bundle the Selawik font (off by default since SIL OFL 1.1 isn't GPL-compatible).
 
 ### Testing
 
-On Windows, `test.bat` builds cordinal, makes any missing test files (with FFmpeg on `PATH`) and runs
-every test suite:
+On Windows, `test.bat` builds cordinal, generates missing test fixtures (needs FFmpeg on `PATH`), and
+runs every suite:
 
 ```bat
 test.bat
@@ -651,25 +437,24 @@ test.bat
 
 | Command | What it does |
 |---|---|
-| `test.bat -Headless` | Runs only the tests that need no window or sound device |
-| `test.bat -List` | Lists every suite and what it needs |
-| `test.bat -NoBuild -Suite search,sorting` | Runs chosen suites against the existing build |
-| `test.bat -NoBuild -Changed` | Runs the suites that cover your uncommitted changes |
-| `-Seed 42 -Repeat 10` | Repeats a randomized run |
+| `test.bat -Headless` | Skip window/audio-device tests |
+| `test.bat -List` | List all suites and their requirements |
+| `test.bat -NoBuild -Suite search,sorting` | Run specific suites against the current build |
+| `test.bat -NoBuild -Changed` | Run suites covering your uncommitted changes |
+| `-Seed 42 -Repeat 10` | Repeat a randomized run |
 
-Results go to a new folder under `build\test-results\`. A failing check prints its file and line, and
-a command to run it again. `pwsh -File tools\check-size.ps1` reports the program size; a packed build
-over 2,500,000 bytes fails. The memory-budget suite checks the player's RAM use.
+Logs land under `build\test-results\`. Failures print `file:line` and a copy-pasteable reproduce
+command. Check binary size with `pwsh -File tools\check-size.ps1` (packed builds fail above 2.5 MB),
+and check RAM use with the `memory-budget` suite.
 
-On Linux, the build also makes `cordinal-core-test`; run it with no arguments to see its commands.
-`cordinal --check-layout` compares the window with the shared layout.
+On Linux, the build also produces `cordinal-core-test` (run with no args for usage) and supports
+`cordinal --check-layout`.
 
 ### Fuzzing and sanitizers
 
-CI's `linux-sanitizers` job builds the core with clang under AddressSanitizer and
-UndefinedBehaviorSanitizer, runs the core self-tests, decodes the official Opus conformance vectors
-(every packet's range-coder state must match the encoder's, and libopus's `opus_compare` must accept
-the output), and fuzzes every file parser with libFuzzer. To run the same on Linux:
+CI's `linux-sanitizers` job compiles the core with clang under ASan + UBSan, runs the core self-tests,
+verifies the official Opus conformance vectors (range-coder state + `opus_compare`), and fuzzes every
+file parser with libFuzzer. Run it locally on Linux:
 
 ```sh
 cmake -S . -B build-fuzz -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCORDINAL_FUZZ=ON
@@ -679,22 +464,20 @@ tools/opus-conformance.sh build-fuzz results/opus
 tools/fuzz-media.sh build-fuzz results/fuzz 60
 ```
 
-A crash leaves its input in `results/fuzz/crashes/<target>/`; `build-fuzz/fuzz-<target> <file>`
-replays it.
+Crashes save their reproducer to `results/fuzz/crashes/<target>/`; replay with
+`build-fuzz/fuzz-<target> <file>`.
 
-## Contributing and support
+## Contributing & support
 
-- **Bugs:** open an [issue](https://github.com/imhavingasuperbadday/cordinal/issues/new/choose) with
-  your cordinal version, your Windows or Linux version, and the steps to reproduce it. On Windows,
-  attach any crash report from `%LOCALAPPDATA%\cordinal\crashes`.
-- **Format requests:** use the *Format request* template, with a short sample file if you can share it.
-- **New features:** open an issue before you start, so your time isn't wasted on something that
-  doesn't fit.
-- **Security problems:** report them privately, as [SECURITY.md](SECURITY.md) explains.
-- **Code, tests and docs:** read [CONTRIBUTING.md](CONTRIBUTING.md) first, and sign the [CLA](CLA.md)
-  with your first pull request.
+- **Bugs:** Open an [issue](https://github.com/imhavingasuperbadday/cordinal/issues/new/choose) with
+  your cordinal version, OS version, and repro steps (on Windows, attach crash logs from
+  `%LOCALAPPDATA%\cordinal\crashes`).
+- **Format requests:** Use the *Format request* template and attach a short sample if you can.
+- **Feature ideas:** Open an issue before writing code so you don't waste time on something out of scope.
+- **Security:** Report privately per [SECURITY.md](SECURITY.md).
+- **PRs:** Read [CONTRIBUTING.md](CONTRIBUTING.md) and sign the [CLA](CLA.md) on your first PR.
 
 ## License
 
-cordinal is free software under the GNU GPL, version 3 or later ([LICENSE](LICENSE)).
-[THIRD_PARTY.md](THIRD_PARTY.md) lists the outside code and data it includes.
+GNU GPL v3 or later ([LICENSE](LICENSE)). Third-party code and data are listed in
+[THIRD_PARTY.md](THIRD_PARTY.md).
