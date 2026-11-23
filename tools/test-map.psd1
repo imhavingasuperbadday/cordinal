@@ -118,7 +118,7 @@
         @{ Paths = @('src/packs.*', 'src/app_packs.*', 'src/app_packfiles.*'); Suites = @('packs') }
         @{ Paths = @('src/crashdump.*'); Suites = @('crash-dumps') }
         @{ Paths = @('src/memory_report.*', 'src/packed_image.*', 'src/delayload.*', 'src/background_cpu.*',
-                     'src/app_memory.*', 'src/app_lightweight.*')
+                     'src/app_memory.*', 'src/app_lightweight.*', 'src/trimwatch.*')
            Suites = @('memory', 'memory-budget') }
 
         # Window, menus, preferences, themes and drawing: the native UI suite, which needs a window.

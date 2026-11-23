@@ -29,11 +29,11 @@ int CheckLinuxTabs() {
     const std::wstring savedSearch = g.search;
     const uint64_t savedShown = g_autoTabShown;
     std::vector<TrackId> ids;
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < 6; ++i) {
         TrackId id = g_lib.Add(L"/checks/np-album-" + std::to_wstring(i) + L".flac");
         TagData tags;
         tags.title = "Now playing album " + std::to_string(i);
-        if (i != 4) tags.album = i == 2 ? "Elsewhere" : "Pickaxe Songs";
+        if (i != 4) tags.album = i == 2 || i == 5 ? "Elsewhere" : "Pickaxe Songs";
         tags.albumArtist = "Rook";
         g_lib.ApplyTags(id, tags);
         ids.push_back(id);
@@ -50,7 +50,7 @@ int CheckLinuxTabs() {
     check(g.rows == std::vector<TrackId>{ids[0], ids[1], ids[3]}, "Now Playing lists only the playing song's album");
     g.playing = ids[2];
     FollowNowPlayingAlbum();
-    check(g.rows == std::vector<TrackId>{ids[2]}, "Now Playing follows playback into another album");
+    check(g.rows == std::vector<TrackId>{ids[2], ids[5]}, "Now Playing follows playback into another album");
     g.search = L"\"Now playing album\"";
     RebuildRows();
     check(g.rows.size() == ids.size() && NowPlayingAlbumTrack() == kNone, "a search in Now Playing looks through the whole list");

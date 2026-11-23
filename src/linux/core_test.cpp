@@ -40,6 +40,7 @@
 //   cordinal-core-test text DIR [FONT...]     the text stack on fonts made in DIR and the installed ones: outlines,
 //                                             coverage, kerning, ligatures, scripts, emoji, and malformed fonts
 //   cordinal-core-test bidi FILE              the bidi pass against Unicode's BidiCharacterTest.txt
+//   cordinal-core-test fake-fcitx LOG         a stand-in fcitx5 on the session bus for the e2e test (tests/ime_fake.h)
 //   cordinal-core-test sound-pod              the SPA POD builder and reader on known values
 //   cordinal-core-test sound-fuzz [N [SEED]]  the PipeWire and PulseAudio message parsers on N mutated messages
 //   cordinal-core-test sound-pattern SECONDS [RATE [TARGET [STALL_MS]]]
@@ -54,6 +55,7 @@
 #include "linux/libc/checks.h"
 #include "tests/discord_checks.h"
 #include "tests/fontmatch_checks.h"
+#include "tests/ime_fake.h"
 #include "tests/text_checks.h"
 #include "tests/wind_checks.h"
 #include "tests/metadata_checks.h"
@@ -95,7 +97,9 @@
 
 #include <bearssl.h>
 
+#include <arpa/inet.h>
 #include <fcntl.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -1174,6 +1178,49 @@ int CheckAway(const char* directory) {
     auto t0 = std::chrono::steady_clock::now();
     auto cancelled = web::HttpFetch(&cancel, "http://192.0.2.1/", "GET", {}, {}, 10000);
     check(cancelled.status == 0 && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(2), "a cancelled request stops at once");
+
+    // A server that answers BearSSL's TLS 1.2 hello with a protocol_version alert, as a TLS 1.3-only host
+    // does: the request goes to curl instead, here a stand-in on PATH that records what it was given.
+    const std::string fake = std::string(directory) + "/curl", seen = std::string(directory) + "/curl-seen";
+    if (FILE* f = fopen(fake.c_str(), "w")) {
+        fprintf(f, "#!/bin/sh\nprintf '%%s\n' \"$@\" > '%s.args'\ncat > '%s.body'\n"
+                   "printf 'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok'\n", seen.c_str(), seen.c_str());
+        fclose(f);
+        chmod(fake.c_str(), 0700);
+    }
+    int listener = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    sockaddr_in at{};
+    at.sin_family = AF_INET;
+    at.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t atSize = sizeof(at);
+    bool listening = listener >= 0 && !bind(listener, (sockaddr*)&at, sizeof(at)) && !listen(listener, 1) &&
+                     !getsockname(listener, (sockaddr*)&at, &atSize);
+    std::thread refuser([&] {
+        int c = listening ? accept(listener, nullptr, nullptr) : -1;
+        if (c < 0) return;
+        char hello[512];
+        if (recv(c, hello, sizeof(hello), 0) > 0) send(c, "\x15\x03\x03\x00\x02\x02\x46", 7, MSG_NOSIGNAL);
+        close(c);
+    });
+    const std::string path = getenv("PATH") ? getenv("PATH") : "";
+    setenv("PATH", (std::string(directory) + ":" + path).c_str(), 1);
+    const std::string refusing = "https://127.0.0.1:" + std::to_string(ntohs(at.sin_port)) + "/submit";
+    auto fallback = listening ? web::HttpFetch(nullptr, refusing, "POST", "hi", "X-Test: 1\r\n", 5000) : web::HttpReply{};
+    shutdown(listener, SHUT_RDWR);  // wakes the accept if the request never connected
+    refuser.join();
+    close(listener);
+    auto read = [](const std::string& file) {
+        std::ifstream in(file);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    const std::string args = read(seen + ".args");
+    check(fallback.status == 200 && fallback.body == "ok" && read(seen + ".body") == "hi" &&
+          args.find(refusing) != args.npos && args.find("X-Test: 1") != args.npos && args.find("--tlsv1.2") != args.npos,
+          "a server that turns TLS 1.2 down is asked again through curl");
+    auto direct = web::HttpFetch(nullptr, refusing, "GET", {}, {}, 5000);  // no server now: straight to curl
+    setenv("PATH", path.c_str(), 1);
+    check(direct.status == 200 && direct.body == "ok" && read(seen + ".args").find("GET") != std::string::npos,
+          "later requests to that host go straight to curl");
     server.Stop();
     return failures;
 }
@@ -1391,6 +1438,7 @@ int main(int argc, char** argv) {
     if (argc >= 2 && !strcmp(argv[1], "fonts-match")) return fontmatch_checks::CheckInstalled(argc >= 3 ? argv[2] : nullptr);
     if (argc >= 3 && !strcmp(argv[1], "text")) return text_checks::Check(argv[2], argc - 3, argv + 3);
     if (argc >= 3 && !strcmp(argv[1], "bidi")) return text_checks::CheckBidi(argv[2]);
+    if (argc >= 3 && !strcmp(argv[1], "fake-fcitx")) return ime_fake::Run(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "listenbrainz")) return CheckListenBrainz(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "discord")) {  // tests/discord_checks.h, shared with the Windows self-test
         int failures = 0;
@@ -1405,6 +1453,6 @@ int main(int argc, char** argv) {
     if (argc >= 3 && !strcmp(argv[1], "decode")) return Decode(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "play")) return Play(argv[2], argc >= 4 ? atof(argv[3]) : 5);
     fprintf(stderr, "usage: cordinal-core-test scan DIR | decode FILE | play FILE [SECONDS] | replaygain FILE... | "
-                    "tags FILE DIR | convert FILE DIR | organize FILE ROOT | copy FILE DEST | collection DIR | ipod DIR | eq | resampler | waveform | helpers DIR | devices | sfx | listenbrainz DIR | weighted-shuffle | waybar | tagsuggest | chapters FILE | library FILE | history FILE | playlists FILE | steam [cancel] | away DIR | tls | tls-hosts | web DIR CONTROL | fonts DIR | fonts-match [FILE] | text DIR [FONT...] | bidi FILE\n");
+                    "tags FILE DIR | convert FILE DIR | organize FILE ROOT | copy FILE DEST | collection DIR | ipod DIR | eq | resampler | waveform | helpers DIR | devices | sfx | listenbrainz DIR | weighted-shuffle | waybar | tagsuggest | chapters FILE | library FILE | history FILE | playlists FILE | steam [cancel] | away DIR | tls | tls-hosts | web DIR CONTROL | fonts DIR | fonts-match [FILE] | text DIR [FONT...] | bidi FILE | fake-fcitx LOG\n");
     return 2;
 }

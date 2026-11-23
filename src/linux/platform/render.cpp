@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <set>
 #include <vector>
@@ -20,7 +21,10 @@ struct SDL_Texture {
     int w = 0, h = 0;
     SDL_PixelFormat format = SDL_PIXELFORMAT_ARGB8888;
     bool alpha = true;  // the format has an alpha channel
-    std::vector<uint32_t> px;  // 0xAARRGGBB
+    // 0xAARRGGBB, from calloc: fresh pages read as zero without being touched, so a large texture
+    // filled a little at a time (a glyph atlas page) costs only the rows written so far.
+    uint32_t* px = nullptr;
+    ~SDL_Texture() { free(px); }
     SDL_BlendMode blend = SDL_BLENDMODE_BLEND;
     SDL_ScaleMode scale = SDL_SCALEMODE_LINEAR;
     // Colour and alpha modulation. SDL's software renderer sets these from a textured quad's vertex
@@ -520,13 +524,17 @@ void BlitTriangle(SDL_Renderer* r, SDL_Texture* tex, TriVertex v0, TriVertex v1,
 // --- texture copies (SDL_RenderTexture through the software backend) --------------------------------------------
 
 void Copy(SDL_Renderer* r, SDL_Texture* tex, const SDL_FRect& srcF, const SDL_FRect& dstF, const SDL_FColor& mod) {
+    // Floor at the origin, ceiling at the far edge, so a fractional destination keeps both
+    // edges it touches and a whole-pixel copy still takes the fast path.
+    const int dx = (int)std::floor(dstF.x), dy = (int)std::floor(dstF.y);
+    const int dw = std::max((int)std::ceil(dstF.x + dstF.w) - dx, 0), dh = std::max((int)std::ceil(dstF.y + dstF.h) - dy, 0);
     SDL_Rect s{(int)srcF.x, (int)srcF.y, (int)srcF.w, (int)srcF.h};
-    SDL_Rect d{(int)dstF.x, (int)dstF.y, (int)dstF.w, (int)dstF.h};
+    SDL_Rect d{dx, dy, dw, dh};
     CopyState st;
     st.r = ColorByte(mod.r), st.g = ColorByte(mod.g), st.b = ColorByte(mod.b), st.a = ColorByte(mod.a);
     st.blend = tex->blend;
     st.srcAlpha = tex->alpha;
-    Image src{tex->px.data(), tex->w, tex->h, tex->w};
+    Image src{tex->px, tex->w, tex->h, tex->w};
     Image dst = Target(r);
     const SDL_Rect clip = ClipRect(r);
     if (s.w == d.w && s.h == d.h) {
@@ -638,8 +646,13 @@ bool SDL_RenderClear(SDL_Renderer* r) {
 bool SDL_RenderFillRects(SDL_Renderer* r, const SDL_FRect* rects, int count) {
     if (!Begin(r) || !rects) return false;
     std::vector<SDL_Rect> ir((size_t)std::max(count, 0));
-    for (int i = 0; i < count; ++i)
-        ir[i] = {(int)rects[i].x, (int)rects[i].y, std::max((int)rects[i].w, 1), std::max((int)rects[i].h, 1)};
+    // The floor at the origin and the ceiling at the far edge, as SDL does: a fractional rect
+    // keeps both edges it touches instead of losing its fraction to a truncating cast.
+    for (int i = 0; i < count; ++i) {
+        const int x0 = (int)std::floor(rects[i].x), y0 = (int)std::floor(rects[i].y);
+        ir[i] = {x0, y0, std::max((int)std::ceil(rects[i].x + rects[i].w) - x0, 1),
+                 std::max((int)std::ceil(rects[i].y + rects[i].h) - y0, 1)};
+    }
     FillRects(r, ir.data(), count, r->r, r->g, r->b, r->a, r->blend);
     return true;
 }
@@ -654,7 +667,9 @@ bool SDL_RenderLines(SDL_Renderer* r, const SDL_FPoint* points, int count) {
     if (!Begin(r) || !points) return false;
     if (count < 2) return true;
     std::vector<SDL_Point> p((size_t)count);
-    for (int i = 0; i < count; ++i) p[i] = {(int)points[i].x, (int)points[i].y};
+    // Lines take the nearest pixel, so a border drawn on fractional geometry stays on it
+    // instead of sitting a pixel up and to the left of what it frames.
+    for (int i = 0; i < count; ++i) p[i] = {(int)std::lround(points[i].x), (int)std::lround(points[i].y)};
     Pen pen;
     pen.t = Target(r);
     pen.blend = r->blend == SDL_BLENDMODE_BLEND;
@@ -773,7 +788,8 @@ bool SDL_RenderGeometry(SDL_Renderer* r, SDL_Texture* tex, const SDL_Vertex* v, 
                     }
                 }
             } else if (d.w != 0 && d.h != 0) {
-                SDL_Rect ir{(int)d.x, (int)d.y, std::max((int)d.w, 1), std::max((int)d.h, 1)};
+                const int qx = (int)std::floor(d.x), qy = (int)std::floor(d.y);
+                SDL_Rect ir{qx, qy, std::max((int)std::ceil(d.x + d.w) - qx, 1), std::max((int)std::ceil(d.y + d.h) - qy, 1)};
                 FillRects(r, &ir, 1, ColorByte(col.r), ColorByte(col.g), ColorByte(col.b), ColorByte(col.a), SDL_BLENDMODE_BLEND);
             }
             prev[0] = -1;
@@ -825,12 +841,18 @@ SDL_Texture* SDL_CreateTexture(SDL_Renderer* r, SDL_PixelFormat format, SDL_Text
         SDL_SetError("Unsupported texture format");
         return nullptr;
     }
+    auto* px = (uint32_t*)calloc((size_t)w * h, 4);
+    if (!px) {
+        SDL_SetError("Out of memory");
+        return nullptr;
+    }
     auto* t = new SDL_Texture;
     t->renderer = r;
     t->w = w, t->h = h, t->format = format;
     t->alpha = format != SDL_PIXELFORMAT_XRGB8888;
     t->blend = t->alpha ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE;
-    t->px.assign((size_t)w * h, t->alpha ? 0 : 0xff000000u);
+    t->px = px;
+    if (!t->alpha) std::fill(px, px + (size_t)w * h, 0xff000000u);
     r->textures.insert(t);
     return t;
 }

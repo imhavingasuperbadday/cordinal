@@ -70,11 +70,12 @@ enum class If {
     Display, Registry, Callback, Compositor, Shm, Pool, Buffer, Surface, Region, Seat, Pointer, Keyboard, Output,
     DataManager, DataDevice, DataOffer, DataSource, WmBase, XdgSurface, Toplevel, DecoManager, Deco, Viewporter,
     Viewport, FracManager, Frac, ShapeManager, ShapeDevice, TextInputManager, TextInput, Activation, ActivationToken,
-    IconManager, Icon,
+    IconManager, Icon, FrameCallback,
     Gone,  // destroyed by us, waiting for delete_id
 };
 
 class Wayland;
+class WlWindow;
 
 struct Buffer {
     uint32_t id = 0;
@@ -82,6 +83,7 @@ struct Buffer {
     size_t bytes = 0;
     int w = 0, h = 0;
     bool busy = false, argb = false;
+    WlWindow* window = nullptr;  // a window picture's owner, told when the compositor lets it go
 };
 
 class WlWindow : public NativeWindow {
@@ -105,6 +107,7 @@ public:
     void Sync() override;
     uint32_t* Framebuffer(int& w, int& h, int& stride) override;
     void Present(const SDL_Rect* rects, int count) override;
+    bool FrameKept() override;
     void SetCursor(Cursor c) override;
     void SetTextInput(bool on, const SDL_Rect* area) override;
 
@@ -117,10 +120,18 @@ public:
     void SetIntegerScale(int scale);
     void UpdateSize(int w, int h);
     float Scale() const { return frac120_ ? frac120_ / 120.f : (float)intScale_; }
+    void Released();
+    void FrameDone();
+    int GiveBackInMs(uint64_t now) const;  // -1: nothing to give back
+    void GiveBack(uint64_t now);
+    int RetryInMs(uint64_t now) const;  // -1: no skipped frame waits on the compositor's answer
+    void Retry(uint64_t now);
     SDL_Window* Owner() const { return owner_; }
     uint32_t Surface() const { return surface_; }
     bool TextWanted() const { return textOn_; }
-    const SDL_Rect& TextArea() const { return textArea_; }
+    // Null until the focused field reported where its caret is: the protocol says a client
+    // without a position to give omits the rectangle rather than guessing one.
+    const SDL_Rect* TextArea() const { return haveArea_ ? &textArea_ : nullptr; }
     std::vector<uint32_t> outputs;  // the outputs the surface is on
     bool configured = false;
     Cursor cursor = Cursor::Arrow;
@@ -145,13 +156,30 @@ private:
     bool pendingMax_ = false;
     uint32_t frac120_ = 0;
     int intScale_ = 1;
-    std::vector<uint32_t> canvas_;
-    int cw_ = 0, ch_ = 0;
+    // The window's pixels (docs/memory.md, "Linux window pixels"): the frame is drawn straight into
+    // one of at most two shared buffers, with no private copy. The buffer the compositor last let go
+    // is drawn into again and already holds the picture; while it still reads that one, the other
+    // takes a copy. A frame that finds both in use is skipped and drawn again when one comes back,
+    // so the UI thread never waits on the compositor and a compositor that keeps buffers (a hidden
+    // workspace) can't make the player allocate more. Once the compositor has its copy and nothing
+    // was drawn for a moment, the pages go back to the system: an idle window keeps no pixels.
     std::vector<Buffer*> buffers_;
+    Buffer* draw_ = nullptr;   // this frame's, from its first Framebuffer call to Present
+    Buffer* shown_ = nullptr;  // the last one committed: the picture the next frame starts from
+    bool skipped_ = false;     // a frame found both buffers in use: ask for another when one is free
+    bool emptied_ = true;      // the buffers' pages are given back (or there are none)
+    uint64_t presentedAt_ = 0;
+    // The compositor's word that the last frame is on screen (wl_surface.frame): the next waits for
+    // it, so a window it isn't showing (another workspace) stops drawing and gives its pixels back.
+    // A compositor that never answers is waited on for at most kFrameWaitMs.
+    uint32_t frameCallback_ = 0;
+    uint64_t frameAskedAt_ = 0;
+    bool WaitingForFrame(uint64_t now) const;
+    Buffer* TakeBuffer(int w, int h, bool argb);
     std::vector<uint8_t> shape_;
     int shapeW_ = 0, shapeH_ = 0;
     bool shapeChanged_ = false, viewportDirty_ = true;
-    bool textOn_ = false;
+    bool textOn_ = false, haveArea_ = false;
     SDL_Rect textArea_{};
 };
 
@@ -176,6 +204,9 @@ public:
         const uint32_t id = nextId_++;
         objs_[id] = {type, data};
         return id;
+    }
+    void Detach(uint32_t id) {  // the object's events no longer reach what it was made for
+        if (auto it = objs_.find(id); it != objs_.end()) it->second.data = nullptr;
     }
     void Destroyed(uint32_t id) {
         if (auto it = objs_.find(id); it != objs_.end()) it->second = {If::Gone, nullptr};
@@ -283,6 +314,10 @@ private:
     WlWindow* textFocus_ = nullptr;
     std::string commit_;
     bool textEnabled_ = false;
+    // The preedit that `done` will show, and the one the UI sees already.
+    std::string preedit_, shownPreedit_;
+    int preeditCursor_ = 0, preeditLen_ = 0, shownCursor_ = 0;
+    SDL_Rect lastArea_{};  // the cursor rectangle the input method was last told
     // Activation.
     std::map<uint32_t, WlWindow*> tokens_;
 };
@@ -461,9 +496,13 @@ bool Wayland::Roundtrip(int timeoutMs) {
 void Wayland::Dispatch() {
     while (ReadSome(0)) HandleAll();
     HandleAll();
+    const uint64_t now = NowMs();
+    for (WlWindow* w : windows_) {
+        if (w->GiveBackInMs(now) == 0) w->GiveBack(now);
+        if (w->RetryInMs(now) == 0) w->Retry(now);
+    }
     // Key repeat, client-side as Wayland asks.
     if (repeatKey_ && kbdFocus_ && repeatRate_ > 0) {
-        const uint64_t now = NowMs();
         int guard = 0;
         while (repeatKey_ && now >= nextRepeat_ && guard++ < 50) {
             Key(repeatKey_, true, true);
@@ -475,9 +514,14 @@ void Wayland::Dispatch() {
 }
 
 int Wayland::TimeoutMs() const {
-    if (!repeatKey_ || !kbdFocus_ || repeatRate_ <= 0) return -1;
     const uint64_t now = NowMs();
-    return now >= nextRepeat_ ? 0 : (int)std::min<uint64_t>(nextRepeat_ - now, 1000);
+    int wait = -1;
+    for (const WlWindow* w : windows_)
+        for (int due : {w->GiveBackInMs(now), w->RetryInMs(now)})
+            if (due >= 0 && (wait < 0 || due < wait)) wait = due;
+    if (!repeatKey_ || !kbdFocus_ || repeatRate_ <= 0) return wait;
+    const int repeat = now >= nextRepeat_ ? 0 : (int)std::min<uint64_t>(nextRepeat_ - now, 1000);
+    return wait < 0 ? repeat : std::min(wait, repeat);
 }
 
 void Wayland::Bind(uint32_t name, const std::string& iface, uint32_t version) {
@@ -564,6 +608,12 @@ void Wayland::Handle(uint32_t object, If type, void* data, uint16_t op, Args& a)
             }
         }
         break;
+    case If::FrameCallback:
+        if (op == 0) {
+            if (data) ((WlWindow*)data)->FrameDone();
+            Destroyed(object);
+        }
+        break;
     case If::Callback:
         if (op == 0) {
             std::erase(waitingCallbacks_, object);
@@ -594,8 +644,13 @@ void Wayland::Handle(uint32_t object, If type, void* data, uint16_t op, Args& a)
         if (!w) break;
         if (op == 0 || op == 1) {  // enter, leave
             const uint32_t output = a.Uint();
-            if (op == 0) w->outputs.push_back(output);
-            else std::erase(w->outputs, output);
+            // A compositor may repeat an enter for an output the list already has; leave removes
+            // every copy, so pushing a second would leave the list one short after one leave.
+            if (op == 0) {
+                if (std::find(w->outputs.begin(), w->outputs.end(), output) == w->outputs.end()) w->outputs.push_back(output);
+            } else {
+                std::erase(w->outputs, output);
+            }
             w->SetIntegerScale(-1);
         } else if (op == 2) {  // preferred_buffer_scale
             w->SetIntegerScale(std::max(1, a.Int()));
@@ -917,16 +972,44 @@ void Wayland::Handle(uint32_t object, If type, void* data, uint16_t op, Args& a)
                 Send(Msg(textInput_, 2));  // disable
                 Send(Msg(textInput_, 7));  // commit
             }
+            // The input method drops its composition with the focus; so does the field.
+            if (textFocus_ && !shownPreedit_.empty()) OnEditing(textFocus_->Owner(), std::string(), 0, 0);
+            shownPreedit_.clear();
+            shownCursor_ = 0;
             textFocus_ = nullptr;
             textEnabled_ = false;
             break;
-        case 3:  // commit_string
+        case 2: {  // preedit_string: the composing text, applied by the next done
+            preedit_ = std::string(a.String());
+            preeditCursor_ = (int)a.Uint();
+            const uint32_t end = a.Uint();
+            preeditLen_ = std::max(0, (int)end - preeditCursor_);
+            break;
+        }
+        case 3:  // commit_string: the finished text, applied by the next done
             commit_ = std::string(a.String());
             break;
-        case 5:  // done
-            if (!commit_.empty() && textFocus_) OnText(textFocus_->Owner(), commit_);
-            commit_.clear();
+        case 4:  // delete_surrounding_text: read past; the fields keep no surrounding text
+            a.Uint(), a.Uint();
             break;
+        case 5: {  // done: one committed string and the preedit state to show now
+            const bool commit = !commit_.empty() && textFocus_;
+            if (commit) OnText(textFocus_->Owner(), commit_);
+            if (textFocus_) {
+                // A commit replaces the preedit; otherwise the new preedit (or none) is the state.
+                const std::string shown = commit ? std::string() : preedit_;
+                const int cursor = commit ? 0 : preeditCursor_, len = commit ? 0 : preeditLen_;
+                if (shown != shownPreedit_ || cursor != shownCursor_) {
+                    shownPreedit_ = shown;
+                    shownCursor_ = cursor;
+                    OnEditing(textFocus_->Owner(), shown, cursor, len);
+                }
+            }
+            commit_.clear();
+            preedit_.clear();
+            preeditCursor_ = preeditLen_ = 0;
+            break;
+        }
         default: break;
         }
         break;
@@ -959,7 +1042,8 @@ void Wayland::Key(uint32_t key, bool down, bool repeat) {
     if (sc == SDL_SCANCODE_UNKNOWN) sc = ScancodeFromKeysym(base ? base : sym);
     const SDL_Keycode keycode = KeycodeFor(sc, base, shifted);
     std::string text;
-    if (down) {
+    if (down && shownPreedit_.empty()) {
+        // While an input method composes, it owns the keys: text arrives by commit_string instead.
         const uint32_t c = KeysymToUnicode(sym);
         if (c >= 0x20 && c != 0x7f) text = Utf8(c);
     }
@@ -970,16 +1054,29 @@ void Wayland::ApplyTextInput() {
     if (!textInput_ || !textFocus_) return;
     const bool want = textFocus_->TextWanted();
     if (want) {
-        Send(Msg(textInput_, 1));  // enable
-        const SDL_Rect& r = textFocus_->TextArea();
-        Send(std::move(Msg(textInput_, 5).U(0).U(0)));  // content type: normal
-        Send(std::move(Msg(textInput_, 6).I(r.x).I(r.y).I(std::max(r.w, 1)).I(std::max(r.h, 1))));
-        Send(Msg(textInput_, 7));  // commit
-        textEnabled_ = true;
+        if (!textEnabled_) {
+            Send(Msg(textInput_, 1));  // enable
+            Send(std::move(Msg(textInput_, 5).U(0).U(0)));  // content type: normal
+            if (const SDL_Rect* r = textFocus_->TextArea()) {
+                Send(std::move(Msg(textInput_, 6).I(r->x).I(r->y).I(std::max(r->w, 1)).I(std::max(r->h, 1))));
+                lastArea_ = *r;
+            }
+            Send(Msg(textInput_, 7));  // commit
+            textEnabled_ = true;
+        } else if (const SDL_Rect* r = textFocus_->TextArea()) {
+            // The caret moved: tell the input method where its candidates belong now.
+            if (r->x != lastArea_.x || r->y != lastArea_.y || r->w != lastArea_.w || r->h != lastArea_.h) {
+                Send(std::move(Msg(textInput_, 6).I(r->x).I(r->y).I(std::max(r->w, 1)).I(std::max(r->h, 1))));
+                Send(Msg(textInput_, 7));
+                lastArea_ = *r;
+            }
+        }
     } else if (textEnabled_) {
         Send(Msg(textInput_, 2));
         Send(Msg(textInput_, 7));
         textEnabled_ = false;
+        shownPreedit_.clear();
+        shownCursor_ = 0;
     }
     FlushOut();
 }
@@ -995,7 +1092,10 @@ void Wayland::Forget(WlWindow* w) {
 }
 
 void Wayland::BufferReleased(uint32_t id) {
-    if (auto it = buffers_.find(id); it != buffers_.end()) it->second->busy = false;
+    auto it = buffers_.find(id);
+    if (it == buffers_.end()) return;
+    it->second->busy = false;
+    if (it->second->window) it->second->window->Released();
 }
 
 // --- cursors ----------------------------------------------------------------------------------------------------
@@ -1063,14 +1163,29 @@ void Wayland::ApplyCursor(WlWindow* w) {
         if (!file && theme != "default") file = FindXcursorFile("default", names[(int)w->cursor]);
         if (file)
             if (auto img = x11::ParseXcursor(*file, size * scale)) {
-                // The buffer's size must be a multiple of its scale.
-                const int bw = ((int)img->width + scale - 1) / scale * scale, bh = ((int)img->height + scale - 1) / scale * scale;
-                buf = NewShmBuffer(*this, bw, bh, true);
+                // A theme without this size gives its nearest image; rescaled to what the
+                // display reads, as libXcursor rescales it, instead of showing it too small.
+                const int want = size * scale;
+                std::vector<uint32_t> scaled;
+                const uint32_t* src = img->argb.data();
+                uint32_t sw = img->width, sh = img->height;
+                if (sw != (uint32_t)want || sh != (uint32_t)want) {
+                    const double rx = (double)sw / want, ry = (double)sh / want;
+                    scaled.resize((size_t)want * want);
+                    for (int y = 0; y < want; ++y)
+                        for (int x = 0; x < want; ++x)
+                            scaled[(size_t)y * want + x] = src[(size_t)(int)(y * ry) * sw + (int)(x * rx)];
+                    src = scaled.data();
+                    sw = sh = (uint32_t)want;
+                }
+                buf = NewShmBuffer(*this, want, want, true);
                 if (buf) {
                     memset(buf->px, 0, buf->bytes);
-                    for (uint32_t y = 0; y < img->height; ++y)
-                        memcpy(buf->px + (size_t)y * bw, img->argb.data() + (size_t)y * img->width, img->width * 4);
-                    hot = {(int)img->xhot / scale, (int)img->yhot / scale};
+                    for (uint32_t y = 0; y < sh; ++y)
+                        memcpy(buf->px + (size_t)y * want, src + (size_t)y * sw, sw * 4);
+                    // The hotspot follows the rescale, rounded: truncating would bias the point.
+                    hot = {(int)std::lround((double)img->xhot * want / img->width),
+                           (int)std::lround((double)img->yhot * want / img->height)};
                 }
             }
         it = cursorImages_.emplace(key, std::make_pair(buf, hot)).first;
@@ -1163,7 +1278,12 @@ std::optional<std::string> Wayland::GetClipboard(const std::string& mime) {
 bool Wayland::UsableBounds(SDL_Rect& r) {
     for (const auto& [id, o] : outputs_)
         if (o.w > 0 && o.h > 0) {
-            const int s = std::max(1, o.scale);
+            // The output's integer scale is only its preference: a window this compositor put
+            // there may read a fractional scale, whose points are what fit on the screen.
+            int s = std::max(1, o.scale);
+            for (WlWindow* w : windows_)
+                if (std::find(w->outputs.begin(), w->outputs.end(), id) != w->outputs.end() && w->Scale() > 1)
+                    s = std::max(s, (int)std::ceil(w->Scale() - 0.01f));
             r = {0, 0, o.w / s, o.h / s};
             return true;
         }
@@ -1251,6 +1371,7 @@ void WlWindow::DropRole() {
 }
 
 WlWindow::~WlWindow() {
+    if (frameCallback_) wl_.Detach(frameCallback_);
     DropRole();
     DropIcon();
     for (Buffer* b : buffers_) FreeShmBuffer(wl_, b);
@@ -1334,7 +1455,9 @@ void WlWindow::UpdateSize(int w, int h) {
 void WlWindow::SetFractional(uint32_t scale120) {
     if (!scale120 || scale120 == frac120_) return;
     frac120_ = scale120;
-    OnDisplayScale(owner_, Scale());
+    // Only a high-density window's buffer follows the scale; a plain window's pixels are its
+    // points, and reporting a scale its buffer doesn't have would size the UI past the canvas.
+    OnDisplayScale(owner_, highDensity_ ? Scale() : 1.f);
     viewportDirty_ = true;
     UpdateSize(owner_->w, owner_->h);
     if (wl_.PointerFocus() == this) wl_.ApplyCursor(this);
@@ -1349,7 +1472,7 @@ void WlWindow::SetIntegerScale(int scale) {
     }
     if (scale == intScale_) return;
     intScale_ = scale;
-    OnDisplayScale(owner_, Scale());
+    OnDisplayScale(owner_, highDensity_ ? Scale() : 1.f);
     viewportDirty_ = true;
     UpdateSize(owner_->w, owner_->h);
     if (wl_.PointerFocus() == this) wl_.ApplyCursor(this);
@@ -1411,13 +1534,21 @@ bool WlWindow::SetShape(int w, int h, const uint8_t* alpha) {
     const uint32_t region = wl_.New(If::Region);
     wl_.Send(std::move(Msg(wl_.compositor, 1).U(region)));
     if (alpha) {
-        for (int y = 0; y < h; ++y)
+        // The mask is in pixels; the input region is in surface points, the size the compositor
+        // shows, so each run lands where its pixels are on screen at any scale.
+        const int ptsW = std::max(1, owner_->w), ptsH = std::max(1, owner_->h);
+        for (int y = 0; y < h; ++y) {
+            const int py = (int)std::lround((double)y * ptsH / h);
             for (int x = 0; x < w;) {
                 while (x < w && !alpha[(size_t)y * w + x]) ++x;
                 const int start = x;
                 while (x < w && alpha[(size_t)y * w + x]) ++x;
-                if (x > start) wl_.Send(std::move(Msg(region, 1).I(start).I(y).I(x - start).I(1)));
+                if (x > start) {
+                    const int px0 = (int)std::lround((double)start * ptsW / w), px1 = (int)std::lround((double)x * ptsW / w);
+                    if (px1 > px0) wl_.Send(std::move(Msg(region, 1).I(px0).I(py).I(px1 - px0).I(1)));
+                }
             }
+        }
         wl_.Send(std::move(Msg(surface_, 5).U(region)));  // set_input_region
     } else {
         wl_.Send(std::move(Msg(surface_, 5).U(0)));  // the whole surface again
@@ -1468,56 +1599,136 @@ void WlWindow::Hide() {
 
 void WlWindow::Sync() { wl_.Roundtrip(); }
 
+// How long a window waits, once nothing has been drawn, before giving its pixels back: long enough
+// that the clock's four frames a second while playing keep their buffer, short enough that a window
+// left alone holds no pixels a moment later.
+constexpr uint64_t kGiveBackMs = 600;
+
 uint32_t* WlWindow::Framebuffer(int& w, int& h, int& stride) {
     w = owner_->pw, h = owner_->ph, stride = w;
-    if (w != cw_ || h != ch_) {
-        canvas_.assign((size_t)w * h, 0xff000000u);
-        cw_ = w, ch_ = h;
+    const bool argb = !shape_.empty();
+    if (draw_ && (draw_->w != w || draw_->h != h || draw_->argb != argb)) draw_ = nullptr;  // resized mid-frame
+    if (!draw_ && w > 0 && h > 0) {
+        const uint64_t now = NowMs();
+        if (frameCallback_ && !WaitingForFrame(now)) Retry(now);  // not shown: a frame a second at most
+        if (WaitingForFrame(now)) {
+            skipped_ = true;  // FrameDone asks for this frame again
+            return nullptr;
+        }
+        draw_ = TakeBuffer(w, h, argb);
     }
-    return canvas_.data();
+    return draw_ ? draw_->px : nullptr;
+}
+
+constexpr uint64_t kFrameWaitMs = 1000;
+
+bool WlWindow::WaitingForFrame(uint64_t now) const { return frameCallback_ && now < frameAskedAt_ + kFrameWaitMs; }
+
+void WlWindow::FrameDone() {
+    frameCallback_ = 0;
+    Released();
+}
+
+int WlWindow::RetryInMs(uint64_t now) const {
+    if (!skipped_ || !frameCallback_) return -1;
+    return now >= frameAskedAt_ + kFrameWaitMs ? 0 : (int)(frameAskedAt_ + kFrameWaitMs - now);
+}
+
+// The compositor didn't answer in time: forget the frame it owes, and draw the one skipped.
+void WlWindow::Retry(uint64_t) {
+    if (frameCallback_) {
+        wl_.Detach(frameCallback_);  // its answer, if it ever comes, is ignored
+        frameCallback_ = 0;
+    }
+    if (!draw_) Released();
+}
+
+bool WlWindow::FrameKept() {
+    return !emptied_ && shown_ && shown_->w == owner_->pw && shown_->h == owner_->ph && !skipped_;
+}
+
+// The buffer this frame draws into, holding the last frame's picture where there is one.
+Buffer* WlWindow::TakeBuffer(int w, int h, bool argb) {
+    auto fits = [&](const Buffer* b) { return b->w == w && b->h == h && b->argb == argb; };
+    // Free buffers of another size or kind are no use any more.
+    for (auto it = buffers_.begin(); it != buffers_.end();)
+        if (!(*it)->busy && !fits(*it)) {
+            if (*it == shown_) shown_ = nullptr;
+            FreeShmBuffer(wl_, *it);
+            it = buffers_.erase(it);
+        } else {
+            ++it;
+        }
+    if (shown_ && !shown_->busy && fits(shown_)) {
+        emptied_ = false;
+        return shown_;
+    }
+    Buffer* b = nullptr;
+    for (Buffer* c : buffers_)
+        if (!c->busy && fits(c)) b = c;
+    if (!b && buffers_.size() < 2) {
+        if (!(b = NewShmBuffer(wl_, w, h, argb))) return nullptr;
+        b->window = this;
+        buffers_.push_back(b);
+    }
+    if (!b) {
+        skipped_ = true;  // the compositor holds both; Released asks for this frame again
+        return nullptr;
+    }
+    // The compositor may still be reading the last picture; reading it here as well is safe.
+    if (shown_ && shown_->w == w && shown_->h == h && !emptied_) memcpy(b->px, shown_->px, (size_t)w * h * 4);
+    emptied_ = false;
+    return b;
+}
+
+void WlWindow::Released() {
+    if (!skipped_ || WaitingForFrame(NowMs())) return;
+    skipped_ = false;
+    OnExposed(owner_);  // the frame that was skipped is drawn now
+}
+
+int WlWindow::GiveBackInMs(uint64_t now) const {
+    if (emptied_ || draw_ || buffers_.empty()) return -1;
+    for (const Buffer* b : buffers_)
+        if (b->busy) return -1;  // its release runs Dispatch, which looks again
+    return now >= presentedAt_ + kGiveBackMs ? 0 : (int)(presentedAt_ + kGiveBackMs - now);
+}
+
+// The compositor has let go of every buffer, and the protocol says changing or destroying a released
+// buffer leaves the surface as it is: the compositor keeps its copy. The pages go back to the system;
+// the buffers stay, reading as zero, and the next frame is drawn whole (FrameKept is false).
+void WlWindow::GiveBack(uint64_t now) {
+    for (Buffer*& b : buffers_)
+        if (madvise(b->px, b->bytes, MADV_REMOVE) != 0) {  // a kernel that can't: let the buffer go
+            if (b == shown_) shown_ = nullptr;
+            FreeShmBuffer(wl_, b);
+            b = nullptr;
+        }
+    std::erase(buffers_, nullptr);
+    emptied_ = true;
+    presentedAt_ = now;
 }
 
 void WlWindow::Present(const SDL_Rect* rects, int count) {
-    if (hidden_ || !configured || cw_ <= 0 || ch_ <= 0) return;
-    // A free buffer of the canvas's size (the compositor may still be reading the others).
-    const bool argb = !shape_.empty();
-    Buffer* buf = nullptr;
-    for (Buffer* b : buffers_)
-        if (!b->busy && b->w == cw_ && b->h == ch_ && b->argb == argb) buf = b;
-    if (!buf) {
-        // Drop free buffers of another size; wait a little when three are in use.
-        for (auto it = buffers_.begin(); it != buffers_.end();)
-            if (!(*it)->busy && ((*it)->w != cw_ || (*it)->h != ch_ || (*it)->argb != argb)) {
-                FreeShmBuffer(wl_, *it);
-                it = buffers_.erase(it);
-            } else {
-                ++it;
-            }
-        if (buffers_.size() >= 3) wl_.WaitFor([&] {
-            for (Buffer* b : buffers_)
-                if (!b->busy) return true;
-            return false;
-        }, 100);
-        for (Buffer* b : buffers_)
-            if (!b->busy && b->w == cw_ && b->h == ch_ && b->argb == argb) buf = b;
-        if (!buf) {
-            buf = NewShmBuffer(wl_, cw_, ch_, argb);
-            if (!buf) return;
-            buffers_.push_back(buf);
-        }
-    }
-    // The whole canvas each time: the buffer may hold any earlier frame.
-    if (!argb) {
-        memcpy(buf->px, canvas_.data(), (size_t)cw_ * ch_ * 4);
-    } else {
-        for (int y = 0; y < ch_; ++y) {
-            const int sy = std::min(shapeH_ - 1, (int)((int64_t)y * shapeH_ / ch_));
-            for (int x = 0; x < cw_; ++x) {
-                const int sx = std::min(shapeW_ - 1, (int)((int64_t)x * shapeW_ / cw_));
+    Buffer* buf = draw_;
+    draw_ = nullptr;
+    if (!buf) return;  // nothing was drawn: a skipped frame, or no size yet
+    shown_ = buf;  // the newest picture, which the next frame starts from even when it isn't shown
+    presentedAt_ = NowMs();
+    if (hidden_ || !configured) return;
+    const int w = buf->w, h = buf->h;
+    if (buf->argb) {
+        // The shape cuts out what is outside it; wl_shm's ARGB is premultiplied, so outside is zero.
+        for (int y = 0; y < h; ++y) {
+            const int sy = std::min(shapeH_ - 1, (int)((int64_t)y * shapeH_ / h));
+            uint32_t* row = buf->px + (size_t)y * w;
+            for (int x = 0; x < w; ++x) {
+                const int sx = std::min(shapeW_ - 1, (int)((int64_t)x * shapeW_ / w));
                 const bool on = sy >= 0 && sx >= 0 && shape_[(size_t)sy * shapeW_ + sx];
-                buf->px[(size_t)y * cw_ + x] = on ? canvas_[(size_t)y * cw_ + x] | 0xff000000u : 0;
+                row[x] = on ? row[x] | 0xff000000u : 0;
             }
         }
+        rects = nullptr;
     }
     buf->busy = true;
     wl_.Send(std::move(Msg(surface_, 1).U(buf->id).I(0).I(0)));  // attach
@@ -1533,7 +1744,12 @@ void WlWindow::Present(const SDL_Rect* rects, int count) {
         rects = nullptr;
     }
     if (shapeChanged_) rects = nullptr, shapeChanged_ = false;
-    SDL_Rect full{0, 0, cw_, ch_};
+    if (!frameCallback_) {
+        frameCallback_ = wl_.New(If::FrameCallback, this);
+        frameAskedAt_ = NowMs();
+        wl_.Send(std::move(Msg(surface_, 3).U(frameCallback_)));  // frame
+    }
+    SDL_Rect full{0, 0, w, h};
     if (!rects) rects = &full, count = 1;
     for (int i = 0; i < count; ++i) {
         if (wl_.compositorVersion >= 4) wl_.Send(std::move(Msg(surface_, 9).I(rects[i].x).I(rects[i].y).I(rects[i].w).I(rects[i].h)));
@@ -1551,7 +1767,7 @@ void WlWindow::SetCursor(Cursor c) {
 
 void WlWindow::SetTextInput(bool on, const SDL_Rect* area) {
     textOn_ = on;
-    if (area) textArea_ = *area;
+    if (area) textArea_ = *area, haveArea_ = true;  // null: keep the caret rectangle the field gave
     wl_.ApplyTextInput();
 }
 

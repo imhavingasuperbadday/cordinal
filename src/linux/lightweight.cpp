@@ -12,8 +12,6 @@
 // window, and wherever no portal answers.
 #include "ui_internal.h"
 
-#include <malloc.h>
-
 namespace lx {
 
 namespace {
@@ -66,7 +64,7 @@ void EnterLightweight() {
         }
     }
     InvalidateCellCache();
-    if (g.settings.lightweightTrim) malloc_trim(0);  // what the caches freed goes back to the system
+    GiveMemoryBackSoon();  // what the caches freed goes back to the system once the window is away
     MprisChanged();  // the tray menu's checkmark
     ApplyGlobalKeys();  // cordinal's own keys from any program, held while the mode is on
     g.redraw = true;

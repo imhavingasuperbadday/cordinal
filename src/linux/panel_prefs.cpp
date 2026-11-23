@@ -447,9 +447,14 @@ const Pref kPrefs[] = {
      "waveforms wait until a window shows them.", PrefType::Bool, 0, 1, 1, 1, [] { return (double)Cfg().lightweightPause; },
      [](double v) { Cfg().lightweightPause = v != 0; Saved(); }},
     {"lightweight_trim", "Lightweight mode", "Give memory back to the system",
-     "When Lightweight mode starts, memory cordinal no longer uses goes back to the system, so it shows only what playing "
-     "needs.", PrefType::Bool, 0, 1, 1, 1, [] { return (double)Cfg().lightweightTrim; },
-     [](double v) { Cfg().lightweightTrim = v != 0; Saved(); }},
+     "Memory cordinal no longer uses goes back to the system: once it has started, when you switch to another program "
+     "or Lightweight mode, and whenever more builds up while you aren't using it, in any mode. A system monitor then "
+     "shows what cordinal is actually using.", PrefType::Bool, 0, 1, 1, 1, [] { return (double)Cfg().lightweightTrim; },
+     [](double v) {
+         Cfg().lightweightTrim = v != 0;
+         Saved();
+         GiveMemoryBackSoon();  // turned on: what has built up goes now
+     }},
     {"inbox_enabled", "Library", "New music from library folders",
      "Add new music automatically, or review it in the Inbox first. Existing Inbox tracks stay there.",
      PrefType::Choice, 0, 1, 0, 1, [] { return (double)Cfg().inboxEnabled; },
@@ -750,9 +755,11 @@ void PrefField(const Rect& r, const std::string& text, const char* cue, const Pa
     Fill(r, c.field);
     Frame(r, focused ? kFocusBlue : r.In(g_mx, g_my) ? c.fieldHot : c.fieldBorder);
     const float tx = r.x + S(5), ty = TextY(r);
-    if (text.empty() && cue) DrawText(Font::Normal, cue, tx, ty, p.sub, r.w - S(10));
-    float w = text.empty() ? 0 : DrawText(Font::Normal, text, tx, ty, c.text, r.w - S(10));
-    if (focused && SDL_GetTicks() % 1060 < 530) Fill({tx + w, ty, S(1), LineHeight(Font::Normal)}, c.text);
+    // Typing goes at the end; an input method's composition shows there until it commits.
+    const std::string shown = focused ? text + g_preedit : text;
+    if (shown.empty() && cue) DrawText(Font::Normal, cue, tx, ty, p.sub, r.w - S(10));
+    if (!shown.empty()) DrawText(Font::Normal, shown, tx, ty, c.text, r.w - S(10));
+    if (focused) DrawComposition(shown, text.size(), tx, ty, tx, r.R() - S(5), p.accent, c.text);
 }
 
 // An on/off setting as a switch: the track lit in the accent when on, the knob at that end, and the

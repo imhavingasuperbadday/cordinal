@@ -174,6 +174,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_SIZE:
             if (wp == SIZE_MINIMIZED && !g.closing) {
                 TrimMemory();
+                GiveMemoryBackSoon();
                 return 0;
             }
             Layout();
@@ -276,7 +277,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_HSCROLL: MainScroll(wp, lp); return 0;
         case WM_TIMER:
             if (wp == kWebTimer) { WebTick(); return 0; }
-            if (HelperTimer(wp) || ArtFadeTimer(wp) || LightweightTimer(wp)) return 0;
+            if (HelperTimer(wp) || ArtFadeTimer(wp)) return 0;
             if (wp == kSearchTimer) { FlushSearch(); return 0; }
             if (wp == kOnlineSearchTimer) { OnlineSearchTimer(); return 0; }
             if (wp == kUiTimer) MainTick();

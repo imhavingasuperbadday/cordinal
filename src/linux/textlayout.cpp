@@ -150,7 +150,8 @@ void Font::Shape(const uint32_t* text, const uint32_t* clusters, size_t n, uint3
     std::vector<ShapedGlyph> shaped;
     shaper_->Shape(shapeFont_, text, clusters, n, script, rtl, &shaped);
     int32_t bold = bold_ ? overhang_ * 64 : 0;
-    for (const ShapedGlyph& g : shaped) out->push_back({this, g.glyph, g.xOffset, g.yOffset, g.xAdvance + bold, g.cluster});
+    for (const ShapedGlyph& g : shaped)
+        out->push_back({this, g.glyph, g.xOffset, g.yOffset, g.xAdvance + bold, g.cluster, rtl});
     // Spans of characters this face lacks go to each fallback in turn, as SDL_ttf's spans did.
     uint32_t first = clusters[0], end = clusters[0] + (uint32_t)n;
     for (Font* fb : fallbacks_) {
@@ -222,7 +223,8 @@ const Font::Line& Font::Layout(std::string_view text) {
     int32_t x = 0;
     int minx = 0, maxx = 0, miny = 0, maxy = height_;
     for (Placed& p : line.glyphs) {
-        if (p.glyph == 0 && p.font != this) p = {this, 0, 0, 0, Advance(0) + (bold_ ? overhang_ * 64 : 0), p.offset};
+        if (p.glyph == 0 && p.font != this)
+            p = {this, 0, 0, 0, Advance(0) + (bold_ ? overhang_ * 64 : 0), p.offset, p.rtl};
         int32_t xo = p.x, yo = p.y;
         p.x = x + xo;
         p.y = p.font->ascent_ * 64 - yo;
@@ -281,6 +283,17 @@ void Font::Measure(std::string_view text, int maxWidth, int* width, size_t* leng
             x -= p.advance;
         }
     }
+}
+
+int Font::CaretX(std::string_view text, size_t at) {
+    const Line& line = Layout(text);
+    // A glyph drawn left of the caret is one logically before it in a left-to-right run, or
+    // logically after it in a right-to-left run: that prefix of the visual order, whichever way
+    // the paragraph reads, is where the caret for byte offset `at` sits.
+    int32_t x = 0;
+    for (const Placed& p : line.glyphs)
+        if ((p.offset < at) != p.rtl) x += p.advance;
+    return line.xstart + Floor26(x);
 }
 
 void Font::Quads(std::string_view text, std::vector<Quad>* out) {

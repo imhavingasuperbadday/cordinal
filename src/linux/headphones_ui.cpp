@@ -253,7 +253,7 @@ int CheckHeadphonesPanel() {
     g_headset.preset = 8;
     g_headset.battery = 75;
     g_headset.eqKnown = true;
-    for (float dpi : {1.0f, 2.0f}) {
+    for (float dpi : {1.0f, 1.25f, 1.5f, 2.0f}) {
         g.scale = dpi;
         H = HeadphonesPanel{};
         SyncPanel();

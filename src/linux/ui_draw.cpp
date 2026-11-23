@@ -895,9 +895,14 @@ void DrawTabs(const Palette& p) {
     Fill({L.search.x + S(1), L.search.B() - S(1), L.search.w - S(2), S(1)}, g.searchFocused ? p.accent : p.dark ? p.sub : 0x838383);
     float tx = L.search.x + S(4), ty = TextY(L.search);
     std::string cue = InternetRadio().active ? "Name, call sign or FM/AM number" : Active().kind == PlaylistKind::Library ? "Search library (Ctrl+F)" : "Search " + Utf8(Active().name) + " (Ctrl+F)";
-    if (g.search.empty()) DrawText(Font::Normal, cue, tx, ty, p.sub, L.search.w - S(8));
-    float w = DrawText(Font::Normal, Utf8(g.search), tx, ty, p.text, L.search.R() - tx - S(4));
-    if (g.searchFocused && (SDL_GetTicks() / 530) % 2 == 0) Fill({tx + w + 1, ty, std::max(1.0f, S(1)), LineHeight(Font::Normal)}, p.text);
+    // The query, and while the box has the keys the input method's composition after it (the box
+    // appends at its end).
+    std::string shown = Utf8(g.search);
+    const size_t preeditAt = shown.size();
+    if (g.searchFocused) shown += g_preedit;
+    if (shown.empty()) DrawText(Font::Normal, cue, tx, ty, p.sub, L.search.w - S(8));
+    DrawText(Font::Normal, shown, tx, ty, p.text, L.search.R() - tx - S(4));
+    if (g.searchFocused) DrawComposition(shown, preeditAt, tx, ty, tx, L.search.R() - S(2), p.accent, p.text);
     }
     // The Library's view row: the current view (and the shown browser) in a square raised box, so it
     // never reads as another tab; hovering brightens a label.
@@ -972,7 +977,10 @@ void DrawRadio(const Palette& p) {
         if (radio.browser && !station.icon.empty()) {
             radio.browser->RequestIcon(station.icon);
             if (const std::string* bytes = radio.browser->Icon(station.icon)) {
-                auto found = g_radioArt.find(station.icon);
+                // The pixel size is part of the key: a scale change draws another size, and a
+                // texture made for the old one would only stretch to fit.
+                const std::pair<std::string, int> key{station.icon, (int)S(64)};
+                auto found = g_radioArt.find(key);
                 if (found == g_radioArt.end()) {
                     if (g_radioArt.size() >= 100) {
                         auto oldest = g_radioArt.begin();
@@ -984,7 +992,7 @@ void DrawRadio(const Palette& p) {
                         created = SDL_CreateTexture(g.renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STATIC, image.width, image.height);
                         if (created) { SDL_UpdateTexture(created, nullptr, image.rgba.data(), image.width * 4); SDL_SetTextureBlendMode(created, SDL_BLENDMODE_BLEND); }
                     }
-                    found = g_radioArt.emplace(station.icon, created).first;
+                    found = g_radioArt.emplace(key, created).first;
                 }
                 texture = found->second;
             }

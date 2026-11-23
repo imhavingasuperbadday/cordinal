@@ -276,11 +276,11 @@ void TestPortedUi(const std::wstring& directory) {
             const auto savedToken = g.playingToken;
             const int savedPl = g.playingPl;
             std::vector<TrackId> np;
-            for (int i = 0; i < 5; ++i) {
+            for (int i = 0; i < 6; ++i) {
                 TrackId id = g_lib.Add(directory + L"\\np-album-" + std::to_wstring(i) + L".flac");
                 TagData tags;
                 tags.title = "Now playing album " + std::to_string(i);
-                if (i != 4) tags.album = i == 2 ? "Elsewhere" : "Pickaxe Songs";
+                if (i != 4) tags.album = i == 2 || i == 5 ? "Elsewhere" : "Pickaxe Songs";
                 tags.albumArtist = "Rook";
                 g_lib.ApplyTags(id, tags);
                 np.push_back(id);
@@ -298,7 +298,7 @@ void TestPortedUi(const std::wstring& directory) {
                   L"Now Playing lists only the playing song's album");
             g.playing = np[2];
             FollowNowPlayingAlbum();
-            Check(g.view == std::vector<uint32_t>{2}, L"Now Playing follows playback into another album");
+            Check(g.view == std::vector<uint32_t>{2, 5}, L"Now Playing follows playback into another album");
             g.filter = L"\"Now playing album\"";
             RebuildView();
             Check(g.view.size() == np.size() && NowPlayingAlbumTrack() == kNone,

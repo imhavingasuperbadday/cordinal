@@ -705,6 +705,20 @@ std::vector<TrackId> AlbumTracksOf(const std::vector<TrackId>& ids) {
     return out;
 }
 
+bool AlbumHasCompany(TrackId playing, const std::vector<TrackId>& items) {
+    if (playing >= g_lib.Count() || !g_lib[playing].album) return false;
+    const Track& album = g_lib[playing];
+    for (TrackId id : items)
+        if (id != playing && id < g_lib.Count() && SameAlbum(g_lib[id], album)) return true;
+    for (TrackId id = 0; id < (TrackId)g_lib.Count(); ++id) {
+        const Track& t = g_lib[id];
+        if (id != playing && (t.flags & (Track::kInLibrary | Track::kInbox)) && !(t.flags & Track::kMissing) &&
+            SameAlbum(t, album))
+            return true;
+    }
+    return false;
+}
+
 size_t CompleteAlbumInList(std::vector<TrackId>& items, TrackId playing, int after, std::vector<uint32_t>& oldToNew) {
     oldToNew.resize(items.size());
     for (size_t i = 0; i < items.size(); ++i) oldToNew[i] = (uint32_t)i;

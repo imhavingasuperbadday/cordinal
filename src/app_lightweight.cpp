@@ -3,7 +3,8 @@
 // little memory and CPU. What stays on screen is a preference: nothing but the notification-area
 // icon, the mini player, or the compact window. Going in releases the UI's caches (the reduced
 // memory policy of app_memory.cpp), pauses background library work, slows the UI timer while
-// nothing is shown and, a moment later, gives unused memory back to Windows. Library records,
+// nothing is shown and, a moment later, gives unused memory back to Windows (app_memory.cpp, which
+// keeps doing so in every mode). Library records,
 // playlists, the queue and the engine stay exactly as they were, so playback never notices.
 //
 // While it is on, the numpad is a remote from any program (NumpadKeyIndex below), with Num Lock off
@@ -17,7 +18,6 @@ namespace app {
 
 namespace {
 
-constexpr UINT_PTR kLightTimer = 150;         // on g.hwnd: the delayed trim, beside 147..149
 constexpr UINT kHiddenTick = 1000, kShownTick = 250;
 
 struct State {
@@ -181,7 +181,7 @@ void EnterLightweight() {
     UpdateViewMemory();  // ReducedMemoryMode() is now true
     TrimMemory();
     if (LightweightHidesWindow()) SetTimer(g.hwnd, kUiTimer, kHiddenTick, nullptr);
-    if (g.lightweightTrim) SetTimer(g.hwnd, kLightTimer, 2000, nullptr);
+    GiveMemoryBackSoon();
     RegisterGlobalKeys();  // cordinal's own keys from any program, held while the mode is on
     StartKeys();
     UpdateTray();
@@ -193,7 +193,6 @@ void LeaveLightweight(bool show) {
     g.lightweight = false;  // first, so closing the mini player below doesn't come back here
     StopKeys();
     RegisterGlobalKeys();
-    KillTimer(g.hwnd, kLightTimer);
     SetTimer(g.hwnd, kUiTimer, kShownTick, nullptr);
     if (PaletteOpen()) ClosePalette();
     if (s.openedMini && MiniPlayerWindow()) {
@@ -242,18 +241,7 @@ void LightweightPreferencesChanged() {
 // The mini player opened or closed while the mode is on (the icon's menu does both without leaving
 // it): what it made and dropped goes back to Windows a moment later, as on the way in.
 void LightweightMiniChanged() {
-    if (g.lightweight && g.lightweightTrim) SetTimer(g.hwnd, kLightTimer, 2000, nullptr);
-}
-
-bool LightweightTimer(UINT_PTR id) {
-    if (id != kLightTimer) return false;
-    KillTimer(g.hwnd, kLightTimer);
-    if (!g.lightweight) return true;
-    // The caches are gone; what is left resident but unused goes back to Windows. Pages playback
-    // touches come straight back from the standby list, so the music doesn't notice.
-    HeapCompact(GetProcessHeap(), 0);
-    SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
-    return true;
+    if (g.lightweight) GiveMemoryBackSoon();
 }
 
 }  // namespace app

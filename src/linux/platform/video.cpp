@@ -192,6 +192,7 @@ bool Pop(SDL_Event* out) {
         s.held.push_back(std::move(q.text));
         const char* p = s.held.back().c_str();
         if (q.e.type == SDL_EVENT_TEXT_INPUT) q.e.text.text = p;
+        else if (q.e.type == SDL_EVENT_TEXT_EDITING) q.e.editing.text = p;
         else if (q.e.type == SDL_EVENT_DROP_FILE || q.e.type == SDL_EVENT_DROP_TEXT) q.e.drop.data = p;
     }
     if (out) *out = q.e;
@@ -255,7 +256,8 @@ void PushEvent(const SDL_Event& e, std::string text) {
         std::lock_guard lock(s.mu);
         if (s.queue.size() > 65535) return;  // SDL's cap: a stuck main thread doesn't eat the memory
         Queued q{e, std::move(text), false};
-        q.hasText = e.type == SDL_EVENT_TEXT_INPUT || e.type == SDL_EVENT_DROP_FILE || e.type == SDL_EVENT_DROP_TEXT;
+        q.hasText = e.type == SDL_EVENT_TEXT_INPUT || e.type == SDL_EVENT_TEXT_EDITING ||
+                    e.type == SDL_EVENT_DROP_FILE || e.type == SDL_EVENT_DROP_TEXT;
         s.queue.push_back(std::move(q));
     }
     Wake();
@@ -409,6 +411,14 @@ void OnText(SDL_Window* w, const std::string& text) {
         if (c >= 0x20 && c != 0x7f) clean.push_back((char)c);
     if (clean.empty()) return;
     PushEvent(Base(SDL_EVENT_TEXT_INPUT, w), std::move(clean));
+}
+
+void OnEditing(SDL_Window* w, const std::string& text, int start, int length) {
+    if (!S().textInput || !w) return;
+    SDL_Event e = Base(SDL_EVENT_TEXT_EDITING, w);
+    e.editing.start = start;
+    e.editing.length = length;
+    PushEvent(e, text);
 }
 
 void OnDrop(SDL_Window* w, bool file, const std::string& data, float x, float y) {
@@ -731,6 +741,8 @@ bool SDL_HideWindow(SDL_Window* w) {
     return true;
 }
 
+bool SDL_WindowFrameKept(SDL_Window* w) { return w && w->native && w->native->FrameKept(); }
+
 bool SDL_SyncWindow(SDL_Window* w) {
     if (!w || !w->native) return false;
     w->native->Sync();
@@ -784,8 +796,17 @@ bool SDL_StartTextInput(SDL_Window* w) {
 
 bool SDL_StopTextInput(SDL_Window* w) {
     if (!w) return false;
+    // A composition still showing ends with the field: the input method drops it once disabled,
+    // and the UI would otherwise keep drawing it and keep its keys from the next field.
+    if (S().textInput) PushEvent(Base(SDL_EVENT_TEXT_EDITING, w), std::string());
     S().textInput = false;
     if (w->native) w->native->SetTextInput(false, nullptr);
+    return true;
+}
+
+bool SDL_SetTextInputArea(SDL_Window* w, const SDL_Rect* area) {
+    if (!w || !S().textInput) return false;
+    if (w->native) w->native->SetTextInput(true, area);
     return true;
 }
 

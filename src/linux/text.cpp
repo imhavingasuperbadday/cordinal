@@ -110,9 +110,9 @@ const Slot* Place(const type::Font::Quad& q) {
             fresh.texture = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, kPage, kPage);
             if (!fresh.texture) return nullptr;
             SDL_SetTextureBlendMode(fresh.texture, SDL_BLENDMODE_BLEND);
+            // A new page reads as transparent, untouched until glyphs land in it: nearest
+            // sampling never reads past a glyph's own rectangle, so it needs no clearing.
             SDL_SetTextureScaleMode(fresh.texture, SDL_SCALEMODE_NEAREST);
-            std::vector<uint32_t> clear((size_t)kPage * kPage, 0x00FFFFFF);
-            SDL_UpdateTexture(fresh.texture, nullptr, clear.data(), kPage * 4);
             fresh.x = fresh.y = 1;
             g_pages.push_back(fresh);
             page = &g_pages.back();
@@ -289,7 +289,11 @@ bool InitText(SDL_Renderer* renderer, float scale, const Theme& theme) {
         g_lineHeight[(int)s.font] = (float)f->Height();
         g_fonts[(int)s.font] = std::move(f);
     }
-    // Scripts the main font lacks (CJK, Arabic, symbols...): the matcher's choices for them, as fontconfig's.
+    // Scripts the main font lacks (CJK, Arabic, symbols...): the matcher's choices for them, as fontconfig's,
+    // in the UI face's own generic family so a serif theme falls back to the serif CJK faces.
+    std::string generic = "sans-serif";
+    if (size_t comma = face.rfind(','); comma != std::string::npos && face.size() - comma - 1 <= 12)
+        generic = face.substr(comma + 1);
     std::vector<std::pair<std::string, int>> seen;  // several patterns often give one face
     if (!embedded) seen = {{regular.file, regular.index}, {bold.file, bold.index}};
     // With Selawik in front, the desktop's face comes first after it: Cyrillic, Greek, Vietnamese...
@@ -303,14 +307,20 @@ bool InitText(SDL_Renderer* renderer, float scale, const Theme& theme) {
             // Fallbacks keep the default (normal) hinting, as the SDL3_ttf fonts did: whole-pixel advances.
             auto fb = type::Font::Open(data, match.index & 0xFFFF, g_fonts[i]->Size());
             if (!fb) continue;
+            // The bold slots stay bold when their text falls back, or bold titles lose their weight.
+            if (i == (int)Font::Bold || i == (int)Font::Title || i == (int)Font::Heading) fb->SetBold(true);
             g_fonts[i]->AddFallback(fb.get());
             g_fallbacks.push_back(std::move(fb));
         }
     };
     if (embedded) addFallback(regular);
-    for (const char* pattern : {"sans-serif:lang=ja", "sans-serif:lang=ko", "sans-serif:lang=zh-cn", "sans-serif:lang=ar",
-                                "sans-serif:lang=he", "sans-serif:lang=th", "sans-serif:lang=hi",
-                                "sans-serif:charset=2605", "sans-serif:charset=2606", "sans-serif:charset=26a1",
+    for (const char* lang : {"ja", "ko", "zh-cn", "ar", "he", "th", "hi"}) {
+        char pattern[32];
+        snprintf(pattern, sizeof pattern, "%s:lang=%s", generic.c_str(), lang);
+        fonts::Match match;
+        if (FindFont(pattern, &match)) addFallback(match);
+    }
+    for (const char* pattern : {"sans-serif:charset=2605", "sans-serif:charset=2606", "sans-serif:charset=26a1",
                                 "DejaVu Sans", "emoji"}) {
         fonts::Match match;
         if (FindFont(pattern, &match)) addFallback(match);
@@ -343,6 +353,11 @@ float LineHeight(Font font) { return g_lineHeight[(int)font]; }
 float TextWidth(Font font, const std::string& text) {
     if (text.empty() || !g_fonts[(int)font]) return 0;
     return (float)g_fonts[(int)font]->Width(text);
+}
+
+float CaretX(Font font, const std::string& text, size_t at) {
+    if (text.empty() || !g_fonts[(int)font]) return 0;
+    return (float)g_fonts[(int)font]->CaretX(text, at);
 }
 
 float DrawText(Font font, const std::string& text, float x, float y, uint32_t rgb, float maxWidth, int align) {

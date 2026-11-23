@@ -182,7 +182,11 @@ void DoLayout() {
     for (size_t t = 0; t < L.tabSlots.size(); ++t)
         labels.push_back(TextWidth(Font::Normal, L.tabSlots[t] == g_renameIndex ? Utf8(g_renameText) : TabLabel(t)));
     int count = (int)labels.size(), room = (int)(L.tabs.w - S(4)), total = 0;
-    for (float w : labels) total += (int)std::ceil(w);
+    // Sum the exact widths before rounding, as Windows does: a fraction lost per tab adds up
+    // to whole pixels the strip would tighten early for.
+    float total26 = 0;
+    for (float w : labels) total26 += w;
+    total = (int)std::ceil(total26);
     int tabPad = ui::FitTabPadding(total, count, room, (int)S(ui::kTabPad), (int)S(ui::kTabPadTight));
     float equal = count ? std::max(S(ui::kMinTabWidth), std::floor((float)room / count)) : 0;
     for (float label : labels) {
@@ -206,7 +210,9 @@ void DoLayout() {
         float bw = TextWidth(Font::Normal, ViewButtonLabel(i)) + S(16);
         L.views[i] = {i == kViewButtons - 1 ? content.R() - S(8) - bw : (float)vx,
             y + S(4), bw, S(ui::kViewButton)};
-        vx += (int)(bw + S(4));
+        // The buttons keep their exact widths as they pile up; truncating each leaves the row
+        // with uneven gaps that grow with every button, most of all at a fractional scale.
+        vx = (int)std::lround(vx + bw + S(4));
     }
     y += L.viewRow.h;
     L.browser = L.splitter = {};

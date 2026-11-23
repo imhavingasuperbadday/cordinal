@@ -39,7 +39,11 @@ public:
     // The pixels to draw into for the window's current pixel size (0xFFRRGGBB words), stride in words.
     virtual uint32_t* Framebuffer(int& w, int& h, int& stride) = 0;
     virtual void Present(const SDL_Rect* rects, int count) = 0;  // null: everything
+    // The next frame's pixels start as the last frame's, so it may redraw only part of the window.
+    virtual bool FrameKept() { return true; }
     virtual void SetCursor(Cursor c) = 0;
+    // `area` null: keep the last given caret rectangle. Only the focused text field's window
+    // gets a real rectangle, so an input method places its candidate window at the caret.
     virtual void SetTextInput(bool on, const SDL_Rect* area) = 0;
     virtual std::string PortalHandle() { return {}; }  // "x11:1a00004" for the portal's parent_window
 };
@@ -96,6 +100,9 @@ void OnKey(SDL_Window* w, SDL_Scancode sc, SDL_Keycode key, bool down, bool repe
 // says are up lose their side bits; a group it says is down without a side gets the left one.
 void SyncModifiers(bool shift, bool ctrl, bool alt, bool gui, bool caps, bool num);
 void OnText(SDL_Window* w, const std::string& text);  // an input method's committed text
+// An input method's composing text (preedit) and the byte range of its cursor in it; empty text
+// ends the composition. Only sent while text input is on.
+void OnEditing(SDL_Window* w, const std::string& text, int start, int length);
 void OnDrop(SDL_Window* w, bool file, const std::string& data, float x, float y);
 void OnThemeChanged();
 bool TextInputActive();

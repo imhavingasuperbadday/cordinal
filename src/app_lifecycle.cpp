@@ -184,6 +184,7 @@ void MainTick() {
     }
     FlushPendingPreferences();
     MaybeOfferPreferenceSuggestions();
+    MemoryTick();
 }
 
 }  // namespace app

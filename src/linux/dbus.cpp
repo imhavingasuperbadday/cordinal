@@ -803,7 +803,8 @@ void Dispatch(Bus& bus, const Message& m, std::span<const Interface> objects) {
             if (m.sig != method.in) return error("InvalidArgs", "wrong arguments for this method");
             Call c{bus, m, m.Body(), {}};
             method.fn(c);
-            return bus.Reply(m, method.out, c.out);
+            if (!c.replied) return bus.Reply(m, method.out, c.out);
+            return;
         }
         if (!iface.empty()) return error("UnknownMethod", "no such method");
     }

@@ -226,6 +226,9 @@ void MouseDown(const SDL_MouseButtonEvent& e) {
     g_mouseX = x;
     g_mouseY = y;
     g.redraw = true;
+    // A click takes the keys from the input method's composition: the compositor commits or
+    // drops its preedit of its own, so what was shown here goes now.
+    g_preedit.clear(), g_preeditCursor = g_preeditLen = 0;
     if (g_exclude.open) {
         if (e.button == SDL_BUTTON_LEFT && g_exclude.confirm.In(x, y)) ConfirmExclude(true);
         else if (e.button == SDL_BUTTON_LEFT && g_exclude.cancel.In(x, y)) ConfirmExclude(false);
@@ -672,6 +675,9 @@ void MenuKey(SDL_Keycode key) {
 
 void Key(const SDL_KeyboardEvent& e) {
     g.redraw = true;
+    // While an input method composes, its field owns the keys: whatever the compositor still
+    // forwards would edit the text under the composition, and the composition commits by itself.
+    if (!g_preedit.empty()) return;
     SDL_Keymod mod = e.mod;
     bool ctrl = mod & SDL_KMOD_CTRL, shift = mod & SDL_KMOD_SHIFT;
     if (g_exclude.open) {
@@ -965,6 +971,9 @@ void KeyUp(const SDL_KeyboardEvent& e) {
 }
 
 void TextInput(const SDL_TextInputEvent& e) {
+    // Committed text takes the composition's place; the empty editing event that follows it
+    // would clear g_preedit too, but the field below may already redraw with it gone.
+    g_preedit.clear(), g_preeditCursor = g_preeditLen = 0;
     if (g_renameIndex >= 0 && e.text) {
         std::wstring text = compat::Widen(e.text);
         if (g_renameSelected) { g_renameText.clear(); g_renameCaret = 0; }
@@ -1005,6 +1014,14 @@ void TextInput(const SDL_TextInputEvent& e) {
     g.search += compat::Widen(e.text);
     if (InternetRadio().active) { InternetRadio().query = g.search; if (!InternetRadio().discover) RadioRebuild(); }
     else { RebuildRows(); OnlineSearchQueryChanged(g.search); }
+    g.redraw = true;
+}
+
+void TextEditing(const SDL_TextEditingEvent& e) {
+    // An input method's composing text, shown at the focused field's caret until it commits.
+    g_preedit = e.text ? e.text : "";
+    g_preeditCursor = std::clamp(e.start, 0, (int)g_preedit.size());
+    g_preeditLen = std::clamp(e.length, 0, (int)g_preedit.size() - g_preeditCursor);
     g.redraw = true;
 }
 

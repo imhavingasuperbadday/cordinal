@@ -187,6 +187,38 @@ MemoryReport TakeMemoryReport() {
     return r;
 }
 
+size_t PrivateWorkingSetNow() {
+    PROCESS_MEMORY_COUNTERS_EX2 counters{};
+    if (GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&counters, sizeof(counters)))
+        return counters.PrivateWorkingSetSize;
+    PROCESS_MEMORY_COUNTERS basic{};
+    return GetProcessMemoryInfo(GetCurrentProcess(), &basic, sizeof(basic)) ? basic.WorkingSetSize : 0;
+}
+
+MemoryFigures TakeMemoryFigures() {
+    MemoryFigures f;
+    PROCESS_MEMORY_COUNTERS_EX2 counters{};
+    if (GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&counters, sizeof(counters)))
+        f.privateWorkingSet = counters.PrivateWorkingSetSize;
+    PSAPI_WORKING_SET_INFORMATION probe{};
+    QueryWorkingSet(GetCurrentProcess(), &probe, sizeof(probe));
+    const size_t bytes = sizeof(ULONG_PTR) + (probe.NumberOfEntries + 4096) * sizeof(PSAPI_WORKING_SET_BLOCK);
+    auto* list = static_cast<PSAPI_WORKING_SET_INFORMATION*>(VirtualAlloc(nullptr, bytes, MEM_COMMIT, PAGE_READWRITE));
+    if (!list) return f;
+    // The image's own private pages; its headers are resident already, so reading them costs nothing.
+    const uintptr_t program = (uintptr_t)GetModuleHandleW(nullptr);
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(program);
+    const size_t programSize = reinterpret_cast<const IMAGE_NT_HEADERS*>(program + dos->e_lfanew)->OptionalHeader.SizeOfImage;
+    if (QueryWorkingSet(GetCurrentProcess(), list, (DWORD)bytes))
+        for (ULONG_PTR i = 0; i < list->NumberOfEntries; ++i) {
+            const PSAPI_WORKING_SET_BLOCK& page = list->WorkingSetInfo[i];
+            if (!page.Shared && (uintptr_t)page.VirtualPage * kPage - program < programSize) f.program += kPage;
+        }
+    VirtualFree(list, 0, MEM_RELEASE);
+    if (!f.privateWorkingSet) f.privateWorkingSet = PrivateWorkingSetNow();
+    return f;
+}
+
 std::wstring FormatMemoryReport(const MemoryReport& r) {
     wchar_t line[256];
     std::wstring out;

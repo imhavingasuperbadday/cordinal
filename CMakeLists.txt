@@ -9,7 +9,7 @@
 # D-Bus is spoken by its own client (src/linux/dbus.cpp), and sound goes to PipeWire or PulseAudio
 # through their native protocols (src/linux/pw_native.cpp, pulse_native.cpp), not a library.
 cmake_minimum_required(VERSION 3.20)
-project(cordinal VERSION 0.1.17 LANGUAGES C CXX)
+project(cordinal VERSION 0.1.18 LANGUAGES C CXX)
 
 if(WIN32)
     message(FATAL_ERROR "On Windows, build with build.bat")
@@ -82,7 +82,7 @@ add_library(cordinal_core STATIC
     src/discord.cpp src/library.cpp src/librarydb.cpp src/listenbrainz.cpp src/migration.cpp src/backup.cpp src/playlog.cpp src/points.cpp src/taste.cpp src/radio.cpp src/radio_browser.cpp src/radio_stream.cpp src/radio_hls.cpp src/rediscover.cpp src/scanner.cpp src/sfx.cpp src/sort.cpp src/steam.cpp
     src/headsets.cpp src/helpers.cpp src/streamfile.cpp src/tags.cpp src/tags_fields.cpp src/tags_flacogg.cpp src/tags_id3.cpp src/tags_mp4.cpp src/tags_riff.cpp src/tagwriter.cpp src/tagwriter_flacogg.cpp src/tagwriter_mp3mp4.cpp
     src/tagwriter_cord.cpp src/tagundo.cpp src/playlist_files.cpp src/playlist.cpp src/md5.cpp src/cord_encode.cpp src/cord_export.cpp
-    src/convert.cpp src/cdrip.cpp src/organize.cpp src/devicecopy.cpp src/collection.cpp src/linux/recycle.cpp src/linux/fontmatch.cpp
+    src/trimwatch.cpp src/convert.cpp src/cdrip.cpp src/organize.cpp src/devicecopy.cpp src/collection.cpp src/linux/recycle.cpp src/linux/fontmatch.cpp
     src/linux/typeface.cpp src/linux/raster.cpp src/linux/shaper.cpp src/linux/textlayout.cpp
     src/titleformat.cpp src/peaks.cpp src/tempo.cpp src/theme_palette.cpp src/replaygain.cpp src/eq_profile.cpp
     src/tag_suggest.cpp src/keymap.cpp src/packs.cpp src/web_audio.cpp src/web_catalog.cpp src/web_http.cpp src/web_library.cpp src/web_server.cpp src/web_ui.cpp
@@ -130,18 +130,18 @@ add_executable(cordinal
     src/linux/tagwrite.cpp src/linux/panels.cpp src/linux/panel_album.cpp src/linux/albumtag_ui.cpp src/linux/duplicates_ui.cpp src/linux/panel_eq.cpp src/linux/panel_organize.cpp
     src/linux/panel_comeback.cpp src/linux/panel_palette.cpp src/linux/panel_points.cpp src/linux/panel_prefs.cpp src/linux/panel_rules.cpp src/linux/panel_setup.cpp
     src/linux/panel_tags.cpp src/linux/panel_convert.cpp src/linux/panel_rip.cpp src/linux/convert_run.cpp src/linux/expand.cpp
-    src/linux/organize_run.cpp src/linux/copy_run.cpp src/linux/collection_run.cpp src/linux/ipod_run.cpp src/linux/libview.cpp src/linux/libview_canvas.cpp src/linux/scrobble.cpp src/linux/sounds.cpp src/linux/points_ui.cpp src/linux/lyrics.cpp src/linux/mini.cpp src/linux/lightweight.cpp src/linux/keys.cpp src/linux/panel_keys.cpp src/linux/packs_ui.cpp src/linux/helpers_ui.cpp src/linux/preferences_ui.cpp src/linux/games.cpp src/linux/editions_ui.cpp src/linux/coverfetch_ui.cpp src/linux/artistinfo_ui.cpp src/linux/webfetch_ui.cpp src/linux/panel_radar.cpp
+    src/linux/organize_run.cpp src/linux/copy_run.cpp src/linux/collection_run.cpp src/linux/ipod_run.cpp src/linux/libview.cpp src/linux/libview_canvas.cpp src/linux/scrobble.cpp src/linux/sounds.cpp src/linux/points_ui.cpp src/linux/lyrics.cpp src/linux/mini.cpp src/linux/lightweight.cpp src/linux/memory.cpp src/linux/keys.cpp src/linux/panel_keys.cpp src/linux/packs_ui.cpp src/linux/helpers_ui.cpp src/linux/preferences_ui.cpp src/linux/games.cpp src/linux/editions_ui.cpp src/linux/coverfetch_ui.cpp src/linux/artistinfo_ui.cpp src/linux/webfetch_ui.cpp src/linux/panel_radar.cpp
     src/linux/ui_model.cpp src/linux/ui_layout.cpp src/linux/ui_menus.cpp src/linux/ui_dialogs.cpp
     src/linux/discover_ui.cpp src/linux/search_online_ui.cpp
     src/linux/ui_draw.cpp src/linux/icons.cpp src/linux/ui_input.cpp src/linux/ui_files.cpp src/linux/ui_checks.cpp src/linux/queue_ui.cpp
     src/tests/selftest_linux_packs.cpp src/tests/selftest_linux_headsets.cpp
     src/linux/headsets.cpp src/linux/headphones_ui.cpp src/linux/output_profiles.cpp
     src/linux/platform/video.cpp src/linux/platform/render.cpp src/linux/platform/image_write.cpp src/linux/platform/keys.cpp
-    src/linux/platform/desktop.cpp src/linux/platform/overlay.cpp src/linux/platform/x11.cpp src/linux/platform/x11_wire.cpp src/linux/platform/xkb_keymap.cpp src/linux/platform/wayland_wire.cpp src/linux/platform/wayland.cpp
+    src/linux/platform/desktop.cpp src/linux/platform/ime.cpp src/linux/platform/overlay.cpp src/linux/platform/x11.cpp src/linux/platform/x11_wire.cpp src/linux/platform/xkb_keymap.cpp src/linux/platform/wayland_wire.cpp src/linux/platform/wayland.cpp
     src/linux/helper_feed.cpp src/tests/selftest_linux_helpers.cpp)
 target_sources(cordinal PRIVATE src/linux/migration.cpp src/linux/fountain.cpp src/linux/alternate_ui.cpp src/tests/selftest_linux_alternate.cpp)
 target_sources(cordinal PRIVATE src/linux/big_ui.cpp src/tests/selftest_linux_big.cpp src/tests/selftest_linux_queue.cpp
-    src/tests/selftest_linux_lightweight.cpp)
+    src/tests/selftest_linux_lightweight.cpp src/tests/selftest_linux_memory.cpp)
 
 # The Windows icon file, whose images are PNGs: the window's icon, the About box's and the web player's.
 # GENERATE preserves timestamps when bytes are unchanged, so repeated configuration does not
@@ -368,6 +368,18 @@ if(CORDINAL_PORTABLE)
                     "-Wl,--version-script=${CMAKE_CURRENT_BINARY_DIR}/cordial-export-symbols.map")
                 target_link_libraries(${target} PRIVATE ${CORDINAL_STATIC_LINK})
             endforeach()
+            # The code the player runs while it plays and sits idle, linked together (linux/hot-code.ld,
+            # from linux/code-profile.sh): the kernel maps 64 KiB around every page of code that runs,
+            # so with that code spread over the whole program it kept about 8 MB resident for 1.1 MB it
+            # used (docs/memory.md, "Linux code layout"). Each function gets a section for the script to
+            # name. A name the script lists that a compiler didn't produce matches nothing.
+            foreach(target cordinal_core cordinal_bearssl cordinal)
+                target_compile_options(${target} PRIVATE -ffunction-sections)
+            endforeach()
+            if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/linux/hot-code.ld")
+                target_link_options(cordinal PRIVATE "-Wl,-T,${CMAKE_CURRENT_SOURCE_DIR}/linux/hot-code.ld")
+                set_property(TARGET cordinal APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/linux/hot-code.ld")
+            endif()
         endif()
     endif()
 endif()
@@ -382,7 +394,7 @@ target_sources(cordinal PRIVATE src/tests/selftest_linux_layout.cpp src/tests/se
 # The platform layer on its own: a window that prints its events, for tools/platform-gui-test.sh.
 add_executable(cordinal-platform-probe EXCLUDE_FROM_ALL src/linux/platform/probe.cpp
     src/linux/platform/video.cpp src/linux/platform/render.cpp src/linux/platform/image_write.cpp src/linux/platform/keys.cpp
-    src/linux/platform/desktop.cpp src/linux/platform/overlay.cpp src/linux/platform/x11.cpp src/linux/platform/x11_wire.cpp
+    src/linux/platform/desktop.cpp src/linux/platform/ime.cpp src/linux/platform/overlay.cpp src/linux/platform/x11.cpp src/linux/platform/x11_wire.cpp
     src/linux/platform/xkb_keymap.cpp src/linux/platform/wayland_wire.cpp src/linux/platform/wayland.cpp src/linux/dbus.cpp)
 target_include_directories(cordinal-platform-probe PRIVATE src/linux src)
 target_compile_options(cordinal-platform-probe PRIVATE -Wall -Wno-unused-parameter -Wno-sign-compare -Wno-missing-field-initializers)

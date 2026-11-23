@@ -169,7 +169,7 @@ void PaintAbout(HDC dc, RECT rc) {
     const int right = a.width - a.pad;
     if (a.icon) DrawIconEx(dc, a.iconRect.left, a.iconRect.top, a.icon, a.iconSize, a.iconSize, 0, nullptr, DI_NORMAL);
     DrawAboutText(dc, a.titleFont, TextColor(), L"cordinal", a.textLeft, a.titleTop, right - a.textLeft, DT_SINGLELINE);
-    DrawAboutText(dc, g.font, SubColor(), L"Version 0.1.17", a.textLeft, a.versionTop, right - a.textLeft, DT_SINGLELINE);
+    DrawAboutText(dc, g.font, SubColor(), L"Version 0.1.18", a.textLeft, a.versionTop, right - a.textLeft, DT_SINGLELINE);
     DrawAboutText(dc, g.font, TextColor(), kAboutTagline, a.textLeft, a.taglineTop, right - a.textLeft, DT_WORDBREAK);
     FillSolid(dc, {a.pad, a.ruleY, right, a.ruleY + 1}, Ref(P().border));
     int y = a.rowsTop;
@@ -242,8 +242,9 @@ void ShowAbout() {
         return;
     }
     // The figure Task Manager shows, and how much of it is the program's own code: a packed build
-    // holds all of that privately (docs/memory.md).
-    const MemoryReport memory = TakeMemoryReport();
+    // holds all of that privately (docs/memory.md). Read without walking the heaps, which would page
+    // them all back in and show a figure the reading itself raised.
+    const MemoryFigures memory = TakeMemoryFigures();
     wchar_t stats[200];
     swprintf_s(stats, L"Library: %zu tracks in %.1f KB\nMemory: %.1f MB in use, %.1f MB of it the program", g_lib.Count(),
                g_lib.MemoryBytes() / 1024.0, memory.privateWorkingSet / 1048576.0, memory.program / 1048576.0);

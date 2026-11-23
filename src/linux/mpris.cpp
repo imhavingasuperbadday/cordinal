@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 
@@ -43,6 +44,7 @@ constexpr dbus::Target kDaemon{"org.freedesktop.DBus", "/org/freedesktop/DBus", 
 struct Snapshot {
     std::string status = "Stopped";  // Playing, Paused, Stopped
     TrackId id = kNone;
+    std::string trackPath;           // the mpris:trackid object path, already made (radio makes one per station)
     std::string title, artist, album, albumArtist, art, url;
     int64_t lengthUs = 0;
     double loopStart = 0, loopEnd = 0;
@@ -54,6 +56,7 @@ struct Snapshot {
     bool shuffle = false;
     Repeat repeat = Repeat::Off;
     bool lightweight = false;  // Lightweight mode (lightweight.cpp)
+    bool radio = false;        // internet radio, with no seeking and a station's own track id
     bool canNext = false, canPrevious = false;
     std::string output;
     std::string tip;  // a pack's tray tip format over what plays, or empty for "artist - title"
@@ -70,6 +73,7 @@ int g_wake = -1;  // eventfd: the snapshot changed, or quit
 std::atomic<bool> g_quit{false};
 std::string g_sniName;
 uint32_t g_menuRevision = 1;
+bool g_lostName = false;  // another cordinal took the media-player name: stop serving, never retry
 
 Snapshot Snap() {
     std::lock_guard lock(g_mx);
@@ -87,15 +91,36 @@ std::string AutostartPath() {
 
 std::string TrackPath(TrackId id) { return "/io/github/cordinal/track/" + std::to_string(id); }
 
+// An object-path-safe form of a station's Radio Browser id: path-legal characters only.
+std::string RadioPath(const std::string& id) {
+    std::string out = "/io/github/cordinal/radio/";
+    for (unsigned char c : id) out += isalnum(c) ? (char)c : '_';
+    return out;
+}
+
+// A file path as a URI, percent-encoded where it isn't already URI-safe: a song's path can hold
+// spaces or anything else it was named with, and GNOME and Waybar parse these strictly.
+std::string FileUri(const std::string& path) {
+    static const char hex[] = "0123456789ABCDEF";
+    std::string out = "file://";
+    for (unsigned char c : path) {
+        const bool uri = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '/' ||
+                         c == '-' || c == '_' || c == '.' || c == '~';
+        if (uri) out += (char)c;
+        else out += {'%', hex[c >> 4], hex[c & 15]};
+    }
+    return out;
+}
+
 // --- MPRIS ----------------------------------------------------------------------------------------
 void WriteMetadata(Writer& w) {
     Snapshot s = Snap();
     Writer::Array a = w.Open(8);
     w.Entry("mpris:trackid", "o");
-    if (s.id == kNone) {
+    if (s.id == kNone && s.trackPath.empty()) {
         w.O("/org/mpris/MediaPlayer2/TrackList/NoTrack");
     } else {
-        w.O(TrackPath(s.id));
+        w.O(s.trackPath.empty() ? TrackPath(s.id) : s.trackPath);
         if (s.lengthUs > 0) w.Entry("mpris:length", "x"), w.X(s.lengthUs);
         w.Entry("xesam:title", "s"), w.S(s.title);
         if (!s.artist.empty()) w.Entry("xesam:artist", "as"), w.Strings({s.artist});
@@ -127,15 +152,20 @@ void GetProperty(std::string_view p, Writer& w) {
     else if (p == "Volume") w.D(s.volume);
     else if (p == "Position") w.X(PositionUs(s));
     else if (p == "Rate") w.D(s.rate);
-    else if (p == "MinimumRate") w.D(0.375);
-    else if (p == "MaximumRate") w.D(4.0);
+    // What settings.ini accepts: speed 0.25..4 with tempo 0.75..2, so their product.
+    else if (p == "MinimumRate") w.D(0.25 * 0.75);
+    else if (p == "MaximumRate") w.D(4.0 * 2.0);
     else if (p == "CanGoNext") w.B(s.canNext);
     else if (p == "CanGoPrevious") w.B(s.canPrevious);
-    else if (p == "CanSeek") w.B(s.id != kNone && s.lengthUs > 0);
+    // A file can be seeked even when nothing knows its duration; a radio stream cannot.
+    else if (p == "CanSeek") w.B(!s.radio && s.id != kNone);
     else if (p == "HasTrackList" || p == "Fullscreen" || p == "CanSetFullscreen") w.B(false);
     else if (p == "Identity" || p == "DesktopEntry") w.S("cordinal");
     else if (p == "SupportedUriSchemes") w.Strings({"file"});
-    else if (p == "SupportedMimeTypes") w.Strings({"audio/flac", "audio/mpeg", "audio/ogg", "audio/x-wav", "audio/mp4", "audio/opus"});
+    // As the DLNA sink answers: the formats cordinal's own decoders open.
+    else if (p == "SupportedMimeTypes")
+        w.Strings({"audio/flac", "audio/mpeg", "audio/ogg", "audio/wav", "audio/aiff", "audio/mp4", "audio/aac",
+                   "audio/opus", "audio/x-ape", "audio/x-wavpack", "audio/x-ms-wma"});
     else w.B(true);  // CanPlay, CanPause, CanControl, CanQuit, CanRaise
 }
 
@@ -145,7 +175,7 @@ void SetProperty(std::string_view p, Reader& r) {
     else if (p == "LoopStatus") {
         std::string_view s = r.S();
         Post(Remote::SetRepeat, (LPARAM)(s == "Track" ? Repeat::One : s == "Playlist" ? Repeat::All : Repeat::Off));
-    }
+    } else if (p == "Rate") Post(Remote::SetRate, (LPARAM)std::lround(std::clamp(r.D(), 0.1875, 8.0) * 1e6));
 }
 
 void Simple(dbus::Call& c) {
@@ -162,12 +192,17 @@ void SetPosition(dbus::Call& c) {
     std::string_view track = c.in.O();
     int64_t pos = c.in.X();
     Snapshot s = Snap();
-    if (s.id != kNone && track == TrackPath(s.id)) Post(Remote::SetPosition, (LPARAM)pos);
+    const std::string mine = s.trackPath.empty() ? TrackPath(s.id) : s.trackPath;
+    if (s.id != kNone && track == mine) Post(Remote::SetPosition, (LPARAM)pos);
 }
 
 void OpenUri(dbus::Call& c) {
     std::string uri(c.in.S());
-    if (uri.rfind("file://", 0) != 0) return;
+    if (uri.rfind("file://", 0) != 0) {
+        c.replied = true;
+        c.bus.Error(c.msg, "org.freedesktop.DBus.Error.NotSupported", "only file URIs can be opened");
+        return;
+    }
     std::wstring path(4096, L'\0');
     DWORD size = (DWORD)path.size();
     if (SUCCEEDED(PathCreateFromUrlW(compat::Widen(uri.c_str()).c_str(), path.data(), &size, 0))) {
@@ -199,7 +234,7 @@ constexpr dbus::Method kPlayerMethods[] = {
 constexpr dbus::SignalInfo kPlayerSignals[] = {{"Seeked", "x"}};
 // Position is polled by clients, never announced, as the specification allows.
 constexpr dbus::Property kPlayerProperties[] = {
-    {"PlaybackStatus", "s"}, {"LoopStatus", "s", true}, {"Rate", "d"},       {"Shuffle", "b", true},
+    {"PlaybackStatus", "s"}, {"LoopStatus", "s", true}, {"Rate", "d", true}, {"Shuffle", "b", true},
     {"Metadata", "a{sv}"},   {"Volume", "d", true},     {"Position", "x"},   {"MinimumRate", "d"},
     {"MaximumRate", "d"},    {"CanGoNext", "b"},        {"CanGoPrevious", "b"}, {"CanPlay", "b"},
     {"CanPause", "b"},       {"CanSeek", "b"},          {"CanControl", "b"}};
@@ -415,6 +450,9 @@ void OnMessage(dbus::Bus& bus, const dbus::Message& m) {
             std::string_view name = r.S(), oldOwner = r.S(), newOwner = r.S();
             (void)oldOwner;
             if (name == kWatcher && !newOwner.empty()) RegisterWithWatcher();
+        } else if (m.sender == "org.freedesktop.DBus" && m.member == "NameLost" && m.sig == "s") {
+            // The daemon sends this when the name is taken from us: another cordinal owns it now.
+            if (m.Body().S() == std::string_view(kBusName)) g_lostName = true;
         }
         return;
     }
@@ -426,24 +464,89 @@ void Emit(const dbus::Interface& o, const char* member, const char* sig, const W
 }
 
 // --- the bus thread -----------------------------------------------------------------------------------------
+
+// The name, the tray's, the watcher registration and the match rule: everything a fresh (or
+// reconnected) connection needs before it can serve.
+bool RegisterAll() {
+    // DO_NOT_QUEUE: a stale owner answers EXISTS (3) instead of leaving this one queued silently;
+    // only the primary owner (1) serves.
+    dbus::Target request = kDaemon;
+    request.member = "RequestName";
+    Writer name;
+    name.S(kBusName);
+    name.U(4);
+    auto reply = g_bus->CallSync(request, "su", name, 5000);  // a session bus still starting at login is slow
+    if (!reply || reply->type != dbus::kReturn || reply->sig != "u" || reply->Body().U() != 1) {
+        fputs("cordinal: the media-player name is taken; media keys and tray are off\n", stderr);
+        return false;
+    }
+    g_sniName = "org.kde.StatusNotifierItem-" + std::to_string(getpid()) + "-1";
+    Writer sni;
+    sni.S(g_sniName);
+    sni.U(0);
+    g_bus->Send(request, "su", sni);
+    dbus::Target match = kDaemon;
+    match.member = "AddMatch";
+    Writer rule;
+    rule.S("type='signal',sender='org.freedesktop.DBus',path='/org/freedesktop/DBus',"
+           "interface='org.freedesktop.DBus',member='NameOwnerChanged'");
+    g_bus->Send(match, "s", rule);
+    RegisterWithWatcher();
+    g_lostName = false;
+    g_menuRevision = 1;
+    g_bus->Flush();
+    return true;
+}
+
 void Run() {
     Snapshot last;
     std::string lastMenu;
+    int64_t retryAt = 0;  // when to try the bus again (0: never)
+    bool announced = false;  // one note when the bus first goes away, not one per retry
     while (!g_quit) {
-        int more = g_bus ? g_bus->Process(64) : 0;
-        if (more < 0) {
-            g_bus.reset();  // closed or malformed: stop, do not spin on a dead socket, do not reconnect
-            fputs("cordinal: session bus closed; media keys and tray are off\n", stderr);
+        // Wakes come with every playback change; the bus is tried again only once its wait is over.
+        if (!g_bus && retryAt && !g_lostName && (int64_t)SDL_GetTicks() >= retryAt) {
+            g_bus = dbus::Bus::OpenUser(1000);
+            if (g_bus) {
+                g_bus->onMessage = OnMessage;
+                if (RegisterAll()) {
+                    // Everything is news to the new connection's listeners. The snapshot itself is
+                    // the UI thread's to fill, so this thread only forgets what it last announced.
+                    last = Snapshot{};
+                    announced = false;
+                    retryAt = 0;
+                } else {
+                    g_bus.reset();
+                    retryAt = SDL_GetTicks() + 30000;
+                }
+            } else {
+                if (!announced) fputs("cordinal: session bus lost; media keys and tray retry in the background\n", stderr);
+                announced = true;
+                retryAt = SDL_GetTicks() + 30000;
+            }
         }
+        int more = g_bus ? g_bus->Process(64) : 0;
+        if (more < 0 || (g_bus && g_lostName)) {  // closed, malformed, or another cordinal took the name
+            g_bus.reset();
+            if (g_lostName) {
+                fputs("cordinal: another cordinal took the media-player name; media keys and tray are off\n", stderr);
+                retryAt = 0;
+            } else {
+                if (!announced) fputs("cordinal: session bus lost; media keys and tray retry in the background\n", stderr);
+                announced = true;
+                retryAt = SDL_GetTicks() + 30000;
+            }
+        }
+        int wait = -1;
+        if (!g_bus && retryAt && !g_lostName) wait = (int)std::clamp<int64_t>(retryAt - SDL_GetTicks(), 0, 30000);
         pollfd fds[2] = {{g_wake, POLLIN, 0}, {g_bus ? g_bus->Fd() : -1, g_bus ? g_bus->Events() : (short)0, 0}};
-        poll(fds, 2, more > 0 ? 0 : g_bus ? g_bus->TimeoutMs() : -1);
+        poll(fds, 2, more > 0 ? 0 : g_bus ? g_bus->TimeoutMs() : wait);
         if (fds[0].revents & POLLIN) {
             uint64_t v;
             if (read(g_wake, &v, sizeof(v)) < 0) {
             }
         }
-        if (g_quit) break;
-        if (!g_bus) continue;
+        if (g_quit || !g_bus) continue;
         // Tell listeners what changed since the last look.
         Snapshot now;
         bool seeked;
@@ -454,8 +557,8 @@ void Run() {
         }
         std::vector<const char*> changed;
         if (now.status != last.status) changed.push_back("PlaybackStatus");
-        if (now.id != last.id || now.title != last.title || now.artist != last.artist || now.album != last.album ||
-            now.art != last.art || now.lengthUs != last.lengthUs)
+        if (now.id != last.id || now.trackPath != last.trackPath || now.title != last.title || now.artist != last.artist ||
+            now.album != last.album || now.art != last.art || now.lengthUs != last.lengthUs)
             changed.push_back("Metadata");
         if (now.volume != last.volume) changed.push_back("Volume");
         if (now.rate != last.rate) changed.push_back("Rate");
@@ -463,9 +566,12 @@ void Run() {
         if (now.repeat != last.repeat) changed.push_back("LoopStatus");
         if (now.canNext != last.canNext) changed.push_back("CanGoNext");
         if (now.canPrevious != last.canPrevious) changed.push_back("CanGoPrevious");
-        if (now.id != last.id || now.lengthUs != last.lengthUs) changed.push_back("CanSeek");
+        if (now.id != last.id || now.lengthUs != last.lengthUs || now.radio != last.radio) changed.push_back("CanSeek");
         if (!changed.empty()) dbus::EmitChanged(*g_bus, kObjects[1], changed);
-        if (seeked) {
+        // A new track (or a new station) starts somewhere other than where the last one ended:
+        // a discontinuity the specification says to announce, or a client trusting Seeked keeps a
+        // stale position until it happens to poll.
+        if (seeked || now.id != last.id || (!now.trackPath.empty() && now.trackPath != last.trackPath)) {
             Writer w;
             w.X(PositionUs(now));
             Emit(kObjects[1], "Seeked", "x", w);
@@ -531,25 +637,12 @@ void StartMpris() {
         return;  // the rest works
     }
     g_bus->onMessage = OnMessage;
-    // The player's name is taken before anything else, so a second cordinal started at once finds it.
-    dbus::Target request = kDaemon;
-    request.member = "RequestName";
-    Writer name;
-    name.S(kBusName);
-    name.U(0);
-    g_bus->CallSync(request, "su", name, 5000);
-    g_sniName = "org.kde.StatusNotifierItem-" + std::to_string(getpid()) + "-1";
-    Writer sni;
-    sni.S(g_sniName);
-    sni.U(0);
-    g_bus->Send(request, "su", sni);
-    dbus::Target match = kDaemon;
-    match.member = "AddMatch";
-    Writer rule;
-    rule.S("type='signal',sender='org.freedesktop.DBus',path='/org/freedesktop/DBus',"
-           "interface='org.freedesktop.DBus',member='NameOwnerChanged'");
-    g_bus->Send(match, "s", rule);
-    RegisterWithWatcher();
+    // The player's name is taken before anything else, so a second cordinal started at once
+    // finds it. RegisterAll answers quickly on a live bus and says when the name isn't ours.
+    if (!RegisterAll()) {
+        g_bus.reset();
+        return;
+    }
     g_wake = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     g_quit = false;
     MprisChanged();
@@ -560,6 +653,19 @@ void StopMpris() {
     if (!g_thread.joinable()) {
         g_bus.reset();
         return;
+    }
+    if (g_bus) {  // say goodbye properly: watchers see the names go instead of timing them out
+        dbus::Target release = kDaemon;
+        release.member = "ReleaseName";
+        Writer name;
+        name.S(kBusName);
+        g_bus->Send(release, "s", name);
+        if (!g_sniName.empty()) {
+            Writer sni;
+            sni.S(g_sniName);
+            g_bus->Send(release, "s", sni);
+        }
+        g_bus->Flush();
     }
     g_quit = true;
     Wake();
@@ -576,6 +682,9 @@ void MprisChanged(bool seeked) {
     s.status = id == kNone && !radio ? "Stopped" : IsPaused() ? "Paused" : "Playing";
     if (radio) {
         s.id = kNone - 1;
+        s.radio = true;
+        // A station is its own track: the id stays with the station, not the whole radio.
+        s.trackPath = InternetRadio().playing.id.empty() ? RadioPath(InternetRadio().playing.name) : RadioPath(InternetRadio().playing.id);
         s.title = InternetRadio().lastTitle.empty() ? InternetRadio().playing.name : ToUtf8(InternetRadio().lastTitle);
         s.artist = InternetRadio().lastTitle.empty() ? "" : InternetRadio().playing.name;
         s.position = 0;
@@ -598,7 +707,7 @@ void MprisChanged(bool seeked) {
         std::wstring path = g_lib.Path(id), file;
         int index = 0;
         if (SplitSubtrack(path, file, index)) path = file;
-        s.url = "file://" + compat::Narrow(path.c_str());
+        s.url = FileUri(compat::Narrow(path.c_str()));
         static const std::wstring kOwn;  // no tray tip format of the user's own, as on Windows
         if (const std::wstring& tip = EffectiveFormat(kPackTray, kOwn); !tip.empty()) s.tip = ToUtf8(FormatForTrack(tip, id, true));
     }
@@ -628,7 +737,7 @@ void MprisSetArt(TrackId id, const std::string& path) {
     {
         std::lock_guard lock(g_mx);
         g_artFor = id;
-        g_artPath = path.empty() ? std::string() : "file://" + path;
+        g_artPath = path.empty() ? std::string() : FileUri(path);
         if (g_snap.id == id) g_snap.art = g_artPath;
     }
     Wake();

@@ -476,7 +476,7 @@ struct App {
     // Lightweight mode (app_lightweight.cpp): cordinal keeps playing with its window put away.
     bool lightweight = false;
     int lightweightShows = 0;      // LightweightShows: what stays on screen
-    bool lightweightTrim = true;   // give unused memory back to Windows on the way in
+    bool lightweightTrim = true;   // give unused memory back to Windows (app_memory.cpp), in every mode
     bool lightweightPause = true;  // pause background library work (ReplayGain sweep, waveforms)
     int lightweightNumpad = 1;     // LightweightNumpad: the numpad as a remote
     // Converting to .cord: verified originals go to the Recycle Bin, or are kept and, unless shown,

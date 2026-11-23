@@ -146,6 +146,12 @@ inline int Check(const std::string& dir) {
     void* map = mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, memory, 0);
     Expect(map != MAP_FAILED && (memcpy(map, "mapped", 6), pread(memory, buf, 6, 0) == 6) && !memcmp(buf, "mapped", 6),
            "mmap of a memfd shares its pages");
+    // How a window gives its pixels back (platform/wayland.cpp): the shared pages are freed, reading as zero.
+    Expect(map != MAP_FAILED && madvise(map, 4096, MADV_REMOVE) == 0 && pread(memory, buf, 6, 0) == 6 &&
+               buf[0] == 0 && buf[5] == 0 && ((const char*)map)[0] == 0,
+           "madvise MADV_REMOVE frees a memfd's pages");
+    Expect(madvise(map, 4096, 12345) == -1 && errno == EINVAL, "madvise reports an unknown advice");
+    Expect(mprotect(map, 4096, PROT_READ) == 0 && ((const char*)map)[0] == 0, "mprotect makes a mapping read-only");
     Expect(munmap(map, 4096) == 0, "munmap");
     close(memory);
     Expect(mmap(nullptr, 4096, PROT_READ, MAP_SHARED, -1, 0) == MAP_FAILED && errno == EBADF,
@@ -176,6 +182,12 @@ inline int Check(const std::string& dir) {
     close(client);
     close(server);
     ExpectError(connect(-1, (sockaddr*)&address, sizeof address), EBADF, "connect on a bad descriptor");
+    int pair[2] = {-1, -1};
+    Expect(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair) == 0 && send(pair[0], "pong", 4, MSG_NOSIGNAL) == 4 &&
+               recv(pair[1], buf, 4, MSG_WAITALL) == 4 && !memcmp(buf, "pong", 4),
+           "socketpair");
+    close(pair[0]);
+    close(pair[1]);
 
     // The process and randomness.
     Expect(getpid() > 0 && syscall(SYS_gettid) > 0 && getuid() == (uid_t)syscall(SYS_getuid), "getpid, gettid and getuid");

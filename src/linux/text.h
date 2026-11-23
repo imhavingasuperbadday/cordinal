@@ -32,6 +32,9 @@ bool UsesPackFont(Font font);  // font-source inspection for the headless layout
 // with an ellipsis. align: 0 left, 1 center, 2 right (within maxWidth). Returns the width drawn.
 float DrawText(Font font, const std::string& text, float x, float y, uint32_t rgb, float maxWidth = 0, int align = 0);
 float TextWidth(Font font, const std::string& text);
+// Where a caret at byte offset `at` in `text` (UTF-8) sits when the line is drawn at x: the same
+// pen position in right-to-left text as in left-to-right, from the shaped line's glyph order.
+float CaretX(Font font, const std::string& text, size_t at);
 float LineHeight(Font font);
 
 // The DELTARUNE font (the web player serves it too).

@@ -2,6 +2,7 @@
 #include "alternate_ui.h"
 #include "big_ui.h"
 #include "headphones_ui.h"
+#include "platform/ime.h"
 #include "ui_internal.h"
 
 namespace lx {
@@ -10,6 +11,7 @@ int CheckWindowLayouts();
 int CheckLinuxPacks();  // src/tests/selftest_linux_packs.cpp
 int CheckLinuxQueue();  // src/tests/selftest_linux_queue.cpp
 int CheckLinuxLightweight();  // src/tests/selftest_linux_lightweight.cpp
+int CheckLinuxMemory();  // src/tests/selftest_linux_memory.cpp
 int CheckLinuxTabs();   // src/tests/selftest_linux_tabs.cpp
 
 int CheckLayout() {
@@ -190,7 +192,42 @@ int CheckLayout() {
         g.rows = savedRows;
         g_lib = std::move(saved);
     }
-    off += CheckWindowLayouts() + CheckPreferences() + CheckLinuxPacks() + CheckLinuxHeadsets() + CheckLinuxBig() + CheckLinuxHelperFeed() + CheckLinuxAlternateThemes() + CheckTagSuggestions() + CheckLinuxQueue() + CheckLinuxTabs() + CheckLinuxLightweight();
+    {
+        // An input method composes in the search box: its preedit holds the keys, so nothing the
+        // compositor still forwards edits the query under it, and the commit lands whole.
+        const std::wstring savedSearch = g.search;
+        const bool savedFocus = g.searchFocused;
+        g.search.clear();
+        g.searchFocused = true;
+        SDL_StartTextInput(g.window);
+        SDL_TextEditingEvent editing{};
+        editing.type = SDL_EVENT_TEXT_EDITING;
+        editing.text = "\xE6\x9D\xB1\xE4\xBA\xAC";  // Tokyo, as a composition
+        editing.start = 6, editing.length = 0;
+        TextEditing(editing);
+        SDL_KeyboardEvent backspace{};
+        backspace.type = SDL_EVENT_KEY_DOWN, backspace.key = SDLK_BACKSPACE, backspace.down = true;
+        Key(backspace);
+        bool composing = g_preedit == editing.text && g.search.empty();
+        SDL_TextInputEvent commit{};
+        commit.type = SDL_EVENT_TEXT_INPUT;
+        commit.text = "\xE6\x9D\xB1\xE4\xBA\xAC";  // the composition's committed text
+        TextInput(commit);
+        const bool landed = g.search == L"\x6771\x4EAC" && g_preedit.empty();
+        SDL_TextEditingEvent gone{};
+        gone.type = SDL_EVENT_TEXT_EDITING;
+        TextEditing(gone);
+        const bool cleared = g_preedit.empty();
+        printf("%s an input method's composition owns the search box's keys until it commits\r\n",
+               composing && landed && cleared ? "ok  " : "FAIL");
+        off += !(composing && landed && cleared);
+        g.searchFocused = savedFocus;
+        if (!savedFocus) SDL_StopTextInput(g.window);
+        g.search = savedSearch;
+    }
+    off += platform::ime::CheckParsing();  // what fcitx5 and ibus send X11 windows over the bus
+    off += CheckWindowLayouts() + CheckPreferences() + CheckLinuxPacks() + CheckLinuxHeadsets() + CheckLinuxBig() + CheckLinuxHelperFeed() + CheckLinuxAlternateThemes() + CheckTagSuggestions() + CheckLinuxQueue() + CheckLinuxTabs() + CheckLinuxLightweight() +
+           CheckLinuxMemory();
     const bool software = SetGpuDrawing(false) && !g.settings.gpuDrawing &&
         std::string_view(SDL_GetRendererName(g.renderer)) == SDL_SOFTWARE_RENDERER &&
         UiSymbolsAvailable() && DrawText(Font::Normal, "Renderer restored", 0, 0, CurrentPalette().text) > 0;

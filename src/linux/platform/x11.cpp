@@ -2,13 +2,18 @@
 // their EWMH/ICCCM properties, pictures through MIT-SHM (PutImage in strips without it), core
 // input with the XKB extension asked only for detectable key repeat, the keyboard mapping read
 // with GetKeyboardMapping, CLIPBOARD (INCR transfers read, small replies served), XDND drops,
-// glyph cursors, SHAPE for the mini player, and the scale from Xft.dpi or XSETTINGS as SDL reads it.
+// glyph cursors, SHAPE for the mini player, and the scale from Xft.dpi or XSETTINGS as SDL reads
+// it. The scale makes a window that many pixels for the points cordinal lays out, X11's one way
+// of drawing sharp on a dense screen; positions and input arrive as points, hints and the window
+// itself as pixels.
+#include "platform/ime.h"
 #include "platform/platform.h"
 #include "platform/x11_wire.h"
 
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/ipc.h>
+#include <sys/mman.h>
 #include <sys/shm.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -152,7 +157,7 @@ public:
     uint32_t* Framebuffer(int& w, int& h, int& stride) override;
     void Present(const SDL_Rect* rects, int count) override;
     void SetCursor(Cursor c) override;
-    void SetTextInput(bool, const SDL_Rect*) override {}
+    void SetTextInput(bool on, const SDL_Rect* area) override;
     std::string PortalHandle() override {
         char buf[32];
         snprintf(buf, sizeof buf, "x11:%x", id_);
@@ -163,6 +168,9 @@ public:
     SDL_Window* Owner() const { return owner_; }
     void WriteHints();
     void FreeBuffer();
+    void Rescale(float was);
+    int GiveBackInMs(uint64_t now) const;  // -1: nothing to give back
+    void GiveBack();
 
     int minW = 0, minH = 0;
     bool resizable = true, mapped = false;
@@ -178,6 +186,11 @@ private:
     int shmId_ = -1;
     uint32_t shmSeg_ = 0;
     int bw_ = 0, bh_ = 0;
+    // The server copies each frame out of the pixels before Present returns and keeps the window's
+    // picture itself, so a window left alone gives its pages back (docs/memory.md, "Linux window
+    // pixels"). A part-window frame only sends the part it drew, so the pixels around it don't matter.
+    uint64_t presentedAt_ = 0;
+    bool emptied_ = true;
 };
 
 class X11 : public Backend {
@@ -191,6 +204,7 @@ public:
     int Fd() const override { return fd_; }
     void Dispatch() override;
     void Flush() override { FlushOut(); }
+    int TimeoutMs() const override;
     bool UsableBounds(SDL_Rect& r) override;
     bool GlobalMouse(float& x, float& y) override;
     void CaptureMouse(bool on) override;
@@ -223,6 +237,16 @@ public:
     void NetState(X11Window& w, bool add, const char* a, const char* b = nullptr);
     const Screen& Scr() const { return setup_.screens[screen_]; }
     uint32_t Root() const { return Scr().root; }
+    // X11 has one coordinate space, the window's pixels: what the session's scale does is make a
+    // window that many pixels for the points cordinal lays out, as toolkits size themselves on
+    // X11. Nothing here is fractional-blurred the way Wayland's scaling can be; the window is
+    // simply scale times as large, and its framebuffer with it.
+    // Sizes keep at least one pixel or point; positions (At, Pos) convert as they are, so the
+    // screen's origin stays at 0.
+    int Px(int points) const { return std::max(1, Pos(points)); }
+    int Pt(int pixels) const { return std::max(1, At(pixels)); }
+    int Pos(int points) const { return (int)std::lround(points * scale_); }
+    int At(int pixels) const { return (int)std::lround(pixels / scale_); }
     uint32_t Gc() const { return gc_; }
     uint8_t Depth() const { return depth_; }
     int ShmMajor() const { return shmMajor_; }
@@ -230,7 +254,11 @@ public:
     size_t MaxRequestBytes() const { return (size_t)setup_.maxRequest * 4; }
     uint32_t CursorFor(Cursor c);
     uint32_t ThemeCursor(const char* name);
-    void Forget(X11Window* w) { std::erase(windows_, w); }
+    void Forget(X11Window* w) {
+        std::erase(windows_, w);
+        if (imeWindow_ == w) imeWindow_ = nullptr, imeFocused_ = false;
+    }
+    void TextInput(X11Window& w, bool on, const SDL_Rect* area);
     uint32_t Time() const { return time_; }
 
 private:
@@ -246,6 +274,8 @@ private:
     void LoadKeymap();
     void UpdateScale(bool notify);
     void Key(const std::string& ev, bool down);
+    void DeliverKey(const std::string& ev, bool down, bool repeat);
+    void ImeOutput();
     uint32_t Lookup(uint8_t keycode, uint16_t state, uint32_t* base, uint32_t* shifted);
     void ServeSelection(const std::string& ev);
     void Dnd(X11Window& w, const std::string& ev);
@@ -289,6 +319,12 @@ private:
         bool dropping = false;
     } drag_;
     bool grabbed_ = false;
+    // The input method (ime.h): started with the first text field, and the window whose field has
+    // the keys. The caret is kept in points, so a moved window sends it again in new root pixels.
+    std::unique_ptr<ime::Client> ime_;
+    X11Window* imeWindow_ = nullptr;
+    bool imeFocused_ = false, imeCaretSent_ = false;
+    SDL_Rect imeCaret_{};
 };
 
 // --- the connection -------------------------------------------------------------------------------------------
@@ -719,6 +755,21 @@ void X11::Key(const std::string& ev, bool down) {
         }
         down_[code] = false;
     }
+    // While a text field has the keys, the input method sees each one first and gives back what it
+    // doesn't take; the repeat and modifier bookkeeping above has happened, once.
+    if (ime_ && (ime_->Busy() || (imeWindow_ == w && ime_->Taking()))) {
+        uint32_t base, shifted;
+        ime_->Key(ev, down, repeat, Lookup(code, state, &base, &shifted), code, state, R32(ev, 4));
+        return;
+    }
+    DeliverKey(ev, down, repeat);
+}
+
+void X11::DeliverKey(const std::string& ev, bool down, bool repeat) {
+    const uint8_t code = (uint8_t)ev[1];
+    const uint16_t state = R16(ev, 28);
+    X11Window* w = Find(R32(ev, 12));
+    if (!w) return;
     uint32_t base, shifted;
     const uint32_t sym = Lookup(code, state, &base, &shifted);
     if (getenv("CORDINAL_X11_DEBUG")) fprintf(stderr, "x11: key %u state %x down %d sym %x\n", code, state, down, sym);
@@ -731,6 +782,55 @@ void X11::Key(const std::string& ev, bool down) {
         if (c >= 0x20 && c != 0x7f) text = Utf8(c);
     }
     OnKey(w->Owner(), sc, key, down, repeat, text);
+}
+
+// --- the input method ------------------------------------------------------------------------------------------
+
+void X11Window::SetTextInput(bool on, const SDL_Rect* area) { x_.TextInput(*this, on, area); }
+
+void X11::TextInput(X11Window& w, bool on, const SDL_Rect* area) {
+    if (on && !ime_) ime_ = ime::Client::Start();
+    if (!ime_) return;
+    if (on != imeFocused_ || (on && imeWindow_ != &w)) {
+        imeFocused_ = on;
+        imeWindow_ = on ? &w : nullptr;
+        imeCaretSent_ = false;
+        ime_->Focus(on);
+    }
+    if (!on || !area) return;
+    const bool same = area->x == imeCaret_.x && area->y == imeCaret_.y && area->w == imeCaret_.w && area->h == imeCaret_.h;
+    if (same && imeCaretSent_) return;
+    imeCaret_ = *area;
+    // The caret in root pixels, where the input method puts its candidates: one round trip, made
+    // only when the caret or the window moved.
+    auto r = Reply(Send(Req(40).U32(w.Id()).U32(Root()).U16(0).U16(0).Done()));
+    if (!r) return;
+    ime_->Cursor(S16(*r, 12) + Pos(area->x), S16(*r, 14) + Pos(area->y), Px(area->w), Px(area->h));
+    imeCaretSent_ = true;
+}
+
+// What the input method gave back since the last look: keys it didn't take, keys of its own, text
+// it committed and its composition, for the window whose field has the keys.
+void X11::ImeOutput() {
+    for (ime::Out& o : ime_->Take()) {
+        if (o.kind == ime::Out::kReplay) {
+            DeliverKey(o.raw, o.down, o.repeat);
+            continue;
+        }
+        if (!imeWindow_) continue;
+        SDL_Window* owner = imeWindow_->Owner();
+        if (o.kind == ime::Out::kCommit) {
+            OnText(owner, o.text);
+        } else if (o.kind == ime::Out::kPreedit) {
+            OnEditing(owner, o.text, o.cursor, 0);
+        } else {  // a key the input method sends itself (a BackSpace it decided to pass on, say)
+            const SDL_Scancode sc = ScancodeFromKeysym(o.sym);
+            std::string text;
+            if (o.down)
+                if (uint32_t c = KeysymToUnicode(o.sym); c >= 0x20 && c != 0x7f && !(o.state & 4)) text = Utf8(c);
+            OnKey(owner, sc, KeycodeFor(sc, o.sym, o.sym), o.down, false, text);
+        }
+    }
 }
 
 // --- scale ----------------------------------------------------------------------------------------------------
@@ -769,8 +869,15 @@ void X11::UpdateScale(bool notify) {
     if (scale <= 0)
         if (const char* g = getenv("GDK_SCALE")) scale = atoi(g);
     if (scale <= 0) scale = 1;
+    const float was = scale_;
     scale_ = (float)scale;
     for (X11Window* w : windows_) {
+        if (was != scale_) {
+            // The window's points now stand for more pixels: resize it to stay the same size in
+            // points. A window manager that owns the size (a maximized one) ignores the request,
+            // and its next ConfigureNotify reports whatever it kept.
+            w->Rescale(was);
+        }
         if (notify) OnDisplayScale(w->Owner(), scale_);
         else w->Owner()->displayScale = scale_;
     }
@@ -784,8 +891,9 @@ std::unique_ptr<NativeWindow> X11::CreateWindow(SDL_Window* owner, const std::st
                           kPointerMotionMask | kExposureMask | kStructureMask | kFocusMask | kPropertyMask;
     // CreateWindow: black background, NorthWest bit gravity, the events above.
     // Centred on the screen, where SDL puts a window without a position (the window manager may move it).
-    const int16_t x = (int16_t)((Scr().width - w) / 2), y = (int16_t)((Scr().height - h) / 2);
-    Send(Req(1, 0).U32(id).U32(Root()).U16((uint16_t)x).U16((uint16_t)y).U16((uint16_t)w).U16((uint16_t)h).U16(0).U16(1).U32(0)
+    const int pw = Px(w), ph = Px(h);
+    const int16_t x = (int16_t)((Scr().width - pw) / 2), y = (int16_t)((Scr().height - ph) / 2);
+    Send(Req(1, 0).U32(id).U32(Root()).U16((uint16_t)x).U16((uint16_t)y).U16((uint16_t)pw).U16((uint16_t)ph).U16(0).U16(1).U32(0)
              .U32(0x2 | 0x10 | 0x800).U32(Scr().black).U32(1).U32(mask).Done());
     auto win = std::make_unique<X11Window>(*this, owner, id);
     windows_.push_back(win.get());
@@ -810,6 +918,9 @@ std::unique_ptr<NativeWindow> X11::CreateWindow(SDL_Window* owner, const std::st
     if (flags & SDL_WINDOW_BORDERLESS) win->SetBordered(false);
     if (flags & SDL_WINDOW_MAXIMIZED) NetState(*win, true, "_NET_WM_STATE_MAXIMIZED_VERT", "_NET_WM_STATE_MAXIMIZED_HORZ");
     if (flags & SDL_WINDOW_ALWAYS_ON_TOP) NetState(*win, true, "_NET_WM_STATE_ABOVE");
+    // The pixels this window's points take at this session's scale, and the scale itself, so
+    // the first frame is drawn the size the window really is before any ConfigureNotify.
+    owner->pw = pw, owner->ph = ph;
     owner->displayScale = scale_;
     win->SetCursor(Cursor::Arrow);
     if (!(flags & SDL_WINDOW_HIDDEN)) {
@@ -854,23 +965,27 @@ void X11Window::SetIcon(int w, int h, const uint32_t* argb) {
 
 void X11Window::WriteHints() {
     // WM_NORMAL_HINTS: minimum size; a fixed-size window has its maximum at the same size.
+    // The hints speak X11's pixels, so the points the player keeps become their pixel size.
     uint32_t hints[18] = {};
     hints[0] = 16 | 512;  // PMinSize | PWinGravity
-    hints[5] = (uint32_t)std::max(minW, 1), hints[6] = (uint32_t)std::max(minH, 1);
+    hints[5] = (uint32_t)x_.Px(std::max(minW, 1)), hints[6] = (uint32_t)x_.Px(std::max(minH, 1));
     if (!resizable) {
         hints[0] |= 32;  // PMaxSize
-        hints[5] = hints[7] = (uint32_t)owner_->w;
-        hints[6] = hints[8] = (uint32_t)owner_->h;
+        hints[5] = hints[7] = (uint32_t)x_.Px(owner_->w);
+        hints[6] = hints[8] = (uint32_t)x_.Px(owner_->h);
     }
     hints[17] = 1;  // NorthWestGravity
     x_.Prop(id_, "WM_NORMAL_HINTS", "WM_SIZE_HINTS", 32, hints, 18);
 }
 
 void X11Window::SetSize(int w, int h) {
-    x_.Send(Req(12).U32(id_).U16(4 | 8).Pad(2).U32((uint32_t)w).U32((uint32_t)h).Done());
+    x_.Send(Req(12).U32(id_).U16(4 | 8).Pad(2).U32((uint32_t)x_.Px(w)).U32((uint32_t)x_.Px(h)).Done());
     if (!resizable) {
         owner_->w = w, owner_->h = h;
+        owner_->pw = x_.Px(w), owner_->ph = x_.Px(h);
         WriteHints();
+        x_.FlushOut();
+        return;
     }
     x_.FlushOut();
 }
@@ -880,8 +995,19 @@ void X11Window::SetMinimumSize(int w, int h) {
     WriteHints();
 }
 
+// The session's scale changed from `was`: this window's points take their new pixel size.
+void X11Window::Rescale(float was) {
+    const int pw = x_.Px(owner_->w), ph = x_.Px(owner_->h);
+    if (owner_->pw == pw && owner_->ph == ph) return;
+    owner_->pw = pw, owner_->ph = ph;
+    x_.Send(Req(12).U32(id_).U16(4 | 8).Pad(2).U32((uint32_t)pw).U32((uint32_t)ph).Done());
+    if (!resizable) WriteHints();
+    x_.FlushOut();
+}
+
 bool X11Window::SetPosition(int x, int y) {
-    x_.Send(Req(12).U32(id_).U16(1 | 2).Pad(2).U32((uint32_t)x).U32((uint32_t)y).Done());
+    // The player speaks points; the server's root coordinates are pixels.
+    x_.Send(Req(12).U32(id_).U16(1 | 2).Pad(2).U32((uint32_t)x_.Pos(x)).U32((uint32_t)x_.Pos(y)).Done());
     x_.FlushOut();
     lastX = x, lastY = y;
     return true;
@@ -894,7 +1020,7 @@ bool X11Window::GetPosition(int& x, int& y) {
         x = lastX, y = lastY;
         return false;
     }
-    x = S16(*r, 12), y = S16(*r, 14);
+    x = x_.At(S16(*r, 12)), y = x_.At(S16(*r, 14));
     return true;
 }
 
@@ -992,8 +1118,24 @@ void X11Window::FreeBuffer() {
     bw_ = bh_ = 0;
 }
 
+// As Wayland's kGiveBackMs: the clock's frames while playing keep the pixels, an idle window doesn't.
+constexpr uint64_t kGiveBackMs = 600;
+
+int X11Window::GiveBackInMs(uint64_t now) const {
+    if (emptied_ || (!shm_ && plain_.empty())) return -1;
+    return now >= presentedAt_ + kGiveBackMs ? 0 : (int)(presentedAt_ + kGiveBackMs - now);
+}
+
+void X11Window::GiveBack() {
+    emptied_ = true;
+    if (shm_ && madvise(shm_, (size_t)bw_ * bh_ * 4, MADV_REMOVE) == 0) return;
+    if (shm_) FreeBuffer();
+    std::vector<uint32_t>().swap(plain_);  // Framebuffer makes another
+}
+
 uint32_t* X11Window::Framebuffer(int& w, int& h, int& stride) {
     w = owner_->pw, h = owner_->ph, stride = w;
+    emptied_ = false;
     if (w == bw_ && h == bh_ && (shm_ || !plain_.empty())) return shm_ ? shm_ : plain_.data();
     FreeBuffer();
     bw_ = w, bh_ = h;
@@ -1047,6 +1189,7 @@ void X11Window::Present(const SDL_Rect* rects, int count) {
     // With shared memory the next frame draws into the same pixels: wait until the server has them.
     if (shm_) x_.Round();
     else x_.FlushOut();
+    presentedAt_ = NowMs();
 }
 
 void X11Window::SetCursor(Cursor c) {
@@ -1090,6 +1233,7 @@ std::optional<std::string> X11::WaitEvent(int type, uint32_t window, int timeout
 }
 
 void X11::Dispatch() {
+    if (ime_) ImeOutput();
     while (ReadSome(0)) {}
     if (!TakeUnits()) return;
     while (!events_.empty()) {
@@ -1097,7 +1241,18 @@ void X11::Dispatch() {
         events_.pop_front();
         Handle(ev);
     }
+    const uint64_t now = NowMs();
+    for (X11Window* w : windows_)
+        if (w->GiveBackInMs(now) == 0) w->GiveBack();
     FlushOut();
+}
+
+int X11::TimeoutMs() const {
+    const uint64_t now = NowMs();
+    int wait = -1;
+    for (const X11Window* w : windows_)
+        if (int due = w->GiveBackInMs(now); due >= 0 && (wait < 0 || due < wait)) wait = due;
+    return wait;
 }
 
 void X11::Handle(const std::string& ev) {
@@ -1109,7 +1264,8 @@ void X11::Handle(const std::string& ev) {
         X11Window* w = Find(R32(ev, 12));
         if (!w) break;
         const int b = (uint8_t)ev[1];
-        const float x = S16(ev, 24), y = S16(ev, 26);
+        // Event coordinates are pixels; the player works in points.
+        const float x = S16(ev, 24) / scale_, y = S16(ev, 26) / scale_;
         SyncModifiers(R16(ev, 28) & 1, R16(ev, 28) & 4, R16(ev, 28) & altMask_, R16(ev, 28) & superMask_, R16(ev, 28) & 2, R16(ev, 28) & numMask_);
         if (b >= 4 && b <= 7) {  // the wheel: presses only
             if (type == 4) {
@@ -1125,7 +1281,7 @@ void X11::Handle(const std::string& ev) {
     }
     case 6: {  // MotionNotify
         X11Window* w = Find(R32(ev, 12));
-        if (w) OnMouseMotion(w->Owner(), S16(ev, 24), S16(ev, 26));
+        if (w) OnMouseMotion(w->Owner(), S16(ev, 24) / scale_, S16(ev, 26) / scale_);
         break;
     }
     case 7: case 8: {  // EnterNotify, LeaveNotify
@@ -1134,7 +1290,7 @@ void X11::Handle(const std::string& ev) {
         if (!w || detail == 2 /* Inferior */) break;
         if (type == 7) {
             OnMouseEnterLeave(w->Owner(), true);
-            OnMouseMotion(w->Owner(), S16(ev, 24), S16(ev, 26));
+            OnMouseMotion(w->Owner(), S16(ev, 24) / scale_, S16(ev, 26) / scale_);
         } else if (mode != 1 /* Grab */ && !grabbed_) {
             OnMouseEnterLeave(w->Owner(), false);
         }
@@ -1145,6 +1301,7 @@ void X11::Handle(const std::string& ev) {
         const uint8_t detail = (uint8_t)ev[1], mode = (uint8_t)ev[8];
         if (!w || detail == 5 /* Pointer */ || detail == 7 /* None */ || mode == 1 /* Grab */ || mode == 2 /* Ungrab */) break;
         if (type == 10) down_.reset();
+        if (ime_ && w == imeWindow_) ime_->Focus(type == 9);  // its panel goes with the window's focus
         OnFocus(w->Owner(), type == 9);
         break;
     }
@@ -1168,9 +1325,11 @@ void X11::Handle(const std::string& ev) {
     case 22: {  // ConfigureNotify
         X11Window* w = Find(R32(ev, 8));
         if (!w) break;
-        if (ev[0] & 0x80) w->lastX = S16(ev, 16), w->lastY = S16(ev, 18);  // synthetic: root coordinates
+        if (ev[0] & 0x80) w->lastX = At(S16(ev, 16)), w->lastY = At(S16(ev, 18));  // synthetic: root coordinates, as points
+        if (w == imeWindow_) imeCaretSent_ = false;  // moved or resized: the caret's root position may have changed
         const int width = R16(ev, 20), height = R16(ev, 22);
-        OnWindowResized(w->Owner(), width, height, width, height);
+        // The server speaks pixels; the points they stand for are what the player lays out.
+        OnWindowResized(w->Owner(), Pt(width), Pt(height), width, height);
         break;
     }
     case 28: {  // PropertyNotify
@@ -1356,7 +1515,7 @@ void X11::Dnd(X11Window& w, const std::string& ev) {
     } else if (mt == Atom("XdndPosition") && source == drag_.source) {
         const uint32_t xy = R32(ev, 20);
         auto r = Reply(Send(Req(40).U32(Root()).U32(w.Id()).U16((uint16_t)(xy >> 16)).U16((uint16_t)(xy & 0xffff)).Done()));
-        if (r) drag_.x = S16(*r, 12), drag_.y = S16(*r, 14);
+        if (r) drag_.x = S16(*r, 12) / scale_, drag_.y = S16(*r, 14) / scale_;  // pixels to points
         ClientMessage(w.Id(), Atom("XdndStatus"), {w.Id(), drag_.type ? 3u : 0u, 0, 0, drag_.type ? Atom("XdndActionCopy") : 0}, source);
         FlushOut();
     } else if (mt == Atom("XdndLeave") && source == drag_.source) {
@@ -1398,20 +1557,23 @@ void X11::DndData(X11Window& w, const std::string& ev) {
 bool X11::UsableBounds(SDL_Rect& r) {
     r = {0, 0, Scr().width, Scr().height};
     auto area = GetProp(Root(), Atom("_NET_WORKAREA"));
-    if (!area || area->format != 32 || area->data.size() < 16) return true;
-    size_t desk = 0;
-    if (auto cur = GetProp(Root(), Atom("_NET_CURRENT_DESKTOP")); cur && cur->format == 32 && cur->data.size() >= 4)
-        desk = R32(cur->data, 0);
-    if ((desk + 1) * 16 > area->data.size()) desk = 0;
-    r = {(int)R32(area->data, desk * 16), (int)R32(area->data, desk * 16 + 4), (int)R32(area->data, desk * 16 + 8),
-         (int)R32(area->data, desk * 16 + 12)};
+    if (!area || area->format != 32 || area->data.size() < 16) r = {0, 0, Pt(Scr().width), Pt(Scr().height)};
+    else {
+        size_t desk = 0;
+        if (auto cur = GetProp(Root(), Atom("_NET_CURRENT_DESKTOP")); cur && cur->format == 32 && cur->data.size() >= 4)
+            desk = R32(cur->data, 0);
+        if ((desk + 1) * 16 > area->data.size()) desk = 0;
+        // The work area is in pixels; what fits on screen for the player is points.
+        r = {At((int)R32(area->data, desk * 16)), At((int)R32(area->data, desk * 16 + 4)),
+             Pt((int)R32(area->data, desk * 16 + 8)), Pt((int)R32(area->data, desk * 16 + 12))};
+    }
     return true;
 }
 
 bool X11::GlobalMouse(float& x, float& y) {
     auto r = Reply(Send(Req(38).U32(Root()).Done()));
     if (!r) return false;
-    x = S16(*r, 16), y = S16(*r, 18);
+    x = S16(*r, 16) / scale_, y = S16(*r, 18) / scale_;
     return true;
 }
 

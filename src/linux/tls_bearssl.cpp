@@ -2,6 +2,8 @@
 // declares (keys, certificate requests, certificates, server sessions over memory buffers and the ACME
 // account key) and web_remote.h's HttpFetch, the client behind every HTTPS request the player makes.
 // Certificates are checked against the system's roots (or SSL_CERT_FILE) and must name the host.
+// BearSSL stops at TLS 1.2, so a server that turns that handshake down (TLS 1.3 only, or ciphers BearSSL
+// lacks) is asked again through the system's curl, which carries the distribution's maintained TLS.
 // A key name is the path of an owner-only file (web::SaveRecords) holding the key as PKCS#8 PEM; the
 // account key's blob is its RFC 5915 DER. Both read keys OpenSSL wrote for earlier releases.
 #include "web_tls.h"
@@ -18,8 +20,11 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <poll.h>
+#include <signal.h>
+#include <spawn.h>
 #include <sys/random.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -30,7 +35,11 @@
 #include <ctime>
 #include <deque>
 #include <filesystem>
+#include <mutex>
+#include <set>
 #include <type_traits>
+
+extern char** environ;
 
 namespace web {
 namespace {
@@ -501,13 +510,35 @@ struct ClientTls {
     unsigned char buffer[BR_SSL_BUFSIZE_BIDI];
 };
 
-// One connection's bytes, plain or through TLS, with a deadline and the caller's cancel flag.
+// A handshake the server turned down over the version or cipher suites, not over its certificate.
+bool Refused(int error) {
+    return error == BR_ERR_UNSUPPORTED_VERSION || error == BR_ERR_BAD_VERSION || error == BR_ERR_BAD_CIPHER_SUITE ||
+           error == BR_ERR_RECV_FATAL_ALERT + 40 ||  // handshake_failure
+           error == BR_ERR_RECV_FATAL_ALERT + 70 ||  // protocol_version
+           error == BR_ERR_RECV_FATAL_ALERT + 71;    // insufficient_security
+}
+
+// Hosts that refused BearSSL once, so later requests go straight to curl instead of failing first.
+std::mutex curlHostsLock;
+std::set<std::string> curlHosts;
+bool ViaCurl(const std::string& host) {
+    std::lock_guard lock(curlHostsLock);
+    return curlHosts.contains(host);
+}
+
+// One connection's bytes, plain or through TLS, with a deadline and the caller's cancel flag. After
+// Curl, `fd` is curl's output instead of a server socket.
 struct Stream {
     int fd = -1;
+    pid_t child = -1;
+    bool refused = false;  // Secure failed with Refused
     std::unique_ptr<ClientTls> tls;
     uint64_t deadline = 0;
     const std::atomic<bool>* cancel = nullptr;
-    ~Stream() { if (fd >= 0) close(fd); }
+    ~Stream() {
+        if (fd >= 0) close(fd);
+        if (child > 0) { kill(child, SIGKILL); waitpid(child, nullptr, 0); }
+    }
     // Waits for the socket in short steps, so a cancel is seen within a tenth of a second.
     bool Wait(bool write) {
         for (;;) {
@@ -576,7 +607,61 @@ struct Stream {
         br_ssl_engine_set_x509(e, &tls->checker.vtable);
         // An address is checked by the checker above and is never sent as the server name (RFC 6066).
         if (!br_ssl_client_reset(&tls->client, tls->checker.ipSize ? nullptr : host.c_str(), 0)) return false;
-        return Run(BR_SSL_SENDAPP | BR_SSL_RECVAPP) == 1;
+        if (Run(BR_SSL_SENDAPP | BR_SSL_RECVAPP) == 1) return true;
+        refused = Refused(br_ssl_engine_last_error(e));
+        if (refused) { std::lock_guard lock(curlHostsLock); curlHosts.insert(host); }
+        return false;
+    }
+    // The request through the system's curl instead (see the top of the file). --raw -i writes the
+    // response as it came off the wire, so Read and the parsers above take it unchanged. `headers` are
+    // "Name: value\r\n" lines. Sockets rather than pipes carry the bytes: sending the body with
+    // MSG_NOSIGNAL can't raise SIGPIPE if curl exits first. False when curl can't be started.
+    bool Curl(const std::string& url, const char* method, const std::string& headers, const std::string& body,
+              unsigned maxSeconds) {
+        if (fd >= 0) { close(fd); fd = -1; }
+        tls.reset();
+        std::vector<std::string> args{"curl", "-s", "-i", "--raw", "--http1.1", "--suppress-connect-headers",
+                                      "--proto", "=https", "--tlsv1.2", "--connect-timeout", "8",
+                                      "-H", "Expect:", "-H", "Accept-Encoding: identity"};
+        if (!strcmp(method, "HEAD")) args.push_back("-I");
+        else args.insert(args.end(), {"-X", method});
+        if (maxSeconds) args.insert(args.end(), {"--max-time", std::to_string(maxSeconds)});
+        if (Lower(headers).find("user-agent:") == std::string::npos) args.insert(args.end(), {"-A", "cordinal"});
+        for (size_t at = 0; at < headers.size();) {
+            size_t end = std::min(headers.find("\r\n", at), headers.size());
+            if (end > at) args.insert(args.end(), {"-H", headers.substr(at, end - at)});
+            at = end + 2;
+        }
+        const bool upload = !body.empty() || !strcmp(method, "POST");
+        if (upload) args.insert(args.end(), {"--data-binary", "@-"});
+        args.insert(args.end(), {"--url", url});
+        std::vector<char*> argv;
+        for (std::string& a : args) argv.push_back(a.data());
+        argv.push_back(nullptr);
+
+        int in[2], out[2];
+        if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, in)) return false;
+        if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, out)) { close(in[0]); close(in[1]); return false; }
+        posix_spawn_file_actions_t actions;
+        posix_spawn_file_actions_init(&actions);
+        posix_spawn_file_actions_adddup2(&actions, in[1], 0);
+        posix_spawn_file_actions_adddup2(&actions, out[1], 1);
+        posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0);
+        int failed = posix_spawnp(&child, "curl", &actions, nullptr, argv.data(), environ);
+        posix_spawn_file_actions_destroy(&actions);
+        close(in[1]);
+        close(out[1]);
+        fd = out[0];
+        if (failed) { child = -1; close(in[0]); return false; }
+        fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+        bool sent = true;
+        for (std::string_view rest = upload ? std::string_view(body) : std::string_view(); sent && !rest.empty();) {
+            long n = send(in[0], rest.data(), rest.size(), MSG_NOSIGNAL);
+            if (n > 0) rest.remove_prefix((size_t)n);
+            else sent = n < 0 && errno == EINTR;
+        }
+        close(in[0]);  // the end of the body, or no body at all
+        return sent;
     }
     bool Write(std::string_view data) {
         if (!tls) {
@@ -662,26 +747,38 @@ HttpReply HttpFetch(void* session, const std::string& url, const char* method, c
     Stream stream;
     stream.deadline = ClockMs() + timeoutMs;
     stream.cancel = (const std::atomic<bool>*)session;
-    addrinfo hints{}, *list = nullptr;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_ADDRCONFIG;
-    if (getaddrinfo(host.c_str(), port.c_str(), &hints, &list) || !list) return reply;
-    bool connected = false;
-    for (const addrinfo* a = list; a && !connected; a = a->ai_next) {
-        if (stream.fd >= 0) { close(stream.fd); stream.fd = -1; }
-        connected = stream.Connect(a);
+    bool viaCurl = https && ViaCurl(host);
+    if (!viaCurl) {
+        addrinfo hints{}, *list = nullptr;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_flags = AI_ADDRCONFIG;
+        if (getaddrinfo(host.c_str(), port.c_str(), &hints, &list) || !list) return reply;
+        bool connected = false;
+        for (const addrinfo* a = list; a && !connected; a = a->ai_next) {
+            if (stream.fd >= 0) { close(stream.fd); stream.fd = -1; }
+            connected = stream.Connect(a);
+        }
+        freeaddrinfo(list);
+        if (!connected) return reply;
+        if (https && !stream.Secure(host)) {
+            if (!stream.refused) return reply;
+            viaCurl = true;
+        }
     }
-    freeaddrinfo(list);
-    if (!connected || (https && !stream.Secure(host))) return reply;
 
     const bool head = !strcmp(method, "HEAD");
-    // A caller that names itself (the metadata services ask for a contact) replaces the bare name.
-    const bool named = Lower(headers).find("user-agent:") != std::string::npos;
-    std::string request = std::string(method) + ' ' + target + " HTTP/1.1\r\nHost: " + authority + "\r\n" +
-        (named ? "" : "User-Agent: cordinal\r\n") + "Accept-Encoding: identity\r\nConnection: close\r\n" + headers;
-    if (!body.empty() || !strcmp(method, "POST")) request += "Content-Length: " + std::to_string(body.size()) + "\r\n";
-    request += "\r\n" + body;
-    if (!stream.Write(request)) return reply;
+    if (viaCurl) {
+        unsigned left = (unsigned)((stream.deadline - std::min(stream.deadline, ClockMs()) + 999) / 1000);
+        if (!stream.Curl(url, method, headers, body, std::max(1u, left))) return reply;
+    } else {
+        // A caller that names itself (the metadata services ask for a contact) replaces the bare name.
+        const bool named = Lower(headers).find("user-agent:") != std::string::npos;
+        std::string request = std::string(method) + ' ' + target + " HTTP/1.1\r\nHost: " + authority + "\r\n" +
+            (named ? "" : "User-Agent: cordinal\r\n") + "Accept-Encoding: identity\r\nConnection: close\r\n" + headers;
+        if (!body.empty() || !strcmp(method, "POST")) request += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+        request += "\r\n" + body;
+        if (!stream.Write(request)) return reply;
+    }
 
     // Read until the server closes, or until the body it announced is complete.
     std::string raw;
@@ -764,18 +861,31 @@ bool RadioHttpStream(const std::string& initial, const std::atomic<bool>& cancel
         }
         if (host.empty() || port.empty()) return false;
         Stream stream; stream.deadline = ClockMs() + 8000; stream.cancel = &cancel;
-        addrinfo hints{}, *list = nullptr; hints.ai_socktype = SOCK_STREAM; hints.ai_flags = AI_ADDRCONFIG;
-        if (getaddrinfo(host.c_str(), port.c_str(), &hints, &list) || !list) return false;
-        bool connected = false;
-        for (const auto* a = list; a && !connected && !cancel; a = a->ai_next) {
-            if (stream.fd >= 0) { close(stream.fd); stream.fd = -1; }
-            connected = stream.Connect(a);
+        bool viaCurl = secure && ViaCurl(host);
+        if (!viaCurl) {
+            addrinfo hints{}, *list = nullptr; hints.ai_socktype = SOCK_STREAM; hints.ai_flags = AI_ADDRCONFIG;
+            if (getaddrinfo(host.c_str(), port.c_str(), &hints, &list) || !list) return false;
+            bool connected = false;
+            for (const auto* a = list; a && !connected && !cancel; a = a->ai_next) {
+                if (stream.fd >= 0) { close(stream.fd); stream.fd = -1; }
+                connected = stream.Connect(a);
+            }
+            freeaddrinfo(list);
+            if (!connected) return false;
+            if (secure && !stream.Secure(host)) {
+                if (!stream.refused) return false;
+                viaCurl = true;
+            }
         }
-        freeaddrinfo(list);
-        if (!connected || (secure && !stream.Secure(host))) return false;
-        std::string request = "GET " + target + " HTTP/1.1\r\nHost: " + authority +
-            "\r\nUser-Agent: cordinal/0.1.17\r\nIcy-MetaData: 1\r\nAccept-Encoding: identity\r\nConnection: close\r\n" + requestHeaders + "\r\n";
-        if (!stream.Write(request)) return false;
+        // A live stream has no end, so curl gets no overall time limit; the reads below keep theirs.
+        if (viaCurl) {
+            if (!stream.Curl(url, "GET", "User-Agent: cordinal/0.1.18\r\nIcy-MetaData: 1\r\n" + requestHeaders, {}, 0))
+                return false;
+        } else {
+            std::string request = "GET " + target + " HTTP/1.1\r\nHost: " + authority +
+                "\r\nUser-Agent: cordinal/0.1.17\r\nIcy-MetaData: 1\r\nAccept-Encoding: identity\r\nConnection: close\r\n" + requestHeaders + "\r\n";
+            if (!stream.Write(request)) return false;
+        }
         std::string raw; size_t end = std::string::npos;
         while ((end = raw.find("\r\n\r\n")) == raw.npos) {
             if (raw.size() > 65536 || stream.Read(raw) != 1) return false;

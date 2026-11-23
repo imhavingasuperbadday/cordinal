@@ -943,6 +943,41 @@ void TestLightweightMode() {
     }
     Check(keys.Passed(), L"lightweight: the numpad's keys map as Preferences describes%ls", keys.failed.c_str());
 
+    // The watch after the trim, fed the figures a real player showed (docs/memory.md, "Lightweight
+    // mode stays trimmed"): playback's pages back at 4.8 MB, a passing allocation, startup's last work
+    // adding a megabyte, a track change's library save adding two, and the outside read of every page
+    // about two minutes in that took it to 12.9 MB.
+    batch.Next(L"lightweight: the watch trims again for growth that stays, never for playback's own pages");
+    testlog::Cases watch;
+    constexpr size_t kMb = 1 << 20;
+    auto mb = [](int tenths) { return (size_t)tenths * kMb / 10; };
+    TrimWatch w;
+    w.Trimmed(0);
+    watch.Add(!w.Sample(mb(140), 1000), L"nothing before playback's pages have settled");
+    watch.Add(!w.Sample(mb(48), 5000) && w.floor == mb(48), L"the settled figure is the floor");
+    watch.Add(!w.Sample(mb(56), 10000) && !w.Sample(mb(48), 15000), L"one sample above it is passing");
+    watch.Add(!w.Sample(mb(58), 20000) && !w.Sample(mb(58), 25000), L"growth that stays waits half a minute since the trim");
+    watch.Add(w.Sample(mb(58), 30000), L"then trims");
+    w.Trimmed(30000);
+    w.Sample(mb(32), 35000);
+    watch.Add(!w.Sample(mb(33), 60000) && w.gap == TrimWatch::kFirstGap && !w.trigger,
+              L"a trim that stays down keeps the wait short");
+    watch.Add(!w.Sample(mb(53), 240000) && w.Sample(mb(53), 245000),
+              L"a track change's one-off pages go back ten seconds later");
+    w.Trimmed(245000);
+    w.Sample(mb(52), 250000);
+    watch.Add(!w.Sample(mb(52), 275000) && w.gap == 2 * TrimWatch::kFirstGap,
+              L"pages that come straight back double the wait");
+    watch.Add(!w.Sample(mb(58), 280000) && !w.Sample(mb(58), 285000) && !w.Sample(mb(58), 300000),
+              L"a small rise inside the doubled wait is left");
+    w.Sample(mb(52), 301000);
+    watch.Add(!w.Sample(mb(129), 302000) && w.Sample(mb(129), 304000),
+              L"a jump past 4 MB trims at once, twice seen");
+    w.Trimmed(304000);
+    w.Sample(mb(50), 309000);
+    watch.Add(!w.Sample(mb(50), 334000) && w.gap == TrimWatch::kFirstGap, L"and its trim helping shortens the wait again");
+    Check(watch.Passed(), L"lightweight: the memory watch trims as described%ls", watch.failed.c_str());
+
     batch.Next(L"lightweight: Preferences has a page for it, with the defaults a background player wants");
     const Tweak* shows = FindTweak("lightweight.shows");
     const Tweak* numpad = FindTweak("lightweight.numpad");
@@ -2646,6 +2681,27 @@ void TestUiControls(const std::wstring& scratch) {
         RebuildView();
         Check(g.playlists[np].items.size() == albumTracks - 1,
               L"UI: a track removed from the playing album doesn't come back with the next rebuild");
+        // A track whose album nobody else shares (a single, a loose file) doesn't shrink Now Playing to
+        // one row: the whole list shows.
+        {
+            TrackId lone = g_lib.Add(L"C:\\ui-test\\np-lone-single.flac");
+            TagData tags;
+            tags.title = "Lone Single";
+            tags.album = "Lone Single (Single)";
+            g_lib.ApplyTags(lone, tags);
+            g_lib[lone].flags |= Track::kInLibrary;
+            g_lib.Touch();
+            g.playlists[np].items = {0, 1, 2, lone};
+            g.npCompleted = kNone;
+            g.playing = lone;
+            g.playingPl = np;
+            RebuildView();
+            Check(g.npAlbumTrack == kNone && g.view.size() == 4,
+                  L"UI: Now Playing lists everything when the playing track has no album mates (%zu rows)",
+                  g.view.size());
+            g_lib[lone].flags &= ~Track::kInLibrary;
+            g_lib.Touch();
+        }
         g.playing = kNone;
         g.playingPl = -1;
         g.npCompleted = kNone;

@@ -1,8 +1,9 @@
 // Text shaping for the Linux text stack (text.h), in place of HarfBuzz: a line is split into runs
 // by a bidi pass (UAX #9 without explicit embeddings) and by script, and each run is shaped with
 // the face's OpenType GSUB and GPOS lookups (every lookup type but GPOS cursive attachment), the
-// kern table where GPOS has no kerning, Unicode composition and mark reordering, Arabic joining
-// (with presentation forms for a font without positional lookups), mirrored characters in
+// kern table where GPOS has no kerning, Unicode composition and mark reordering, Hangul conjoining
+// jamo composed to the precomposed syllable when the face has it, Arabic joining (with
+// presentation forms for a font without positional lookups), mirrored characters in
 // right-to-left runs, Devanagari-family syllable reordering (reph, pre-base matras, half and below
 // forms), Thai and Lao SARA AM, and hidden default ignorables. Positions are in 26.6 pixels, scaled
 // the way HarfBuzz's FreeType font scales them, so widths agree with what SDL_ttf measured.

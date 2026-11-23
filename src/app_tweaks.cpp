@@ -415,11 +415,14 @@ const Tweak kTweaks[] = {
      L"waveforms wait until a window shows them.", TweakType::Bool, 0, 1, 1,
      [] { return (double)g.lightweightPause; }, [](double v) { g.lightweightPause = v != 0; }, 0,
      LightweightPreferencesChanged},
+    // Covers every mode since November 23, 2026 (app_memory.cpp); the key and page are from when only
+    // Lightweight mode trimmed, and keys are never renamed.
     {"lightweight.trim", L"Lightweight", L"TrimMemory", L"Give memory back to Windows",
-     L"A moment after Lightweight mode starts, memory cordinal no longer uses goes back to Windows, so Task Manager "
-     L"shows only what playing needs.", TweakType::Bool, 0, 1, 1,
+     L"Memory cordinal no longer uses goes back to Windows: once it has started, when it's minimized or in "
+     L"Lightweight mode, and whenever more builds up while you aren't using it, in any mode. Task Manager then "
+     L"shows what cordinal is actually using.", TweakType::Bool, 0, 1, 1,
      [] { return (double)g.lightweightTrim; }, [](double v) { g.lightweightTrim = v != 0; }, 0,
-     LightweightPreferencesChanged},
+     GiveMemoryBackSoon},  // turned on: what has built up goes now
     {"convert.recycle", L"Convert", L"Recycle", L"Send converted originals to the Recycle Bin",
      L"When Convert replaces songs, their original files go to the Recycle Bin instead of staying where they are.",
      TweakType::Bool, 0, 1, 1, [] { return (double)g.convertRecycle; }, [](double v) { g.convertRecycle = v != 0; },

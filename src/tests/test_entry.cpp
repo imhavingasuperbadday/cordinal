@@ -44,6 +44,8 @@ std::optional<int> RunTestMode(const std::vector<std::wstring>& args) {
 int wmain(int argc, wchar_t** argv) {
     RestorePackedImageProtection();
     std::vector<std::wstring> args(argv + 1, argv + argc);
+    // The suites and benchmarks measure this process's own memory; trimming it would move their figures.
+    app::AllowGivingMemoryBack(false);
     // Decode benchmarks already write UTF-8 bytes with fwrite; other diagnostics use wide I/O.
     bool byteOutput = !args.empty() && (args[0] == L"--decode-benchmark" || args[0] == L"--pipeline-benchmark");
     _setmode(_fileno(stdout), byteOutput ? _O_BINARY : _O_U8TEXT);

@@ -461,7 +461,7 @@ TrackId NowPlayingAlbumTrack() {
         g.playing >= g_lib.Count() || g.playlists.empty())
         return kNone;
     if (Active().kind != PlaylistKind::NowPlaying || !g.search.empty()) return kNone;
-    return g_lib[g.playing].album ? g.playing : kNone;
+    return AlbumHasCompany(g.playing, Active().items) ? g.playing : kNone;
 }
 
 TrackId g_npAlbumTrack = kNone;  // the track whose album the rows were narrowed to

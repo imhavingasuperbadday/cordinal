@@ -30,8 +30,22 @@ struct MemoryReport {
 // memory-budget suite and `cordinal-test --memory-report` ask the real player this way.
 constexpr unsigned long kCopyDataMemoryReport = 0x43444D52;  // 'CDMR'
 
-// Walks the address space and the working set; a few milliseconds, safe on any thread.
+// Walks the address space and the working set; a few milliseconds, safe on any thread. Walking the
+// heaps reads a header on every page that holds a block, so the report pages the whole heap back in
+// and raises the figure it reports; Help > About uses TakeMemoryFigures instead.
 MemoryReport TakeMemoryReport();
+
+// Task Manager's figure and the program's share, from the system's counters and the working-set
+// list alone: nothing of the process is read, so asking leaves the figure as it was.
+struct MemoryFigures {
+    size_t privateWorkingSet = 0;
+    size_t program = 0;
+};
+MemoryFigures TakeMemoryFigures();
+// Task Manager's figure alone, in one system call. Before PROCESS_MEMORY_COUNTERS_EX2 (older
+// Windows 10) Windows has no private figure, so this is the whole working set there: still fine
+// for spotting growth, which is what Lightweight mode's watch uses it for.
+size_t PrivateWorkingSetNow();
 std::wstring FormatMemoryReport(const MemoryReport& report);
 // Writes the report to a new file (never replacing one); false when the file exists or fails.
 bool WriteMemoryReport(const std::wstring& path);

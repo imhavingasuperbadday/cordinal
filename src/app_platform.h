@@ -4,6 +4,7 @@
 // messages are routed through OnPlatformMessage.
 #pragma once
 #include "app_state.h"
+#include "trimwatch.h"
 
 namespace app {
 
@@ -75,8 +76,12 @@ bool LightweightPausesWork();   // on, with background library work paused
 void LightweightWindowShown();
 void LightweightSizeChanged(ViewSize size);
 void LightweightPreferencesChanged();
-bool LightweightTimer(UINT_PTR id);
 void LightweightMiniChanged();  // the mini player opened or closed
+
+// Giving memory back to Windows (app_memory.cpp), on TrimWatch's schedule (trimwatch.h).
+void MemoryTick();             // from MainTick: the first trim once startup is done, then the watch
+void GiveMemoryBackSoon();     // a trim in two seconds: the window was minimized or put away
+void AllowGivingMemoryBack(bool allow);  // the test companion measures its own memory, so it says no
 // The keymap numpad index (keymap.h) a key press is under a LightweightNumpad mode, -1 for none;
 // `extended` is the keyboard's flag that tells the arrow-key block from the numpad with Num Lock off.
 int NumpadKeyIndex(DWORD vk, bool extended, int mode);

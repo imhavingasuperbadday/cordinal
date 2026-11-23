@@ -151,18 +151,24 @@ std::wstring Printable(const std::wstring& s) {
 void DrawLineField(TextField& t, const Rect& r, bool focused, bool enabled, const char* cue, const Palette& p) {
     Fill(r, enabled ? p.surface2 : p.surface);
     Frame(r, focused ? p.accent : p.border);
-    const float pad = S(5), lineH = LineHeight(Font::Normal);
+    const float pad = S(5);
     SDL_Rect clip{(int)(r.x + S(2)), (int)(r.y + S(1)), (int)(r.w - S(4)), (int)(r.h - S(2))};
     SDL_SetRenderClipRect(g.renderer, &clip);
+    // Only the focused field shows the input method's composition; every other field is drawn as it is.
+    const std::string& preedit = focused ? g_preedit : std::string();
     if (t.text.empty() && !focused && cue) DrawText(Font::Normal, cue, r.x + pad, TextY(r), p.faint);
-    const std::string all = Utf8(t.text);
-    const float caretX = TextWidth(Font::Normal, Utf8(t.text.substr(0, t.caret))), room = r.w - 2 * pad;
+    // The text with the composition inserted at the field's caret.
+    std::string before = Utf8(t.text.substr(0, t.caret)), after = Utf8(t.text.substr(t.caret));
+    const size_t preeditAt = before.size();
+    std::string all = before + preedit + after;
+    // The caret sits at the composition's cursor, on whichever side the text's direction puts it.
+    const float caretX = CaretX(Font::Normal, all, preeditAt + (preedit.empty() ? 0 : g_preeditCursor)), room = r.w - 2 * pad;
     if (caretX - t.scrollX > room) t.scrollX = caretX - room;
     if (caretX < t.scrollX) t.scrollX = caretX;
     const float tx = r.x + pad - t.scrollX, ty = TextY(r);
-    if (focused && t.all) Fill({tx, r.y + S(3), TextWidth(Font::Normal, all), r.h - S(6)}, p.select);
-    DrawText(Font::Normal, all, tx, ty, focused && t.all ? p.selectText : p.text);
-    if (focused && enabled && SDL_GetTicks() % 1060 < 530) Fill({std::round(tx + caretX), ty, S(1), lineH}, p.text);
+    if (focused && t.all && preedit.empty()) Fill({tx, r.y + S(3), TextWidth(Font::Normal, all), r.h - S(6)}, p.select);
+    DrawText(Font::Normal, all, tx, ty, focused && t.all && preedit.empty() ? p.selectText : p.text);
+    if (focused && enabled) DrawComposition(all, preeditAt, tx, ty, r.x + S(2), r.R() - S(3), p.accent, p.text);
     SDL_SetRenderClipRect(g.renderer, nullptr);
 }
 
@@ -263,6 +269,22 @@ const Ops* OpenOps() { return kOps[(size_t)g_kind]; }
 
 namespace lx {
 using namespace panel;
+
+float DrawComposition(const std::string& shown, size_t caret, float tx, float ty, float minX, float maxX, uint32_t underline,
+                      uint32_t caretColor) {
+    const float lineH = LineHeight(Font::Normal);
+    if (!g_preedit.empty()) {  // underlined where it sits in the drawn line, whichever way the line reads
+        float x0 = tx + CaretX(Font::Normal, shown, caret), x1 = tx + CaretX(Font::Normal, shown, caret + g_preedit.size());
+        if (x1 < x0) std::swap(x0, x1);
+        Fill({x0, ty + lineH - S(2), std::max(1.0f, x1 - x0), std::max(1.0f, S(1))}, underline);
+    }
+    const size_t at = caret + (g_preedit.empty() ? 0 : (size_t)g_preeditCursor);
+    const float cx = std::clamp(std::round(tx + CaretX(Font::Normal, shown, at)), minX, std::max(minX, maxX));
+    if (SDL_GetTicks() % 1060 < 530 || !g_preedit.empty()) Fill({cx, ty, std::max(1.0f, S(1)), lineH}, caretColor);
+    SDL_Rect area{(int)cx, (int)ty, 1, (int)lineH};  // where the input method puts its candidates
+    SDL_SetTextInputArea(g.window, &area);
+    return cx;
+}
 
 // The dimmed window behind a dialog, and the dialog's own surface, centered.
 Rect DrawFrame(const Palette& p, float w, float h, const char* title) {

@@ -350,13 +350,13 @@ int FindPlaylist(PlaylistKind kind) {
 }
 
 // The playing track, when Now Playing lists only its album: Now Playing is open and holds what
-// plays, the track has an album tag, no search is typed and Preferences leaves it on. Otherwise
-// kNone, and the whole list shows.
+// plays, the track has an album tag shared with another track, no search is typed and Preferences
+// leaves it on. Otherwise kNone, and the whole list shows.
 TrackId NowPlayingAlbumTrack() {
     if (!g.npAlbumOnly || ApolloMode() || g.playing == kNone || g.playing >= g_lib.Count() || g.playlists.empty())
         return kNone;
     if (Active().kind != PlaylistKind::NowPlaying || g.active != g.playingPl || !g.filter.empty()) return kNone;
-    return g_lib[g.playing].album ? g.playing : kNone;
+    return AlbumHasCompany(g.playing, Active().items) ? g.playing : kNone;
 }
 
 // Playback moved to another album, stopped, or started: Now Playing's list follows.

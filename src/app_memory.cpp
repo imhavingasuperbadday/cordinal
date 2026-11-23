@@ -4,11 +4,76 @@
 // write can retain one. Work that can leave records unreferenced (an import, a cleared or closed
 // playlist, tags read again) sets g.compactPending, and the next idle tick that finds nothing busy
 // compacts.
+//
+// Also gives memory back to Windows (TrimWatch, app_platform.h): once startup's work is done, two
+// seconds after the window is minimized or put away, and whenever the watch sees memory stay above
+// what the player settled at. Never while someone is using a cordinal window, so a scroll or a drag
+// doesn't fault its pages back in mid-gesture. Pages still in use come straight back from the
+// standby list, so playback and the window don't notice.
 #include "app.h"
+#include "memory_report.h"
 #include "playlog.h"
 #include "taste.h"
 
 namespace app {
+
+namespace {
+struct GivingBack {
+    bool allowed = true;
+    bool first = true;          // startup's trim hasn't happened yet
+    ULONGLONG started = 0, sampled = 0, due = 0;
+    TrimWatch watch;
+} gb;
+
+constexpr ULONGLONG kStartupSettle = 20000;  // the window, library load and first save are done by then
+constexpr ULONGLONG kSoon = 2000, kWatchTick = 5000;
+constexpr DWORD kQuiet = 10000;              // no input this long: nobody is using the window
+
+// A cordinal window has the keyboard and was used just now.
+bool InUse() {
+    DWORD pid = 0;
+    HWND front = GetForegroundWindow();
+    if (!front || !GetWindowThreadProcessId(front, &pid) || pid != GetCurrentProcessId()) return false;
+    LASTINPUTINFO last{sizeof(last)};
+    return GetLastInputInfo(&last) && GetTickCount() - last.dwTime < kQuiet;
+}
+
+void GiveBack() {
+    HeapCompact(GetProcessHeap(), 0);
+    SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
+    gb.watch.Trimmed(GetTickCount64());
+    gb.first = false;
+    gb.due = 0;
+}
+}  // namespace
+
+void AllowGivingMemoryBack(bool allow) { gb.allowed = allow; }
+
+void GiveMemoryBackSoon() {
+    if (gb.allowed && g.lightweightTrim) gb.due = GetTickCount64() + kSoon;
+}
+
+void MemoryTick() {
+    if (!gb.allowed || !g.lightweightTrim || g.closing) return;
+    const ULONGLONG now = GetTickCount64();
+    if (!gb.started) gb.started = now;
+    if (gb.due) {
+        if (now >= gb.due && !InUse()) GiveBack();
+        return;
+    }
+    if (now - gb.sampled < kWatchTick) return;
+    gb.sampled = now;
+    // Startup's own pages (the unpacked program, the library load, the first scan) are most of
+    // what a fresh start holds and are never touched again; the scan's leftovers go at its end.
+    if (gb.first) {
+        if (now - gb.started >= kStartupSettle && !g.scanner.Busy() && !ScanInProgress() && !g.importRunning &&
+            !InUse())
+            GiveBack();
+        return;
+    }
+    // The figure is one system call that reads none of the process's pages.
+    if (gb.watch.Sample(PrivateWorkingSetNow(), now) && !InUse()) GiveBack();
+}
 
 bool ReducedMemoryMode() { return g.size == ViewSize::Compact || MiniPlayerWindow() || g.lightweight; }
 

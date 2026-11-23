@@ -66,6 +66,9 @@ float g_muteVolume = 0;   // the volume before Mute, 0 while not muted
 TrackId g_sectionMenuTrack = kNone;
 double g_sectionMenuPos = 0;
 TrackDrag g_trackDrag;
+// An input method's composing text in the focused field, and its cursor's byte range in it.
+std::string g_preedit;
+int g_preeditCursor = 0, g_preeditLen = 0;
 
 // --- album groups ------------------------------------------------------------------------------------
 // Consecutive tracks of one album (two or more) under a two-row header, as on Windows
@@ -135,7 +138,7 @@ uint64_t g_visualAt = 0;
 // clicked (with sound effects on or off), what cordinal is, and what it is using now.
 AboutBox g_about;
 
-std::map<std::string, SDL_Texture*> g_radioArt;  // radio station icons by URL
+std::map<std::pair<std::string, int>, SDL_Texture*> g_radioArt;  // radio icons by URL and pixel size
 
 // --- public ------------------------------------------------------------------------------------------------
 namespace {
@@ -345,6 +348,8 @@ bool SetGpuDrawing(bool enabled) {
 void OnScaleChanged() {
     g.scale = SDL_GetWindowDisplayScale(g.window);
     if (g.scale <= 0) g.scale = 1;
+    // Icons are keyed by pixel size: the ones from the old scale would stay in memory unused.
+    ReleaseIconTextures();
     ApplyTheme();
 }
 
@@ -446,6 +451,10 @@ void Render() {
 // The live seek bar's 60 Hz frame: the rest of the software backbuffer is still the last full frame,
 // so copy just this rectangle to the window instead of letting SDL update all of it.
 void RenderSeek() {
+    if (!SDL_WindowFrameKept(g.window)) {  // the window's pixels were given back: the whole frame, once
+        Render();
+        return;
+    }
     SDL_SetRenderClipRect(g.renderer, nullptr);
     DrawLiveSeek(CurrentPalette());
 #if SDL_VERSION_ATLEAST(3, 1, 3)
@@ -479,12 +488,14 @@ void HandleEvent(const SDL_Event& e) {
         case SDL_EVENT_KEY_DOWN: Key(e.key); break;
         case SDL_EVENT_KEY_UP: KeyUp(e.key); break;
         case SDL_EVENT_TEXT_INPUT: TextInput(e.text); break;
+        case SDL_EVENT_TEXT_EDITING: TextEditing(e.editing); break;
         case SDL_EVENT_WINDOW_MOUSE_LEAVE:
             g_mouseX = g_mouseY = -1;
             g.redraw = true;
             break;
         case SDL_EVENT_WINDOW_FOCUS_LOST:
             CloseMenus();
+            GiveMemoryBackSoon();  // put away for another program; Wayland doesn't say when it's minimized
             break;
         case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED: OnScaleChanged(); break;
         case SDL_EVENT_WINDOW_RESIZED:

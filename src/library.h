@@ -336,6 +336,10 @@ inline bool SameAlbum(const Track& a, const Track& b) {
 // slot `after` so they play next, or behind the album's last track in the list when `after` is -1 or out
 // of range. Returns how many were added; `oldToNew` then maps every old slot to its new one.
 size_t CompleteAlbumInList(std::vector<TrackId>& items, TrackId playing, int after, std::vector<uint32_t>& oldToNew);
+// Whether `playing` has an album to narrow Now Playing to: an album tag and at least one other track
+// (in `items` or the library) in it. A lone single, or a loose track tagged with an album nobody else
+// shares, would otherwise shrink Now Playing to that one row, so the whole list shows instead.
+bool AlbumHasCompany(TrackId playing, const std::vector<TrackId>& items);
 // The search box's "missing:<field>" terms (Library > Find missing information): a track matches
 // when that tag is empty, so the gaps can be listed and then filled in with Edit tags. "any" means
 // any of title, artist, album, year, genre or track number.

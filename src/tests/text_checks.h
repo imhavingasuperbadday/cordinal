@@ -101,6 +101,43 @@ inline std::string BoxFont(const std::string& family) {
     return fontmatch_checks::Sfnt(t);
 }
 
+// A box face over arbitrary code points: one glyph per entry, in the order given (its glyph id is
+// 1 + the number of entries before it), each with its own box. No GSUB, so scripts that fall back
+// without positional lookups (Arabic's presentation forms) take that path.
+inline std::string GlyphFont(const std::string& family, const std::vector<std::pair<uint32_t, Box>>& entries) {
+    fontmatch_checks::Spec spec;
+    spec.family = family;
+    spec.glyphs = (uint16_t)(entries.size() + 1);
+    std::vector<Box> boxes{{0, 0, 0, 0, 500}};  // .notdef
+    std::string glyf, loca, hmtx;
+    Put16(loca, 0);
+    Put16(hmtx, 500), Put16(hmtx, 0);
+    for (const auto& [cp, b] : entries) {
+        spec.bmp.push_back({cp, cp});  // one range each, so ids follow the entry order
+        boxes.push_back(b);
+        Put16(loca, (uint32_t)glyf.size() / 2);
+        if (b.x1 > b.x0) glyf += SimpleGlyph(b);
+        Put16(hmtx, (uint32_t)b.advance), Put16(hmtx, (uint32_t)b.x0);
+    }
+    Put16(loca, (uint32_t)glyf.size() / 2);
+    auto t = fontmatch_checks::Tables(spec);
+    t["glyf"] = glyf, t["loca"] = loca, t["hmtx"] = hmtx;
+    t["hhea"].resize(4), Put16(t["hhea"], 800), Put16(t["hhea"], (uint16_t)(int16_t)-200);
+    t["hhea"].resize(34), Put16(t["hhea"], (uint32_t)boxes.size());
+    t["maxp"] = t["maxp"].substr(0, 4), Put16(t["maxp"], (uint32_t)boxes.size());
+    return fontmatch_checks::Sfnt(t);
+}
+
+// A code point as UTF-8, for the check strings.
+inline std::string Cp(uint32_t cp) {
+    std::string out;
+    if (cp < 0x80) out += (char)cp;
+    else if (cp < 0x800) out += {(char)(0xC0 | cp >> 6), (char)(0x80 | cp & 0x3F)};
+    else if (cp < 0x10000) out += {(char)(0xE0 | cp >> 12), (char)(0x80 | (cp >> 6) & 0x3F), (char)(0x80 | cp & 0x3F)};
+    else out += {(char)(0xF0 | cp >> 18), (char)(0x80 | (cp >> 12) & 0x3F), (char)(0x80 | (cp >> 6) & 0x3F), (char)(0x80 | cp & 0x3F)};
+    return out;
+}
+
 inline type::FontData Bytes(const std::string& s) { return type::FromBytes(std::make_shared<const std::string>(s)); }
 
 inline int32_t Scale(int px, int upem) { return type::DivFix(px * 64, upem); }
@@ -236,6 +273,82 @@ inline int Check(const char* dirArg, int extraCount, char** extra) {
     size_t len = 0;
     font->Measure("BBAA", 13, &w, &len);  // B, B kerned to A, A, A
     check(len == 2 && w == 12, "measuring stops before the first glyph that doesn't fit");
+
+    // ---- Carets: the pen at a byte offset, whichever way the line reads ----
+    check(font->CaretX("AA", 1) == 7 && font->CaretX("AA", 2) == 14 && font->CaretX("AA", 0) == 0,
+          "a left-to-right caret sits after the glyphs of its prefix");
+
+    // ---- Hangul: conjoining jamo compose the syllable the face has ----
+    {
+        const Box s1{0, 0, 500, 700, 500}, s2{0, 0, 600, 700, 600};
+        std::string bytes = GlyphFont("Hangul Box", {{0xAC00, s1}, {0xAC01, s2},
+                                                     {0x1100, {0, 0, 200, 700, 200}}, {0x1161, {0, 0, 300, 700, 300}},
+                                                     {0x11A8, {0, 0, 400, 700, 400}}});
+        auto hangul = type::Font::Open(Bytes(bytes), 0, 10);
+        auto jamoOnly = type::Font::Open(Bytes(GlyphFont("Jamo Box", {{0x1100, {0, 0, 200, 700, 200}},
+                                                                     {0x1161, {0, 0, 300, 700, 300}},
+                                                                     {0x11A8, {0, 0, 400, 700, 400}}})), 0, 10);
+        if (hangul && jamoOnly) {
+            auto g = [&](uint32_t cp) { return hangul->GetFace().GlyphIndex(cp); };
+            const auto& lv = hangul->Layout(Cp(0x1100) + Cp(0x1161));
+            check(lv.glyphs.size() == 1 && lv.glyphs[0].glyph == g(0xAC00),
+                  "a leading and a vowel jamo compose the syllable the face has");
+            const auto& lvt = hangul->Layout(Cp(0x1100) + Cp(0x1161) + Cp(0x11A8));
+            check(lvt.glyphs.size() == 1 && lvt.glyphs[0].glyph == g(0xAC01),
+                  "a trailing jamo joins the composed syllable");
+            const auto& lvT = hangul->Layout(Cp(0xAC00) + Cp(0x11A8));
+            check(lvT.glyphs.size() == 1 && lvT.glyphs[0].glyph == g(0xAC01),
+                  "a precomposed syllable takes its trailing jamo the same way");
+            const auto& plain = hangul->Layout(Cp(0xAC00));
+            check(plain.glyphs.size() == 1 && plain.glyphs[0].glyph == g(0xAC00), "a plain syllable stays one glyph");
+            const auto& unjoined = jamoOnly->Layout(Cp(0x1100) + Cp(0x1161) + Cp(0x11A8));
+            check(unjoined.glyphs.size() == 3 && unjoined.glyphs[0].glyph == jamoOnly->GetFace().GlyphIndex(0x1100) &&
+                      unjoined.glyphs[2].glyph == jamoOnly->GetFace().GlyphIndex(0x11A8),
+                  "a face with only jamo keeps them, as HarfBuzz leaves what it cannot compose");
+        }
+    }
+
+    // ---- Arabic: the presentation forms a face without positional lookups takes ----
+    {
+        const Box base{0, 0, 500, 700, 500};
+        std::string bytes = GlyphFont("Arabic Box", {{0x0644, base}, {0x0645, base}, {0x0627, base}, {0x0633, base},
+                                                     {0x064E, base},  // a mark: joining-transparent
+                                                     {0xFEDF, {0, 0, 500, 700, 500}}, {0xFEE0, {0, 0, 600, 700, 600}},
+                                                     {0xFEB1, {0, 0, 700, 700, 700}}, {0xFEB2, {0, 0, 800, 700, 800}},
+                                                     {0xFEE4, {0, 0, 500, 700, 500}}, {0xFEE2, {0, 0, 600, 700, 600}},
+                                                     {0xFEFB, {0, 0, 500, 700, 500}}, {0xFEFC, {0, 0, 600, 700, 600}}});
+        auto arabic = type::Font::Open(Bytes(bytes), 0, 10);
+        if (arabic) {
+            auto g = [&](uint32_t cp) { return arabic->GetFace().GlyphIndex(cp); };
+            const auto& la = arabic->Layout(Cp(0x0644) + Cp(0x0627));
+            check(la.rtl && la.glyphs.size() == 1 && la.glyphs[0].glyph == g(0xFEFB),
+                  "lam-alef becomes its isolated presentation ligature when nothing joins before");
+            // lam, meem, lam, alef, seen: seen must keep its own isolated form even after the
+            // ligature before it removed a letter from the buffer.
+            const auto& mixed = arabic->Layout(Cp(0x0644) + Cp(0x0645) + Cp(0x0644) + Cp(0x0627) + Cp(0x0633));
+            check(mixed.glyphs.size() == 4 && mixed.glyphs[0].glyph == g(0xFEB1) && mixed.glyphs[1].glyph == g(0xFEFC) &&
+                      mixed.glyphs[2].glyph == g(0xFEE4) && mixed.glyphs[3].glyph == g(0xFEDF),
+                  "every letter after a lam-alef ligature still takes its own form");
+            // The mark between lam and alef is transparent to the ligature, as HarfBuzz's lookup
+            // ignores marks, and stays a glyph of its own.
+            const auto& marked = arabic->Layout(Cp(0x0644) + Cp(0x064E) + Cp(0x0627));
+            check(marked.glyphs.size() == 2 && marked.glyphs[0].glyph == g(0x064E) && marked.glyphs[1].glyph == g(0xFEFB),
+                  "a mark between lam and alef neither blocks the ligature nor disappears");
+            // A caret at either end of a right-to-left line sits on the edge it belongs to.
+            const std::string word = Cp(0x0644) + Cp(0x0645);
+            check(arabic->CaretX(word, 0) == arabic->Width(word) && arabic->CaretX(word, word.size()) == 0,
+                  "a right-to-left caret starts at the right edge and ends at the left");
+        }
+    }
+
+    // ---- Japanese: kana and kanji are runs of their own scripts ----
+    {
+        std::vector<uint32_t> text{0x3042, 0x6F22, 0x3044};  // あ漢い
+        bool rtl = false;
+        auto runs = type::Itemize(text, &rtl);
+        check(!rtl && runs.size() == 3 && runs[0].script == 0x48697261u /* Hira */ && runs[1].script == 0x48616E69u /* Hani */,
+              "hiragana, kanji and hiragana shape as three runs, each under its own script");
+    }
     font->SetBold(true);
     check(font->Width("A") == 8 && font->Image(1).width == 6, "synthetic bold widens each glyph and advance by the overhang");
     font->SetBold(false);

@@ -1179,6 +1179,7 @@ void OnEngineEvent(EngineEvent e, unsigned long long token) {
             MprisChanged();
             FlushDeferredTags();
             MaybeAutoMeasure(true);
+            MemoryTrackStarted();
             break;
         case EngineEvent::Damaged: {
             std::wstring msg = g.engine.TakeError(token);

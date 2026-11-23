@@ -83,7 +83,7 @@ constexpr unsigned kConvertMemoryDays[] = {1, 3, 7, 49};
 // for Seek/SetPosition, 0..1000000 for SetVolume, 0/1 for SetShuffle, a Repeat for SetRepeat,
 // a std::vector<std::wstring>* for Open).
 enum class Remote : WPARAM {
-    PlayPause = 1, Play, Pause, Stop, Next, Previous, Raise, Quit, Seek, SetPosition, SetVolume, SetShuffle, SetRepeat, Open,
+    PlayPause = 1, Play, Pause, Stop, Next, Previous, Raise, Quit, Seek, SetPosition, SetVolume, SetShuffle, SetRepeat, SetRate, Open,
     ToggleStartOnLogin, ToggleLightweight, PickSong
 };
 enum class Repeat : int { Off, All, One };
@@ -606,6 +606,18 @@ void LeaveMini();
 bool MiniEvent(const SDL_Event& e);
 // The window's smallest size for its view size; leaving the mini player sets it again.
 void ApplyWindowMinimum();
+
+// Giving memory back to the system (memory.cpp), as the Windows build's app_memory.cpp: on
+// TrimWatch's schedule (trimwatch.h), when Preferences > Give memory back to the system is on.
+void MemoryTick();          // from the main loop's quarter-second tick
+void GiveMemoryBackSoon();  // a trim in two seconds: the window was put away
+void MemoryTrackStarted();  // a trim once the song's one-off work (opening it, its cover) is done
+void GiveMemoryBack();      // now: the allocator's free pages and DropCleanFilePages
+// Unmaps the resident pages of read-only file mappings no one wrote to (the program's code, fonts):
+// clean copies of files still in the page cache. Returns the bytes dropped.
+size_t DropCleanFilePages();
+size_t ResidentBytes();     // anonymous and file pages, without shared memory (the window's pixels)
+void PrepareCodeProfile();  // at start, for linux/code-profile.sh (CORDINAL_CODE_PROFILE)
 
 // Lightweight mode (lightweight.cpp, View > Lightweight mode, Ctrl+Shift+L), as the Windows build's
 // app_lightweight.cpp: playing in the background with the window put away.

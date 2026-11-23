@@ -71,6 +71,17 @@ extern bool g_altAlone;
 extern float g_muteVolume;
 extern TrackId g_sectionMenuTrack;
 extern double g_sectionMenuPos;
+// An input method's composing text in the focused field (UTF-8), with its cursor's byte range
+// (ui_input.cpp's TextEditing sets it; drawing shows it inline until the text commits).
+extern std::string g_preedit;
+extern int g_preeditCursor, g_preeditLen;
+// The marks of the focused one-line field whose drawn text `shown` (UTF-8, drawn at tx, ty) holds
+// the input method's composition (g_preedit) at byte offset `caret`, the field's own caret: the
+// composition underlined, the caret at the composition's cursor (blinking only when there is no
+// composition), kept within minX..maxX, and the input method told where it is for its candidates.
+// Returns the caret's x.
+float DrawComposition(const std::string& shown, size_t caret, float tx, float ty, float minX, float maxX, uint32_t underline,
+                      uint32_t caretColor);
 struct TrackDrag {
     bool pending = false, collapseOnClick = false;
     float x = 0, y = 0;
@@ -268,7 +279,7 @@ struct AboutBox {
 };
 extern AboutBox g_about;
 // Radio station icons by URL, kept for the life of the window.
-extern std::map<std::string, SDL_Texture*> g_radioArt;
+extern std::map<std::pair<std::string, int>, SDL_Texture*> g_radioArt;
 
 // The transport glyphs Windows draws from Segoe MDL2 Assets (and the speaker, from Segoe UI Symbol),
 // as Fluent UI System Icons at the Windows glyph size, centred in `r`.
@@ -475,6 +486,7 @@ void MenuKey(SDL_Keycode key);
 void Key(const SDL_KeyboardEvent& e);
 void KeyUp(const SDL_KeyboardEvent& e);
 void TextInput(const SDL_TextInputEvent& e);
+void TextEditing(const SDL_TextEditingEvent& e);
 void Draw();
 std::vector<PaletteCommand> MenuCommands();
 void RunMenuCommand(size_t index);

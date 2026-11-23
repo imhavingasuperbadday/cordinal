@@ -1,6 +1,6 @@
 // The shaper (shaper.h): Unicode properties and the bidi pass, the OpenType layout engine over
 // GSUB, GPOS and GDEF, and the script-specific steps HarfBuzz's shapers take for Arabic,
-// Devanagari and its relatives, Thai and Lao.
+// Devanagari and its relatives, Thai and Lao, and Hangul's jamo-to-syllable composition.
 #include "shaper.h"
 
 #include <algorithm>
@@ -94,8 +94,11 @@ bool IsDefaultIgnorable(uint32_t ch) { return Props(ch) & 32; }
 bool IsMark(uint32_t ch) { return MarkKind(ch) != 0; }
 bool IsEmojiPresentation(uint32_t ch) { return Props(ch) & 64; }
 bool JoinsGraphemes(uint32_t ch) {
+    // Conjoining jamo and the halfwidth kana voiced marks continue a grapheme too, as HarfBuzz
+    // merges them, so a caret or a font-fallback span can't split a syllable or a kana.
     return IsMark(ch) || ch == 0x200D || (ch >= 0xFE00 && ch <= 0xFE0F) || (ch >= 0xE0100 && ch <= 0xE01EF) ||
-           (ch >= 0x1F3FB && ch <= 0x1F3FF) || (ch >= 0xE0020 && ch <= 0xE007F);
+           (ch >= 0x1F3FB && ch <= 0x1F3FF) || (ch >= 0xE0020 && ch <= 0xE007F) ||
+           (ch >= 0x1161 && ch <= 0x1175) || (ch >= 0x11A8 && ch <= 0x11C2) || ch == 0xFF9E || ch == 0xFF9F;
 }
 
 // ---- Bidi and script runs ----------------------------------------------------------------------
@@ -257,12 +260,12 @@ std::vector<Run> Itemize(const std::vector<uint32_t>& text, bool* rtlParagraph, 
         if (scripts[i] == kScZyyy) scripts[i] = next;
         else next = scripts[i];
     }
-    // Hiragana, Katakana and Han share a run, as CJK text mixes them.
-    auto group = [](uint8_t s) { return (s == kScHira || s == kScKana) ? kScHani : s; };
+    // Scripts split as Unicode says, so each run is shaped under its own writing system's lookups:
+    // kana and kanji read different GSUB language systems in one Japanese line, as in HarfBuzz.
     std::vector<Run> runs;
     for (size_t i = 0; i < n;) {
         size_t j = i + 1;
-        while (j < n && levels[j] == levels[i] && group(scripts[j]) == group(scripts[i])) ++j;
+        while (j < n && levels[j] == levels[i] && scripts[j] == scripts[i]) ++j;
         Run r;
         r.start = i, r.end = j, r.level = levels[i];
         const char* c = kScriptCodes[scripts[i]];
@@ -424,7 +427,9 @@ struct Table {
             lookups.push_back(std::move(lk));
         }
     }
-    // The script's default language system, trying `tags` then DFLT, dflt and latn.
+    // The script's default language system, trying `tags` then DFLT, dflt and latn. A script whose
+    // default is empty is skipped, as HarfBuzz skips it for the next tag: the first language's
+    // lookups would apply another language's forms to every run of that script.
     Bytes LangSys(const std::vector<uint32_t>& tags) const {
         Bytes scripts = At(t, 4);
         uint16_t count = scripts.U16(0);
@@ -433,10 +438,8 @@ struct Table {
         for (uint32_t tag : want)
             for (uint16_t i = 0; i < count; ++i)
                 if (scripts.U32(2 + (size_t)i * 6) == tag) {
-                    Bytes s = scripts.Sub(scripts.U16(2 + (size_t)i * 6 + 4));
-                    Bytes lang = At(s, 0);
+                    Bytes lang = At(scripts.Sub(scripts.U16(2 + (size_t)i * 6 + 4)), 0);
                     if (!lang.Empty()) return lang;
-                    if (s.U16(2)) return s.Sub(s.U16(4 + 4));  // no default: the first language
                 }
         return {};
     }
@@ -1262,7 +1265,7 @@ void ArabicJoining(std::vector<Info>& buf, std::vector<uint8_t>* forms) {
 }
 
 // A font without positional lookups: the presentation forms its cmap maps instead.
-void ArabicFallback(const Face& face, std::vector<Info>& buf, const std::vector<uint8_t>& forms) {
+void ArabicFallback(const Face& face, std::vector<Info>& buf, std::vector<uint8_t>& forms) {
     auto formOf = [](uint32_t cp, int form) -> uint32_t {
         size_t count = sizeof(kArabicForms) / sizeof(kArabicForms[0]) / 5;
         size_t lo = 0, hi = count;
@@ -1276,20 +1279,28 @@ void ArabicFallback(const Face& face, std::vector<Info>& buf, const std::vector<
         return kArabicForms[lo * 5 + column];
     };
     for (size_t i = 0; i < buf.size(); ++i) {
-        // Lam with a following alef becomes one of the lam-alef ligatures.
-        if (buf[i].cp == 0x0644 && i + 1 < buf.size()) {
-            static const uint32_t kAlef[] = {0x0622, 0x0623, 0x0625, 0x0627};
-            static const uint32_t kLig[] = {0xFEF5, 0xFEF7, 0xFEF9, 0xFEFB};
-            for (int a = 0; a < 4; ++a)
-                if (buf[i + 1].cp == kAlef[a]) {
-                    uint32_t lig = kLig[a] + ((forms[i] == kFina || forms[i] == kMedi) ? 1 : 0);
-                    if (uint16_t g = face.GlyphIndex(lig)) {
-                        buf[i].glyph = g;
-                        buf[i + 1].cluster = buf[i].cluster;
-                        buf.erase(buf.begin() + i + 1);
-                        goto next;
+        // Lam with a following alef becomes one of the lam-alef ligatures, ignoring whatever
+        // transparent characters (marks) stand between them, as HarfBuzz's own lookup does.
+        if (buf[i].cp == 0x0644) {
+            size_t j = i + 1;
+            while (j < buf.size() && Joining(buf[j].cp) == 5) ++j;
+            if (j < buf.size()) {
+                static const uint32_t kAlef[] = {0x0622, 0x0623, 0x0625, 0x0627};
+                static const uint32_t kLig[] = {0xFEF5, 0xFEF7, 0xFEF9, 0xFEFB};
+                for (int a = 0; a < 4; ++a)
+                    if (buf[j].cp == kAlef[a]) {
+                        uint32_t lig = kLig[a] + ((forms[i] == kFina || forms[i] == kMedi) ? 1 : 0);
+                        if (uint16_t g = face.GlyphIndex(lig)) {
+                            buf[i].glyph = g;
+                            buf[j].cluster = buf[i].cluster;
+                            // `forms` indexes the buffer: it loses the same element or every
+                            // letter after the ligature takes the previous letter's form.
+                            forms.erase(forms.begin() + j);
+                            buf.erase(buf.begin() + j);
+                            goto next;
+                        }
                     }
-                }
+            }
         }
         if (forms[i] != kNoForm)
             if (uint32_t f = formOf(buf[i].cp, forms[i]))
@@ -1451,6 +1462,35 @@ struct Shaping {
                 ++j;
             }
         }
+        if (plan.kind == Shaper::Plan::kHangul) ComposeHangul();
+    }
+
+    // Conjoining jamo become the precomposed syllable when the font has it, as HarfBuzz
+    // preprocesses Hangul; a font with only jamo keeps them, and the decompose pass above
+    // has already split syllables a jamo-only font needs split.
+    void ComposeHangul() {
+        auto isT = [](uint32_t cp) { return cp >= 0x11A8 && cp <= 0x11C2; };
+        std::vector<Info> out;
+        out.reserve(buf.size());
+        for (size_t i = 0; i < buf.size();) {
+            uint32_t cp = buf[i].cp, s = 0;
+            if (cp >= 0x1100 && cp <= 0x1112 && i + 1 < buf.size() && buf[i + 1].cp >= 0x1161 && buf[i + 1].cp <= 0x1175)
+                s = 0xAC00 + (cp - 0x1100) * 588 + (buf[i + 1].cp - 0x1161) * 28;  // <L, V>
+            else if (cp >= 0xAC00 && cp < 0xAC00 + 11172 && (cp - 0xAC00) % 28 == 0 && i + 1 < buf.size() && isT(buf[i + 1].cp))
+                s = cp + (buf[i + 1].cp - 0x11A7);                                 // <LV, T>
+            if (!s || !Glyph(s)) {
+                out.push_back(buf[i++]);
+                continue;
+            }
+            size_t used = 2;
+            if ((s - 0xAC00) % 28 == 0 && i + 2 < buf.size() && isT(buf[i + 2].cp) && Glyph(s + (buf[i + 2].cp - 0x11A7)))
+                s += buf[i + 2].cp - 0x11A7, used = 3;                             // <L, V, T>
+            Info x = buf[i];
+            x.cp = s;
+            out.push_back(x);
+            i += used;
+        }
+        buf = std::move(out);
     }
 
     void MapGlyphs() {

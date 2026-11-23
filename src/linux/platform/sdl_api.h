@@ -117,6 +117,10 @@ float SDL_GetWindowDisplayScale(SDL_Window* window);  // the desktop's content s
 SDL_DisplayID SDL_GetDisplayForWindow(SDL_Window* window);
 bool SDL_GetDisplayUsableBounds(SDL_DisplayID display, SDL_Rect* rect);
 bool SDL_UpdateWindowSurfaceRects(SDL_Window* window, const SDL_Rect* rects, int numrects);
+// Not SDL's: true when the window's next frame starts from the last frame's pixels, so it may redraw
+// and update only part of the window. False once the platform layer gave the pixels back (a window
+// left alone keeps none on Wayland) or has none yet: draw the whole window then.
+bool SDL_WindowFrameKept(SDL_Window* window);
 
 // --- rendering ------------------------------------------------------------------------------------------------------
 
@@ -203,6 +207,9 @@ const char* SDL_GetKeyName(SDL_Keycode key);  // "F13" for function keys, the ch
 SDL_Keycode SDL_GetKeyFromName(const char* name);
 bool SDL_StartTextInput(SDL_Window* window);
 bool SDL_StopTextInput(SDL_Window* window);
+// Where the focused text field's caret is, in window points, so an input method puts its
+// candidate window there instead of the window corner. No-op while text input is off.
+bool SDL_SetTextInputArea(SDL_Window* window, const SDL_Rect* area);
 
 using SDL_MouseButtonFlags = Uint32;
 constexpr Uint8 SDL_BUTTON_LEFT = 1, SDL_BUTTON_MIDDLE = 2, SDL_BUTTON_RIGHT = 3, SDL_BUTTON_X1 = 4, SDL_BUTTON_X2 = 5;
@@ -239,6 +246,7 @@ enum SDL_EventType : Uint32 {
     SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED = 0x214,
     SDL_EVENT_KEY_DOWN = 0x300,
     SDL_EVENT_KEY_UP = 0x301,
+    SDL_EVENT_TEXT_EDITING = 0x302,
     SDL_EVENT_TEXT_INPUT = 0x303,
     SDL_EVENT_MOUSE_MOTION = 0x400,
     SDL_EVENT_MOUSE_BUTTON_DOWN = 0x401,
@@ -264,6 +272,8 @@ struct SDL_KeyboardEvent {
     bool down, repeat;
 };
 struct SDL_TextInputEvent { Uint32 type, reserved; Uint64 timestamp; SDL_WindowID windowID; const char* text; };
+// An input method's composing text: `start` and `length` are the byte range of its cursor in it.
+struct SDL_TextEditingEvent { Uint32 type, reserved; Uint64 timestamp; SDL_WindowID windowID; const char* text; Sint32 start, length; };
 struct SDL_MouseMotionEvent {
     Uint32 type, reserved;
     Uint64 timestamp;
@@ -307,6 +317,7 @@ union SDL_Event {
     SDL_WindowEvent window;
     SDL_KeyboardEvent key;
     SDL_TextInputEvent text;
+    SDL_TextEditingEvent editing;
     SDL_MouseMotionEvent motion;
     SDL_MouseButtonEvent button;
     SDL_MouseWheelEvent wheel;

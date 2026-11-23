@@ -53,6 +53,7 @@ public:
         int32_t x, y;     // 26.6 pen position (y: the font's ascent less the glyph's offset)
         int32_t advance;  // 26.6
         uint32_t offset;  // byte offset of its cluster in the line
+        bool rtl = false;  // its run reads right to left (CaretX)
     };
     struct Line {
         std::vector<Placed> glyphs;  // left to right on screen
@@ -66,6 +67,10 @@ public:
     int Width(std::string_view text) { return Layout(text).w; }
     // TTF_MeasureString: the widest prefix within maxWidth pixels, its width and byte length.
     void Measure(std::string_view text, int maxWidth, int* width, size_t* length);
+    // Where a caret at byte offset `at` sits in the line as it is drawn: the pen between the
+    // glyphs of the two sides, whichever direction the line reads, so an Arabic caret drawn
+    // from a logical prefix lands where that boundary actually is.
+    int CaretX(std::string_view text, size_t at);
 
     struct Quad {
         const Font* font;

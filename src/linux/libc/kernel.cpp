@@ -136,6 +136,9 @@ CL int futimens(int fd, const TimeSpec times[2]) { return (int)Call(__NR_utimens
 
 // Sockets.
 CL int socket(int domain, int type, int protocol) { return (int)Call(__NR_socket, domain, type, protocol); }
+CL int socketpair(int domain, int type, int protocol, int fds[2]) {
+    return (int)Call(__NR_socketpair, domain, type, protocol, fds);
+}
 CL int bind(int fd, const void* address, unsigned length) { return (int)Call(__NR_bind, fd, address, length); }
 CL int listen(int fd, int backlog) { return (int)Call(__NR_listen, fd, backlog); }
 CL int accept(int fd, void* address, unsigned* length) { return (int)Call(__NR_accept, fd, address, length); }
@@ -164,6 +167,8 @@ CL void* mmap(void* address, size_t length, int protection, int flags, int fd, l
     return (void*)Call(__NR_mmap, address, length, protection, flags, fd, offset);
 }
 CL int munmap(void* address, size_t length) { return (int)Call(__NR_munmap, address, length); }
+CL int madvise(void* address, size_t length, int advice) { return (int)Call(__NR_madvise, address, length, advice); }
+CL int mprotect(void* address, size_t length, int protection) { return (int)Call(__NR_mprotect, address, length, protection); }
 CL int shmget(int key, size_t size, int flags) { return (int)Call(__NR_shmget, key, size, flags); }
 CL void* shmat(int id, const void* address, int flags) { return (void*)Call(__NR_shmat, id, address, flags); }
 CL int shmdt(const void* address) { return (int)Call(__NR_shmdt, address); }

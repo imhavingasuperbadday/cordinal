@@ -185,6 +185,14 @@ void OnRemote(Remote r, LPARAM value) {
         case Remote::SetRepeat:
             SetRepeat((Repeat)std::clamp((int)value, 0, 2));
             break;
+        case Remote::SetRate: {
+            // The audible rate is speed times tempo; the tempo stays what the user set, and the
+            // speed moves so their product is what the client asked to hear.
+            const double tempo = g.settings.tempo > 0 ? g.settings.tempo : 1;
+            SetSpeed(std::clamp(value / 1e6 / tempo, 0.25, 4.0));
+            SaveSettings();
+            break;
+        }
         case Remote::Open: {
             std::unique_ptr<std::vector<std::wstring>> paths(reinterpret_cast<std::vector<std::wstring>*>(value));
             ExpandPaths(*paths, Opening::Play);
@@ -234,7 +242,8 @@ int Run(int argc, char** argv) {
         if (!full.empty()) paths.push_back(full);
     }
 
-    SDL_SetAppMetadata("cordinal", "0.1.17", "cordinal");
+    PrepareCodeProfile();
+    SDL_SetAppMetadata("cordinal", "0.1.18", "cordinal");
     SDL_SetHint(SDL_HINT_VIDEO_WAYLAND_PREFER_LIBDECOR, "1");
     if (parity) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
@@ -425,6 +434,7 @@ int Run(int argc, char** argv) {
                 g.redraw = true;
             }
             MaybeAutoMeasure(false);
+            MemoryTick();
             if (g.playing != kNone || RadioPlaying() || g.searchFocused || now < g.messageUntil + 300) g.redraw = true;
         }
         if (g.libraryDirty && now - g.lastSave > 5 * 60 * 1000) SaveLibraryFile(false);

@@ -249,14 +249,16 @@ void DrawField(int f, const Palette& p) {
         if (focused && SDL_GetTicks() % 1060 < 530)
             Fill({std::round(r.x + pad + caretX), r.y + S(4) + caretY - t.scrollY, S(1), lineH}, p.text);
     } else {
-        std::string all = Utf8(t.text);
-        float caretX = TextWidth(Font::Normal, Utf8(t.text.substr(0, t.caret))), room = r.w - 2 * pad;
+        // The text with an input method's composition at the caret while this field has the keys.
+        const std::string& preedit = focused ? g_preedit : std::string();
+        const std::string before = Utf8(t.text.substr(0, t.caret)), all = before + preedit + Utf8(t.text.substr(t.caret));
+        const float caretX = CaretX(Font::Normal, all, before.size() + (preedit.empty() ? 0 : g_preeditCursor)), room = r.w - 2 * pad;
         if (caretX - t.scrollX > room) t.scrollX = caretX - room;
         if (caretX < t.scrollX) t.scrollX = caretX;
         float tx = r.x + pad - t.scrollX, ty = TextY(r);
-        if (focused && t.all) Fill({tx, r.y + S(3), TextWidth(Font::Normal, all), r.h - S(6)}, p.select);
-        DrawText(Font::Normal, all, tx, ty, focused && t.all ? p.selectText : p.text);
-        if (focused && SDL_GetTicks() % 1060 < 530) Fill({std::round(tx + caretX), ty, S(1), lineH}, p.text);
+        if (focused && t.all && preedit.empty()) Fill({tx, r.y + S(3), TextWidth(Font::Normal, all), r.h - S(6)}, p.select);
+        DrawText(Font::Normal, all, tx, ty, focused && t.all && preedit.empty() ? p.selectText : p.text);
+        if (focused) DrawComposition(all, before.size(), tx, ty, r.x + S(2), r.R() - S(3), p.accent, p.text);
     }
     SDL_SetRenderClipRect(g.renderer, nullptr);
 }

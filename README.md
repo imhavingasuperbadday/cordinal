@@ -9,7 +9,7 @@ No installer, no runtime, no codec packs, no telemetry. Just drop it anywhere an
 
 <div align="center">
 
-Current release: **0.1.17** · `cordinal.exe`, 2,113,536 bytes<br>
+Current release: **0.1.18** · `cordinal.exe`, 2,113,536 bytes<br>
 **[Download](https://github.com/imhavingasuperbadday/cordinal/releases/latest)** ·
 [Quick start](#quick-start) · [Guide](#guide) · [Linux](#linux-preview) · [Building](#building) ·
 [Issues](https://github.com/imhavingasuperbadday/cordinal/issues)
@@ -325,8 +325,8 @@ Playlists always point at exact files, and `%edition%` works in title formats.
   column.
 - **Album colours (`Preferences ▸ View`):** Tint the player background, the whole interface, or nothing
   from the playing cover, with Subtle-to-Bold strength and guaranteed text readability.
-- **Lightweight mode (`Ctrl+Shift+L`):** Closes the main window and trims memory/CPU while playback and
-  effects keep running. Keep just the tray icon, the mini player, or the compact window. Control music
+- **Lightweight mode (`Ctrl+Shift+L`):** Closes the main window and keeps memory/CPU trimmed while playback
+  and effects keep running. Keep just the tray icon, the mini player, or the compact window. Control music
   from anywhere with `Win+Alt+Space` (song picker), the numpad with Num Lock off (`5` pause, `4`/`6`
   skip, `8`/`2` volume, `7`/`9` seek, `1` mute, `3` shuffle, `0` picker, `.` restore), or right-clicking
   the tray icon.
@@ -387,8 +387,18 @@ the reference and gets more mileage).
 
 What makes the Linux build unusual: it's **one completely static x86-64 binary with zero shared
 libraries**. It brings its own C library, talks straight to Wayland/X11 and PipeWire/PulseAudio, draws
-its own text, and bundles BearSSL for HTTPS. Same binary runs on any 64-bit x86 Linux distro — old
+its own text, and bundles BearSSL for HTTPS. BearSSL stops at TLS 1.2, so a server that only takes
+TLS 1.3 gets asked again through the system's `curl` when one is installed. Same binary runs on any 64-bit x86 Linux distro — old
 glibc, Alpine/musl, whatever.
+
+It does its own text shaping too, so Japanese, Korean, Arabic, Hebrew, Thai and Devanagari titles
+render properly without HarfBuzz. On Wayland it follows fractional scaling (125%, 150%...), and
+X11 picks up your session's scale too. Input methods like fcitx5 and ibus work on both: you compose
+right in the search box and other text fields, with the candidate list at the caret.
+
+It stays small, too. An idle window settles around 5 MB: memory goes back to the system while you
+aren't using the player, a window that sits still keeps none of its pixels, and the code that plays
+music is linked together so playback keeps about 3 MB of it resident.
 
 Install or update:
 

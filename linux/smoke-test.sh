@@ -114,6 +114,10 @@ for mode in eq resampler weighted-shuffle; do check "$mode" "$BUILD/cordinal-cor
 check tagsuggest "$BUILD/cordinal-core-test" tagsuggest
 check waybar "$BUILD/cordinal-core-test" waybar
 check keymap "$BUILD/cordinal-core-test" keymap
+# The text stack: outlines and shaping on the fixtures it makes, and the installed fonts when any.
+mkdir -p "$OUT/text"
+check text "$BUILD/cordinal-core-test" text "$OUT/text"
+check bidi "$BUILD/cordinal-core-test" bidi "$(dirname -- "${BASH_SOURCE[0]}")/../src/tests/BidiCharacterTest.txt"
 check waveform "$BUILD/cordinal-core-test" waveform "$OUT/source.flac" "$OUT/source.ogg" "$OUT/source.opus"
 check replaygain "$BUILD/cordinal-core-test" replaygain "$OUT/source.flac" "$OUT/source.mp3"
 check replaygain-scan python3 - "$BUILD/cordinal-core-test" "$OUT" <<'PY'

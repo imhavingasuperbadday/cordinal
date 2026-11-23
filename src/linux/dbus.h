@@ -173,6 +173,7 @@ struct Call {
     const Message& msg;
     Reader in;
     Writer out;  // the reply body, in the method's output signature
+    bool replied = false;  // the handler sent its own reply (an error, say); Dispatch adds none
 };
 struct Method {
     const char *name, *in, *out;
