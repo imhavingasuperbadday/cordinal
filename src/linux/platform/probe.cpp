@@ -37,7 +37,10 @@ __attribute__((format(printf, 1, 2))) static void Print(const char* fmt, ...) {
 
 int main(int argc, char** argv) {
     if (!SDL_Init(SDL_INIT_VIDEO)) return Print("init failed: %s", SDL_GetError()), 1;
-    SDL_Window* w = SDL_CreateWindow(argc > 1 ? argv[1] : "cordinal-probe", 400, 300, SDL_WINDOW_RESIZABLE);
+    // High density, as the player's window is: only such a window's buffer follows the display's scale,
+    // so only it reports a scale other than 1.
+    SDL_Window* w = SDL_CreateWindow(argc > 1 ? argv[1] : "cordinal-probe", 400, 300,
+                                     SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (!w) return Print("window failed: %s", SDL_GetError()), 1;
     SDL_Renderer* r = SDL_CreateRenderer(w, nullptr);
     SDL_StartTextInput(w);
