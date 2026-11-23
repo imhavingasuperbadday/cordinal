@@ -199,6 +199,24 @@ void TestShortTagHeaders(const std::wstring& scratch) {
         badFloats.Add(ok && tags.duration > 0 && tags.bitrate == 0,
                       L"MP4 of " + std::to_wstring(tags.duration) + L" s: " + std::to_wstring(tags.bitrate) + L" kbps");
     }
+    // A WAV whose INFO list has an entry claiming nearly 4 GiB: the entry's step wrapped to zero and the
+    // reader looped for ever (found by fuzz-tags). The entry before it still reads.
+    {
+        auto le32 = [](uint32_t v) { return std::string{(char)v, (char)(v >> 8), (char)(v >> 16), (char)(v >> 24)}; };
+        const std::string fmt = std::string("fmt ", 4) + le32(16) + std::string("\x01\0\x02\0", 4) + le32(44100) +
+                                le32(176400) + std::string("\x04\0\x10\0", 4);
+        const std::string info = std::string("INFOINAM", 8) + le32(6) + std::string("Title\0", 6) + "IART" + le32(0xFFFFFFF7) + "Seed";
+        const std::string list = "LIST" + le32((uint32_t)info.size()) + info;
+        const std::string data = "data" + le32(4) + std::string(4, '\0');
+        const std::string body = "WAVE" + fmt + list + data;
+        const std::string file = "RIFF" + le32((uint32_t)body.size()) + body;
+        const std::wstring wav = scratch + L"\\huge-info.wav";
+        if (!Ready(WriteTestBytes(wav, file), L"the WAV file with an oversized INFO entry is prepared")) return;
+        TagData tags;
+        const bool ok = ReadTags(wav, tags);
+        badFloats.Add(ok && tags.title == "Title" && tags.artist.empty() && tags.sampleRate == 44100,
+                      L"WAV INFO entry of 4294967287 bytes: title " + std::to_wstring(tags.title.size()) + L" bytes");
+    }
     Check(badFloats.Passed(), L"a Matroska duration, a Matroska or AIFF sample rate or a bitrate that is NaN, infinite or out of range reads as unknown%ls",
           badFloats.failed.c_str());
 }

@@ -62,8 +62,11 @@ bool ReadRiff(const File& f, TagData& t, ArtSink& art) {
             if (l.substr(0, 4) == "INFO") {
                 for (size_t q = 4; q + 8 <= l.size();) {
                     sv key = l.substr(q, 4);
-                    uint32_t n = LE32(l, q + 4);
-                    std::string v = Trim(std::string(Sub(l, q + 8, n)).c_str());
+                    // In 64 bits: 8 + n + 1 in 32 wrapped to 0 for a size near 4 GiB, and the loop never
+                    // moved on (found by fuzz-tags). An entry running past the list ends it.
+                    const uint64_t n = LE32(l, q + 4);
+                    if (n > l.size() - q - 8) break;
+                    std::string v = Trim(std::string(Sub(l, q + 8, (size_t)n)).c_str());
                     if (key == "INAM") t.title = v;
                     else if (key == "IART") t.artist = v;
                     else if (key == "IPRD") t.album = v;
