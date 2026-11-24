@@ -9,7 +9,7 @@ No installer, no runtime, no codec packs, no telemetry. Just drop it anywhere an
 
 <div align="center">
 
-Current release: **0.1.19** · `cordinal.exe`, 2,119,168 bytes<br>
+Current release: **0.1.19** · `cordinal.exe`, 2,252,288 bytes<br>
 **[Download](https://github.com/imhavingasuperbadday/cordinal/releases/latest)** ·
 [Quick start](#quick-start) · [Guide](#guide) · [Linux](#linux-preview) · [Building](#building) ·
 [Issues](https://github.com/imhavingasuperbadday/cordinal/issues)
