@@ -65,7 +65,8 @@ bool Children(File& file,const Element& parent,auto&& visit) {
 }
 // Map a Matroska CodecID string to a Cordinal codec (0x160 keeps the WMA format tag).
 uint32_t Codec(const std::string& id) {
-    if (id=="A_AAC" || id=="A_AAC/MPEG2/LC" || id=="A_AAC/MPEG4/LC") return AudioAac;
+    if (id=="A_AAC" || id=="A_AAC/MPEG2/LC" || id=="A_AAC/MPEG4/LC" ||
+        id=="A_AAC/MPEG2/LC/SBR" || id=="A_AAC/MPEG4/LC/SBR") return AudioAac;
     if (id=="A_ALAC") return AudioAlac;
     if (id=="A_OPUS") return AudioOpus;
     if (id=="A_FLAC") return AudioFlac;

@@ -237,15 +237,45 @@ void BuildGroups() {
     v.albumTracks.swap(packed);
     if (g.libMode == LibraryMode::Artists) {
         // "Toby Fox; Geoffrey Day" is two artists: the album shows under each of them.
+        // Track artists, composers, and credits also appear so clicking an artist finds both
+        // albums they made and tracks they appeared on or produced.
         std::unordered_map<StringPool::Handle, uint32_t> byArtist;
         std::vector<StringPool::Handle> names;
         for (int i = 0; i < (int)v.albums.size(); ++i) {
             BrowserValues(Tracks(v.albums[i])[0], BrowseField::AlbumArtist, names);
             for (StringPool::Handle name : names) {
                 auto [it, added] = byArtist.try_emplace(name, (uint32_t)v.artists.size());
-                if (added) v.artists.push_back(Artist{name, {}, 0});
+                if (added) v.artists.push_back(Artist{name, {}, 0, i, 0});
                 v.artists[it->second].albums.push_back(i);
                 v.artists[it->second].tracks += v.albums[i].trackCount;
+            }
+        }
+        std::vector<StringPool::Handle> trackPeople;
+        for (int i = 0; i < (int)v.albums.size(); ++i) {
+            for (TrackId id : Tracks(v.albums[i])) {
+                trackPeople.clear();
+                auto addPerson = [&](StringPool::Handle h) {
+                    if (!h) return;
+                    if (std::find(trackPeople.begin(), trackPeople.end(), h) == trackPeople.end())
+                        trackPeople.push_back(h);
+                };
+                BrowserValues(id, BrowseField::Artist, names);
+                for (StringPool::Handle h : names) addPerson(h);
+                BrowserValues(id, BrowseField::Composer, names);
+                for (StringPool::Handle h : names) addPerson(h);
+                if (size_t cn = g_lib.CreditsCount(id)) {
+                    const CreditHandle* cs = g_lib.CreditsBegin(id);
+                    for (size_t c = 0; c < cn; ++c) addPerson(cs[c].name);
+                }
+                for (StringPool::Handle h : trackPeople) {
+                    auto [it, added] = byArtist.try_emplace(h, (uint32_t)v.artists.size());
+                    if (added) v.artists.push_back(Artist{h, {}, 0, i, 0});
+                    Artist& ar = v.artists[it->second];
+                    if (ar.albums.empty() || ar.albums.back() != i) {
+                        ar.appearances += 1;
+                        ar.tracks += 1;
+                    }
+                }
             }
         }
         // Split names join the list where they belong alphabetically ("Unknown artist" last).
@@ -595,8 +625,11 @@ void LibViewRememberPosition(PlaylistPosition& position) {
     if (v.expanded >= 0 && v.expanded < (int)v.albums.size())
         position.expanded = Tracks(v.albums[v.expanded]).front();
     if (g.libMode == LibraryMode::AlbumTracks) position.focus = v.anchorTrack;
-    else if (g.libMode == LibraryMode::Artists && v.focus >= 0 && v.focus < (int)v.artists.size())
-        position.focus = Tracks(v.albums[v.artists[v.focus].albums.front()]).front();
+    else if (g.libMode == LibraryMode::Artists && v.focus >= 0 && v.focus < (int)v.artists.size()) {
+        const Artist& ar = v.artists[v.focus];
+        int alb = ar.albums.empty() ? ar.coverAlbum : ar.albums.front();
+        if (alb >= 0 && alb < (int)v.albums.size()) position.focus = Tracks(v.albums[alb]).front();
+    }
     else if (g.libMode == LibraryMode::Albums && v.focus >= 0 && v.focus < (int)v.albums.size())
         position.focus = Tracks(v.albums[v.focus]).front();
 }

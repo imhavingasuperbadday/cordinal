@@ -1495,6 +1495,34 @@ bool cord::FoldResidualsAvx2(const double* y, size_t n, const int32_t* coefficie
     return ok;
 }
 
+void nativeaudio::AudioSbrQmfWindowAnaAvx2(const float* x,const float* cAna,float* u) {
+    for (unsigned n=0;n<64;n+=8) {
+        __m256 sum=_mm256_mul_ps(_mm256_loadu_ps(x+n),_mm256_loadu_ps(cAna+n));
+        sum=_mm256_fmadd_ps(_mm256_loadu_ps(x+64+n),_mm256_loadu_ps(cAna+64+n),sum);
+        sum=_mm256_fmadd_ps(_mm256_loadu_ps(x+128+n),_mm256_loadu_ps(cAna+128+n),sum);
+        sum=_mm256_fmadd_ps(_mm256_loadu_ps(x+192+n),_mm256_loadu_ps(cAna+192+n),sum);
+        sum=_mm256_fmadd_ps(_mm256_loadu_ps(x+256+n),_mm256_loadu_ps(cAna+256+n),sum);
+        _mm256_storeu_ps(u+n,sum);
+    }
+    _mm256_zeroupper();
+}
+void nativeaudio::AudioSbrQmfWindowSynAvx2(const float* v,const float* cSyn,float* out) {
+    for (unsigned n=0;n<64;n+=8) {
+        __m256 sum=_mm256_mul_ps(_mm256_loadu_ps(v+n),_mm256_loadu_ps(cSyn+n));
+        sum=_mm256_fmadd_ps(_mm256_loadu_ps(v+192+n),_mm256_loadu_ps(cSyn+64+n),sum);
+        sum=_mm256_fmadd_ps(_mm256_loadu_ps(v+256+n),_mm256_loadu_ps(cSyn+128+n),sum);
+        sum=_mm256_fmadd_ps(_mm256_loadu_ps(v+448+n),_mm256_loadu_ps(cSyn+192+n),sum);
+        sum=_mm256_fmadd_ps(_mm256_loadu_ps(v+512+n),_mm256_loadu_ps(cSyn+256+n),sum);
+        sum=_mm256_fmadd_ps(_mm256_loadu_ps(v+704+n),_mm256_loadu_ps(cSyn+320+n),sum);
+        sum=_mm256_fmadd_ps(_mm256_loadu_ps(v+768+n),_mm256_loadu_ps(cSyn+384+n),sum);
+        sum=_mm256_fmadd_ps(_mm256_loadu_ps(v+960+n),_mm256_loadu_ps(cSyn+448+n),sum);
+        sum=_mm256_fmadd_ps(_mm256_loadu_ps(v+1024+n),_mm256_loadu_ps(cSyn+512+n),sum);
+        sum=_mm256_fmadd_ps(_mm256_loadu_ps(v+1216+n),_mm256_loadu_ps(cSyn+576+n),sum);
+        _mm256_storeu_ps(out+n,sum);
+    }
+    _mm256_zeroupper();
+}
+
 // Four frames per pass, two per register ([L, R] of frame f, then of f + 1), so six sums are in
 // flight: as many as the registers hold without spilling. Each is the scalar FIR's own sequence
 // of rounded products and sums: GCC would fuse them into FMAs under -mfma, so contraction is off.

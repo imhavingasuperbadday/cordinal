@@ -1100,4 +1100,76 @@ void TestNativeCodecs(const std::wstring& root, const std::wstring& scratch) {
         failures.Add(FailedPlayback(OpenPcmDecoder(adpcm)), L"ADPCM invalid second block");
     testlog::Check(failures.Passed(), L"damaged playback fails, stays failed without leaking PCM, and recovers on seek%ls",
                    failures.failed.c_str());
+
+    batch.Next(L"HE-AAC v1 (SBR) and HE-AAC v2 (Parametric Stereo) decode doubled-rate stereo and seek cleanly");
+    {
+        auto buildAdts = [](const uint8_t* p0, size_t n0, const uint8_t* p1, size_t n1, int count) {
+            std::string s((const char*)p0, n0);
+            for (int i = 1; i < count; ++i) s.append((const char*)p1, n1);
+            return s;
+        };
+        static constexpr uint8_t v1p0[] = {0xff,0xf1,0x58,0x40,0x02,0xff,0xfc,0x01,0x68,0x00,0x06,0xbd,
+                                           0xd2,0x00,0x00,0x00,0x37,0x00,0x02,0x83,0xff,0xfe,0x0e};
+        static constexpr uint8_t v1p1[] = {0xff,0xf1,0x58,0x40,0x02,0xbf,0xfc,0x01,0x68,0x00,0x06,0x9d,
+                                           0x00,0x00,0x37,0x00,0x02,0x83,0xff,0xfe,0x0e};
+        static constexpr uint8_t v2p0[] = {0xff,0xf1,0x58,0x40,0x03,0xff,0xfc,0x01,0x68,0x00,0x06,0xf0,
+                                           0x4d,0xd2,0x00,0x00,0x00,0x37,0x00,0x02,0x83,0xff,0xff,0x7b,
+                                           0x10,0x2f,0xe0,0x03,0xe0,0x00,0x0e};
+        static constexpr uint8_t v2p1[] = {0xff,0xf1,0x58,0x40,0x03,0x5f,0xfc,0x01,0x68,0x00,0x06,0xed,
+                                           0x00,0x00,0x37,0x00,0x02,0x83,0xff,0xff,0x58,0x5f,0xc0,0x07,
+                                           0xc0,0x0e};
+        const std::wstring v1Path = scratch + L"\\he-v1.aac";
+        const std::wstring v2Path = scratch + L"\\he-v2.aac";
+        bool ok = Ready(WriteTestBytes(v1Path, buildAdts(v1p0, sizeof(v1p0), v1p1, sizeof(v1p1), 10)) &&
+                        WriteTestBytes(v2Path, buildAdts(v2p0, sizeof(v2p0), v2p1, sizeof(v2p1), 10)),
+                        L"HE-AAC ADTS test fixtures are written");
+        if (ok) {
+            auto d1 = OpenAacDecoder(v1Path);
+            float pcm[4096 * 2];
+            uint64_t frames1 = 0;
+            double energy1 = 0;
+            bool finite1 = d1 && d1->Rate() == 48000;
+            while (d1 && finite1) {
+                size_t n = d1->Read(pcm, 4096);
+                if (!n) break;
+                for (size_t i = 0; i < n * 2; ++i) {
+                    finite1 &= std::isfinite(pcm[i]);
+                    energy1 += (double)pcm[i] * pcm[i];
+                }
+                frames1 += n;
+            }
+            testlog::Check(d1 && finite1 && !d1->Failed() && frames1 >= 10 * 2048 && energy1 > 1.0,
+                           L"HE-AAC v1 SBR ADTS decodes at 48 kHz with synthesized highband energy");
+
+            auto d2 = OpenAacDecoder(v2Path);
+            uint64_t frames2 = 0;
+            double sumL = 0, sumR = 0;
+            float expect[256 * 2]{};
+            bool finite2 = d2 && d2->Rate() == 48000;
+            while (d2 && finite2) {
+                size_t n = d2->Read(pcm, 4096);
+                if (!n) break;
+                for (size_t i = 0; i < n; ++i) {
+                    finite2 &= std::isfinite(pcm[i * 2]) && std::isfinite(pcm[i * 2 + 1]);
+                    if (frames2 + i >= 4096) {
+                        sumL += (double)pcm[i * 2] * pcm[i * 2];
+                        sumR += (double)pcm[i * 2 + 1] * pcm[i * 2 + 1];
+                    }
+                    if (frames2 + i >= 4096 && frames2 + i < 4352) {
+                        size_t idx = (size_t)(frames2 + i - 4096);
+                        expect[idx * 2] = pcm[i * 2];
+                        expect[idx * 2 + 1] = pcm[i * 2 + 1];
+                    }
+                }
+                frames2 += n;
+            }
+            bool seekOk = d2 && d2->Seek(4096.0 / 48000.0) && d2->Read(pcm, 256) == 256;
+            if (seekOk) {
+                for (size_t i = 0; i < 512; ++i) seekOk &= std::abs(pcm[i] - expect[i]) < 0.0001f;
+            }
+            testlog::Check(d2 && finite2 && !d2->Failed() && frames2 >= 10 * 2048 &&
+                           sumL > sumR * 9.0 && seekOk,
+                           L"HE-AAC v2 Parametric Stereo decodes directional stereo at 48 kHz and seeks accurately");
+        }
+    }
 }

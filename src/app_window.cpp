@@ -489,6 +489,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g.engine.Shutdown();
                 std::wstring ignored;
                 FlushDeferredTagWrites(ignored);
+                SyncFinish();  // publishes this PC's changes before the last save
                 SaveState();
                 if (g.dirty) KeepUnsavedLibrary();  // no time to ask: the next start restores it
             }
@@ -509,6 +510,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g.engine.Shutdown();
             std::wstring tagError;
             FlushDeferredTagWrites(tagError);
+            SyncFinish();  // publishes this PC's changes before the last save
             SaveBeforeClose();
             if (!tagError.empty()) {
                 const std::wstring text =

@@ -4,6 +4,8 @@
 // builds leave the count at zero and do nothing.
 // The independent CDP1 loader restores native protections before TLS callbacks or entry; that
 // build also leaves this table empty. tools/pack-cdpack.ps1 verifies its complete native image.
+// It also fills in the hook below, through which cordinal gives cold code back
+// (cdpack/spec.md, "Detached images").
 #include "packed_image.h"
 #include <windows.h>
 #include <cstring>
@@ -21,6 +23,23 @@ struct Layout { BYTE marker[16]; DWORD count; Region regions[16]; };
 #pragma section(".rdata$layout", read)
 __declspec(allocate(".rdata$layout")) const volatile Layout layout{
     {0x8c, 0x53, 0x21, 0x97, 0x6a, 0xc4, 0x48, 0x5b, 0xb0, 0x1f, 0x43, 0x4f, 0x52, 0x44, 0x01, 0x00}, 0, {}};
+
+// cdpack/src/format.h's ColdStatus and Hook. The packer finds the hook by its magic; the loader
+// fills in its entry points, and a native build leaves them null.
+struct ColdStatus {
+    DWORD flags, coldChunks, resident, cap, decodes, evictions, suspended, pad;
+    unsigned long long residentBytes;
+    void *stub, *native;
+};
+struct Hook {
+    BYTE magic[16];
+    DWORD version, bytes;
+    unsigned (*evict)(const void*, unsigned);
+    unsigned (*decodes)(const void*);
+    void (*status)(ColdStatus*);
+};
+alignas(8) volatile Hook cdpackHook{
+    {'C', 'D', 'P', 'H', 'O', 'O', 'K', '1', 0x5a, 0xc3, 0x17, 0x9e, 0x42, 0x08, 0xd1, 0x6b}, 0, 0, nullptr, nullptr, nullptr};
 
 void Protect(BYTE* base, DWORD rva, DWORD size, DWORD protection) {
     DWORD old;
@@ -59,4 +78,32 @@ void RestorePackedImageProtection() {
             Protect(base, s.VirtualAddress, s.Misc.VirtualSize, PAGE_READONLY);
         }
     }
+}
+
+unsigned ReleaseColdCode() {
+    auto evict = cdpackHook.evict;
+    return evict ? evict(nullptr, 1) : 0;  // format.h evict_idle
+}
+
+bool ColdCodeNow(ColdCode& out) {
+    auto status = cdpackHook.status;
+    if (!status) return false;
+    ColdStatus s{};
+    status(&s);
+    if (!s.coldChunks) return false;
+    out = {s.coldChunks, s.resident, s.decodes, s.evictions, (size_t)s.residentBytes};
+    return true;
+}
+
+bool PackedLoaderImage(uintptr_t& base, size_t& bytes) {
+    auto status = cdpackHook.status;
+    if (!status) return false;
+    ColdStatus s{};
+    status(&s);
+    if (!(s.flags & 1) || !s.stub || s.stub == s.native) return false;
+    auto* stub = static_cast<const BYTE*>(s.stub);
+    base = (uintptr_t)stub;
+    bytes = reinterpret_cast<const IMAGE_NT_HEADERS*>(stub + reinterpret_cast<const IMAGE_DOS_HEADER*>(stub)->e_lfanew)
+                ->OptionalHeader.SizeOfImage;
+    return true;
 }

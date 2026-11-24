@@ -20,6 +20,7 @@
 //   cordinal-core-test history FILE           list a saved library.cdb's listens and points
 //   cordinal-core-test playlists FILE         list a saved library.cdb: playlists, items, inbox and ratings
 //   cordinal-core-test listenbrainz DIR       queue a listen and keep a token in DIR, check a bogus token
+//   cordinal-core-test sync DIR               two PCs syncing plays, ratings and playlists through DIR
 //   cordinal-core-test discord DIR            the Discord status against a fake Discord socket made in DIR
 //   cordinal-core-test devices                list the output devices (PipeWire's, or PulseAudio's)
 //   cordinal-core-test helpers DIR            read, trust and run a helper made of two shell scripts
@@ -63,6 +64,7 @@
 #include "tests/sound_checks.h"
 #include "tests/keymap_checks.h"
 #include "tests/tag_suggest_checks.h"
+#include "tests/sync_checks.h"
 #include "convert.h"
 #include "decoder.h"
 #include "devicecopy.h"
@@ -1440,6 +1442,14 @@ int main(int argc, char** argv) {
     if (argc >= 3 && !strcmp(argv[1], "bidi")) return text_checks::CheckBidi(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "fake-fcitx")) return ime_fake::Run(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "listenbrainz")) return CheckListenBrainz(argv[2]);
+    if (argc >= 3 && !strcmp(argv[1], "sync")) {  // tests/sync_checks.h, shared with the Windows self-test
+        int failures = 0;
+        for (const auto& [ok, what] : sync_checks::All(Wide(argv[2]))) {
+            printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str());
+            failures += !ok;
+        }
+        return failures ? 1 : 0;
+    }
     if (argc >= 3 && !strcmp(argv[1], "discord")) {  // tests/discord_checks.h, shared with the Windows self-test
         int failures = 0;
         for (const auto& [ok, what] : discord_checks::All(argv[2])) {
@@ -1453,6 +1463,6 @@ int main(int argc, char** argv) {
     if (argc >= 3 && !strcmp(argv[1], "decode")) return Decode(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "play")) return Play(argv[2], argc >= 4 ? atof(argv[3]) : 5);
     fprintf(stderr, "usage: cordinal-core-test scan DIR | decode FILE | play FILE [SECONDS] | replaygain FILE... | "
-                    "tags FILE DIR | convert FILE DIR | organize FILE ROOT | copy FILE DEST | collection DIR | ipod DIR | eq | resampler | waveform | helpers DIR | devices | sfx | listenbrainz DIR | weighted-shuffle | waybar | tagsuggest | chapters FILE | library FILE | history FILE | playlists FILE | steam [cancel] | away DIR | tls | tls-hosts | web DIR CONTROL | fonts DIR | fonts-match [FILE] | text DIR [FONT...] | bidi FILE | fake-fcitx LOG\n");
+                    "tags FILE DIR | convert FILE DIR | organize FILE ROOT | copy FILE DEST | collection DIR | ipod DIR | eq | resampler | waveform | helpers DIR | devices | sfx | listenbrainz DIR | sync DIR | weighted-shuffle | waybar | tagsuggest | chapters FILE | library FILE | history FILE | playlists FILE | steam [cancel] | away DIR | tls | tls-hosts | web DIR CONTROL | fonts DIR | fonts-match [FILE] | text DIR [FONT...] | bidi FILE | fake-fcitx LOG\n");
     return 2;
 }

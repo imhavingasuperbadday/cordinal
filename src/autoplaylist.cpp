@@ -6,6 +6,7 @@
 // tables are UI-only and may change freely. Parsing is lenient: an unknown rule is skipped so a
 // file from a newer version still loads.
 #include "sort.h"
+#include "album_editions.h"
 #include "autoplaylist.h"
 #include "playlog.h"
 #include "textcase.h"
@@ -25,13 +26,14 @@ namespace {
 const char* const kFieldKeys[] = {"any", "title", "artist", "albumartist", "album", "genre", "composer", "comment", "grouping",
                                   "label", "path", "codec", "year", "rating", "plays", "skips", "length", "bitrate", "track",
                                   "disc", "bpm", "lastplayed", "added", "plays30", "plays365", "samplerate",
-                                  "channels", "size", "gain", "firstplayed", "favorite"};
+                                  "channels", "size", "gain", "firstplayed", "favorite", "dr", "edition", "lyrics"};
 const wchar_t* const kFieldNames[] = {L"Any text", L"Title", L"Artist", L"Album artist", L"Album", L"Genre", L"Composer",
                                       L"Comment", L"Grouping", L"Label", L"Path", L"Codec", L"Year", L"Rating", L"Play count",
                                       L"Skip count", L"Length (seconds)", L"Bitrate (kbps)", L"Track number", L"Disc number",
                                       L"BPM", L"Last played", L"Date added", L"Plays in the last 30 days",
                                       L"Plays in the last 365 days", L"Sample rate (kHz)", L"Channels",
-                                      L"File size (MB)", L"Track gain (dB)", L"First played", L"Favorite (0 or 1)"};
+                                      L"File size (MB)", L"Track gain (dB)", L"First played", L"Favorite (0 or 1)",
+                                      L"Dynamic range (LU)", L"Edition", L"Lyrics"};
 const char* const kOpKeys[] = {"contains", "notcontains", "is", "isnot", "starts", "ends", "empty", "notempty",
                                "eq", "ne", "atleast", "atmost", "between", "inlast", "notinlast", "never",
                                "before", "after"};
@@ -171,13 +173,13 @@ private:
 
     const std::wstring& Needle(const std::string& s) {
         auto [it, added] = needles_.emplace(s, std::wstring());
-        if (added) it->second = textcase::Linguistic(FromUtf8(s));
+        if (added) it->second = textcase::SearchFold(FromUtf8(s));
         return it->second;
     }
 
     const std::wstring& Str(StringPool::Handle h) {
         auto [it, added] = lower_.emplace(h, std::wstring());
-        if (added) it->second = textcase::Linguistic(library_.Str(h));
+        if (added) it->second = textcase::SearchFold(library_.Str(h));
         return it->second;
     }
 
@@ -194,9 +196,11 @@ private:
             case RuleField::Label: return !t.label;
             case RuleField::Path: return !t.dir && !t.file;
             case RuleField::Codec: return *CodecName(t.codec) == 0;
+            case RuleField::Edition: return AlbumEditionSearchText(id).empty();
+            case RuleField::Lyrics: return !library_.Lyrics(id);
             case RuleField::Any:
                 return TextEmpty(RuleField::Title, id, t) && !t.artist && !t.albumArtist && !t.album && !t.genre &&
-                       !t.composer && !t.comment && !t.grouping && !t.label;
+                       !t.composer && !t.comment && !t.grouping && !t.label && !library_.Lyrics(id);
             default: return true;
         }
     }
@@ -205,7 +209,7 @@ private:
         switch (f) {
             case RuleField::Title: {
                 std::wstring title = t.title ? library_.Str(t.title) : StemOf(library_.Path(id));
-                return textcase::Linguistic(title);
+                return textcase::SearchFold(title);
             }
             case RuleField::Artist: return Str(t.artist);
             case RuleField::AlbumArtist: return Str(t.albumArtist ? t.albumArtist : t.artist);
@@ -215,11 +219,14 @@ private:
             case RuleField::Comment: return Str(t.comment);
             case RuleField::Grouping: return Str(t.grouping);
             case RuleField::Label: return Str(t.label);
-            case RuleField::Path: return textcase::Linguistic(library_.Path(id));
-            case RuleField::Codec: return textcase::Linguistic(CodecName(t.codec));
+            case RuleField::Path: return textcase::SearchFold(library_.Path(id));
+            case RuleField::Codec: return textcase::SearchFold(CodecName(t.codec));
+            case RuleField::Edition: return textcase::SearchFold(AlbumEditionSearchText(id));
+            case RuleField::Lyrics: return Str(library_.Lyrics(id));
             case RuleField::Any: {
                 std::wstring all = Text(RuleField::Title, id, t);
                 for (auto h : {t.artist, t.albumArtist, t.album, t.genre, t.composer, t.comment, t.grouping, t.label}) all += L"\n" + Str(h);
+                if (StringPool::Handle lh = library_.Lyrics(id)) all += L"\n" + Str(lh);
                 return all;
             }
             default: return {};
@@ -259,6 +266,8 @@ private:
             case RuleField::FileSize: return t.fileSize / 1e6;
             case RuleField::TrackGain:
                 return t.rgTrackGain == kNoGain ? std::numeric_limits<double>::quiet_NaN() : t.rgTrackGain / 100.0;
+            case RuleField::Dr:
+                return t.rgHigh ? (t.rgHigh - 1) / 4.0 : std::numeric_limits<double>::quiet_NaN();
             default: return 0;
         }
     }
@@ -326,7 +335,7 @@ const wchar_t* RuleFieldName(RuleField f) { return kFieldNames[(int)f]; }
 const wchar_t* RuleOpName(RuleOp op) { return kOpNames[(int)op]; }
 const wchar_t* PickByName(PickBy p) { return kPickNames[(int)p]; }
 const wchar_t* LimitUnitName(LimitUnit u) { return kUnitNames[(int)u]; }
-bool IsTextField(RuleField f) { return f <= RuleField::Codec; }
+bool IsTextField(RuleField f) { return f <= RuleField::Codec || f == RuleField::Edition || f == RuleField::Lyrics; }
 bool IsDateField(RuleField f) {
     return f == RuleField::LastPlayed || f == RuleField::DateAdded || f == RuleField::FirstPlayed;
 }

@@ -12,6 +12,7 @@
 // standby list, so playback and the window don't notice.
 #include "app.h"
 #include "memory_report.h"
+#include "packed_image.h"
 #include "playlog.h"
 #include "taste.h"
 
@@ -39,6 +40,10 @@ bool InUse() {
 }
 
 void GiveBack() {
+    // A cdpack build decommits the cold code (the tag editor's, the ripper's...) nothing touched since
+    // the last trim, before this one: it leaves memory and the commit charge outright, where a trim
+    // only parks it, and code still in use stays.
+    ReleaseColdCode();
     HeapCompact(GetProcessHeap(), 0);
     SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
     gb.watch.Trimmed(GetTickCount64());

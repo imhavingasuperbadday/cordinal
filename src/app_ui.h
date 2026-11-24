@@ -57,6 +57,8 @@ LRESULT CALLBACK TabsSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
 LRESULT CALLBACK HeaderSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR);
 LRESULT CALLBACK ButtonSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR);
 void DrawToolbarButton(const DRAWITEMSTRUCT* di);
+void UpdateSearchSuggest();
+void HideSearchSuggest();
 void RegisterAppClass(const wchar_t* cls, WNDPROC proc, UINT style = 0, bool appIcon = true);
 LRESULT FieldControlColor(HDC dc);
 LRESULT SurfaceControlColor(HDC dc, COLORREF text);

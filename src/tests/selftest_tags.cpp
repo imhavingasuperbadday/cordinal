@@ -1,6 +1,7 @@
 // Tag checks of the self test (see selftest.cpp): tag reading, ReplayGain tags, chapters and
 // lyrics, Steam soundtracks, crash dumps and ListenBrainz.
 #include "selftest_common.h"
+#include "tag_values.h"
 
 #include "tests/tag_suggest_checks.h"
 
@@ -60,6 +61,106 @@ void TestExtendedTags(const std::wstring& dir) {
     }
     Check(bad.empty(), L"EXT TAGS  composer, comment, grouping, label, track/disc totals, BPM, compilation and lyrics in FLAC, MP3, M4A and Ogg%ls",
           bad.c_str());
+
+    // Multi-value splitting and exception list.
+    testlog::Cases mv;
+    mv.Add(SplitTagValues("AC/DC", TagFieldKind::Artist) == std::vector<std::string>{"AC/DC"}, L"AC/DC preserved");
+    mv.Add(SplitTagValues("Earth, Wind & Fire", TagFieldKind::Artist) == std::vector<std::string>{"Earth, Wind & Fire"},
+           L"Earth, Wind & Fire preserved");
+    mv.Add(SplitTagValues("Simon & Garfunkel", TagFieldKind::Artist) == std::vector<std::string>{"Simon & Garfunkel"},
+           L"Simon & Garfunkel preserved");
+    mv.Add(SplitTagValues("Daft Punk feat. Pharrell Williams", TagFieldKind::Artist) ==
+               std::vector<std::string>{"Daft Punk", "Pharrell Williams"},
+           L"feat. split");
+    mv.Add(SplitTagValues("Daft Punk (feat. Pharrell Williams & Nile Rodgers)", TagFieldKind::Artist) ==
+               std::vector<std::string>{"Daft Punk", "Pharrell Williams", "Nile Rodgers"},
+           L"(feat. A & B) split");
+    mv.Add(SplitTagValues("Daft Punk feat. Simon & Garfunkel", TagFieldKind::Artist) ==
+               std::vector<std::string>{"Daft Punk", "Simon & Garfunkel"},
+           L"feat. exception preserved");
+    mv.Add(SplitTagValues("Artist A / Artist B", TagFieldKind::Artist) ==
+               std::vector<std::string>{"Artist A", "Artist B"},
+           L"slash split");
+    mv.Add(SplitTagValues("Rock, Electronic / Ambient; Jazz", TagFieldKind::Genre) ==
+               std::vector<std::string>{"Rock", "Electronic", "Ambient", "Jazz"},
+           L"multi-genre split");
+    Check(mv.Passed(), L"multi-value splitting respects band exceptions and delimiters%ls", mv.failed.c_str());
+
+    // ID3v2.4 NUL-separated values, TIPL/TMCL credits, and GRP1/MVNM/MVIN work/movement.
+    auto syncsafe = [](uint32_t v) {
+        std::string b(4, '\0');
+        b[0] = (char)((v >> 21) & 0x7F);
+        b[1] = (char)((v >> 14) & 0x7F);
+        b[2] = (char)((v >> 7) & 0x7F);
+        b[3] = (char)(v & 0x7F);
+        return b;
+    };
+    auto id3Frame = [&](const char* id, const std::string& body) {
+        return std::string(id, 4) + syncsafe((uint32_t)body.size()) + std::string("\0\0", 2) + body;
+    };
+    std::string frames;
+    frames += id3Frame("TPE1", std::string("\x03", 1) + "Daft Punk" + '\0' + "Pharrell Williams");
+    frames += id3Frame("TCON", std::string("\x03", 1) + "Electronic" + '\0' + "Funk");
+    frames += id3Frame("GRP1", std::string("\x03", 1) + "Symphony No. 5");
+    frames += id3Frame("MVNM", std::string("\x03", 1) + "I. Allegro con brio");
+    frames += id3Frame("MVIN", std::string("\x03", 1) + "1/4");
+    frames += id3Frame("TIPL", std::string("\x03", 1) + "producer" + '\0' + "Pharrell Williams");
+    frames += id3Frame("TMCL", std::string("\x03", 1) + "guitar" + '\0' + "Nile Rodgers");
+    std::string mp3 = std::string("ID3\x04\x00\x00", 6) + syncsafe((uint32_t)frames.size()) + frames;
+    mp3 += std::string("\xFF\xFB\x90\x00", 4) + std::string(413, '\0');
+    const std::wstring id3Path = dir + L"\\..\\scratch-mv.mp3";
+    if (WriteTestBytes(id3Path, mp3)) {
+        TagData td;
+        bool ok = ReadTags(id3Path, td);
+        DeleteFileW(id3Path.c_str());
+        bool hasProd = false, hasGuitar = false;
+        for (const auto& c : td.credits) {
+            if (c.role == "Producer" && c.name == "Pharrell Williams") hasProd = true;
+            if (c.role == "Guitar" && c.name == "Nile Rodgers") hasGuitar = true;
+        }
+        Check(ok && td.artist == "Daft Punk; Pharrell Williams" && td.genre == "Electronic; Funk" &&
+                  td.work == "Symphony No. 5" && td.movement == "I. Allegro con brio" &&
+                  td.movementNo == 1 && td.movementTotal == 4 && hasProd && hasGuitar,
+              L"ID3v2.4 multi-value frames, TIPL/TMCL credits, and work/movement tags");
+    }
+
+    // Vorbis comments: multi-value ARTIST/GENRE, WORK/MOVEMENT, and PRODUCER/PERFORMER credits.
+    auto le32 = [](uint32_t v) {
+        std::string b(4, '\0');
+        for (int i = 0; i < 4; ++i, v >>= 8) b[i] = (char)(v & 0xFF);
+        return b;
+    };
+    auto vcEntry = [&](std::string_view s) { return le32((uint32_t)s.size()) + std::string(s); };
+    std::string vc = vcEntry("test") + le32(8);
+    vc += vcEntry("ARTIST=Ludwig van Beethoven");
+    vc += vcEntry("ARTIST=Berliner Philharmoniker");
+    vc += vcEntry("GENRE=Classical");
+    vc += vcEntry("GENRE=Symphony");
+    vc += vcEntry("WORK=Symphony No. 9");
+    vc += vcEntry("MOVEMENTNAME=IV. Finale");
+    vc += vcEntry("MOVEMENTNUMBER=4/4");
+    vc += vcEntry("PERFORMER=Herbert von Karajan (conductor)");
+    std::string flac = "fLaC";
+    // STREAMINFO (type 0, 34 bytes)
+    std::string si(34, '\0');
+    si[10] = 0x0A; si[11] = (char)0xC4; si[12] = 0x42;  // 44100 Hz, 2ch, 16-bit
+    flac += std::string("\x00\x00\x00\x22", 4) + si;
+    // VORBIS_COMMENT (type 4 + last block 0x84)
+    flac += std::string(1, (char)0x84) + std::string(1, (char)((vc.size() >> 16) & 255)) +
+            std::string(1, (char)((vc.size() >> 8) & 255)) + std::string(1, (char)(vc.size() & 255)) + vc;
+    const std::wstring flacPath = dir + L"\\..\\scratch-mv.flac";
+    if (WriteTestBytes(flacPath, flac)) {
+        TagData td;
+        bool ok = ReadTags(flacPath, td);
+        DeleteFileW(flacPath.c_str());
+        bool hasPerf = false;
+        for (const auto& c : td.credits)
+            if (c.role == "Performer (conductor)" && c.name == "Herbert von Karajan") hasPerf = true;
+        Check(ok && td.artist == "Ludwig van Beethoven; Berliner Philharmoniker" &&
+                  td.genre == "Classical; Symphony" && td.work == "Symphony No. 9" &&
+                  td.movement == "IV. Finale" && td.movementNo == 4 && td.movementTotal == 4 && hasPerf,
+              L"Vorbis multi-value comments, credits, and work/movement tags");
+    }
 }
 
 namespace {
@@ -568,7 +669,7 @@ void TestCrashDump(const std::wstring& scratch) {
 void TestListenBrainz(const std::wstring& scratch) {
     using namespace listenbrainz;
     const std::string info = "\"media_player\":\"cordinal\",\"submission_client\":\"cordinal\","
-                             "\"submission_client_version\":\"0.1.18\"";
+                             "\"submission_client_version\":\"0.1.19\"";
 
     Listen a;
     a.listenedAt = 1700000000;

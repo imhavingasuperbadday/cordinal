@@ -135,7 +135,7 @@ enum : int {
     IDC_ELAPSED = 2910, IDC_LYRICS,
     IDC_FB_TREE = 2920, IDC_FB_VIEW, IDC_FB_FILTER, IDC_FB_PROPS,  // the foobar2000 theme's Album List panel
     IDC_FOLDERS_MUSIC,
-    IDC_RADIO_TAB = 2930,
+    IDC_RADIO_TAB = 2930, IDC_SAVE_SEARCH,
 };
 
 // Menu/command ids. The trailing ranges (IDM_*_BASE) reserve contiguous blocks so
@@ -160,7 +160,7 @@ enum : int {
     IDM_REGION_PLAY, IDM_REGION_START, IDM_REGION_END,  // the seek bar's right-click menu (app_region.cpp)
     IDM_WEB_SERVER, IDM_PREFERENCES, IDM_COMMAND_PALETTE,
     IDM_BACKUP, IDM_RESTORE_BACKUP, IDM_IMPORT_STATISTICS,
-    IDM_CANCEL_BACKUP, IDM_OPEN_RADIO, IDM_WRITE_STATISTICS, IDM_RG_SCAN_ALL,
+    IDM_CANCEL_BACKUP, IDM_OPEN_RADIO, IDM_WRITE_STATISTICS, IDM_RG_SCAN_ALL, IDM_SYNC, IDM_SAVE_SEARCH_AUTO,
     IDM_DUPLICATE_PL = 4000, IDM_REOPEN_PL, IDM_MOVE_PL_LEFT, IDM_MOVE_PL_RIGHT, IDM_PLAYING_PL,
     IDM_RELOAD_TAGS, IDM_CANCEL_IMPORT, IDM_WATCH_IMPORTED, IDM_CANCEL_STEAM, IDM_UNDO, IDM_REDO, IDM_QUEUE_SHOW,
     IDM_LIGHTWEIGHT, IDM_QUICK_PICK,  // Lightweight mode and its song picker (app_lightweight.cpp)
@@ -247,6 +247,7 @@ enum : int {
     // Mix like this song. Each makes a tab, or brings the one with the same rules to the front.
     IDM_MIX_BASE = 4440,     // + MixPreset
     IDM_RELEASE_RADAR = 4450,  // Library > New releases by your favorite artists...
+    IDM_LINT = 4451,           // Library > Lint library... (app_lint.cpp)
 };
 constexpr int kMaxPacks = 64, kMaxPackThemes = 64, kMaxPackAutoPlaylists = 64, kMaxPackColumnSets = 30;
 constexpr int kMaxHelpers = 32, kMaxHelperVisualizers = 16, kMaxHelperTools = 40;
@@ -377,7 +378,7 @@ struct ClosedPlaylist { Playlist playlist; int index; };
 struct App {
     HINSTANCE inst = nullptr;
     HWND hwnd = nullptr, list = nullptr, header = nullptr, tabs = nullptr, seek = nullptr, volume = nullptr,
-         status = nullptr, search = nullptr, npTitle = nullptr, npSub = nullptr, time = nullptr,
+         status = nullptr, search = nullptr, saveSearch = nullptr, npTitle = nullptr, npSub = nullptr, time = nullptr,
          speaker = nullptr, tips = nullptr, rename = nullptr, eqWnd = nullptr, headphonesWnd = nullptr, foldersWnd = nullptr,
          elapsed = nullptr;  // left of the seek bar; `time` on its right shows the time left or the length
     bool timeRemaining = true;  // click the time right of the seek bar to switch
@@ -634,6 +635,7 @@ extern App g;
 struct TagResult {
     TrackId id;
     TagData tags;
+    std::string lyrics;
     bool success = false;
     std::wstring path;  // reject a stale read if a track was moved while the batch ran
     uint64_t fileSize = 0, fileTime = 0;

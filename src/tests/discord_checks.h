@@ -4,6 +4,7 @@
 // (core_test.cpp, "discord") both run them.
 #pragma once
 #include "discord.h"
+#include "metadata_fetch.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -227,6 +228,24 @@ inline Results All(const std::string& socketFolder) {
     check(PreferredCover("http://example.com/a.jpg", "https://example.com/other.jpg") == "https://example.com/other.jpg",
           "a chosen cover Discord cannot take gives way to the found one");
     check(PreferredCover("", "").empty(), "with neither address cordinal's icon stands in");
+    // Covers uploaded for the status: litterbox's reply is the address alone, kept three days, reused for two.
+    const std::string hosted = "https://litter.catbox.moe/abc123.jpg";
+    check(online::HostedAddress(hosted + "\n") == hosted && online::HostedAddress(" " + hosted) == hosted,
+          "the upload's reply is its address, whatever space surrounds it");
+    check(online::HostedAddress("https://example.com/a.jpg").empty() && online::HostedAddress("<html>").empty() &&
+              online::HostedAddress("https://litter.catbox.moe/").empty() &&
+              online::HostedAddress("https://litter.catbox.moe/a b.jpg").empty(),
+          "a reply that is not one of the host's addresses is never shown");
+    const int64_t uploaded = 1700000000;
+    const std::string kept = HostedCacheValue(uploaded, hosted);
+    check(ReusableHostedCover(kept, uploaded + 3600) == hosted &&
+              ReusableHostedCover(kept, uploaded + 47 * 3600) == hosted,
+          "an uploaded cover is reused while the host keeps it more than a day longer");
+    check(ReusableHostedCover(kept, uploaded + 48 * 3600).empty() && ReusableHostedCover(kept, uploaded - 10).empty(),
+          "a cover near its expiry, or uploaded in the future, is uploaded again");
+    check(ReusableHostedCover("x\t" + hosted, uploaded).empty() && ReusableHostedCover(hosted, uploaded).empty() &&
+              ReusableHostedCover(std::to_string(uploaded) + "\thttps://example.com/a.jpg", uploaded).empty(),
+          "a damaged cache line is uploaded again");
     NowPlaying odd = song;
     odd.title = "X";
     odd.artist = std::string(126, 'a') + "\xE2\x82\xAC";  // the euro sign straddles the 128-byte limit

@@ -313,22 +313,26 @@ namespace {
 // Codewords are counted with U(n,k), symmetric in n and k: U(n,k) = U(n-1,k)+U(n,k-1)+U(n-1,k-1)
 // for n,k > 0 and U(0,k) = 1 only for k = 0. A codebook of k pulses in n dimensions holds
 // V(n,k) = U(n,k)+U(n,k+1) vectors, U(n,k) of them with a negative first value. The table is
-// needed only once the first CELT band is decoded; building it at first use keeps its 126 KB
-// out of the executable's read-only data (it lives in .bss, filled by 31,152 additions). Row n
-// holds every count the decoder reads while n dimensions remain, so its searches stay in one
-// row. Counts above 32 bits saturate to UINT32_MAX; no valid codebook reaches them.
+// needed only once the first CELT band is decoded, so it is built then, by 31,152 additions, on
+// the heap: neither its 126 KB of read-only data nor a .bss array of that size sits in the
+// executable's image for players who never open Opus. Row n holds every count the decoder reads
+// while n dimensions remain, so its searches stay in one row. Counts above 32 bits saturate to
+// UINT32_MAX; no valid codebook reaches them.
 using PulseTable=std::array<std::array<uint32_t,178>,177>;
-PulseTable pulseCounts;
+const PulseTable* pulseCounts;  // kept for the life of the process once built
 void InitPulseCounts() {
     static const bool filled=[] {
-        pulseCounts[0][0]=1;
+        auto* table=new PulseTable{};
+        PulseTable& t=*table;
+        t[0][0]=1;
         for (int n=1;n<=176;++n) for (int k=1;k<=177;++k)
-            pulseCounts[n][k]=(uint32_t)std::min<uint64_t>(UINT32_MAX,uint64_t(pulseCounts[n-1][k])+pulseCounts[n][k-1]+pulseCounts[n-1][k-1]);
+            t[n][k]=(uint32_t)std::min<uint64_t>(UINT32_MAX,uint64_t(t[n-1][k])+t[n][k-1]+t[n-1][k-1]);
+        pulseCounts=table;
         return true;
     }();
     (void)filled;
 }
-inline const PulseTable& PulseCounts() { return pulseCounts; }
+inline const PulseTable& PulseCounts() { return *pulseCounts; }
 // Decodes codeword `index` of k pulses in n dimensions into y (the enumeration of RFC 6716
 // 4.3.4.2, in the U form libopus uses) and returns the sum of squares. Codewords from
 // U(n,k+1) on have a negative first value. The pulses left after this dimension are then the

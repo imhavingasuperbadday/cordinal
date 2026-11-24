@@ -205,7 +205,7 @@ void TagWorker() {
                 if (!PostMessageW(nullptr, WM_APP_CHAPTERS, 0, (LPARAM)result)) delete result;
                 continue;
             }
-            TagResult r{job.id, job.path, {}, false};
+            TagResult r{job.id, job.path, {}, {}, false};
             WIN32_FILE_ATTRIBUTE_DATA attrs{};
             r.haveStats = GetFileAttributesExW(job.path.c_str(), GetFileExInfoStandard, &attrs) != FALSE;
             if (r.haveStats) {
@@ -213,6 +213,7 @@ void TagWorker() {
                 r.fileTime = (uint64_t)attrs.ftLastWriteTime.dwHighDateTime << 32 | attrs.ftLastWriteTime.dwLowDateTime;
             }
             r.ok = ReadTags(job.path, r.tags);  // the shared reader also resolves CUE and game-music tracks
+            if (r.ok) ReadSearchableLyrics(job.path, r.lyrics);
             results->push_back(std::move(r));
         }
         if (results->empty() || !PostMessageW(nullptr, WM_APP_TAGS, 0, (LPARAM)results)) delete results;
@@ -353,6 +354,7 @@ void AcceptTags(std::vector<TagResult>* results) {
             bool changed = r.haveStats && (t.fileSize != r.fileSize || t.fileTime != r.fileTime);
             if (r.haveStats) { t.fileSize = r.fileSize; t.fileTime = r.fileTime; }
             g_lib.ApplyTags(r.id, r.tags);
+            g_lib.SetLyrics(r.id, r.lyrics);
             if (changed) RefreshTrackArt(r.id);
             playingChanged |= r.id == g.playing;
         } else g_lib[r.id].flags = (uint16_t)((g_lib[r.id].flags & ~Track::kLoaded) | Track::kTagFailed);

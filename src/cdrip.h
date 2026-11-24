@@ -88,6 +88,50 @@ std::unique_ptr<PcmReader> OpenTrack(Drive& drive, const Toc& toc, size_t track,
 // Runs the first pass of a reader OpenTrack made; false when cancelled.
 bool Scan(PcmReader& reader);
 
+// AccurateRip disc identifiers, binary database entries, and verification state.
+struct AccurateRipIds {
+    unsigned tracks = 0;
+    uint32_t id1 = 0, id2 = 0, cddb = 0;
+};
+struct AccurateRipEntry {
+    uint8_t confidence = 0;
+    uint32_t crc = 0;
+    uint32_t frame450 = 0;
+};
+struct AccurateRipPressing {
+    AccurateRipIds ids{};
+    std::vector<AccurateRipEntry> tracks;
+};
+enum class ArStatus { NotChecked, NotInDatabase, VerifiedV2, VerifiedV1, MatchedOffset, Mismatch };
+struct AccurateRipTrackResult {
+    ArStatus status = ArStatus::NotChecked;
+    unsigned confidence = 0;
+    unsigned totalConfidence = 0;
+    int matchedOffset = 0;  // non-zero when frame 450 matches a pressing shifted in [-kMaxOffset, +kMaxOffset]
+    uint32_t v1 = 0, v2 = 0, frame450 = 0, crc32 = 0;
+    bool hasFrame450 = false;
+};
+struct OffsetDetection {
+    bool found = false;
+    int offset = 0;
+    unsigned matchedTracks = 0;
+    unsigned confidence = 0;
+    unsigned checkedTracks = 0;
+};
+
+// Computes the three AccurateRip identifiers (discId1, discId2, cddbId) from a TOC.
+bool ComputeAccurateRipIds(const Toc& toc, AccurateRipIds& ids);
+// Returns the dBAR-*.bin lookup URL for `ids`.
+std::string AccurateRipUrl(const AccurateRipIds& ids);
+// Parses an AccurateRip binary `dBAR-*.bin` response; ignores malformed trailing/truncated pressings.
+std::vector<AccurateRipPressing> ParseAccurateRip(std::string_view bin, unsigned expectedTracks);
+// Queries AccurateRip for `toc` (`http://www.accuraterip.com/...`). Returns empty on network/404 failure.
+std::vector<AccurateRipPressing> FetchAccurateRip(const Toc& toc, online::Cancel& cancel,
+                                                  const albumtag::Fetch& fetch = {});
+// Calibrates the drive read offset using frame-450 CRCs across up to 3 eligible tracks.
+OffsetDetection DetectOffset(Drive& drive, const Toc& toc, const std::vector<AccurateRipPressing>& pressings,
+                             const std::atomic<bool>& cancel, const std::function<void(double)>& progress = nullptr);
+
 struct Job {
     Toc toc;
     Disc disc;
@@ -97,6 +141,10 @@ struct Job {
     int offset = 0;
     unsigned threads = 1;        // the .cord encoder's
     std::string cover;           // image bytes to embed, or empty
+    std::vector<AccurateRipPressing> arPressings;
+    bool arChecked = false;      // distinguishes "not in AccurateRip DB" from "AccurateRip disabled"
+    bool writeLog = false;       // write an atomic <Album>.log next to the ripped tracks
+    std::wstring driveName;      // included in the rip log when set
 };
 // Where track `i` of the job goes: "<folder>/<album artist>/<album>/<NN> <title>.<ext>".
 std::wstring TrackPath(const Job& job, size_t i);
@@ -104,9 +152,11 @@ std::wstring TrackPath(const Job& job, size_t i);
 struct TrackDone {
     std::wstring path, error;  // error empty: written and verified
     ReadStats stats;
+    AccurateRipTrackResult ar;
 };
 struct Result {
     std::vector<TrackDone> tracks;
+    std::wstring logPath;
     bool cancelled = false;
 };
 // Worker thread: rips the job's tracks in order, each written and verified before the next starts.

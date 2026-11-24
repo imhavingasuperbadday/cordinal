@@ -9,13 +9,25 @@ namespace {
 enum class Operation { Backup, Restore, Statistics, Review, Stage, Apply };
 struct Result {
     Operation operation;
-    std::wstring folder, error, stage;
+    std::wstring folder, error, stage, sourceLabel;
     LibraryArchive data;
     std::string settings;
     std::vector<migration::Statistics> statistics;
+    std::vector<migration::ImportedPlaylist> playlists;
     std::vector<migration::PathMap> maps;
     size_t unlocated = 0, missing = 0;
 };
+struct TrackStatBackup {
+    TrackId id = kInvalidTrack;
+    uint32_t playCount = 0, skipCount = 0, added = 0, firstPlayed = 0, lastPlayed = 0;
+    uint8_t rating = 0;
+};
+struct MigrationUndo {
+    uint64_t when = 0;
+    std::wstring description;
+    std::vector<TrackStatBackup> tracks;
+    std::vector<std::wstring> createdPlaylists;
+} migrationUndo;
 std::thread worker;
 std::atomic<bool> cancel{false};
 bool busy = false, stopping = false;
@@ -147,12 +159,22 @@ std::wstring Summary(const Result& r) {
                L"Music is not included. Packs, soundfonts and settings are restored. Reconnect scrobbling services "
                L"and pair browser devices again.";
     const auto plan = migration::PlanStatistics(g_lib, r.statistics, r.maps);
-    return std::to_wstring(plan.matched.size()) + L" songs matched, " +
-           std::to_wstring(plan.unmatched + r.unlocated) + L" unmatched, " + std::to_wstring(plan.conflicts) +
-           L" rating conflicts or duplicate records.\r\n"
-           L"Keep higher counts, earliest first-play dates and existing ratings. No listening events are "
-           L"invented. "
-           L"A backup of the current profile is saved first.";
+    const auto plPlans = migration::PlanPlaylists(g_lib, r.playlists, r.maps);
+    size_t plCount = 0, plTracks = 0;
+    for (const auto& p : plPlans) {
+        if (!p.tracks.empty()) {
+            ++plCount;
+            plTracks += p.tracks.size();
+        }
+    }
+    std::wstring s = std::to_wstring(plan.matched.size()) + L" songs matched, " +
+                     std::to_wstring(plan.unmatched + r.unlocated) + L" unmatched, " +
+                     std::to_wstring(plan.conflicts) + L" rating conflicts or duplicate records.";
+    if (!r.playlists.empty())
+        s += L" " + std::to_wstring(plCount) + L" playlists (" + std::to_wstring(plTracks) + L" tracks found).";
+    s += L"\r\nKeep higher counts, earliest first-play dates and existing ratings. No listening events are "
+         L"invented. A backup of the current profile is saved first, and you can undo with Ctrl+Z.";
+    return s;
 }
 
 void Review() {
@@ -200,7 +222,11 @@ void Apply() {
     }
     if (b.result->operation == Operation::Statistics) {
         auto plan = migration::PlanStatistics(g_lib, b.result->statistics, b.result->maps);
-        if (plan.matched.empty()) {
+        auto plPlans = migration::PlanPlaylists(g_lib, b.result->playlists, b.result->maps);
+        bool anyPlaylist = false;
+        for (const auto& p : plPlans)
+            if (!p.tracks.empty()) anyPlaylist = true;
+        if (plan.matched.empty() && !anyPlaylist) {
             ShowMessage(L"No songs matched. Add the music to your library and check the folder locations.");
             return;
         }
@@ -219,7 +245,9 @@ void Apply() {
             auto out = new Result{Operation::Apply};
             if (backup::Create(r->folder, profile, settings, *snapshot, cancel, out->error)) {
                 out->folder = r->folder;
+                out->sourceLabel = r->sourceLabel;
                 out->statistics = std::move(r->statistics);
+                out->playlists = std::move(r->playlists);
                 out->maps = std::move(r->maps);
             }
             return out;
@@ -349,10 +377,50 @@ void Open(std::unique_ptr<Result> result) {
                     r.bottom - r.top, g.hwnd, nullptr, g.inst, nullptr);
     ShowWindow(b.hwnd, SW_SHOW);
     SetFocus(b.list);
+    if (b.result && b.result->operation == Operation::Statistics && b.result->maps.empty()) Review();
 }
 } // namespace
 
 bool BackupDialogMessage(MSG* msg) { return b.hwnd && IsDialogMessageW(b.hwnd, msg); }
+bool CanUndoMigration(std::wstring& description) {
+    if (migrationUndo.tracks.empty() && migrationUndo.createdPlaylists.empty()) return false;
+    description = migrationUndo.description;
+    return true;
+}
+uint64_t NewestMigrationTime() {
+    return (migrationUndo.tracks.empty() && migrationUndo.createdPlaylists.empty()) ? 0 : migrationUndo.when;
+}
+void UndoLastMigration() {
+    if (migrationUndo.tracks.empty() && migrationUndo.createdPlaylists.empty()) return;
+    for (const auto& s : migrationUndo.tracks) {
+        if (!g_lib.Contains(s.id)) continue;
+        Track& t = g_lib[s.id];
+        t.playCount = s.playCount;
+        t.skipCount = s.skipCount;
+        t.added = s.added;
+        t.firstPlayed = s.firstPlayed;
+        t.lastPlayed = s.lastPlayed;
+        t.rating = s.rating;
+    }
+    for (const auto& name : migrationUndo.createdPlaylists) {
+        for (int i = (int)g.playlists.size() - 1; i >= 0; --i) {
+            if (g.playlists[i].kind == PlaylistKind::Static && g.playlists[i].name == name) {
+                g.playlists.erase(g.playlists.begin() + i);
+                if (g.active >= (int)g.playlists.size()) g.active = std::max(0, (int)g.playlists.size() - 1);
+                break;
+            }
+        }
+    }
+    if (!migrationUndo.tracks.empty()) g_lib.Touch();
+    const std::wstring desc = migrationUndo.description;
+    migrationUndo = {};
+    g.dirty = true;
+    g.statsDirty = true;
+    SaveLibraryNow();
+    RefreshTabs();
+    RebuildView(true);
+    ShowMessage(L"Undid " + desc + L".");
+}
 bool BackupBusy() { return busy; }
 void CancelBackup() {
     cancel = true;
@@ -418,9 +486,15 @@ void ImportPlaybackStatistics() {
     ComPtr<IFileOpenDialog> dialog;
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog))))
         return;
-    COMDLG_FILTERSPEC filter[] = {{L"Playback statistics (foobar2000 XML or CSV)", L"*.xml;*.csv"}};
-    dialog->SetFileTypes(1, filter);
-    dialog->SetTitle(L"Import playback statistics");
+    COMDLG_FILTERSPEC filter[] = {
+        {L"All supported exports (*.xml;*.csv;*.tsv;*.txt;*.xspf)", L"*.xml;*.csv;*.tsv;*.txt;*.xspf"},
+        {L"iTunes / Apple Music Library (*.xml)", L"*.xml"},
+        {L"foobar2000 Playback Statistics (*.xml)", L"*.xml"},
+        {L"MusicBee Library / Playlist (*.xml;*.csv;*.tsv;*.txt;*.xspf)", L"*.xml;*.csv;*.tsv;*.txt;*.xspf"},
+        {L"cordinal Statistics (*.csv)", L"*.csv"},
+    };
+    dialog->SetFileTypes((UINT)std::size(filter), filter);
+    dialog->SetTitle(L"Import playback statistics & playlists");
     ComPtr<IShellItem> item;
     PWSTR raw = nullptr;
     if (FAILED(dialog->Show(g.hwnd)) || FAILED(dialog->GetResult(&item)) ||
@@ -431,17 +505,39 @@ void ImportPlaybackStatistics() {
     ShowMessage(L"Reading playback statistics...");
     Start([file] {
         auto r = new Result{Operation::Statistics};
-        if (ExtOf(file) == L"xml")
+        r->sourceLabel = FileNameOf(file);
+        std::string bytes;
+        if (!backup::ReadBytes(file, bytes)) {
+            r->error = L"Couldn't read the selected export file.";
+            return r;
+        }
+        if (ExtOf(file) == L"xml" && bytes.find("<PlaybackStatistics") != bytes.npos) {
             migration::ReadFoobarStatistics(file, r->statistics, r->unlocated, r->error);
-        else {
-            std::string bytes;
-            if (!backup::ReadBytes(file, bytes))
-                r->error = L"Couldn't read the statistics CSV.";
-            else
-                migration::ReadStatisticsCsv(bytes, r->statistics, r->error);
+            return r;
+        }
+        migration::ImportBundle bundle;
+        migration::ImportFormat format = migration::ImportFormat::Unknown;
+        if (migration::ReadImportBytes(bytes, ToUtf8(StemOf(file)), bundle, format, r->error)) {
+            r->statistics = std::move(bundle.statistics);
+            r->playlists = std::move(bundle.playlists);
+            r->unlocated = bundle.unlocated;
         }
         return r;
     });
+}
+
+void PreviewImportedStatistics(const std::wstring& sourceLabel, migration::ImportBundle bundle) {
+    if (busy || b.hwnd) {
+        ShowMessage(L"Finish or cancel the current backup operation first.");
+        return;
+    }
+    auto r = std::make_unique<Result>();
+    r->operation = Operation::Statistics;
+    r->sourceLabel = sourceLabel;
+    r->statistics = std::move(bundle.statistics);
+    r->playlists = std::move(bundle.playlists);
+    r->unlocated = bundle.unlocated;
+    Open(std::move(r));
 }
 
 void OnBackupMessage(LPARAM lp) {
@@ -474,13 +570,38 @@ void OnBackupMessage(LPARAM lp) {
         PostMessageW(g.hwnd, WM_CLOSE, 0, 0);
     } else if (r->operation == Operation::Apply) {
         auto plan = migration::PlanStatistics(g_lib, r->statistics, r->maps);
+        auto plPlans = migration::PlanPlaylists(g_lib, r->playlists, r->maps);
+        MigrationUndo undo;
+        undo.when = UnixNow();
+        undo.tracks.reserve(plan.matched.size());
+        for (const auto& [id, _] : plan.matched) {
+            if (!g_lib.Contains(id)) continue;
+            const Track& t = g_lib[id];
+            undo.tracks.push_back({id, t.playCount, t.skipCount, t.added, t.firstPlayed, t.lastPlayed, t.rating});
+        }
         migration::ApplyStatistics(g_lib, plan);
+        size_t createdPlaylists = 0;
+        for (auto& pl : plPlans) {
+            if (pl.tracks.empty()) continue;
+            NewPlaylist(FromUtf8(pl.name));
+            const int idx = (int)g.playlists.size() - 1;
+            g.playlists[idx].items = std::move(pl.tracks);
+            undo.createdPlaylists.push_back(g.playlists[idx].name);
+            ++createdPlaylists;
+        }
+        undo.description = L"Undo import (" + std::to_wstring(plan.matched.size()) + L" tracks" +
+                           (createdPlaylists ? L", " + std::to_wstring(createdPlaylists) + L" playlists" : L"") +
+                           L")";
+        migrationUndo = std::move(undo);
         g.dirty = true;
         g.statsDirty = true;
         SaveLibraryNow();
+        RefreshTabs();
         RebuildView(true);
-        ShowMessage(L"Imported statistics for " + std::to_wstring(plan.matched.size()) +
-                    L" songs. Previous profile: " + r->folder);
+        std::wstring msg = L"Imported statistics for " + std::to_wstring(plan.matched.size()) + L" songs";
+        if (createdPlaylists) msg += L" and " + std::to_wstring(createdPlaylists) + L" playlists";
+        msg += L". Press Ctrl+Z to undo. Previous profile: " + r->folder;
+        ShowMessage(msg);
         if (b.hwnd) DestroyWindow(b.hwnd);
     } else
         Open(std::move(r));

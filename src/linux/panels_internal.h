@@ -19,7 +19,7 @@
 namespace lx::panel {
 
 enum class Kind { None, Eq, Headphones, Tags, Prefs, Rules, Organize, Copy, ListenBrainz, Format, Device, Points, Review,
-                  Palette, Layout, Packs, Helpers, Games, Editions, Covers, Artist, Export, Album, Keys, Comeback, AlbumTag, Duplicates, Convert, Rip, WebFetch,
+                  Palette, Layout, Packs, Helpers, Games, Editions, Covers, Artist, Export, Album, Keys, Comeback, AlbumTag, Duplicates, Lint, Convert, Rip, WebFetch,
                   ReleaseRadar, Count };
 extern Kind g_kind;
 extern float g_mx, g_my;  // the mouse, for hover states
@@ -39,7 +39,7 @@ struct Ops {
     bool typing = false;        // takes text input, which ClosePanel stops
 };
 extern const Ops kEqOps, kTagsOps, kPrefsOps, kRulesOps, kOrganizeOps, kCopyOps, kListenBrainzOps, kFormatOps,
-    kDeviceOps, kPointsOps, kReviewOps, kPaletteOps, kLayoutOps, kPacksOps, kHelpersOps, kAlbumOps, kKeysOps, kComebackOps, kAlbumTagOps, kDuplicatesOps, kConvertOps, kRipOps, kWebFetchOps,
+    kDeviceOps, kPointsOps, kReviewOps, kPaletteOps, kLayoutOps, kPacksOps, kHelpersOps, kAlbumOps, kKeysOps, kComebackOps, kAlbumTagOps, kDuplicatesOps, kLintOps, kConvertOps, kRipOps, kWebFetchOps,
     kRadarOps;
 bool ConvertPanelDirty();  // the Convert panel's count waits to be redone once typing pauses
 

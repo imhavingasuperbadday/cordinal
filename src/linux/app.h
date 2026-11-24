@@ -75,6 +75,7 @@ constexpr UINT WM_APP_DISCOVER = WM_APP + 51;          // a preview found for Ke
 constexpr UINT WM_APP_ONLINE_SEARCH = WM_APP + 52;     // online search results (lParam owns them, search_online_ui.cpp)
 constexpr UINT WM_APP_ONLINE_RESOLVE = WM_APP + 53;    // a resolved online song (lParam owns it, search_online_ui.cpp)
 constexpr UINT WM_APP_PICKER_ONLINE = WM_APP + 54;     // picker online results (lParam owns them, panel_palette.cpp)
+constexpr UINT WM_APP_LINT = WM_APP + 55;              // library lint scan finished (lint_ui.cpp)
 
 // How long a conversion can be undone, in days; the Windows build's kConvertMemoryDays.
 constexpr unsigned kConvertMemoryDays[] = {1, 3, 7, 49};
@@ -101,6 +102,7 @@ struct TagResult {
     TrackId id;
     std::wstring path;
     TagData tags;
+    std::string lyrics;
     bool ok;
     bool haveStats = false;
     uint64_t fileSize = 0, fileTime = 0;
@@ -251,6 +253,7 @@ struct Settings {
     // CD drive's read offset in samples (Preferences > Conversion).
     bool ripFlac = true;
     std::wstring ripFolder;
+    std::wstring syncFolder;  // Library > Sync with other PCs; empty = off
     int ripOffset = 0;
     // Library > Organize files: the folder last organized into and the naming pattern (empty: the
     // library's first folder and kDefaultOrganizePattern).
@@ -382,7 +385,10 @@ extern App g;
 void InitPaths();
 void LoadSettings();
 void SaveSettings();
-void ChooseMigration(int kind);  // 1 backup, 2 restore, 3 CSV statistics
+void ChooseMigration(int kind);  // 1 backup, 2 restore, 3 statistics/playlists
+bool CanUndoMigration(std::wstring& description);
+uint64_t NewestMigrationTime();
+void UndoLastMigration();
 void OnMigration(WPARAM kind, LPARAM value);
 void StopMigration();
 void FinishMigration();
@@ -390,6 +396,14 @@ void LoadLibraryFile();
 void SaveLibraryFile(bool force);
 // The system Music folder (XDG's, or $HOME/Music): the default library folder on a new profile.
 std::string MusicFolder();
+
+// sync.cpp: Library > Sync with other PCs (syncfolder.h). A pass about once a minute from the tick, the
+// bookkeeping written after each library save, and a last pass at exit before the final save.
+void SyncTick();
+void SyncLibrarySaved();
+void SyncFinish();
+void OpenSync();
+void SyncFolderChosen(const std::wstring& folder);
 
 // library_sync.cpp
 void StartScanner();

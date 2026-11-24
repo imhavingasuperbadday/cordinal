@@ -6,6 +6,7 @@
 #include "ui.h"
 
 #include "app.h"
+#include "search_query.h"
 #include "archive.h"
 #include "column_layout.h"
 #include "cue.h"
@@ -131,12 +132,12 @@ enum Action {
     kAddFiles, kAddFolder, kOpenPlaylistFile, kSavePlaylistFile, kExit,
     kBackup, kRestore, kStatistics, kExportCollection, kImportCollection, kCancelCollection,
     kSelectAll, kRemove, kKeepSelected, kClear, kReloadTags, kRemoveDuplicates, kRemoveDead, kCancelDead, kFind,
-    kPlayPause, kStopAction, kMute, kPrevAction, kNextAction, kShuffleAction, kShuffleAlbumsAction, kRadio, kTaste, kKeepDiscovery, kRepeatSet, kStopAfter, kSpots, kPlayHistory, kSpeed, kTempo, kShared, kExclusive,
+    kPlayPause, kStopAction, kMute, kPrevAction, kNextAction, kShuffleAction, kShuffleAlbumsAction, kRadio, kTaste, kKeepDiscovery, kRepeatSet, kStopAfter, kSpots, kPlayHistory, kSpeed, kTempo, kReverb, kReverbMix, kNightMode, kBitcrush, kHeadphones, kShared, kExclusive,
     kNewPl, kRenamePl, kClosePl, kDuplicatePl, kReopenPl, kMovePlLeft, kMovePlRight, kNextPl, kPrevPl, kReveal,
-    kFolders, kRescan, kAcceptInbox, kAcceptAllInbox, kExcludeLibrary, kDuplicateAudio,
+    kFolders, kRescan, kAcceptInbox, kAcceptAllInbox, kExcludeLibrary, kDuplicateAudio, kLintLibrary,
     kSteam, kCancelSteam, kWebServer, kConvert, kConvertUndo, kCancelConvert, kOrganize, kOrganizeUndo, kWebFetch, kCopyTo, kCancelCopy,
     kIpodSync, kCancelIpodSync,
-    kTheme, kOpenRadio, kGroupAlbums, kStartOnLogin, kNameThatTrack, kWhichCameFirst, kPoints, kReview, kPalette, kLyrics, kLayout, kViewSize, kBigPanel, kBigReset, kMini, kLightweight, kPickSong, kVolumeUp, kVolumeDown, kSeekBack, kSeekForward, kKeyboard, kPacks, kPackPlaylist, kHelpers, kHelperTool, kHelperCancel,
+    kTheme, kOpenRadio, kGroupAlbums, kAlwaysOnTop, kStartOnLogin, kNameThatTrack, kWhichCameFirst, kPoints, kReview, kPalette, kLyrics, kLayout, kViewSize, kBigPanel, kBigReset, kMini, kLightweight, kPickSong, kVolumeUp, kVolumeDown, kSeekBack, kSeekForward, kKeyboard, kPacks, kPackPlaylist, kHelpers, kHelperTool, kHelperCancel,
     kAbout,
     kPlay, kPlayNext, kAddToQueue, kClearQueue, kAddToNowPlaying, kAddToPlaylist, kRemoveFromNowPlaying, kOpenFolder, kColumnToggle, kPackColumnSet,
     kSectionPlay, kSectionLoop, kSectionStart, kSectionEnd, kSectionClear,
@@ -148,7 +149,7 @@ enum Action {
     kCoverFile, kCoverPaste, kEditAlbumTags, kMissingInfo, kQueuePanel, kQueueEdit, kMakeAlbum, kTagAlbum, kTopBar,
     // The Layout menu (panel_setup.cpp RunLayoutAction): arg is the preset, saved slot, dock, size or row.
     kLayoutPreset, kLayoutBlank, kLayoutSave, kLayoutSaved, kLayoutForget, kLayoutDock, kLayoutWave, kLayoutWaveRow,
-    kLayoutPart, kLayoutBar, kColumnBrowser, kRipCd, kCancelRip, kOnlineAction,
+    kLayoutPart, kLayoutBar, kColumnBrowser, kRipCd, kCancelRip, kOnlineAction, kSyncFolder,
 };
 extern std::function<void(int)> g_choicePick;  // the choice a panel's OpenChoice menu is for
 struct MenuItem {
@@ -266,6 +267,10 @@ bool CoverFading();       // a change is waiting for the next cover or running: 
 void ReleaseCoverFade();  // drops the change and its texture, as the renderer goes
 extern uint32_t g_lastRebuild;
 extern size_t g_sourceCount;  // active tab's tracks before the search
+extern std::vector<SearchSuggestion> g_searchSuggest;
+extern int g_searchSuggestSel;
+void UpdateLinuxSearchSuggest();
+void SaveLinuxSearchAsAutoPlaylist();
 extern std::unordered_map<uint64_t, std::string> g_cells;  // formatted cells by track and column
 extern uint32_t g_cellsRevision;
 extern AudioVisuals g_visuals;

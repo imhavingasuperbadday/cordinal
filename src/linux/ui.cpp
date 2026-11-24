@@ -124,6 +124,7 @@ Wave g_wave;
 SDL_Texture* g_cover = nullptr;
 SDL_Texture* g_disc = nullptr;  // the cover's disc art, when its album has some
 TrackId g_coverFor = kNone, g_coverWanted = kNone;
+std::string g_coverFile;  // g_coverFor's encoded image, saved for MPRIS
 double g_coverHue = -1;  // the cover's hue (CoverHue), which the player's background takes on
 std::vector<uint32_t> g_coverPixels;
 int g_coverWidth = 0, g_coverHeight = 0;
@@ -366,6 +367,7 @@ void SetCover(CoverImage* image) {
     if (g_disc) SDL_DestroyTexture(g_disc);
     g_cover = g_disc = nullptr;
     g_coverFor = image->id;
+    g_coverFile = image->file;
     g_coverHue = image->width > 0 ? CoverHue(image->rgba.data(), (size_t)image->width * image->height, false) : -1;
     MprisSetArt(image->id, image->file);
     g_coverPixels.clear();
@@ -394,6 +396,8 @@ void SetCover(CoverImage* image) {
     }
     g.redraw = true;
 }
+
+std::string CoverFileFor(TrackId id) { return id != kNone && id == g_coverFor ? g_coverFile : std::string(); }
 
 void ForgetCoverArt() {
     // Covers still on their way keep their slots; SetThumb fills them as usual.

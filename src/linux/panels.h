@@ -24,7 +24,8 @@ enum FilePurpose : int {
     kFileAlbumCover = 9,   // the album maker's Choose cover...
     kFileConvertDest = 10,  // the Convert panel's Browse...
     kFileRipDest = 11,      // the Rip CD panel's Browse...
-    kFileImportWeb = 12     // the web save panel's Import file... (a Spotify export or CSV)
+    kFileImportWeb = 12,    // the web save panel's Import file... (a Spotify export or CSV)
+    kFileSyncFolder = 13    // Library > Sync with other PCs: the shared folder (sync.cpp)
 };
 
 void OpenEqualizer();
@@ -40,6 +41,10 @@ void OpenDuplicates();
 void OnDuplicatesMessage();  // WM_APP_DUPLICATES
 void DuplicatesMeasured();
 void StopDuplicates();
+// Library > Lint library (lint_ui.cpp, as app_lint.cpp).
+void OpenLint();
+void OnLintMessage();  // WM_APP_LINT
+void StopLint();
 void OpenPreferences();
 int CheckPreferences();  // headless control geometry, state and keyboard checks; saves no images
 int CheckTagSuggestions();  // headless tag-editor completion check; saves no images

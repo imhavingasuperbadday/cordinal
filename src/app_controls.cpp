@@ -51,6 +51,9 @@ void CreateControls(HWND hwnd) {
     UpdateSearchCue();
     SendMessageW(g.search, EM_SETLIMITTEXT, 4096, 0);
     SetWindowSubclass(g.search, SearchSubclass, 0, 0);
+    g.saveSearch = make(0, WC_BUTTONW, L"Save search as auto-playlist", BS_OWNERDRAW | WS_TABSTOP, IDC_SAVE_SEARCH);
+    ShowWindow(g.saveSearch, SW_HIDE);
+    SetWindowSubclass(g.saveSearch, ButtonSubclass, 0, 0);
     CreateRadio(hwnd);
 
     // Virtual list view: LVS_OWNERDATA means the app supplies every row (g.view) on demand. The
@@ -89,6 +92,14 @@ void CreateControls(HWND hwnd) {
         ti.hwnd = hwnd;
         ti.uId = (UINT_PTR)g.fbButtons[i];
         ti.lpszText = const_cast<wchar_t*>(fbNames[i]);
+        SendMessageW(g.tips, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+    }
+    if (g.saveSearch) {
+        TTTOOLINFOW ti{sizeof(ti)};
+        ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+        ti.hwnd = hwnd;
+        ti.uId = (UINT_PTR)g.saveSearch;
+        ti.lpszText = const_cast<wchar_t*>(L"Save search as auto-playlist");
         SendMessageW(g.tips, TTM_ADDTOOLW, 0, (LPARAM)&ti);
     }
     // The status bar has no child windows for its parts, so its tools are keyed by index

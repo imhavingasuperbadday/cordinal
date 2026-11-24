@@ -621,12 +621,96 @@ bool Import(const std::vector<File>& files, LibraryArchive& out, std::wstring& e
     return true;
 }
 
+namespace {
+std::string NormMeta(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    bool space = true;
+    for (unsigned char c : s) {
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+            space = true;
+            continue;
+        }
+        if (space && !out.empty()) out += ' ';
+        space = false;
+        out += (char)(c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c);
+    }
+    return out;
+}
+
+std::string FirstArtistMeta(std::string_view artist) {
+    auto cut = artist.find_first_of(",;");
+    return NormMeta(cut == artist.npos ? artist : artist.substr(0, cut));
+}
+
+struct MetaIndex {
+    bool built = false;
+    std::map<std::pair<std::string, std::string>, std::vector<TrackId>> byName;
+
+    void Ensure(const Library& library) {
+        if (built) return;
+        built = true;
+        for (TrackId id = 0; id < library.Count(); ++id) {
+            const Track& t = library[id];
+            if (t.flags & (Track::kMissing | Track::kExcluded)) continue;
+            std::string title = NormMeta(library.View(t.title));
+            if (title.empty()) continue;
+            std::string artist = NormMeta(library.View(t.artist));
+            byName[{artist, title}].push_back(id);
+            if (std::string first = FirstArtistMeta(library.View(t.artist)); !first.empty() && first != artist)
+                byName[{first, title}].push_back(id);
+        }
+    }
+
+    TrackId Find(const Library& library, const Statistics& s) {
+        if (s.title.empty()) return kInvalidTrack;
+        Ensure(library);
+        std::string title = NormMeta(s.title);
+        if (title.empty()) return kInvalidTrack;
+        std::string artist = NormMeta(s.artist);
+        auto it = byName.find({artist, title});
+        if (it == byName.end()) {
+            std::string first = FirstArtistMeta(s.artist);
+            if (!first.empty() && first != artist) it = byName.find({first, title});
+        }
+        if (it == byName.end() || it->second.empty()) return kInvalidTrack;
+        if (it->second.size() == 1) return it->second.front();
+        std::string wantAlbum = NormMeta(s.album);
+        TrackId best = it->second.front();
+        int bestScore = -1;
+        for (TrackId id : it->second) {
+            const Track& t = library[id];
+            int score = 0;
+            if (!wantAlbum.empty() && NormMeta(library.View(t.album)) == wantAlbum) score += 2;
+            if (s.durationMs && t.durationMs &&
+                std::abs((int64_t)s.durationMs - (int64_t)t.durationMs) <= 5000)
+                score += 1;
+            if (score > bestScore) {
+                bestScore = score;
+                best = id;
+            }
+        }
+        return best;
+    }
+};
+
+TrackId ResolveTrack(const Library& library, const Statistics& s, const std::vector<PathMap>& maps,
+                     MetaIndex& meta) {
+    if (!s.path.empty()) {
+        TrackId id = library.Find(RemapPath(s.path, maps));
+        if (id != kInvalidTrack) return id;
+    }
+    return meta.Find(library, s);
+}
+} // namespace
+
 StatisticsPlan PlanStatistics(const Library& library, const std::vector<Statistics>& rows,
                               const std::vector<PathMap>& maps) {
     StatisticsPlan plan;
+    MetaIndex meta;
     std::set<TrackId> seen;
     for (const auto& s : rows) {
-        auto id = library.Find(RemapPath(s.path, maps));
+        TrackId id = ResolveTrack(library, s, maps, meta);
         if (id == kInvalidTrack) {
             ++plan.unmatched;
             continue;
@@ -639,6 +723,26 @@ StatisticsPlan PlanStatistics(const Library& library, const std::vector<Statisti
         plan.matched.emplace_back(id, s);
     }
     return plan;
+}
+
+std::vector<PlaylistPlan> PlanPlaylists(const Library& library,
+                                        const std::vector<ImportedPlaylist>& playlists,
+                                        const std::vector<PathMap>& maps) {
+    std::vector<PlaylistPlan> out;
+    MetaIndex meta;
+    for (const auto& pl : playlists) {
+        PlaylistPlan p;
+        p.name = pl.name;
+        for (const auto& s : pl.tracks) {
+            TrackId id = ResolveTrack(library, s, maps, meta);
+            if (id == kInvalidTrack)
+                ++p.unmatched;
+            else
+                p.tracks.push_back(id);
+        }
+        out.push_back(std::move(p));
+    }
+    return out;
 }
 
 void ApplyStatistics(Library& library, const StatisticsPlan& plan) {

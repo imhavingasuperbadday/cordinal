@@ -54,6 +54,18 @@ unpacked (median of five starts on this machine). Format 2 and the IAT build mea
   links them first. Of 938 `.text` pages, 618 stay cold in ten 256 KiB blocks; `program` while
   playing fell from 4.42 to 2.58 MB, and the player grew 17 KB.
 
+- **Cold code is decommitted again (format 4, November 24, 2026).** Written image pages cannot
+  be decommitted, so the player is now restored into private memory of its own, which the loader
+  tells Windows is the program (`spec.md`, "Detached images"). A cold chunk nothing touched since
+  the last idle trim is decommitted before the next one and decodes again on its next use: it leaves
+  the commit charge as well as the working set, and is never written to the pagefile. On the player
+  of that day (13 cold chunks, 3.3 MB), a second trim decommitted one untouched chunk and lowered
+  the commit from 11.71 to 11.29 MB, with no chunk decoded back. The player grew 9 KB (the loader,
+  22 to 32 KB).
+- **The profile has aged.** On November 24, 2,169 of its 25,277 functions no longer matched the
+  build, and 10 of the 13 cold chunks decoded at start-up. Next: refresh `tools/code-profile.txt`
+  with `tools/make-code-profile.py`.
+
 What stays private is the rest of the image: about 1.25 MB of `.text`, `.rdata` 0.71, `.pdata`
 0.20, `.rsrc` 0.15, `.data` 0.10. Next: the hot code still covers 319 pages for 0.69 MiB, because
 the linker orders each of its internal groups of `.text$mn` on its own; and `.rdata` could follow

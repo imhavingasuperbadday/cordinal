@@ -22,6 +22,7 @@ struct NowPlaying {
     std::string title, artist, album, albumArtist;  // UTF-8
     std::string release;                            // MusicBrainz release id from the tags, if any
     std::wstring path;                              // the track's path as the library names it, for its custom cover
+    std::string cover;  // the JPEG or PNG the player shows for the track; empty when it has none or it isn't decoded yet
     double position = 0, duration = 0, rate = 1;    // seconds; rate is playback speed
 };
 
@@ -33,9 +34,11 @@ Show Mode();
 void SetMode(Show mode);
 // UI thread. Cheap to call often: it returns at once when Discord's status would not change.
 void Update(const NowPlaying& now);
-// Album covers: Discord can show only an image on the web, never a local file. When a cover source is turned on in
-// Preferences > Online, the album's cover address is looked up once per album (online::FindCoverUrl) on a thread of
-// its own, and the status shows cordinal's icon until it is found.
+// Covers: Discord can show only an image on the web, never a local file. In order: a cover chosen in cordinal from
+// the online results keeps the address it came from; with Upload covers for Discord on (coverupload::HostEnabled),
+// the cover the player shows is uploaded once (online::HostCover) and its address reused until near its expiry;
+// otherwise, when a cover source is on under Online, the album's cover address is looked up (online::FindCoverUrl).
+// Uploads and lookups run on threads of their own, and the status shows cordinal's icon until they finish.
 //
 // Clears the status and joins the workers; call before online::Stop. Safe when they never started.
 void Stop();
@@ -48,6 +51,11 @@ std::string ActivityJson(const NowPlaying& now, Show mode, int64_t nowMs, int64_
 // The address Discord shows as the picture: the cover chosen in cordinal's own address when it has one, else the
 // album's online cover. Empty when neither is usable, and then cordinal's icon stands in.
 std::string PreferredCover(std::string_view customUrl, std::string_view onlineUrl);
+// An uploaded cover as the online cache keeps it: when it was uploaded (Unix seconds) and its address. Reusable
+// gives the address back while the host still has a day of keeping left, and empty once it is too old or the value
+// is not one of these. Pure.
+std::string HostedCacheValue(int64_t uploadedSeconds, std::string_view url);
+std::string ReusableHostedCover(std::string_view value, int64_t nowSeconds);
 // One IPC message: little-endian opcode and length, then the JSON.
 std::string Frame(uint32_t opcode, std::string_view json);
 

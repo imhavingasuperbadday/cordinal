@@ -63,8 +63,8 @@ struct Books {
     }
 };
 const Books& GetBooks() {
-    static const Books books;
-    return books;
+    static const auto* const books = std::make_unique<Books>().release();
+    return *books;
 }
 
 // What one frame leaves for the next: scale factors (deltas run across frames), whether a band's

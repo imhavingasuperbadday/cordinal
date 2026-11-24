@@ -2,6 +2,7 @@
 // list, the generic KEY=value mapping that Vorbis comments, APE, MP4 freeform atoms, ASF and ID3 TXXX frames
 // share, and the Vorbis comment block itself with the pictures, loops and chapters it may carry.
 #include "tags_read.h"
+#include "tag_values.h"
 
 #include <cctype>
 #include <cmath>
@@ -91,6 +92,27 @@ void ReadNumberPair(const std::string& value, uint32_t& number, uint32_t& total)
     if (slash != std::string::npos) total = (uint32_t)atoi(value.c_str() + slash + 1);
 }
 
+void AddCredit(TagData& t, std::string role, sv rawName) {
+    for (std::string& n : SplitTagValues(rawName, TagFieldKind::Artist)) {
+        std::string r = role;
+        if (n.size() > 3 && n.back() == ')') {
+            size_t open = n.rfind(" (");
+            if (open != std::string::npos && open > 0) {
+                std::string detail = Trim(n.substr(open + 2, n.size() - open - 3));
+                if (!detail.empty()) {
+                    r = r.empty() ? detail : r + " (" + detail + ")";
+                    n = Trim(n.substr(0, open));
+                }
+            }
+        }
+        if (n.empty()) continue;
+        bool dup = false;
+        for (const auto& c : t.credits)
+            if (c.role == r && c.name == n) { dup = true; break; }
+        if (!dup) t.credits.push_back({std::move(r), std::move(n)});
+    }
+}
+
 namespace {
 
 // ApplyField with the key already upper-cased: ApplyComment needs it upper-cased too, and a Vorbis
@@ -105,6 +127,7 @@ void ApplyUpperField(TagData& t, const std::string& key, const std::string& valu
         {"COMPOSER", &TagData::composer}, {"WM/COMPOSER", &TagData::composer},
         {"COMMENT", &TagData::comment}, {"DESCRIPTION", &TagData::comment}, {"WM/COMMENTS", &TagData::comment},
         {"GROUPING", &TagData::grouping}, {"CONTENTGROUP", &TagData::grouping}, {"WM/CONTENTGROUPDESCRIPTION", &TagData::grouping},
+        {"WORK", &TagData::work}, {"MOVEMENT", &TagData::movement}, {"MOVEMENTNAME", &TagData::movement},
         {"LABEL", &TagData::label}, {"PUBLISHER", &TagData::label}, {"ORGANIZATION", &TagData::label}, {"WM/PUBLISHER", &TagData::label},
     };
     for (const auto& field : textFields)
@@ -113,6 +136,36 @@ void ApplyUpperField(TagData& t, const std::string& key, const std::string& valu
             else t.*field.field = value;
             return;
         }
+    if (key == "MOVEMENTNUMBER" || key == "MOVEMENTINDEX") {
+        ReadNumberPair(value, t.movementNo, t.movementTotal);
+        return;
+    }
+    if (key == "MOVEMENTTOTAL" || key == "MOVEMENTCOUNT") {
+        t.movementTotal = (uint32_t)atoi(value.c_str());
+        return;
+    }
+    static const struct { const char* key; const char* role; } creditFields[] = {
+        {"PRODUCER", "Producer"}, {"WM/PRODUCER", "Producer"},
+        {"CONDUCTOR", "Conductor"}, {"WM/CONDUCTOR", "Conductor"},
+        {"PERFORMER", "Performer"}, {"ENGINEER", "Engineer"},
+        {"MIXER", "Mixer"}, {"MIXING ENGINEER", "Mixer"},
+        {"REMIXER", "Remixer"}, {"MODIFIEDBY", "Remixer"},
+        {"ARRANGER", "Arranger"}, {"LYRICIST", "Lyricist"}, {"WM/WRITER", "Lyricist"},
+        {"SOLOIST", "Soloist"}, {"ENSEMBLE", "Ensemble"},
+    };
+    for (const auto& cf : creditFields)
+        if (key == cf.key) {
+            AddCredit(t, cf.role, value);
+            return;
+        }
+    if (key == "INVOLVEDPEOPLE" || key == "CREDITS") {
+        size_t colon = value.find(':');
+        if (colon != std::string::npos && colon > 0)
+            AddCredit(t, Trim(value.substr(0, colon)), value.substr(colon + 1));
+        else
+            AddCredit(t, "Credit", value);
+        return;
+    }
     if (key == "DATE" || key == "YEAR" || key == "WM/YEAR") SetIfEmpty(t.date, value.substr(0, 10));
     else if (key == "TRACKNUMBER" || key == "TRACK" || key == "WM/TRACKNUMBER") {
         ReadNumberPair(value, t.track, t.trackTotal);

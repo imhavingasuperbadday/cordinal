@@ -8,7 +8,23 @@
 #include <cstdio>
 #include <memory>
 
+extern "C" IMAGE_DOS_HEADER __ImageBase;
+
 namespace {
+// The program's module handle, file name and code addresses agree. A detached cdpack build runs
+// from private memory its loader told Windows is the program (cdpack/spec.md, "Detached images").
+bool ModuleIdentityHolds() {
+    const HMODULE self = reinterpret_cast<HMODULE>(&__ImageBase);
+    wchar_t byHandle[MAX_PATH], byNull[MAX_PATH];
+    HMODULE owner = nullptr;
+    void* base = nullptr;
+    return GetModuleHandleW(nullptr) == self && GetModuleFileNameW(self, byHandle, MAX_PATH) &&
+           GetModuleFileNameW(nullptr, byNull, MAX_PATH) && wcscmp(byHandle, byNull) == 0 &&
+           GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                              reinterpret_cast<LPCWSTR>(&ModuleIdentityHolds), &owner) &&
+           owner == self && RtlPcToFileHeader(reinterpret_cast<void*>(&ModuleIdentityHolds), &base) == self;
+}
+
 // Walks the loaded image's committed pages and fails if any is both writable and executable (W^X),
 // which a mis-built image (missing NXCOMPAT/DEP) would allow.
 bool ImagePagesProtected() {
@@ -96,6 +112,7 @@ int TestSizeRegressions(const std::wstring& scratch, FILE* log) {
         failures += !ok;
     };
     check(ImagePagesProtected(), L"image pages are never both writable and executable after startup");
+    check(ModuleIdentityHolds(), L"module handle, file name and code addresses all name the program");
     int destroyed = 0;
     bool unwound = false;
     try { ThrowWithOwnedScope(destroyed); }

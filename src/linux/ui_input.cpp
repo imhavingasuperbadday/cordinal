@@ -6,6 +6,40 @@
 
 namespace lx {
 
+std::vector<SearchSuggestion> g_searchSuggest;
+int g_searchSuggestSel = -1;
+
+void UpdateLinuxSearchSuggest() {
+    if (!g.searchFocused || InternetRadio().active) {
+        g_searchSuggest.clear();
+        g_searchSuggestSel = -1;
+        return;
+    }
+    g_searchSuggest = SearchSuggestions(g_lib, g.search, 8);
+    g_searchSuggestSel = -1;
+}
+
+void SaveLinuxSearchAsAutoPlaylist() {
+    if (g.search.empty() || InternetRadio().active) return;
+    AutoPlaylist a;
+    if (!SearchToAutoPlaylist(g.search, a)) return;
+    std::string rules = SerializeAutoPlaylist(a);
+    std::wstring name = CleanPlaylistName(g.search);
+    if (name.empty()) name = L"Search";
+    if (name.size() > 60) name.resize(60);
+    g.search.clear();
+    g_searchSuggest.clear();
+    g_searchSuggestSel = -1;
+    for (size_t i = 0; i < g.playlists.size(); ++i) {
+        if (g.playlists[i].kind != PlaylistKind::Auto || g.playlists[i].rules != rules) continue;
+        SetActiveTab((int)i);
+        return;
+    }
+    g.playlists.push_back(Playlist{UniquePlaylistName(g.playlists, name), {}, PlaylistKind::Auto, rules});
+    g.libraryDirty = true;
+    SetActiveTab((int)g.playlists.size() - 1);
+}
+
 int MenuHit(float x, float y, int* popup) {
     for (int k = (int)g_popups.size() - 1; k >= 0; --k) {
         const Popup& p = g_popups[k];
@@ -280,12 +314,38 @@ void MouseDown(const SDL_MouseButtonEvent& e) {
     if (LayoutBarMouseDown(x, y)) return;
     if (AlternateMouseDown(x, y, e.button, e.clicks)) return;
     if (PresentationMouseDown(x, y, e.button, e.clicks)) return;
+    if (e.button == SDL_BUTTON_LEFT && g.searchFocused && !g_searchSuggest.empty() && L.search.w > 0 && !InternetRadio().active) {
+        float w = std::max(L.search.w, S(260));
+        float sx = std::min(L.search.x, L.search.R() - w);
+        if (sx < 0) sx = L.search.x;
+        float rowH = S(24);
+        Rect pop{sx, L.search.B() + S(1), w, (float)g_searchSuggest.size() * rowH};
+        if (pop.In(x, y)) {
+            int idx = (int)((y - pop.y) / rowH);
+            if (idx >= 0 && idx < (int)g_searchSuggest.size()) {
+                g.search = ApplySearchSuggestion(g.search, g_searchSuggest[idx].insert);
+                RebuildRows();
+                OnlineSearchQueryChanged(g.search);
+                UpdateLinuxSearchSuggest();
+                g.redraw = true;
+            }
+            return;
+        }
+    }
+    if (e.button == SDL_BUTTON_LEFT && !g.search.empty() && !InternetRadio().active && L.search.w > 0) {
+        Rect saveR{L.search.R() - L.search.h, L.search.y + S(1), L.search.h - S(1), L.search.h - S(2)};
+        if (saveR.In(x, y)) {
+            SaveLinuxSearchAsAutoPlaylist();
+            g.redraw = true;
+            return;
+        }
+    }
     bool wasSearch = g.searchFocused;
     g.searchFocused = L.search.In(x, y);
     if (g.searchFocused && InternetRadio().active) InternetRadio().filterFocus = 0;
     if (g.searchFocused != wasSearch) {
-        if (g.searchFocused) SDL_StartTextInput(g.window);
-        else SDL_StopTextInput(g.window);
+        if (g.searchFocused) { SDL_StartTextInput(g.window); UpdateLinuxSearchSuggest(); }
+        else { SDL_StopTextInput(g.window); g_searchSuggest.clear(); g_searchSuggestSel = -1; }
     }
     if (StartupReviewMouseDown(x, y, e.button)) return;
     if (e.button == SDL_BUTTON_LEFT && ToastMouseDown(x, y)) return;
@@ -874,7 +934,10 @@ void Key(const SDL_KeyboardEvent& e) {
     }
     if (g.searchFocused) {
         if (e.key == SDLK_ESCAPE) {
-            if (!g.search.empty()) {
+            if (!g_searchSuggest.empty()) {
+                g_searchSuggest.clear();
+                g_searchSuggestSel = -1;
+            } else if (!g.search.empty()) {
                 g.search.clear();
                 RebuildRows();
                 OnlineSearchQueryChanged(g.search);
@@ -882,21 +945,43 @@ void Key(const SDL_KeyboardEvent& e) {
                 g.searchFocused = false;
                 SDL_StopTextInput(g.window);
             }
+        } else if (e.key == SDLK_TAB && !g_searchSuggest.empty()) {
+            int idx = g_searchSuggestSel >= 0 ? g_searchSuggestSel : 0;
+            g.search = ApplySearchSuggestion(g.search, g_searchSuggest[idx].insert);
+            RebuildRows();
+            OnlineSearchQueryChanged(g.search);
+            UpdateLinuxSearchSuggest();
+        } else if (e.key == SDLK_UP && !g_searchSuggest.empty()) {
+            g_searchSuggestSel = g_searchSuggestSel <= 0 ? (int)g_searchSuggest.size() - 1 : g_searchSuggestSel - 1;
+        } else if (e.key == SDLK_DOWN && !g_searchSuggest.empty()) {
+            g_searchSuggestSel = (g_searchSuggestSel + 1) % (int)g_searchSuggest.size();
         } else if (e.key == SDLK_BACKSPACE && !g.search.empty()) {
             if (ctrl) g.search.clear();
             else g.search.pop_back();
             RebuildRows();
             OnlineSearchQueryChanged(g.search);
-        } else if (e.key == SDLK_RETURN || e.key == SDLK_DOWN) {
+            UpdateLinuxSearchSuggest();
+        } else if (e.key == SDLK_RETURN || e.key == SDLK_KP_ENTER || e.key == SDLK_DOWN) {
+            if ((e.key == SDLK_RETURN || e.key == SDLK_KP_ENTER) && !g_searchSuggest.empty() && g_searchSuggestSel >= 0) {
+                g.search = ApplySearchSuggestion(g.search, g_searchSuggest[g_searchSuggestSel].insert);
+                RebuildRows();
+                OnlineSearchQueryChanged(g.search);
+                UpdateLinuxSearchSuggest();
+                g.redraw = true;
+                return;
+            }
             g.searchFocused = false;
+            g_searchSuggest.clear();
+            g_searchSuggestSel = -1;
             SDL_StopTextInput(g.window);
             if (!g.rows.empty()) {
                 MoveFocus(0, false);
-                if (e.key == SDLK_RETURN) PlayRow(0);
+                if (e.key == SDLK_RETURN || e.key == SDLK_KP_ENTER) PlayRow(0);
             } else {
                 OnlineSearchActivateDefault();
             }
         }
+        g.redraw = true;
         return;
     }
     if (InternetRadio().active) {
@@ -1013,7 +1098,7 @@ void TextInput(const SDL_TextInputEvent& e) {
     if (!g.searchFocused || !e.text) return;
     g.search += compat::Widen(e.text);
     if (InternetRadio().active) { InternetRadio().query = g.search; if (!InternetRadio().discover) RadioRebuild(); }
-    else { RebuildRows(); OnlineSearchQueryChanged(g.search); }
+    else { RebuildRows(); OnlineSearchQueryChanged(g.search); UpdateLinuxSearchSuggest(); }
     g.redraw = true;
 }
 

@@ -207,11 +207,12 @@ int ComputeNext(unsigned long long fromToken, bool manual, int& plOut) {
                     std::find(g.shuffleQueue.begin(), g.shuffleQueue.end(), (uint32_t)cur) + 1);
             std::reverse(g.shuffleQueue.begin(), g.shuffleQueue.end());
         } else {
-            for (uint32_t index = 0; index < items.size(); ++index)
-                if ((int)index != cur) g.shuffleQueue.push_back(index);
+            std::vector<double> weights;
             if (g.taste || g.skipAwareShuffle)
-                ShuffleByWeights(g.shuffleQueue, OrderWeights(g_lib, items, kNone, UnixNow(), g.taste), g.rng);
-            else std::shuffle(g.shuffleQueue.begin(), g.shuffleQueue.end(), g.rng);
+                weights = OrderWeights(g_lib, items, kNone, UnixNow(), g.taste);
+            ShuffleTracks(g.shuffleQueue, items, g.rng, g.shuffleStarted ? -1 : cur,
+                          weights.empty() ? nullptr : &weights);
+            std::reverse(g.shuffleQueue.begin(), g.shuffleQueue.end());
         }
         g.shuffleStarted = true;
     }

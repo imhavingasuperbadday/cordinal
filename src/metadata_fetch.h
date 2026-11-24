@@ -146,6 +146,15 @@ bool SearchCovers(const CoverSearch& search, Cancel& cancel, const ImageDecoder&
 std::string FindCoverUrl(const CoverQuery& query, const std::string& release, const std::vector<CoverSource>& sources,
                          Cancel& cancel);
 
+// For the Discord status, when Upload covers for Discord is on: sends a JPEG or PNG to litterbox.catbox.moe, which
+// keeps it for kHostedHours and gives back its https address. Blocking, on a worker; at most kMaxHostedBytes go.
+// Empty when the image is too big, the upload failed or was cancelled, or the reply held no usable address.
+constexpr int kHostedHours = 72;
+constexpr size_t kMaxHostedBytes = 4u << 20;
+std::string HostCover(const std::string& image, Cancel& cancel);
+// The address in litterbox's reply, or empty when the reply is not exactly one of its addresses. Pure.
+std::string HostedAddress(std::string_view reply);
+
 // A cover the user hands over as text, pasted or dropped from a browser: a data: URL holding a
 // base64 JPEG or PNG (Google Images' thumbnails), or the https address of one, which is downloaded
 // (blocking: runs on a worker; it may take 15 seconds). NotImage when the text is neither; Failed
@@ -275,6 +284,7 @@ struct Settings {
     bool lyrics[kLyricsSources] = {};  // per lyrics provider, all off
     bool artistInfo = false;           // MusicBrainz and Wikipedia for Artist info...
     bool albumTags = false;            // MusicBrainz for Tag album from MusicBrainz
+    bool accurateRip = false;          // AccurateRip verification and offset calibration
     bool saveMusic = false;            // Save music from the web (webfetch.h)
     bool releaseRadar = false;         // New releases by favorite artists (release_radar.h)
     bool discoverRadio = false;        // unowned songs inside Keep playing like this (discovery.h)

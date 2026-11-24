@@ -22,6 +22,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -399,6 +400,100 @@ std::string UploadedCover(const std::wstring& image) {
     return {};
 }
 
+// --- covers uploaded to the built-in host (UI thread) ---
+
+// The picture the player shows, uploaded once so Discord can fetch it. The host keeps it for kHostedHours, so an
+// address is reused only while it has a day left; the online cache keeps it across restarts, keyed by the image's
+// content, so an album's tracks sharing a cover upload it once.
+struct Hosting {
+    std::string key, image;
+    online::Cancel cancel;
+    std::string url;  // written by the thread before `done`
+    std::atomic<bool> done{false};
+    std::thread thread;
+};
+std::unique_ptr<Hosting> g_hosting;  // at most one at a time
+struct Hosted {
+    std::string url;      // "" after a failed upload
+    Clock::time_point at;  // when it was learned, so a failure is retried after a while
+};
+std::map<std::string, Hosted> g_hosted;  // image key -> address, this session
+constexpr auto kHostedRetry = std::chrono::minutes(10);
+constexpr int64_t kHostedReuseSeconds = (online::kHostedHours - 24) * 3600ll;
+
+std::string HostedKey(const std::string& image) {
+    uint64_t hash = 14695981039346656037ull;  // FNV-1a: only tells covers apart, never trusted for security
+    for (unsigned char c : image) hash = (hash ^ c) * 1099511628211ull;
+    char text[64];
+    snprintf(text, sizeof(text), "discordcover-%016llx-%zu", (unsigned long long)hash, image.size());
+    return text;
+}
+
+}  // namespace
+
+std::string HostedCacheValue(int64_t uploadedSeconds, std::string_view url) {
+    return std::to_string(uploadedSeconds) + '\t' + std::string(url);
+}
+
+std::string ReusableHostedCover(std::string_view value, int64_t nowSeconds) {
+    const size_t tab = value.find('\t');
+    if (tab == std::string_view::npos || tab == 0 || tab > 12) return {};
+    int64_t uploaded = 0;
+    for (char c : value.substr(0, tab)) {
+        if (c < '0' || c > '9') return {};
+        uploaded = uploaded * 10 + (c - '0');
+    }
+    const int64_t age = nowSeconds - uploaded;
+    if (age < 0 || age >= kHostedReuseSeconds) return {};
+    return std::string(online::HostedAddress(value.substr(tab + 1)));
+}
+
+namespace {
+
+// The uploaded address of the cover the player shows; empty while it uploads, when the upload failed, and when
+// uploads are off.
+std::string HostedCover(const std::string& image) {
+    if (image.empty() || image.size() > online::kMaxHostedBytes || !coverupload::HostEnabled() || g_testing)
+        return {};
+    std::string key = HostedKey(image);
+    const auto now = Clock::now();
+    if (g_hosting && g_hosting->done) {
+        g_hosting->thread.join();
+        if (!g_hosting->cancel.Stopped()) {
+            if (g_hosted.size() >= 256) g_hosted.clear();  // a session's worth; the online cache keeps the rest
+            g_hosted[g_hosting->key] = {g_hosting->url, now};
+            if (!g_hosting->url.empty())
+                online::CachePut(g_hosting->key, HostedCacheValue(UnixMs() / 1000, g_hosting->url), true);
+        }
+        g_hosting.reset();
+    }
+    if (auto it = g_hosted.find(key); it != g_hosted.end()) {
+        if (!it->second.url.empty() || now - it->second.at < kHostedRetry) return it->second.url;
+        g_hosted.erase(it);
+    }
+    std::string cached;
+    bool found = false;
+    if (online::CacheGet(key, cached, found) && found) {
+        if (std::string url = ReusableHostedCover(cached, UnixMs() / 1000); !url.empty()) {
+            g_hosted[key] = {url, now};
+            return url;
+        }
+    }
+    if (!g_hosting) {
+        g_hosting = std::make_unique<Hosting>();
+        Hosting* h = g_hosting.get();
+        h->key = std::move(key);
+        h->image = image;
+        h->thread = std::thread([h] {
+            h->url = online::HostCover(h->image, h->cancel);
+            h->done = true;
+        });
+    } else if (g_hosting->key != key) {
+        g_hosting->cancel.Stop();  // a cover no longer playing; the next call after it ends starts this one
+    }
+    return {};
+}
+
 // The album's cover address once known; empty meanwhile, and for radio, loose tracks or no cover source. A lookup
 // for an album no longer playing is cancelled, and the next call after it ends starts the current one.
 std::string CoverFor(const NowPlaying& now) {
@@ -409,6 +504,9 @@ std::string CoverFor(const NowPlaying& now) {
     std::string chosen = now.path.empty() ? std::string() : ToUtf8(customcover::SourceUrlFor(now.path));
     if (chosen.empty() && !now.path.empty()) chosen = UploadedCover(customcover::ImageFor(now.path));
     if (const std::string preferred = PreferredCover(chosen, {}); !preferred.empty()) return preferred;
+    // Then the very picture the player shows, when uploads are on. Until it is uploaded, an album cover already found
+    // online stands in.
+    if (std::string hosted = HostedCover(now.cover); !hosted.empty()) return hosted;
     // A track with no album is looked up by its title, and the song's album cover shown.
     if ((now.album.empty() && now.title.empty()) || !online::AnyCoverSource() || g_testing) return {};
     auto sources = online::CoverOrder();
@@ -554,6 +652,12 @@ void Stop() {
         g_lookup->thread.join();
         g_lookup.reset();
     }
+    if (g_hosting) {
+        g_hosting->cancel.Stop();
+        g_hosting->thread.join();
+        g_hosting.reset();
+    }
+    g_hosted.clear();
     if (g_upload) {
         coverupload::CancelAll();  // a stuck tool must not hold the player open
         g_upload->thread.join();

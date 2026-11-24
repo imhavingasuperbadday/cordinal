@@ -1392,6 +1392,65 @@ void TestMenuAccessKeys() {
     Check(MenuCommandByName(L"Edit > Reload selected metadata") == IDM_RELOAD_TAGS &&
               MenuCommandByName(L"Edit > Reload tags from files") == IDM_RELOAD_TAGS,
           L"menus: a key saved as Edit > Reload selected metadata still runs Reload tags from files");
+
+    batch.Next(L"menus: enable states, Favorite check, and custom Undo shortcut survive UpdateMainMenu");
+    if (HMENU menu = MainMenuBar()) {
+        const auto stateOf = [menu](UINT id) { return GetMenuState(menu, id, MF_BYCOMMAND); };
+        const bool wasStopped = g.playing == kNone;
+        // Exercise IDM_FAVORITE checkmark on a real selection without UB across temporary vectors.
+        bool favChecked = true, favUnchecked = true;
+        if (!Active().items.empty()) {
+            ListView_SetItemState(g.list, -1, LVIS_SELECTED, LVIS_SELECTED);
+            const auto sel = SelectedTracks();
+            if (!sel.empty()) {
+                std::vector<bool> prevFav;
+                prevFav.reserve(sel.size());
+                for (TrackId id : sel) {
+                    prevFav.push_back(g_lib.Favorite(id));
+                    g_lib.SetFavorite(id, true);
+                }
+                UpdateMainMenu(menu);
+                favChecked = (stateOf(IDM_FAVORITE) & MF_CHECKED) != 0;
+                g_lib.SetFavorite(sel.front(), false);
+                UpdateMainMenu(menu);
+                favUnchecked = (stateOf(IDM_FAVORITE) & MF_CHECKED) == 0;
+                for (size_t i = 0; i < sel.size(); ++i) g_lib.SetFavorite(sel[i], prevFav[i]);
+            }
+        }
+        // Custom shortcut suffix on Undo survives UpdateMainMenu.
+        wchar_t origUndo[256]{}, afterUndo[256]{};
+        GetMenuStringW(menu, IDM_UNDO, origUndo, (int)std::size(origUndo), MF_BYCOMMAND);
+        ModifyMenuW(menu, IDM_UNDO, MF_BYCOMMAND | MF_STRING, IDM_UNDO, L"&Undo\tAlt+Backspace");
+        UpdateMainMenu(menu);
+        GetMenuStringW(menu, IDM_UNDO, afterUndo, (int)std::size(afterUndo), MF_BYCOMMAND);
+        const bool undoKept = std::wstring(afterUndo).ends_with(L"\tAlt+Backspace");
+        ModifyMenuW(menu, IDM_UNDO, MF_BYCOMMAND | MF_STRING, IDM_UNDO, origUndo);
+        UpdateMainMenu(menu);
+        const bool stoppedDisabled = !wasStopped ||
+            ((stateOf(IDM_STOP) & MF_GRAYED) != 0 && (stateOf(IDM_PLAYING_PL) & MF_GRAYED) != 0);
+        Check(favChecked && favUnchecked && undoKept && stoppedDisabled,
+              L"menus: UpdateMainMenu tracks Favorite (%d/%d), keeps custom Undo shortcut (%d) and grays stopped items (%d)",
+              favChecked, favUnchecked, undoKept, stoppedDisabled);
+    }
+
+    batch.Next(L"menus: row context menu never shows consecutive separators on Auto playlists");
+    {
+        const PlaylistKind prevKind = Active().kind;
+        Active().kind = PlaylistKind::Auto;
+        HMENU rowAuto = BuildListContextMenu();
+        Active().kind = prevKind;
+        bool doubleSep = false, prevSep = false;
+        for (int i = 0, n = GetMenuItemCount(rowAuto); i < n; ++i) {
+            MENUITEMINFOW mi{sizeof(mi)};
+            mi.fMask = MIIM_FTYPE;
+            if (!GetMenuItemInfoW(rowAuto, i, TRUE, &mi)) continue;
+            const bool sep = (mi.fType & MFT_SEPARATOR) != 0;
+            if (sep && prevSep) doubleSep = true;
+            prevSep = sep;
+        }
+        DestroyMenu(rowAuto);
+        Check(!doubleSep, L"menus: Auto-playlist row menu has no consecutive separators");
+    }
     batch.End();
 }
 

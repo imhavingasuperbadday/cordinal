@@ -83,4 +83,19 @@ void TestLiveAudio(const std::wstring& media) {
     }
     Check(cases.Passed(), L"live MP3 and AAC-LC decode fragmented input with the file decoder's sound and no seeking%ls",
           cases.failed.c_str());
+
+    // Live HE-AAC SBR stream (24 kHz core ADTS -> 48 kHz doubled output).
+    static constexpr uint8_t pkt0[] = {0xff,0xf1,0x58,0x40,0x02,0xff,0xfc,0x01,0x68,0x00,0x06,0xbd,
+                                       0xd2,0x00,0x00,0x00,0x37,0x00,0x02,0x83,0xff,0xfe,0x0e};
+    static constexpr uint8_t pkt1[] = {0xff,0xf1,0x58,0x40,0x02,0xbf,0xfc,0x01,0x68,0x00,0x06,0x9d,
+                                       0x00,0x00,0x37,0x00,0x02,0x83,0xff,0xfe,0x0e};
+    std::string sbrAdts((const char*)pkt0, sizeof(pkt0));
+    for (int i = 0; i < 7; ++i) sbrAdts.append((const char*)pkt1, sizeof(pkt1));
+    auto sbrSource = std::make_shared<FragmentedSource>(std::move(sbrAdts));
+    auto liveSbr = OpenLiveAudio(sbrSource);
+    float sbrOut[2048 * 2];
+    size_t sbrGot = liveSbr ? liveSbr->Read(sbrOut, 2048) : 0;
+    bool sbrOk = liveSbr && !liveSbr->Failed() && liveSbr->Rate() == 48000 && sbrGot == 2048;
+    for (size_t i = 0; i < sbrGot * 2 && sbrOk; ++i) sbrOk &= std::isfinite(sbrOut[i]);
+    Check(sbrOk, L"live HE-AAC SBR stream opens at doubled 48 kHz rate and decodes finite frames");
 }

@@ -43,4 +43,12 @@ void TestHls() {
     std::string packed = "ID3\4\0\0\0\0\0\0"s + "\xFF\xFB\x90\x64"s;
     Check(demux.Segment(packed, output) && output == "\xFF\xFB\x90\x64"s && !demux.Segment("not an audio segment", output),
           L"packed HLS audio strips its timestamp tag and rejects non-audio data");
+    playlist = {};
+    Check(radio::ParseHls(
+              "#EXTM3U\n"
+              "#EXT-X-STREAM-INF:BANDWIDTH=64000,CODECS=\"mp4a.40.5\"\nhe1.m3u8\n"
+              "#EXT-X-STREAM-INF:BANDWIDTH=96000,CODECS=\"mp4a.40.29\"\nhe2.m3u8\n",
+              base, playlist, problem) &&
+              playlist.variant == "https://radio.example/live/he2.m3u8",
+          L"HLS accepts HE-AAC v1 (mp4a.40.5) and HE-AAC v2 (mp4a.40.29) variants");
 }

@@ -303,9 +303,206 @@ inline Group Rips(const std::wstring& scratch) {
     return g;
 }
 
+inline Group AccurateRip(const std::wstring& scratch) {
+    Group g{"AccurateRip verification, offset detection and rip log"};
+
+    // 1. Disc IDs and URL on libdiscid's example TOC (and Enhanced CD data track omission).
+    const cdrip::Toc example = ExampleToc();
+    cdrip::AccurateRipIds ids{};
+    // ExampleToc starts: {0, 15213, 32164, 46442, 63264, 80339}, leadout = 95312
+    const uint32_t wantId1 = 0u + 15213u + 32164u + 46442u + 63264u + 80339u + 95312u;
+    const uint32_t wantId2 = 1u * 1u + 15213u * 2u + 32164u * 3u + 46442u * 4u + 63264u * 5u + 80339u * 6u + 95312u * 7u;
+    g.Add(cdrip::ComputeAccurateRipIds(example, ids) && ids.tracks == 6 && ids.id1 == wantId1 && ids.id2 == wantId2 &&
+              ids.cddb != 0 &&
+              cdrip::AccurateRipUrl(ids).starts_with("http://www.accuraterip.com/accuraterip/") &&
+              cdrip::AccurateRipUrl(ids).find("dBAR-006-") != std::string::npos,
+          "AccurateRip computes id1, id2, cddb and dBAR URL from a TOC");
+    cdrip::Toc enhanced = example;
+    enhanced.tracks.push_back({7, 95312 + 11400, false});
+    enhanced.leadout = 140000;
+    cdrip::AccurateRipIds enhIds{};
+    g.Add(cdrip::ComputeAccurateRipIds(enhanced, enhIds) && enhIds.tracks == ids.tracks && enhIds.id1 == ids.id1 &&
+              enhIds.id2 == ids.id2,
+          "Enhanced CD audio session ends before the trailing data session in AccurateRip ids");
+
+    // 2. Binary dBAR parser: valid multi-pressing, truncated, and mismatched records.
+    auto put32 = [](std::string& s, uint32_t v) {
+        for (int b = 0; b < 4; ++b) s.push_back((char)((v >> (b * 8)) & 0xff));
+    };
+    auto encodeRecord = [&](const cdrip::AccurateRipIds& recIds,
+                            const std::vector<cdrip::AccurateRipEntry>& entries) {
+        std::string out;
+        out.push_back((char)entries.size());
+        put32(out, recIds.id1);
+        put32(out, recIds.id2);
+        put32(out, recIds.cddb);
+        for (const auto& e : entries) {
+            out.push_back((char)e.confidence);
+            put32(out, e.crc);
+            put32(out, e.frame450);
+        }
+        return out;
+    };
+
+    // 3. Three-track 470-sector/track TOC for offline v1, v2, frame-450 and offset detection.
+    cdrip::Toc arToc;
+    arToc.tracks = {{1, 0, true}, {2, 470, true}, {3, 940, true}};
+    arToc.leadout = 1410;
+    cdrip::AccurateRipIds arIds{};
+    cdrip::ComputeAccurateRipIds(arToc, arIds);
+
+    struct BruteAr {
+        uint32_t v1 = 0, v2 = 0, f450 = 0;
+    };
+    auto computeOracle = [&](size_t t) -> BruteAr {
+        const uint64_t total = (uint64_t)(arToc.End(t) - arToc.tracks[t].start) * cdrip::kSectorFrames;
+        const int64_t baseFrame = (int64_t)arToc.tracks[t].start * cdrip::kSectorFrames;
+        const uint64_t lo = (t == 0) ? (5ull * cdrip::kSectorFrames - 1) : 0;
+        const uint64_t hi = (t + 1 == arToc.tracks.size()) ? (total - 5ull * cdrip::kSectorFrames) : total;
+        BruteAr r;
+        for (uint64_t i = lo; i < hi; ++i) {
+            const uint16_t l = (uint16_t)MemoryDrive::Sample(baseFrame + (int64_t)i, 0);
+            const uint16_t rr = (uint16_t)MemoryDrive::Sample(baseFrame + (int64_t)i, 1);
+            const uint32_t w = ((uint32_t)rr << 16) | l;
+            const uint64_t prod = (uint64_t)w * (i + 1);
+            r.v1 += (uint32_t)prod;
+            r.v2 += (uint32_t)prod + (uint32_t)(prod >> 32);
+        }
+        for (uint64_t k = 0; k < cdrip::kSectorFrames; ++k) {
+            const int64_t f = baseFrame + (int64_t)(450ull * cdrip::kSectorFrames + k);
+            const uint32_t w = ((uint32_t)(uint16_t)MemoryDrive::Sample(f, 1) << 16) |
+                               (uint16_t)MemoryDrive::Sample(f, 0);
+            r.f450 += w * (uint32_t)(k + 1);
+        }
+        return r;
+    };
+    const BruteAr ref0 = computeOracle(0), ref1 = computeOracle(1), ref2 = computeOracle(2);
+
+    const std::string binValid =
+        encodeRecord(arIds, {{4, ref0.v1, ref0.f450}, {4, ref1.v1, ref1.f450}, {2, 0x11112222u, 0x33334444u}}) +
+        encodeRecord(arIds, {{9, ref0.v2, ref0.f450}, {1, 0x55556666u, ref1.f450}, {3, 0x77778888u, 0x9999aaaau}});
+    const auto parsed = cdrip::ParseAccurateRip(binValid, 3);
+    g.Add(parsed.size() == 2 && parsed[0].tracks[0].crc == ref0.v1 && parsed[0].tracks[0].confidence == 4 &&
+              parsed[1].tracks[0].crc == ref0.v2 && parsed[1].tracks[0].frame450 == ref0.f450 &&
+              parsed[1].tracks[0].confidence == 9,
+          "ParseAccurateRip reads multi-pressing dBAR binary records");
+    g.Add(cdrip::ParseAccurateRip(binValid.substr(0, binValid.size() - 5), 3).size() == 1 &&
+              cdrip::ParseAccurateRip(binValid, 2).empty() && cdrip::ParseAccurateRip(binValid.substr(0, 10), 3).empty(),
+          "ParseAccurateRip drops truncated tails and track-count mismatches");
+
+    online::Cancel cancelFetch;
+    const auto fetchedOk = cdrip::FetchAccurateRip(arToc, cancelFetch, [&](const std::string& url) {
+        return online::Reply{url == cdrip::AccurateRipUrl(arIds) ? 200u : 404u, binValid};
+    });
+    const auto fetched404 = cdrip::FetchAccurateRip(arToc, cancelFetch, [](const std::string&) {
+        return online::Reply{404u, {}};
+    });
+    g.Add(fetchedOk.size() == 2 && fetched404.empty(),
+          "FetchAccurateRip parses HTTP 200 dBAR replies and returns empty on 404");
+
+    // 4. Offset detection across negative and positive drive offsets (with flaky sectors!).
+    class OffsetDrive final : public MemoryDrive {
+    public:
+        int shift = 0;  // physical read lag: sample at disc frame F appears at (F + shift)
+        bool silent = false;
+        bool Read(uint32_t lba, unsigned count, uint8_t* out) override {
+            for (unsigned s = 0; s < count; ++s)
+                if (auto f = failing.find(lba + s); f != failing.end() && f->second > 0) {
+                    --f->second;
+                    return false;
+                }
+            const int64_t limit = (int64_t)toc.leadout * cdrip::kSectorFrames;
+            for (unsigned s = 0; s < count; ++s) {
+                uint8_t* p = out + (size_t)s * cdrip::kSectorBytes;
+                const int64_t frame0 = (int64_t)(lba + s) * cdrip::kSectorFrames;
+                for (unsigned i = 0; i < cdrip::kSectorFrames; ++i)
+                    for (int c = 0; c < 2; ++c) {
+                        const int64_t src = frame0 + (int64_t)i - shift;
+                        const int16_t v = silent || src < 0 || src >= limit ? 0 : Sample(src, c);
+                        p[i * 4 + c * 2] = (uint8_t)(v & 0xff);
+                        p[i * 4 + c * 2 + 1] = (uint8_t)((v >> 8) & 0xff);
+                    }
+            }
+            return true;
+        }
+    };
+
+    bool offsetsOk = true;
+    std::atomic<bool> cancelOp{false};
+    const auto detectPressings = cdrip::ParseAccurateRip(
+        encodeRecord(arIds, {{5, ref0.v2, ref0.f450}, {5, ref1.v2, ref1.f450}, {5, ref2.v2, ref2.f450}}), 3);
+    for (int shift : {0, 6, 667, -472, -1164, 2000}) {
+        OffsetDrive od;
+        od.toc = arToc;
+        od.shift = shift;
+        od.failing[450] = 1;  // force single-sector retry on track 1 sector 450
+        const auto det = cdrip::DetectOffset(od, arToc, detectPressings, cancelOp);
+        offsetsOk &= det.found && det.offset == shift && det.matchedTracks == 3;
+    }
+    OffsetDrive silentDrive;
+    silentDrive.toc = arToc;
+    silentDrive.silent = true;
+    const auto zeroDb = cdrip::ParseAccurateRip(encodeRecord(arIds, {{1, 0, 0}, {1, 0, 0}, {1, 0, 0}}), 3);
+    const auto silentDet = cdrip::DetectOffset(silentDrive, arToc, zeroDb, cancelOp);
+    g.Add(offsetsOk && !silentDet.found,
+          "DetectOffset calibrates negative and positive drive offsets and rejects silence");
+
+    // 5. Full Rip() streaming AccurateRip v1/v2, MatchedOffset, Mismatch, atomic .log, and DoneText.
+    const std::wstring arOut = scratch + L"\\ar-verify";
+    SHCreateDirectoryExW(nullptr, arOut.c_str(), nullptr);
+    OffsetDrive ripDrive;
+    ripDrive.toc = arToc;
+    ripDrive.shift = 667;
+    cdrip::Job job;
+    job.toc = arToc;
+    job.disc.artist = "AR Test";
+    job.disc.album = "Verify Album";
+    job.tracks = {0, 1, 2};
+    job.folder = arOut;
+    job.flac = true;
+    job.offset = 667;
+    job.arPressings = parsed;
+    job.arChecked = true;
+    job.writeLog = true;
+    job.driveName = L"VirtualDrive";
+    const cdrip::Result verified = cdrip::Rip(ripDrive, job, cancelOp);
+    std::string logText;
+    const bool logRead = !verified.logPath.empty() && backup::ReadBytes(verified.logPath, logText);
+    g.Add(verified.tracks.size() == 3 &&
+              verified.tracks[0].ar.status == cdrip::ArStatus::VerifiedV2 && verified.tracks[0].ar.confidence == 9 &&
+              verified.tracks[0].ar.v1 == ref0.v1 && verified.tracks[0].ar.v2 == ref0.v2 &&
+              verified.tracks[0].ar.frame450 == ref0.f450 &&
+              verified.tracks[1].ar.status == cdrip::ArStatus::VerifiedV1 && verified.tracks[1].ar.confidence == 4 &&
+              verified.tracks[2].ar.status == cdrip::ArStatus::Mismatch && logRead &&
+              logText.find("Accurately ripped (v2, confidence 9)") != std::string::npos &&
+              logText.find("Accurately ripped (v1, confidence 4)") != std::string::npos &&
+              logText.find("Cannot be verified against AccurateRip") != std::string::npos &&
+              logText.find("Read offset: +667 samples") != std::string::npos,
+          "Rip verifies AccurateRip v2/v1/Mismatch in one pass and writes an atomic rip log");
+
+    // Cross-pressing offset match during Rip() (+37 shift relative to DB).
+    const std::wstring shiftOut = scratch + L"\\ar-shifted";
+    SHCreateDirectoryExW(nullptr, shiftOut.c_str(), nullptr);
+    OffsetDrive shiftedDrive;
+    shiftedDrive.toc = arToc;
+    shiftedDrive.shift = 37;
+    cdrip::Job shiftJob = job;
+    shiftJob.folder = shiftOut;
+    shiftJob.offset = 0;  // DB pressing sits +37 samples relative to uncalibrated drive
+    shiftJob.arPressings = cdrip::ParseAccurateRip(
+        encodeRecord(arIds, {{6, 0x12345678u, ref0.f450}, {6, 0x23456789u, ref1.f450}, {6, 0x3456789au, ref2.f450}}), 3);
+    const cdrip::Result shifted = cdrip::Rip(shiftedDrive, shiftJob, cancelOp);
+    g.Add(shifted.tracks.size() == 3 &&
+              shifted.tracks[0].ar.status == cdrip::ArStatus::MatchedOffset && shifted.tracks[0].ar.matchedOffset == 37 &&
+              cdrip::DoneText(shifted).find(L"pressing offset") != std::wstring::npos,
+          "Rip detects different-pressing frame-450 offset matches when primary CRCs differ");
+
+    return g;
+}
+
 inline std::vector<Group> All(const std::wstring& scratch) {
     SHCreateDirectoryExW(nullptr, scratch.c_str(), nullptr);
-    return {DiscIds(), CdText(), Lookups(), Reading(), Rips(scratch)};
+    return {DiscIds(), CdText(), Lookups(), Reading(), Rips(scratch), AccurateRip(scratch)};
 }
 
 }  // namespace cdrip_checks

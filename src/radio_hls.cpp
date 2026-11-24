@@ -211,8 +211,6 @@ bool ParseHls(std::string_view text, const std::string& base, HlsPlaylist& out, 
                 bandwidth = std::min<uint64_t>(bandwidth, 1000000000);
                 bool video = !variant["RESOLUTION"].empty() || variant["CODECS"].find("avc") != std::string::npos || variant["CODECS"].find("hvc") != std::string::npos;
                 uint64_t rank = video ? 10000000 : 0;
-                if (variant["CODECS"].find("mp4a.40.5") != std::string::npos || variant["CODECS"].find("mp4a.40.29") != std::string::npos)
-                    rank += 20000000;
                 rank += bandwidth > 512000 ? 1000000 + bandwidth : 512000 - bandwidth;
                 choices.push_back({url, variant["AUDIO"], rank}); variant.clear();
             } else {
@@ -321,7 +319,9 @@ bool HlsAudio::Init(std::string_view bytes) {
         size_t pos = 8; Box entry;
         if (!Next(stsd, pos, entry) || entry.tag != Tag("mp4a") || entry.bytes.size() < 28) return false;
         Bytes config = AacConfig(Child(entry.bytes.subspan(28), Tag("esds")));
-        if (config.size() < 2 || config[0] >> 3 != 2) return false;
+        if (config.size() < 2) return false;
+        unsigned object = config[0] >> 3;
+        if (object != 2 && object != 5 && object != 29) return false;
         unsigned index = (config[0] & 7) << 1 | config[1] >> 7, layout = (config[1] >> 3) & 15;
         if (index >= 13 || !layout || layout > 7) return false;
         config_ = index << 4 | layout; sampleSize_ = 0;

@@ -44,9 +44,11 @@ void LayoutLibrary(HDWP& dwp, RECT r, bool show) {
     bool library = show && !radio && LibraryActive() && g.size != ViewSize::Compact && (!normal || l.views);
     bool browser = show && !radio && LibraryActive() && g.size != ViewSize::Compact && g.browserVisible, canvas = show && !radio && CanvasActive();
     bool onlineSearch = show && !radio && OnlineSearchVisible();
+    bool saveSearch = search && !g.filter.empty() && !radio;
     ShowWindow(g.tabs, tabs ? SW_SHOWNA : SW_HIDE);
     ShowWindow(RadioTab(), tabs && RadioTabOpen() ? SW_SHOWNA : SW_HIDE);
     ShowWindow(g.search, search ? SW_SHOWNA : SW_HIDE);
+    if (g.saveSearch) ShowWindow(g.saveSearch, saveSearch ? SW_SHOWNA : SW_HIDE);
     ShowWindow(RadioView(), radio ? SW_SHOWNA : SW_HIDE);
     ShowWindow(lyrics, show && LyricsPanelShown() ? SW_SHOWNA : SW_HIDE);
     if (normal) ShowWindow(UpNextPanel(), upNext ? SW_SHOWNA : SW_HIDE);
@@ -62,7 +64,12 @@ void LayoutLibrary(HDWP& dwp, RECT r, bool show) {
     int pad = S(normal ? std::clamp(l.pad, 0, 16) : ui::kPad), x0 = r.left, W = r.right - r.left,
         rowC = tabs || search ? S(ui::kTabRow) : 0;
     int searchW = search ? std::min(S(ui::kSearchWidth), W / 3) : 0;
-    if (search) place(g.search, r.right - pad - searchW, r.top + S(1), searchW, rowC - S(2));
+    int saveW = saveSearch ? rowC - S(2) : 0;
+    int saveGap = saveSearch ? S(2) : 0;
+    if (search) {
+        place(g.search, r.right - pad - searchW, r.top + S(1), std::max(0, searchW - saveW - saveGap), rowC - S(2));
+        if (saveSearch && g.saveSearch) place(g.saveSearch, r.right - pad - saveW, r.top + S(1), saveW, rowC - S(2));
+    }
     int tabW = W - (search ? pad + searchW + S(ui::kSearchGap) : 0);
     int radioW = tabs && RadioTabOpen() ? std::min(S(ui::kRadioTabWidth), std::max(0, tabW)) : 0;
     if (tabs) {

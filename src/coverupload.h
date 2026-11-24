@@ -1,11 +1,17 @@
-// Running the user's own upload tool on a cover image. cordinal holds the picture but Discord can only render an
-// address it can fetch, so a command configured in settings.ini ([Scrobbling] DiscordCoverUpload=) is handed the
-// image's path and the first https address it prints becomes that cover's address for the Discord status. It is
-// empty by default: no process runs unless the user configured one.
+// Giving a cover an address Discord can fetch. cordinal holds the picture but Discord can only render an address,
+// so either the built-in host (Preferences > Scrobbling > Upload covers for Discord, off by default;
+// online::HostCover does the upload) or the user's own command takes it. A command configured in settings.ini
+// ([Scrobbling] DiscordCoverUpload=) is handed the image's path and the first https address it prints becomes that
+// cover's address. Both are off by default: nothing is sent and no process runs unless the user turned one on.
 #pragma once
 #include <string>
 
 namespace coverupload {
+
+// The built-in host, for covers that have no address of their own: the one the player shows, embedded, beside the
+// track or chosen from a file. Any thread.
+bool HostEnabled();
+void SetHostEnabled(bool on);
 
 // False when no command is configured, in which case nothing ever runs.
 bool Configured();

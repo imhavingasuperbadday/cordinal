@@ -1,6 +1,7 @@
 // The Linux window's menus: the menu bar, its popups and row menus, and the actions they run.
 #include "alternate_ui.h"
 #include "big_ui.h"
+#include "headphones_ui.h"
 #include "search_online_ui.h"
 #include "ui_internal.h"
 #include "discover_ui.h"
@@ -130,23 +131,36 @@ std::vector<MenuItem> BarMenu(int m) {
         }
         case 1: {
             bool library = Active().kind == PlaylistKind::Library || Active().kind == PlaylistKind::Inbox;
-            std::wstring undo, redo;
+            const auto selected = SelectedTracks();
+            const bool hasSelection = !selected.empty();
+            const bool allFavorites = hasSelection && std::all_of(selected.begin(), selected.end(),
+                                                                  [](TrackId id) { return g_lib.Favorite(id); });
+            std::wstring undo, redo, migUndo;
             bool canUndo = CanStepPlaylistEdit(false, &undo), canRedo = CanStepPlaylistEdit(true, &redo);
-            if (canUndo && CanUndoTagEdit() && Active().history.undo.back().when < NewestTagEditTime()) undo = L"Undo tag edit";
-            else if (!canUndo && CanUndoTagEdit()) { canUndo = true; undo = L"Undo tag edit"; }
+            uint64_t bestTime = canUndo ? Active().history.undo.back().when : 0;
+            if (CanUndoTagEdit() && NewestTagEditTime() > bestTime) {
+                canUndo = true;
+                bestTime = NewestTagEditTime();
+                undo = L"Undo tag edit";
+            }
+            if (CanUndoMigration(migUndo) && NewestMigrationTime() > bestTime) {
+                canUndo = true;
+                undo = migUndo;
+            }
             std::vector<MenuItem> items{Item(canUndo ? ToUtf8(undo) : "Undo", kUndo, "Ctrl+Z", false, canUndo),
                     Item(canRedo ? ToUtf8(redo) : "Redo", kRedo, "Ctrl+Y", false, canRedo), Separator(),
                     Item("Select all", kSelectAll, "Ctrl+A", false, any), Item("Remove", kRemove, "Del", false, (editable || library) && any),
-                    Item("Keep only selected tracks", kKeepSelected, {}, false, editable && !SelectedTracks().empty()),
+                    Item("Keep only selected tracks", kKeepSelected, {}, false, editable && hasSelection),
                     Item("Clear playlist", kClear, {}, false, editable && any), Separator(),
-                    Item("Reload tags from files", kReloadTags, {}, false, !SelectedTracks().empty() && !TagWriteBusy()),
+                    Item("Reload tags from files", kReloadTags, {}, false, hasSelection && !TagWriteBusy()),
                     Item("Remove duplicates", kRemoveDuplicates, {}, false, editable && any),
                     Item("Remove dead items", kRemoveDead, {}, false, editable && any && !g_playlistFileBusy && !g_playlistImport),
                     Separator(), Item("Search", kFind, "Ctrl+F"), Separator(),
                     Item("Edit tags...", kEditTags, "Alt+Enter", false, g.focus >= 0 && any),
-                    Item("Edit album tags...", kEditAlbumTags, {}, false, !SelectedTracks().empty()),
-                    Item("Make album...", kMakeAlbum, {}, false, !SelectedTracks().empty()),
-                    Item("Tag album from MusicBrainz...", kTagAlbum, {}, false, !SelectedTracks().empty()),
+                    Item("Edit album tags...", kEditAlbumTags, {}, false, hasSelection),
+                    Item("Make album...", kMakeAlbum, {}, false, hasSelection),
+                    Item("Tag album from MusicBrainz...", kTagAlbum, {}, false, hasSelection),
+                    Item("Favorite", kFavorite, "Ctrl+D", allFavorites, hasSelection),
                     Item("Undo last tag edit", kUndoTags, {}, false, CanUndoTagEdit())};
             if (g_checkingDead && g_playlistFileBusy) items.insert(items.begin() + 11, Item("Cancel checking dead items", kCancelDead));
             if (auto labels = HelperToolLabels(); !labels.empty()) {  // the tools of the helpers that are on
@@ -164,8 +178,20 @@ std::vector<MenuItem> BarMenu(int m) {
         }
         case 2: {
             Repeat r = g.settings.repeat;
+            static const char* const reverbNames[] = {"Off", "Room", "Hall", "Plate"};
+            static const char* const mixNames[] = {"Subtle (25%)", "Light (40%)", "Medium (55%)", "Strong (75%)"};
+            static constexpr float reverbMixes[] = {0.25f, 0.4f, 0.55f, 0.75f};
+            std::vector<MenuItem> reverb;
+            for (int i = 0; i < (int)ReverbPreset::Count; ++i)
+                reverb.push_back(Radio(reverbNames[i], kReverb, i, g.settings.reverb.preset == (ReverbPreset)i));
+            reverb.push_back(Separator());
+            for (int i = 0; i < (int)std::size(reverbMixes); ++i) {
+                MenuItem mix = Item(mixNames[i], kReverbMix, {}, std::fabs(g.settings.reverb.mix - reverbMixes[i]) < 0.005f);
+                mix.arg = i;
+                reverb.push_back(std::move(mix));
+            }
             return {Item("Play / Pause", kPlayPause, "Space"), Item("Stop", kStopAction, {}, false, g.playing != kNone),
-                    Item("Mute", kMute, "Ctrl+M", g_muteVolume > 0), Item("Previous", kPrevAction, "Ctrl+Left"),
+                    Item("Mute", kMute, "Ctrl+M", g.settings.volume <= 0), Item("Previous", kPrevAction, "Ctrl+Left"),
                     Item("Next", kNextAction, "Ctrl+Right"), Separator(),
                     Item("Shuffle", kShuffleAction, "Ctrl+H", g.settings.shuffle == kShuffleTracks),
                     Item("Shuffle albums", kShuffleAlbumsAction, {}, g.settings.shuffle == kShuffleAlbums),
@@ -181,7 +207,11 @@ std::vector<MenuItem> BarMenu(int m) {
                     Submenu("ReplayGain", ReplayGainMenu()),
                     Submenu("Speed (pitch follows)", RateItems(kSpeeds, std::size(kSpeeds), g.settings.speed, kSpeed)),
                     Submenu("Tempo (pitch stays)", RateItems(kTempos, std::size(kTempos), g.settings.tempo, kTempo)),
-                    Separator(), Item("Equalizer...", kEqualizer, "Ctrl+E"),
+                    Submenu("Reverb", std::move(reverb)),
+                    Item("Night mode", kNightMode, {}, g.settings.nightMode),
+                    Item("Bitcrush", kBitcrush, {}, g.settings.bitcrush.enabled),
+                    Separator(), Item("Equalizer...", kEqualizer, "Ctrl+E", g.settings.eq.enabled || g.settings.eq.crossfeed),
+                    Item("Headphones and device settings...", kHeadphones),
                     Submenu("Output", {Radio("Shared (through the sound server)", kShared, 0, !g.settings.exclusive),
                                        Radio("Exclusive (bit-perfect)", kExclusive, 0, g.settings.exclusive)})};
         }
@@ -228,7 +258,8 @@ std::vector<MenuItem> BarMenu(int m) {
         }
         case 4: {
             std::vector<MenuItem> items{Item("Library folders...", kFolders),
-                Item("Rescan folders", kRescan, {}, false, !g.settings.folders.empty()), Separator(),
+                Item("Rescan folders", kRescan, {}, false, !g.settings.folders.empty()),
+                Item("Sync with other PCs...", kSyncFolder), Separator(),
                 Item("Add everything in the Inbox", kAcceptAllInbox, {}, false,
                      std::any_of(g.playlists.begin(), g.playlists.end(), [](const Playlist& p) { return p.kind == PlaylistKind::Inbox; })), Separator(),
                 Item("Organize files...", kOrganize, {}, false, !OrganizeBusy()),
@@ -258,6 +289,7 @@ std::vector<MenuItem> BarMenu(int m) {
                 Item("Fetch missing covers...", kFetchCovers, {}, false, !CoverFetchBusy()),
                 Item("Remove recent additions (24 hours)...", kRecentAdditions),
                 Item("Find duplicates...", kDuplicateAudio),
+                Item("Lint my library...", kLintLibrary),
                 Item("Add Steam soundtracks", kSteam, {}, false, !g_playlistFileBusy && !g_playlistImport)};
             if (ConvertBusy()) items.push_back(Item("Cancel conversion", kCancelConvert));
             if (RipBusy()) items.push_back(Item("Cancel rip", kCancelRip));
@@ -278,7 +310,9 @@ std::vector<MenuItem> BarMenu(int m) {
                 if (ThemeAvailable((ThemeMode)t)) themes.push_back(Radio(Plain(ThemeInfo((ThemeMode)t).name), kTheme, t, (int)g.settings.theme == t));
             // The panels, the window's sizes, Big mode's panels and the mini player are in the Layout menu.
             std::vector<MenuItem> view = {Submenu("Theme", std::move(themes)), Item("Radio", kOpenRadio, "Ctrl+Shift+R"), Item("Artist info...", kArtistInfo),
-                    Item("Lightweight mode", kLightweight, "Ctrl+Shift+L", g.lightweight), Item("Packs...", kPacks), Item("Helpers...", kHelpers), Item("Command palette...", kPalette, "Ctrl+Shift+P"), Separator(), Item("Group tracks by album", kGroupAlbums, {}, g.settings.groupAlbums),
+                    Item("Lightweight mode", kLightweight, "Ctrl+Shift+L", g.lightweight),
+                    Item("Always on top", kAlwaysOnTop, {}, g.settings.alwaysOnTop),
+                    Item("Packs...", kPacks), Item("Helpers...", kHelpers), Item("Command palette...", kPalette, "Ctrl+Shift+P"), Separator(), Item("Group tracks by album", kGroupAlbums, {}, g.settings.groupAlbums),
                     Separator(), Item("Start on login", kStartOnLogin, {}, StartsOnLogin()), Separator(),
                     Submenu("Games and stats", {Item("Name That Track...", kNameThatTrack), Item("Which Came First...", kWhichCameFirst), Separator(),
                                                 Item("cordinal points...", kPoints), Item("Year in review...", kReview)})};
@@ -314,10 +348,13 @@ std::vector<MenuItem> BarMenu(int m) {
                 Radio("Normal", kViewSize, 1, g.settings.size == ViewSize::Normal),
                 Radio("Big mode plus", kViewSize, 2, g.settings.size == ViewSize::Spotlight),
                 Radio("Big mode", kViewSize, 3, g.settings.size == ViewSize::Big)}));
-            items.push_back(Submenu("Big mode panels", {Item("Library", kBigPanel, {}, BigPanelShown(0)),
-                Radio("Now playing", kBigPanel, 1, BigPanelShown(1)),
-                Radio("Up next", kBigPanel, 2, BigPanelShown(2)),
-                Item("Reset panel layout", kBigReset)}));
+            auto bigItem = [](const char* label, int panel) {
+                MenuItem it = Item(label, kBigPanel, {}, BigPanelShown(panel));
+                it.arg = panel;
+                return it;
+            };
+            items.push_back(Submenu("Big mode panels", {bigItem("Library", 0), bigItem("Now playing", 1),
+                bigItem("Up next", 2), Item("Reset panel layout", kBigReset)}));
             items.push_back(Item("Mini player", kMini, "Ctrl+Shift+M"));
             return items;
         }
@@ -406,8 +443,9 @@ void OpenRowMenu(float x, float y) {
     ratings.push_back(Separator());
     ratings.push_back(Item("Write ratings and play counts to files", kWriteStatistics, {}, false, !TagWriteBusy()));
     items.push_back(Submenu("Rating", std::move(ratings)));
-    bool allFavorites = !SelectedTracks().empty();
-    for (TrackId id : SelectedTracks()) allFavorites = allFavorites && g_lib.Favorite(id);
+    const auto selected = SelectedTracks();
+    bool allFavorites = !selected.empty() &&
+        std::all_of(selected.begin(), selected.end(), [](TrackId id) { return g_lib.Favorite(id); });
     items.push_back(Item("Favorite", kFavorite, "Ctrl+D", allFavorites));
     bool manual = g.rgRunning && !g.rgAuto;
     // ReplayGain for the selection, named as in Playback > ReplayGain (and as on Windows).
@@ -428,7 +466,7 @@ void OpenRowMenu(float x, float y) {
     std::vector<MenuItem> cover{Item("Choose image file...", kCoverFile),
                                 Item("Paste image from clipboard", kCoverPaste, {}, false, ClipboardMayHoldCover()),
                                 Item("Search online...", kFindCover)};
-    if (HasCustomCover(SelectedTracks())) {
+    if (HasCustomCover(selected)) {
         cover.push_back(Separator());
         cover.push_back(Item("Restore original cover", kRestoreCover));
     }
@@ -536,6 +574,7 @@ void RunAction(const MenuItem& item) {
         case kTaste: SetTaste(!g.settings.taste); break;
         case kKeepDiscovery: DiscoverKeep(); break;
         case kOnlineAction: OnlineSearchMenuAction(item.arg); break;
+        case kSyncFolder: OpenSync(); break;
         case kRepeatSet:
             SetRepeat((Repeat)item.arg);
             break;
@@ -544,6 +583,36 @@ void RunAction(const MenuItem& item) {
             break;
         case kTempo:
             if (item.arg >= 0 && item.arg < (int)std::size(kTempos)) SetTempo(kTempos[item.arg]);
+            break;
+        case kReverb:
+            g.settings.reverb.preset = (ReverbPreset)std::clamp(item.arg, 0, (int)ReverbPreset::Count - 1);
+            ApplyEffects();
+            SaveSettings();
+            break;
+        case kReverbMix: {
+            static constexpr float reverbMixes[] = {0.25f, 0.4f, 0.55f, 0.75f};
+            if (item.arg >= 0 && item.arg < (int)std::size(reverbMixes)) {
+                g.settings.reverb.mix = reverbMixes[item.arg];
+                ApplyEffects();
+                SaveSettings();
+            }
+            break;
+        }
+        case kNightMode:
+            g.settings.nightMode = !g.settings.nightMode;
+            ApplyEffects();
+            SaveSettings();
+            break;
+        case kBitcrush:
+            g.settings.bitcrush.enabled = !g.settings.bitcrush.enabled;
+            ApplyEffects();
+            SaveSettings();
+            break;
+        case kHeadphones: OpenHeadphones(); break;
+        case kAlwaysOnTop:
+            g.settings.alwaysOnTop = !g.settings.alwaysOnTop;
+            SDL_SetWindowAlwaysOnTop(g.window, g.settings.alwaysOnTop);
+            SaveSettings();
             break;
         case kStopAfter: ToggleStopAfterCurrent(); break;
         case kSpots: OpenComebacks(false); break;
@@ -580,6 +649,7 @@ void RunAction(const MenuItem& item) {
         case kSectionPlay: case kSectionLoop: case kSectionStart: case kSectionEnd: case kSectionClear:
             SectionAction(item.action); break;
         case kDuplicateAudio: OpenDuplicates(); break;
+        case kLintLibrary: OpenLint(); break;
         case kSteam: AddSteamSoundtracks(); break;
         case kFetchCovers: FetchMissingCovers(); break;
         case kRecentAdditions: OpenRecentAdditions(); break;

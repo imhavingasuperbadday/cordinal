@@ -350,6 +350,7 @@ void LoadSettings() {
     net.lyrics[1] = ToInt(v, "online_lyrics_ovh", 0) != 0;
     net.artistInfo = ToInt(v, "online_artist_info", 0) != 0;
     net.albumTags = ToInt(v, "online_album_tags", 0) != 0;
+    net.accurateRip = ToInt(v, "online_accurate_rip", 0) != 0;
     net.saveMusic = ToInt(v, "online_save_music", 0) != 0;
     net.searchMusic = ToInt(v, "online_search_music", 0) != 0;
     net.searchSave = std::clamp(ToInt(v, "online_search_save", 0), 0, 1);
@@ -364,6 +365,7 @@ void LoadSettings() {
     if (auto it = v.find("convert_folder"); it != v.end()) s.convertFolder = compat::Widen(it->second.c_str());
     s.ripFlac = ToInt(v, "rip_format", 0) != 1;
     if (auto it = v.find("rip_folder"); it != v.end()) s.ripFolder = compat::Widen(it->second.c_str());
+    if (auto it = v.find("sync_folder"); it != v.end()) s.syncFolder = compat::Widen(it->second.c_str());
     s.ripOffset = std::clamp(ToInt(v, "rip_offset", 0), -3000, 3000);  // cdrip::kMaxOffset
     if (auto it = v.find("organize_folder"); it != v.end()) s.organizeFolder = compat::Widen(it->second.c_str());
     if (auto it = v.find("organize_pattern"); it != v.end()) s.organizePattern = compat::Widen(it->second.c_str());
@@ -373,6 +375,7 @@ void LoadSettings() {
     listenbrainz::SetPaused(ToInt(v, "scrobbling_paused", 0) != 0);
     listenbrainz::SetSendNowPlaying(ToInt(v, "scrobbling_now_playing", 1) != 0);
     discord::SetMode((discord::Show)std::clamp(ToInt(v, "discord_status", 0), 0, discord::kShowChoices - 1));
+    coverupload::SetHostEnabled(ToInt(v, "discord_cover_host", 0) != 0);
     if (auto it = v.find("discord_cover_upload"); it != v.end())
         coverupload::SetCommand(compat::Widen(it->second.c_str()));  // a command line, so not a preference row
     s.libraryMode = (LibraryMode)std::clamp(ToInt(v, "library_view", (int)LibraryMode::Albums), 0, (int)LibraryMode::Count - 1);
@@ -503,6 +506,7 @@ void SaveSettings() {
             "\nonline_lyrics_lrclib=" + std::to_string(net.lyrics[0]) + "\nonline_lyrics_ovh=" + std::to_string(net.lyrics[1]) +
             "\nonline_artist_info=" + std::to_string(net.artistInfo) +
             "\nonline_album_tags=" + std::to_string(net.albumTags) +
+            "\nonline_accurate_rip=" + std::to_string(net.accurateRip) +
             "\nonline_save_music=" + std::to_string(net.saveMusic) +
             "\nonline_search_music=" + std::to_string(net.searchMusic) +
             "\nonline_search_save=" + std::to_string(net.searchSave) +
@@ -568,6 +572,7 @@ void SaveSettings() {
             "\nconvert_folder=" + compat::Narrow(s.convertFolder.c_str()) + "\n";
     text += "rip_format=" + std::to_string(s.ripFlac ? 0 : 1) + "\nrip_folder=" + compat::Narrow(s.ripFolder.c_str()) +
             "\nrip_offset=" + std::to_string(s.ripOffset) + "\n";
+    text += "sync_folder=" + compat::Narrow(s.syncFolder.c_str()) + "\n";
     text += "organize_folder=" + compat::Narrow(s.organizeFolder.c_str()) + "\norganize_pattern=" +
             compat::Narrow(s.organizePattern.c_str()) + "\n";
     text += "copy_folder=" + compat::Narrow(s.copyFolder.c_str()) + "\ncopy_pattern=" + compat::Narrow(s.copyPattern.c_str()) +
@@ -575,6 +580,7 @@ void SaveSettings() {
     text += "scrobbling_paused=" + std::to_string(listenbrainz::Paused()) +
             "\nscrobbling_now_playing=" + std::to_string(listenbrainz::SendNowPlaying()) +
             "\ndiscord_status=" + std::to_string((int)discord::Mode()) +
+            "\ndiscord_cover_host=" + std::to_string(coverupload::HostEnabled()) +
             "\ndiscord_cover_upload=" + compat::Narrow(coverupload::Command().c_str()) + "\n";
     text += "library_view=" + std::to_string((int)s.defaultLibraryMode) + "\nlibrary_browser=" + std::to_string(s.defaultBrowserVisible) +
             "\nbrowser_fields=" + std::to_string(s.browserFields[0]) + "," + std::to_string(s.browserFields[1]) + "," +
@@ -684,6 +690,7 @@ void SaveLibraryFile(bool force) {
     if (SaveLibrary(g.libraryPath, g.playlists)) {
         g.libraryDirty = false;
         KeepLibrarySnapshot(g.libraryPath);  // once a day; a failed copy only skips that day
+        SyncLibrarySaved();                  // the sync bookkeeping that matches this save
     }
     g.lastSave = SDL_GetTicks();
 }

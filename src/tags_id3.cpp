@@ -7,7 +7,7 @@
 
 namespace tagread {
 
-static std::string Id3Text(int enc, sv s) {
+static std::vector<std::string> Id3TextList(int enc, sv s) {
     std::string r;
     switch (enc) {
         case 0: r = Latin1ToUtf8(s); break;
@@ -21,14 +21,21 @@ static std::string Id3Text(int enc, sv s) {
         default: r = std::string(s); break;
     }
     // ID3v2.4 multiple values are NUL separated.
-    std::string out;
+    std::vector<std::string> out;
     size_t start = 0;
     for (size_t i = 0; i <= r.size(); ++i) {
         if (i == r.size() || r[i] == '\0') {
-            AppendValue(out, Trim(r.substr(start, i - start)));
+            std::string part = Trim(r.substr(start, i - start));
+            if (!part.empty()) out.push_back(std::move(part));
             start = i + 1;
         }
     }
+    return out;
+}
+
+static std::string Id3Text(int enc, sv s) {
+    std::string out;
+    for (const auto& part : Id3TextList(enc, s)) AppendValue(out, part);
     return out;
 }
 
@@ -53,12 +60,13 @@ static sv Id3Terminated(int enc, sv s, sv& rest) {
 
 // One registry describes both the frame filter and its decoder, including ID3v2.2 aliases.
 namespace {
-enum class Id3Kind { Text, Genre, Date, Track, Disc, Bpm, Compilation, User, Comment, Lyrics, Picture, Chapter };
+enum class Id3Kind { Text, Genre, Date, Track, Disc, MovementNo, Bpm, Compilation, User, Comment, Lyrics, Picture, Chapter, Credit, Involved };
 struct Id3Frame {
     const char* id;
     const char* legacy;
     Id3Kind kind;
     std::string TagData::*field = nullptr;
+    const char* role = nullptr;
 };
 }  // namespace
 
@@ -67,6 +75,11 @@ static const Id3Frame* FindId3Frame(sv id) {
         {"TIT2", "TT2", Id3Kind::Text, &TagData::title}, {"TPE1", "TP1", Id3Kind::Text, &TagData::artist},
         {"TALB", "TAL", Id3Kind::Text, &TagData::album}, {"TPE2", "TP2", Id3Kind::Text, &TagData::albumArtist},
         {"TCOM", "TCM", Id3Kind::Text, &TagData::composer}, {"TIT1", "TT1", Id3Kind::Text, &TagData::grouping},
+        {"GRP1", "GRP1", Id3Kind::Text, &TagData::work}, {"MVNM", "MVNM", Id3Kind::Text, &TagData::movement},
+        {"MVIN", "MVIN", Id3Kind::MovementNo},
+        {"TPE3", "TP3", Id3Kind::Credit, nullptr, "Conductor"}, {"TPE4", "TP4", Id3Kind::Credit, nullptr, "Remixer"},
+        {"TEXT", "TXT", Id3Kind::Credit, nullptr, "Lyricist"},
+        {"TIPL", "IPLS", Id3Kind::Involved}, {"TMCL", "TMCL", Id3Kind::Involved},
         {"TPUB", "TPB", Id3Kind::Text, &TagData::label}, {"TCON", "TCO", Id3Kind::Genre},
         {"TRCK", "TRK", Id3Kind::Track}, {"TPOS", "TPA", Id3Kind::Disc}, {"TBPM", "TBP", Id3Kind::Bpm},
         {"TCMP", "TCP", Id3Kind::Compilation}, {"TDRC", "TDRC", Id3Kind::Date}, {"TYER", "TYE", Id3Kind::Date},
@@ -118,11 +131,31 @@ static void ParseId3Frame(int version, sv id, uint16_t fflags, sv f, TagData& t,
     int enc = U8(f, 0);
     auto text = [&] { return Id3Text(enc, f.substr(1)); };
     switch (frame->kind) {
-        case Id3Kind::Text: t.*frame->field = text(); break;
-        case Id3Kind::Genre: t.genre = CleanGenre(text()); break;
+        case Id3Kind::Text:
+            if (frame->field == &TagData::artist || frame->field == &TagData::albumArtist ||
+                frame->field == &TagData::composer) {
+                AppendValue(t.*frame->field, text());
+            } else {
+                t.*frame->field = text();
+            }
+            break;
+        case Id3Kind::Genre:
+            for (const auto& g : Id3TextList(enc, f.substr(1))) AppendValue(t.genre, CleanGenre(g));
+            break;
         case Id3Kind::Date: SetIfEmpty(t.date, text().substr(0, 10)); break;
         case Id3Kind::Track: ReadNumberPair(text(), t.track, t.trackTotal); break;
         case Id3Kind::Disc: ReadNumberPair(text(), t.disc, t.discTotal); break;
+        case Id3Kind::MovementNo: ReadNumberPair(text(), t.movementNo, t.movementTotal); break;
+        case Id3Kind::Credit: AddCredit(t, frame->role ? frame->role : "Credit", text()); break;
+        case Id3Kind::Involved: {
+            auto parts = Id3TextList(enc, f.substr(1));
+            for (size_t i = 0; i + 1 < parts.size(); i += 2) {
+                std::string role = parts[i];
+                if (!role.empty()) role[0] = (char)toupper((unsigned char)role[0]);
+                AddCredit(t, std::move(role), parts[i + 1]);
+            }
+            break;
+        }
         case Id3Kind::Bpm: t.bpm = (uint32_t)(atof(text().c_str()) + 0.5); break;
         case Id3Kind::Compilation: t.compilation = (text() == "1"); break;
         case Id3Kind::User: {

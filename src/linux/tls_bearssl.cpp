@@ -879,7 +879,7 @@ bool RadioHttpStream(const std::string& initial, const std::atomic<bool>& cancel
         }
         // A live stream has no end, so curl gets no overall time limit; the reads below keep theirs.
         if (viaCurl) {
-            if (!stream.Curl(url, "GET", "User-Agent: cordinal/0.1.18\r\nIcy-MetaData: 1\r\n" + requestHeaders, {}, 0))
+            if (!stream.Curl(url, "GET", "User-Agent: cordinal/0.1.19\r\nIcy-MetaData: 1\r\n" + requestHeaders, {}, 0))
                 return false;
         } else {
             std::string request = "GET " + target + " HTTP/1.1\r\nHost: " + authority +

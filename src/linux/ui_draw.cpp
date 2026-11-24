@@ -893,16 +893,25 @@ void DrawTabs(const Palette& p) {
     Fill(L.search, p.surface2);
     Frame(L.search, g.searchFocused ? p.accent : p.border);
     Fill({L.search.x + S(1), L.search.B() - S(1), L.search.w - S(2), S(1)}, g.searchFocused ? p.accent : p.dark ? p.sub : 0x838383);
+    bool showSave = !g.search.empty() && !InternetRadio().active;
+    float saveW = showSave ? L.search.h : 0.f;
     float tx = L.search.x + S(4), ty = TextY(L.search);
+    float textR = L.search.R() - saveW - S(4);
     std::string cue = InternetRadio().active ? "Name, call sign or FM/AM number" : Active().kind == PlaylistKind::Library ? "Search library (Ctrl+F)" : "Search " + Utf8(Active().name) + " (Ctrl+F)";
     // The query, and while the box has the keys the input method's composition after it (the box
     // appends at its end).
     std::string shown = Utf8(g.search);
     const size_t preeditAt = shown.size();
     if (g.searchFocused) shown += g_preedit;
-    if (shown.empty()) DrawText(Font::Normal, cue, tx, ty, p.sub, L.search.w - S(8));
-    DrawText(Font::Normal, shown, tx, ty, p.text, L.search.R() - tx - S(4));
-    if (g.searchFocused) DrawComposition(shown, preeditAt, tx, ty, tx, L.search.R() - S(2), p.accent, p.text);
+    if (shown.empty()) DrawText(Font::Normal, cue, tx, ty, p.sub, std::max(0.f, textR - tx));
+    DrawText(Font::Normal, shown, tx, ty, p.text, std::max(0.f, textR - tx));
+    if (g.searchFocused) DrawComposition(shown, preeditAt, tx, ty, tx, std::max(tx, textR + S(2)), p.accent, p.text);
+    if (showSave) {
+        Rect saveR{L.search.R() - saveW, L.search.y + S(1), saveW - S(1), L.search.h - S(2)};
+        bool hot = g_popups.empty() && saveR.In(g_mouseX, g_mouseY);
+        if (hot) Fill(saveR, p.hover);
+        DrawText(Font::Normal, "+", saveR.x, TextY(saveR), hot ? p.text : p.sub, saveR.w, 1);
+    }
     }
     // The Library's view row: the current view (and the shown browser) in a square raised box, so it
     // never reads as another tab; hovering brightens a label.
@@ -1521,6 +1530,28 @@ void Draw() {
         Frame(target, p.accent);
     }
     DrawAlternateOverlay(p);
+    if (g.searchFocused && !g_searchSuggest.empty() && L.search.w > 0 && !InternetRadio().active) {
+        float w = std::max(L.search.w, S(260));
+        float x = std::min(L.search.x, L.search.R() - w);
+        if (x < 0) x = L.search.x;
+        float rowH = S(24);
+        float h = (float)g_searchSuggest.size() * rowH;
+        Rect pop{x, L.search.B() + S(1), w, h};
+        Fill(pop, p.surface2);
+        Frame(pop, p.border);
+        for (size_t i = 0; i < g_searchSuggest.size(); ++i) {
+            Rect row{pop.x + S(1), pop.y + (float)i * rowH, pop.w - S(2), rowH};
+            bool sel = (int)i == g_searchSuggestSel;
+            bool hot = g_popups.empty() && row.In(g_mouseX, g_mouseY);
+            if (sel) Fill(row, p.select);
+            else if (hot) Fill(row, p.hover);
+            std::string label = Utf8(g_searchSuggest[i].label);
+            std::string hint = Utf8(g_searchSuggest[i].hint);
+            float hintW = hint.empty() ? 0.f : std::min(row.w * 0.55f, TextWidth(Font::Normal, hint) + S(12));
+            DrawText(Font::Normal, label, row.x + S(8), TextY(row), p.text, std::max(0.f, row.w - hintW - S(12)));
+            if (!hint.empty()) DrawText(Font::Normal, hint, row.R() - hintW - S(4), TextY(row), p.sub, hintW, 2);
+        }
+    }
     DrawPopups(p);
     TrimThumbs();  // every cover the frame asked to keep is marked now, so only the rest may go
 }

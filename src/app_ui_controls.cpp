@@ -1,8 +1,123 @@
 // The stock controls cordinal subclasses itself: search box keys, the flat list header and the
 // owner-drawn toolbar buttons with their hot state.
 #include "app_ui_internal.h"
+#include "search_query.h"
 
 namespace app {
+
+namespace {
+
+struct SuggestPopup {
+    HWND hwnd = nullptr;
+    std::vector<SearchSuggestion> items;
+    int selected = -1;
+    int hot = -1;
+    int rowHeight = 0;
+} g_suggest;
+
+constexpr wchar_t kSuggestClass[] = L"CordinalSearchSuggest";
+bool g_suggestClassRegistered = false;
+
+void AcceptSuggestion(int index) {
+    if (index < 0 || index >= (int)g_suggest.items.size()) return;
+    std::wstring next = ApplySearchSuggestion(WindowText(g.search), g_suggest.items[index].insert);
+    SetWindowTextW(g.search, next.c_str());
+    SendMessageW(g.search, EM_SETSEL, (WPARAM)next.size(), (LPARAM)next.size());
+    SetFocus(g.search);
+}
+
+LRESULT CALLBACK SuggestProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_MOUSEACTIVATE:
+            return MA_NOACTIVATE;
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(h, &ps);
+            RECT rc;
+            GetClientRect(h, &rc);
+            FillSolid(dc, rc, Ref(P().surface2));
+            SetBkMode(dc, TRANSPARENT);
+            HGDIOBJ old = SelectObject(dc, g.font);
+            const int rowH = g_suggest.rowHeight > 0 ? g_suggest.rowHeight : S(24);
+            for (int i = 0; i < (int)g_suggest.items.size(); ++i) {
+                RECT row{0, i * rowH, rc.right, (i + 1) * rowH};
+                bool sel = i == g_suggest.selected;
+                bool hot = i == g_suggest.hot;
+                if (sel) FillSolid(dc, row, Ref(P().select));
+                else if (hot) FillSolid(dc, row, Ref(P().hover));
+                RECT lr{row.left + S(8), row.top, row.right - S(8), row.bottom};
+                SetTextColor(dc, Ref(P().text));
+                DrawTextW(dc, g_suggest.items[i].label.c_str(), -1, &lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                if (!g_suggest.items[i].hint.empty()) {
+                    SetTextColor(dc, Ref(P().sub));
+                    DrawTextW(dc, g_suggest.items[i].hint.c_str(), -1, &lr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+                }
+            }
+            SelectObject(dc, old);
+            EndPaint(h, &ps);
+            return 0;
+        }
+        case WM_MOUSEMOVE: {
+            int rowH = g_suggest.rowHeight > 0 ? g_suggest.rowHeight : S(24);
+            int idx = GET_Y_LPARAM(lp) / rowH;
+            if (idx < 0 || idx >= (int)g_suggest.items.size()) idx = -1;
+            if (idx != g_suggest.hot) {
+                g_suggest.hot = idx;
+                InvalidateRect(h, nullptr, FALSE);
+            }
+            TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, h, 0};
+            TrackMouseEvent(&tme);
+            return 0;
+        }
+        case WM_MOUSELEAVE:
+            if (g_suggest.hot != -1) { g_suggest.hot = -1; InvalidateRect(h, nullptr, FALSE); }
+            return 0;
+        case WM_LBUTTONDOWN: {
+            int rowH = g_suggest.rowHeight > 0 ? g_suggest.rowHeight : S(24);
+            int idx = GET_Y_LPARAM(lp) / rowH;
+            AcceptSuggestion(idx);
+            return 0;
+        }
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+
+}  // namespace
+
+void HideSearchSuggest() {
+    g_suggest.items.clear();
+    g_suggest.selected = g_suggest.hot = -1;
+    if (g_suggest.hwnd) ShowWindow(g_suggest.hwnd, SW_HIDE);
+}
+
+void UpdateSearchSuggest() {
+    if (!g.search || GetFocus() != g.search || RadioActive() || g.closing) {
+        HideSearchSuggest();
+        return;
+    }
+    g_suggest.items = SearchSuggestions(g_lib, WindowText(g.search), 8);
+    if (g_suggest.items.empty()) {
+        HideSearchSuggest();
+        return;
+    }
+    if (!g_suggestClassRegistered) {
+        RegisterAppClass(kSuggestClass, SuggestProc, 0, false);
+        g_suggestClassRegistered = true;
+    }
+    if (!g_suggest.hwnd) {
+        g_suggest.hwnd = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, kSuggestClass, L"",
+                                         WS_POPUP | WS_BORDER, 0, 0, 0, 0, g.hwnd, nullptr, g.inst, nullptr);
+    }
+    g_suggest.selected = -1;
+    g_suggest.hot = -1;
+    g_suggest.rowHeight = S(24);
+    RECT sr;
+    GetWindowRect(g.search, &sr);
+    int w = std::max<int>((int)(sr.right - sr.left), S(260));
+    int h = (int)g_suggest.items.size() * g_suggest.rowHeight + 2;
+    SetWindowPos(g_suggest.hwnd, HWND_TOPMOST, sr.left, sr.bottom + 1, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    InvalidateRect(g_suggest.hwnd, nullptr, FALSE);
+}
 
 // Search box key handling: Ctrl+A selects all, Esc clears, Enter applies the query
 // (and plays the first match unless Ctrl), Down drops focus into the list. The
@@ -18,12 +133,25 @@ LRESULT CALLBACK SearchSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
             return 0;
         }
         if (wp == VK_ESCAPE) {
+            if (g_suggest.hwnd && IsWindowVisible(g_suggest.hwnd)) {
+                HideSearchSuggest();
+                return 0;
+            }
             SetWindowTextW(h, L"");
             FlushSearch();
             SetFocus(CanvasActive() ? g.libView : g.list);
             return 0;
         }
+        if (wp == VK_TAB && g_suggest.hwnd && IsWindowVisible(g_suggest.hwnd) && !g_suggest.items.empty()) {
+            AcceptSuggestion(g_suggest.selected >= 0 ? g_suggest.selected : 0);
+            return 0;
+        }
         if (wp == VK_RETURN) {
+            if (g_suggest.hwnd && IsWindowVisible(g_suggest.hwnd) && g_suggest.selected >= 0) {
+                AcceptSuggestion(g_suggest.selected);
+                return 0;
+            }
+            HideSearchSuggest();
             FlushSearch();
             if (GetKeyState(VK_CONTROL) >= 0) {
                 if (!g.view.empty()) PlayRow(0);
@@ -31,7 +159,17 @@ LRESULT CALLBACK SearchSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
             }
             return 0;
         }
+        if (wp == VK_UP && g_suggest.hwnd && IsWindowVisible(g_suggest.hwnd) && !g_suggest.items.empty()) {
+            g_suggest.selected = g_suggest.selected <= 0 ? (int)g_suggest.items.size() - 1 : g_suggest.selected - 1;
+            InvalidateRect(g_suggest.hwnd, nullptr, FALSE);
+            return 0;
+        }
         if (wp == VK_DOWN) {
+            if (g_suggest.hwnd && IsWindowVisible(g_suggest.hwnd) && !g_suggest.items.empty()) {
+                g_suggest.selected = (g_suggest.selected + 1) % (int)g_suggest.items.size();
+                InvalidateRect(g_suggest.hwnd, nullptr, FALSE);
+                return 0;
+            }
             FlushSearch();
             if (g.view.empty()) {
                 OnlineSearchFocus();
@@ -49,9 +187,13 @@ LRESULT CALLBACK SearchSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
             }
             return 0;
         }
-    } else if (msg == WM_CHAR && (wp == L'\r' || wp == 27 || wp == 1)) {
+    } else if (msg == WM_CHAR && (wp == L'\r' || wp == 27 || wp == 1 ||
+                                  (wp == L'\t' && g_suggest.hwnd && IsWindowVisible(g_suggest.hwnd)))) {
         return 0;
+    } else if (msg == WM_KILLFOCUS) {
+        if ((HWND)wp != g_suggest.hwnd) HideSearchSuggest();
     } else if (msg == WM_NCDESTROY) {
+        HideSearchSuggest();
         RemoveWindowSubclass(h, SearchSubclass, 0);
     }
     return DefSubclassProc(h, msg, wp, lp);
@@ -205,6 +347,7 @@ void DrawToolbarButton(const DRAWITEMSTRUCT* di) {
         case IDC_SHUFFLE: glyph = L"\xE8B1"; break;
         case IDC_REPEAT: glyph = g.repeat == Repeat::One ? L"\xE8ED" : L"\xE8EE"; break;
         case IDC_RESUME: glyph = L"\xE81C"; break;  // History
+        case IDC_SAVE_SEARCH: glyph = L"\xE710"; break;  // Add (+)
     }
     COLORREF color = (di->itemState & ODS_DISABLED) ? Ref(P().faint) : active ? Ref(P().accent) : TextColor();
     SetBkMode(di->hDC, TRANSPARENT);

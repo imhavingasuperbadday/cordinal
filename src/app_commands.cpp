@@ -60,13 +60,20 @@ void OnCommand(int id, int code, HWND ctl) {
         GetWindowTextW(g.search, text.data(), len + 1);
         text.resize(len);
         if (g.filter == text) return;  // restoring a tab already set its query
+        bool wasEmpty = g.filter.empty();
         g.filter = text;
+        if (wasEmpty != g.filter.empty()) Layout();
         if (!g.restoringView && !g.closing) {
             g.searchPending = true;
             g.dirty = true;
             if (!SetTimer(g.hwnd, kSearchTimer, 150, nullptr)) FlushSearch();
             OnlineSearchQueryChanged(text);
+            UpdateSearchSuggest();
         }
+        return;
+    }
+    if (id == IDC_SAVE_SEARCH) {
+        SaveSearchAsAutoPlaylist();
         return;
     }
     FlushSearch();
@@ -302,6 +309,7 @@ void OnCommand(int id, int code, HWND ctl) {
         {IDM_CANCEL_STEAM, CancelSteamDiscovery},
         {IDM_WATCH_IMPORTED, WatchImportedFolders},
         {IDM_DUPLICATES, ShowDuplicates},
+        {IDM_LINT, ShowLint},
         {IDM_GAME_WHICH_CAME_FIRST, [] { ShowGames(1); }},
         {IDM_ABOUT, ShowAbout},
         {IDM_COLUMNS_RESET, ResetColumns},
@@ -310,12 +318,14 @@ void OnCommand(int id, int code, HWND ctl) {
         {IDM_QUEUE_CLEAR, ClearQueue},
         {IDM_QUEUE_SHOW, ToggleQueue},
         {IDM_NEW_AUTO, [] { ShowAutoPlaylistEditor(-1); }},
+        {IDM_SAVE_SEARCH_AUTO, SaveSearchAsAutoPlaylist},
         {IDM_ORGANIZE_UNDO, UndoOrganize},
         {IDM_TAG_UNDO, UndoLastTagEdit},
         {IDM_UNDO, UndoLatest},
         {IDM_REDO, [] { StepPlaylistEdit(true); }},
         {IDC_VIEW4, ToggleBrowser},
         {IDM_LIBRARY_FOLDERS, ShowLibraryFolders},
+        {IDM_SYNC, ShowSync},
         {IDM_REMOVE_MISSING, RemoveMissingTracks},
         {IDM_RECENT_ADDITIONS, ShowRecentAdditions},
         {IDM_INBOX_ACCEPT, [] { AcceptInbox(SelectedTracks()); }},

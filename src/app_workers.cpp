@@ -91,6 +91,7 @@ void AcceptTagBatch(std::vector<TagResult>* results) {
                 t.fileTime = r.fileTime;
             }
             g_lib.ApplyTags(r.id, r.tags);
+            g_lib.SetLyrics(r.id, r.lyrics);
             if (artChanged && g.artFor == r.id) LoadArtFor(r.id, true);
         }
         else g_lib[r.id].flags = (uint16_t)((g_lib[r.id].flags & ~Track::kLoaded) | Track::kTagFailed);
@@ -128,7 +129,7 @@ void TagWorker(HWND hwnd) {
                 quitting = g.tagQuit;  // shutdown: don't wait out the rest of a slow network folder
             }
             if (quitting) break;
-            TagResult r{source.id, {}, false, source.Path()};
+            TagResult r{source.id, {}, {}, false, source.Path()};
             // Capture identity before reading: a later replacement must still look changed to
             // the scanner. Virtual subtrack paths have no direct stat and retain their scan stamp.
             WIN32_FILE_ATTRIBUTE_DATA attrs{};
@@ -138,6 +139,7 @@ void TagWorker(HWND hwnd) {
                 r.fileTime = (uint64_t)attrs.ftLastWriteTime.dwHighDateTime << 32 | attrs.ftLastWriteTime.dwLowDateTime;
             }
             r.success = ReadTags(r.path, r.tags);
+            if (r.success) ReadSearchableLyrics(r.path, r.lyrics);
             results->push_back(std::move(r));
         }
         if (quitting) {

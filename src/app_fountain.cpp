@@ -564,7 +564,7 @@ void AppendWaveLookMenu(HMENU wave) {
     if (!kExtraThemes) return;  // the fountain styles are the DELTARUNE theme's
     HMENU style = CreatePopupMenu();
     AppendMenuW(style, MF_STRING, IDM_WAVE_STYLE_BASE + (int)WaveStyle::Bars, L"&Bars");
-    AppendMenuW(style, MF_STRING, IDM_WAVE_STYLE_BASE + (int)WaveStyle::FountainBars, L"Fountain &bars");
+    AppendMenuW(style, MF_STRING, IDM_WAVE_STYLE_BASE + (int)WaveStyle::FountainBars, L"&Fountain bars");
     AppendMenuW(style, MF_STRING, IDM_WAVE_STYLE_BASE + (int)WaveStyle::DarkFountain,
                 L"&Dark Fountain (DELTARUNE)");
     AppendMenuW(style, MF_SEPARATOR, 0, nullptr);

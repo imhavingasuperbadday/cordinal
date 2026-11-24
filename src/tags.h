@@ -20,10 +20,17 @@ enum class Codec : uint8_t {
 constexpr Codec kLastCodec = Codec::G726;  // what a stored codec may be
 const wchar_t* CodecName(Codec c);
 
+struct TagCredit {
+    std::string role, name;  // UTF-8 (role e.g. "Producer", "Conductor", "Performer", "Engineer")
+};
+
 struct TagData {
     std::string title, artist, album, albumArtist, genre, date;  // UTF-8
     std::string composer, comment, grouping, label;  // UTF-8 (label = publisher / record label)
+    std::string work, movement;  // UTF-8 (classical/jazz work and movement)
     uint32_t track = 0, trackTotal = 0, disc = 0, discTotal = 0, bpm = 0;
+    uint32_t movementNo = 0, movementTotal = 0;
+    std::vector<TagCredit> credits;
     double duration = 0;
     uint32_t sampleRate = 0, channels = 0, bitrate = 0;  // bitrate in kbps
     Codec codec = Codec::Unknown;
@@ -49,6 +56,9 @@ bool ReadTags(const std::wstring& path, TagData& out);
 bool ReadEmbeddedArt(const std::wstring& path, std::string& image);
 // Unsynchronized lyrics (ID3 USLT, Vorbis/APE LYRICS or UNSYNCEDLYRICS, MP4 ©lyr, ASF WM/Lyrics). Empty if none.
 bool ReadLyrics(const std::wstring& path, std::string& lyrics);
+// Plain searchable text from a sidecar .lrc file or embedded lyrics, with LRC timestamps/metadata stripped.
+std::string CleanSearchableLyrics(std::string_view raw);
+bool ReadSearchableLyrics(const std::wstring& path, std::string& out);
 // Chapter marks: ID3 CHAP frames (MP3) or CHAPTERnnn / CHAPTERnnnNAME comments (FLAC, Ogg, Opus),
 // as yt-dlp and mkvmerge write them. Sorted by start; empty if the file has none.
 struct Chapter {

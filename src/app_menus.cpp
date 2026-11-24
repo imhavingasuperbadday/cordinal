@@ -146,6 +146,7 @@ HMENU BuildMenu() {
     HMENU playlist = CreatePopupMenu();
     AppendMenuW(playlist, MF_STRING, IDM_NEW_PL, L"&New playlist\tCtrl+N");
     AppendMenuW(playlist, MF_STRING, IDM_NEW_AUTO, L"New &auto-playlist...");
+    AppendMenuW(playlist, MF_STRING, IDM_SAVE_SEARCH_AUTO, L"Save searc&h as auto-playlist");
     AppendMenuW(playlist, MF_STRING, IDM_EDIT_AUTO, L"&Edit auto-playlist rules...");
     HMENU mixes = CreatePopupMenu();
     static const wchar_t* const mixMenuNames[] = {L"&Favorites", L"On Re&peat", L"For&gotten Favorites",
@@ -169,9 +170,10 @@ HMENU BuildMenu() {
     HMENU library = CreatePopupMenu();
     AppendMenuW(library, MF_STRING, IDM_LIBRARY_FOLDERS, L"Library &folders...");
     AppendMenuW(library, MF_STRING, IDM_RESCAN, L"&Rescan folders");
+    AppendMenuW(library, MF_STRING, IDM_SYNC, L"Sync wit&h other PCs...");
     AppendMenuW(library, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(library, MF_STRING, IDM_INBOX_ACCEPT_ALL, L"Add everything in the &Inbox");
-    AppendMenuW(library, MF_STRING, IDM_REMOVE_MISSING, L"Forget &missing files...");
+    AppendMenuW(library, MF_STRING, IDM_REMOVE_MISSING, L"For&get missing files...");
     AppendMenuW(library, MF_STRING, IDM_RECENT_ADDITIONS, L"Remove recen&t additions (24 hours)...");
     AppendMenuW(library, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(library, MF_STRING, IDM_ORGANIZE, L"&Organize files...");
@@ -195,6 +197,7 @@ HMENU BuildMenu() {
     AppendMenuW(library, MF_POPUP, (UINT_PTR)missing, L"Fi&nd missing information");
     AppendMenuW(library, MF_STRING, IDM_FETCH_COVERS, L"Fetch missing &covers...");
     AppendMenuW(library, MF_STRING, IDM_DUPLICATES, L"Find duplic&ates...");
+    AppendMenuW(library, MF_STRING, IDM_LINT, L"Lint &my library...");
     AppendMenuW(library, MF_STRING, IDM_STEAM, L"Add &Steam soundtracks");
 
     HMENU view = CreatePopupMenu();
@@ -312,6 +315,10 @@ HACCEL BuildAccelerators() {
 // Radio groups use their IDM_*_BASE offsets (repeat, reverb, theme, size). The cancel commands come
 // and go with the work they stop.
 void UpdateMainMenu(HMENU m) {
+    const std::vector<TrackId> selectedTracks = SelectedTracks();
+    const bool selected = !selectedTracks.empty();
+    const bool allFavorite = selected && std::all_of(selectedTracks.begin(), selectedTracks.end(),
+                                                     [](TrackId id) { return g_lib.Favorite(id); });
     const struct { UINT id; bool checked; } checks[] = {
         {IDM_SHUFFLE, g.shuffle == kShuffleTracks}, {IDM_SHUFFLE_ALBUMS, g.shuffle == kShuffleAlbums},
         {IDM_RADIO, g.radio}, {IDM_TASTE, g.taste}, {IDM_MUTE, g.volumePercent == 0},
@@ -319,8 +326,7 @@ void UpdateMainMenu(HMENU m) {
         {IDM_EQUALIZER, g.eq.enabled || g.eq.crossfeed}, {IDM_ALWAYS_ON_TOP, g.alwaysOnTop},
         {IDM_GROUP_ALBUMS, g.groupAlbums}, {IDM_LYRICS, LyricsPanelShown()},
         {IDM_QUEUE_SHOW, QueueShown()}, {IDM_LIGHTWEIGHT, g.lightweight},
-        {IDM_FAVORITE, !SelectedTracks().empty() && std::all_of(SelectedTracks().begin(), SelectedTracks().end(),
-                                                               [](TrackId id) { return g_lib.Favorite(id); })},
+        {IDM_FAVORITE, allFavorite},
     };
     for (const auto& item : checks) CheckMenuItem(m, item.id, MF_BYCOMMAND | (item.checked ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuRadioItem(m, IDM_REVERB_BASE, IDM_REVERB_BASE + (int)ReverbPreset::Count - 1,
@@ -343,14 +349,22 @@ void UpdateMainMenu(HMENU m) {
         CheckMenuItem(m, IDM_PANEL_BASE + i, MF_BYCOMMAND | (PanelOpen(i) ? MF_CHECKED : MF_UNCHECKED));
     UpdateLayoutMenu(m);
     UpdateConvertMenu(m);
-    bool selected = !SelectedTracks().empty(), editable = Active().Editable();
+    bool editable = Active().Editable();
     const bool manualScan = g.rgRunning && !g.rgAuto;  // the background measurer gives way to the user
     bool removable = Active().kind != PlaylistKind::Library && Active().kind != PlaylistKind::Inbox;
     bool populated = editable && !Active().items.empty();
+    const bool hasInbox = std::any_of(g.playlists.begin(), g.playlists.end(),
+                                      [](const Playlist& p) { return p.kind == PlaylistKind::Inbox && !p.items.empty(); });
     std::wstring undoDescription;
     const struct { UINT id; bool enabled; } enables[] = {
+        {IDM_STOP, g.playing != kNone},
+        {IDM_BACKUP, !BackupBusy()}, {IDM_RESTORE_BACKUP, !BackupBusy()},
+        {IDM_ORGANIZE, !OrganizeBusy()}, {IDM_ORGANIZE_UNDO, !OrganizeBusy()},
         {IDM_REOPEN_PL, !g.closedPlaylists.empty()}, {IDM_RELOAD_TAGS, selected},
-        {IDM_QUEUE_CLEAR, !g.queue.empty()}, {IDM_SPOTS, g.resumeOn}, {IDM_PLAY_HISTORY, !PlayLog().empty()}, {IDM_EDIT_AUTO, Active().kind == PlaylistKind::Auto},
+        {IDM_MOVE_PL_LEFT, g.active > 1}, {IDM_MOVE_PL_RIGHT, g.active > 0 && g.active + 1 < (int)g.playlists.size()},
+        {IDM_PLAYING_PL, g.playing != kNone},
+        {IDM_INBOX_ACCEPT_ALL, hasInbox},
+        {IDM_QUEUE_CLEAR, !g.queue.empty()}, {IDM_SPOTS, g.resumeOn}, {IDM_PLAY_HISTORY, !PlayLog().empty()}, {IDM_SAVE_SEARCH_AUTO, !g.filter.empty() && !RadioActive()}, {IDM_EDIT_AUTO, Active().kind == PlaylistKind::Auto},
         {IDM_RENAME_PL, removable}, {IDM_REMOVE_PL, RadioActive() || removable},
         {IDM_REMOVE, selected && (editable || LibraryActive())}, {IDM_CROP, selected && editable},
         {IDM_CLEAR, populated}, {IDM_REMOVE_DUPES, populated}, {IDM_REMOVE_DEAD, populated},
@@ -361,15 +375,20 @@ void UpdateMainMenu(HMENU m) {
         {IDM_RG_WRITE_TAGS, selected && !manualScan},
         {IDM_FAVORITE, selected},
         {IDM_KEEP_DISCOVERY, DiscoverCanKeep()},
-        {IDM_MIX_BASE + (int)MixPreset::LikeThis, g.playing != kNone || SelectedTracks().size() == 1},
+        {IDM_MIX_BASE + (int)MixPreset::LikeThis, g.playing != kNone || selectedTracks.size() == 1},
     };
     for (const auto& item : enables) EnableMenuItem(m, item.id, MF_BYCOMMAND | (item.enabled ? MF_ENABLED : MF_GRAYED));
-    // Undo names what it will undo: the newer of the active playlist's last change and a tag edit.
-    std::wstring playlistUndo, redo;
-    bool canUndo = CanStepPlaylistEdit(false, &playlistUndo), canRedo = CanStepPlaylistEdit(true, &redo);
-    std::wstring undo = canUndo && (undoDescription.empty() || Active().history.undo.back().when >= NewestTagEditTime())
-                            ? playlistUndo : undoDescription;
-    canUndo = canUndo || !undoDescription.empty();
+    // Undo names what it will undo: the newest of the active playlist's last change, a tag edit, or an import.
+    std::wstring playlistUndo, redo, migUndo;
+    bool canPlUndo = CanStepPlaylistEdit(false, &playlistUndo), canRedo = CanStepPlaylistEdit(true, &redo);
+    bool canMigUndo = CanUndoMigration(migUndo);
+    uint64_t plTime = canPlUndo ? Active().history.undo.back().when : 0;
+    uint64_t tagTime = !undoDescription.empty() ? NewestTagEditTime() : 0;
+    uint64_t migTime = canMigUndo ? NewestMigrationTime() : 0;
+    bool canUndo = canPlUndo || !undoDescription.empty() || canMigUndo;
+    std::wstring undo = (canMigUndo && migTime >= plTime && migTime >= tagTime) ? migUndo :
+                        (canPlUndo && (undoDescription.empty() || plTime >= tagTime)) ? playlistUndo :
+                        undoDescription;
     // The names keep their access keys (&Undo, Re&do); a playlist's name may hold a literal '&'.
     auto keyed = [](const std::wstring& text, size_t key) {
         std::wstring out;
@@ -379,10 +398,18 @@ void UpdateMainMenu(HMENU m) {
         }
         return out;
     };
+    // Preserve whatever shortcut suffix ApplyShortcutLabels put on Undo / Redo.
+    auto shortcutOf = [m](UINT id) -> std::wstring {
+        wchar_t buf[256]{};
+        GetMenuStringW(m, id, buf, (int)std::size(buf), MF_BYCOMMAND);
+        std::wstring text = buf;
+        size_t tab = text.find(L'\t');
+        return tab == std::wstring::npos ? std::wstring() : text.substr(tab);
+    };
     ModifyMenuW(m, IDM_UNDO, MF_BYCOMMAND | MF_STRING | (canUndo ? 0 : MF_GRAYED), IDM_UNDO,
-                (keyed(canUndo ? undo : std::wstring(L"Undo"), 0) + L"\tCtrl+Z").c_str());
+                (keyed(canUndo ? undo : std::wstring(L"Undo"), 0) + shortcutOf(IDM_UNDO)).c_str());
     ModifyMenuW(m, IDM_REDO, MF_BYCOMMAND | MF_STRING | (canRedo ? 0 : MF_GRAYED), IDM_REDO,
-                (keyed(canRedo ? redo : std::wstring(L"Redo"), 2) + L"\tCtrl+Y").c_str());
+                (keyed(canRedo ? redo : std::wstring(L"Redo"), 2) + shortcutOf(IDM_REDO)).c_str());
     ShowWhileRunning(m, IDM_ADD_FOLDER, IDM_CANCEL_IMPORT, L"Cancel i&mport", g.importRunning);
     ShowWhileRunning(m, IDM_STEAM, IDM_CANCEL_STEAM, L"Cancel soundtrack search", SteamDiscoveryRunning());
     EnableMenuItem(m, IDM_STEAM, MF_BYCOMMAND | (SteamDiscoveryRunning() ? MF_GRAYED : MF_ENABLED));

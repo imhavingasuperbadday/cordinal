@@ -148,6 +148,47 @@ void TestScrobbling(const std::wstring& scratch) {
     for (Service service : {Service::ListenBrainz, Service::LastFm, Service::LibreFm}) SetToken(L"", service);
     Stop(); SetHttpForTest(nullptr); SetSendNowPlaying(true); SetPaused(false); server.error = 0;
     Pump(100, [] { return false; }); DestroyWindow(window);
+
+    batch.Next(L"Last.fm and ListenBrainz history backfill parsers, aggregation and paginated fetch");
+    const std::string lbPage =
+        "{\"payload\":{\"listens\":["
+        "{\"listened_at\":1700000200,\"track_metadata\":{\"artist_name\":\"Bj\\u00f6rk\",\"track_name\":\"Joga\",\"release_name\":\"Homogenic\"}},"
+        "{\"listened_at\":1700000100,\"track_metadata\":{\"artist_name\":\"Bj\\u00f6rk\",\"track_name\":\"Joga\",\"release_name\":\"Homogenic\"}}"
+        "]}}";
+    std::vector<Listen> parsedLb;
+    uint32_t oldest = 0;
+    bool hasMore = false;
+    Check(ParseListenBrainzListens(lbPage, parsedLb, oldest, hasMore) && parsedLb.size() == 2 &&
+              oldest == 1700000100 && !hasMore,
+          L"ParseListenBrainzListens extracts listens and oldest timestamp");
+
+    const std::string lfmPage1 =
+        "{\"recenttracks\":{\"@attr\":{\"page\":\"1\",\"totalPages\":\"2\"},\"track\":["
+        "{\"@attr\":{\"nowplaying\":\"true\"},\"artist\":{\"#text\":\"Live\"},\"name\":\"Now\"},"
+        "{\"artist\":{\"#text\":\"Portishead\"},\"name\":\"Roads\",\"album\":{\"#text\":\"Dummy\"},\"date\":{\"uts\":\"1700000500\"}}"
+        "]}}";
+    std::vector<Listen> parsedLfm;
+    uint32_t pg = 0, totalPg = 0;
+    Check(ParseLastFmRecentTracks(lfmPage1, parsedLfm, pg, totalPg) && parsedLfm.size() == 1 &&
+              pg == 1 && totalPg == 2 && parsedLfm[0].artist == "Portishead" && parsedLfm[0].listenedAt == 1700000500,
+          L"ParseLastFmRecentTracks skips nowplaying and reads page/totalPages");
+
+    auto agg = AggregateListens(parsedLb);
+    Check(agg.size() == 1 && agg[0].count == 2 && agg[0].first == 1700000100 && agg[0].last == 1700000200,
+          L"AggregateListens merges repeated listens into count, first and last timestamps");
+
+    SetHttpForTest([](Service, const std::string& url, const char*, const std::string&, const std::string&) -> web::HttpReply {
+        if (url.find("page=1") != std::string::npos)
+            return {200, "{\"recenttracks\":{\"@attr\":{\"page\":\"1\",\"totalPages\":\"2\"},\"track\":[{\"artist\":{\"#text\":\"A\"},\"name\":\"T\",\"date\":{\"uts\":\"100\"}}]}}"};
+        return {200, "{\"recenttracks\":{\"@attr\":{\"page\":\"2\",\"totalPages\":\"2\"},\"track\":[{\"artist\":{\"#text\":\"A\"},\"name\":\"T\",\"date\":{\"uts\":\"200\"}}]}}"};
+    });
+    std::atomic<bool> cancelFetch{false};
+    std::vector<migration::Statistics> fetched;
+    std::wstring fetchErr;
+    const bool fetchedOk = FetchHistory(Service::LastFm, L"alice", L"key123", cancelFetch, fetched, fetchErr);
+    SetHttpForTest(nullptr);
+    Check(fetchedOk && fetched.size() == 1 && fetched[0].count == 2 && fetched[0].first == 100 && fetched[0].last == 200,
+          L"FetchHistory paginates Last.fm recent tracks and aggregates counts/dates: %ls", fetchErr.c_str());
 }
 
 void TestDiscord() {

@@ -191,7 +191,11 @@ void ShowLyricsMenu(POINT screen) {
     } else if (command == 2) {
         std::wstring error;
         switch (online::WriteLrcFile(AudioFileOf(path), p.fetched, error)) {
-            case online::FolderWrite::Written: ShowMessage(L"Saved the lyrics as a .lrc file beside the song."); break;
+            case online::FolderWrite::Written:
+                g_lib.SetLyrics(p.loadedFor, CleanSearchableLyrics(p.fetched));
+                g.dirty = true;
+                ShowMessage(L"Saved the lyrics as a .lrc file beside the song.");
+                break;
             case online::FolderWrite::Exists: ShowMessage(L"A .lrc file with this name is already there; it was kept."); break;
             case online::FolderWrite::Failed: ShowMessage(L"Couldn't save the .lrc file: " + error + L"."); break;
         }

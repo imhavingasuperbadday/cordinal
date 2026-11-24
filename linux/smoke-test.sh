@@ -114,6 +114,7 @@ for mode in eq resampler weighted-shuffle; do check "$mode" "$BUILD/cordinal-cor
 check tagsuggest "$BUILD/cordinal-core-test" tagsuggest
 check waybar "$BUILD/cordinal-core-test" waybar
 check keymap "$BUILD/cordinal-core-test" keymap
+check sync "$BUILD/cordinal-core-test" sync "$OUT/sync"
 # The text stack: outlines and shaping on the fixtures it makes, and the installed fonts when any.
 mkdir -p "$OUT/text"
 check text "$BUILD/cordinal-core-test" text "$OUT/text"

@@ -26,6 +26,8 @@
         @{ Paths = @('src/library*', 'src/librarydb*', 'src/sections.*', 'src/track_set.*', 'src/textcase.*')
            Suites = @('library-db', 'library-workflow', 'search', 'sorting', 'scan-merge', 'title-format') }
         @{ Paths = @('src/scanner.*'); Suites = @('scanner', 'scan-merge', 'library-workflow') }
+        @{ Paths = @('src/syncfolder.*', 'src/app_sync.cpp', 'src/tests/sync_checks.h'); Suites = @('sync', 'ui')
+           Note = 'Linux runs the same checks (cordinal-core-test sync): .\linux.bat.' }
         @{ Paths = @('src/titleformat.*'); Suites = @('title-format', 'search') }
         @{ Paths = @('src/sort.*'); Suites = @('sorting') }
         @{ Paths = @('src/album_editions*', 'src/app_editions.*', 'src/app_groups.*'); Suites = @('album-editions', 'ui') }
@@ -34,12 +36,13 @@
         @{ Paths = @('src/cdrip.*'); Suites = @('cd-rip') }
         @{ Paths = @('src/app_rip.*'); Suites = @('cd-rip', 'ui') }
         @{ Paths = @('src/duplicates.*', 'src/app_duplicates.*'); Suites = @('duplicates', 'ui') }
+        @{ Paths = @('src/library_lint.*', 'src/app_lint.*'); Suites = @('library-lint', 'ui') }
         @{ Paths = @('src/column_layout.*'); Suites = @('ui'); Note = 'Shared with Linux: also run .\linux.bat.' }
         @{ Paths = @('src/playlist.*', 'src/playlist_files.*', 'src/playlist_shuffle.*', 'src/app_playlists.*')
            Suites = @('playlist-files', 'storage', 'sorting') }
-        @{ Paths = @('src/autoplaylist.*', 'src/app_autoplaylist.*'); Suites = @('auto-playlists') }
+        @{ Paths = @('src/autoplaylist.*', 'src/app_autoplaylist.*', 'src/search_query.*'); Suites = @('auto-playlists', 'search') }
         @{ Paths = @('src/playlog.*', 'src/foobar_stats.*', 'src/app_foobar.*'); Suites = @('play-log', 'migration') }
-        @{ Paths = @('src/migration.*', 'src/backup.*', 'src/app_backup.*', 'src/app_import.*'); Suites = @('migration') }
+        @{ Paths = @('src/migration.*', 'src/migration_importers.*', 'src/backup.*', 'src/app_backup.*', 'src/app_import.*'); Suites = @('migration') }
         @{ Paths = @('src/rediscover.*', 'src/taste.*', 'src/app_recent.*'); Suites = @('listening-model', 'play-log') }
         @{ Paths = @('src/points.*', 'src/app_points.*', 'src/app_badges.*'); Suites = @('points') }
         @{ Paths = @('src/streamfile.*', 'src/recycle.*'); Suites = @('storage', 'playlist-files', 'organize', 'tag-undo') }
@@ -51,7 +54,7 @@
         @{ Paths = @('src/command_line.*'); Suites = @('explorer', 'harness') }
 
         # Tags.
-        @{ Paths = @('src/tags*', 'src/tag_suggest.*', 'src/app_tageditor.*')
+        @{ Paths = @('src/tags*', 'src/tag_suggest.*', 'src/tag_values.*', 'src/app_tageditor.*')
            Suites = @('tags', 'chapters-lyrics', 'replaygain-tags', 'steam') }
         @{ Paths = @('src/tagwriter*'); Suites = @('tag-writing-mp4', 'tag-writing-ogg', 'replaygain-tags', 'tag-undo') }
         @{ Paths = @('src/tagundo.*'); Suites = @('tag-undo') }
@@ -139,6 +142,8 @@
         @{ Paths = @('tools/test.ps1', 'tools/test-runner.ps1', 'tools/test-map.psd1', 'test.bat')
            Suites = @('harness'); Note = 'Test runner changed: also run pwsh -File tools\test-runner.ps1.' }
         @{ Paths = @('tools/make-fixtures.ps1'); Suites = @('*') }
+        @{ Paths = @('tools/generate-*', 'tools/test-native-decoders.*')
+           Suites = @('native-codecs'); Note = 'Direct codec oracle changed: also run pwsh -File tools\test-native-decoders.ps1.' }
         @{ Paths = @('tools/fuzz-*', 'tools/opus-conformance.*')
            Suites = @(); Note = 'Fuzzers and conformance: run .\linux.bat test -Suite sanitize (and tools\fuzz-parsers.ps1 -BuildOnly on Windows).' }
         @{ Paths = @('tools/publish.ps1', 'tools/release.ps1', 'tools/version-fields.psd1', 'tools/check-updates.ps1')

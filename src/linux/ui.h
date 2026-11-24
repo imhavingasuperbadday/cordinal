@@ -15,6 +15,9 @@ void RenderSeek();           // the live seek bar alone, between full frames
 bool SeekAnimationOnly();    // only the software-rendered live seek bar is moving
 void HandleEvent(const SDL_Event& e);
 void SetCover(CoverImage* image);  // takes ownership
+// The encoded file of `id`'s cover as SetCover last received it (the one MPRIS shows), or "" when another track's
+// cover is up or it has none.
+std::string CoverFileFor(TrackId id);
 void SetThumb(CoverImage* image);  // an album header's cover; takes ownership
 void RefreshTrackArt(TrackId id);  // a file's size or modification time changed
 void OnFoldersChosen(std::vector<std::wstring>* folders);  // takes ownership

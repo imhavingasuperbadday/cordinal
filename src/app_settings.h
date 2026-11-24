@@ -57,6 +57,13 @@ bool SaveBackupSettings(std::string& bytes);
 void LoadPreferences();
 void SaveState();
 void LoadState();
+// Library > Sync with other PCs (app_sync.cpp, syncfolder.h): a pass about once a minute from the UI
+// tick (`now` starts one at once), the bookkeeping written after each library save, and a last pass
+// at close that publishes this PC's changes before the final save.
+void SyncTick(bool now = false);
+void SyncLibrarySaved();
+void SyncFinish();
+void ShowSync();
 void RestoreWindowPlacement(int showCmd);
 
 }  // namespace app

@@ -79,6 +79,7 @@ void Dispatch(const Message& m) {
         case WM_APP_PICKER_ONLINE: OnPickerOnlineMessage(m.wp, m.lp); break;
         case WM_APP_ALBUMTAG: OnAlbumTagMessage(m.lp); break;
         case WM_APP_DUPLICATES: OnDuplicatesMessage(); break;
+        case WM_APP_LINT: OnLintMessage(); break;
         case WM_APP_PLAYLIST_FILE: OnPlaylistFile(m.wp, m.lp); break;
         case WM_APP_LISTENBRAINZ: OnListenBrainzMessage(m.wp, m.lp); break;
         case WM_APP_LYRICS: OnLyricsLoaded(m.lp); break;
@@ -243,7 +244,7 @@ int Run(int argc, char** argv) {
     }
 
     PrepareCodeProfile();
-    SDL_SetAppMetadata("cordinal", "0.1.18", "cordinal");
+    SDL_SetAppMetadata("cordinal", "0.1.19", "cordinal");
     SDL_SetHint(SDL_HINT_VIDEO_WAYLAND_PREFER_LIBDECOR, "1");
     if (parity) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
@@ -364,7 +365,7 @@ int Run(int argc, char** argv) {
     else if (!parity) ReopenLastTrack();  // the last session's song, paused or playing, as Preferences asks
     // Coming back: offer songs left partway and ones gone quiet, unless all there is is the song just reopened.
     if (paths.empty() && !parity && HasComebacks()) OpenComebacks(false);
-    if (s.folders.empty() && paths.empty()) ShowMessage(L"Welcome! Add your music: Library \x25B8 Library folders...");
+    if (s.folders.empty() && paths.empty()) ShowMessage(L"Add your music: Library \x25B8 Library folders...");
     // Diagnostics leave the user's profile untouched.
     if (checkLayout) {
         int off = CheckLayout();
@@ -434,6 +435,7 @@ int Run(int argc, char** argv) {
                 g.redraw = true;
             }
             MaybeAutoMeasure(false);
+            SyncTick();  // a pass about once a minute while a sync folder is chosen
             MemoryTick();
             if (g.playing != kNone || RadioPlaying() || g.searchFocused || now < g.messageUntil + 300) g.redraw = true;
         }
@@ -474,7 +476,9 @@ int Run(int argc, char** argv) {
     ShutdownSounds();
     StopReplayGain();
     StopDuplicates();  // files it already moved take their history with them before the save
+    StopLint();
     Stop();  // finish the current listening session before saving the library
+    SyncFinish();  // publishes this PC's changes before the last save
     ShutdownRadio();
     DiscoverShutdown();
     StopOnlineSearch();

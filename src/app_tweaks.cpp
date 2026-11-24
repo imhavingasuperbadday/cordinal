@@ -10,6 +10,7 @@
 #include "metadata_fetch.h"
 #include "peaks.h"
 #include "musicbrainz.h"
+#include "coverupload.h"
 #include "discord.h"
 #include "listenbrainz.h"
 
@@ -452,10 +453,9 @@ const Tweak kTweaks[] = {
     {"scrobbling.discord", L"Scrobbling", L"Discord", L"Discord status",
      L"While the Discord app runs on this computer, your status shows the song playing or the album, with how far "
      L"along it is. Nothing is shown while paused. Discord shows it only while its own Activity Privacy setting "
-     L"shares your activity. The picture is the cover cordinal shows: a cover chosen from the online results keeps "
-     L"the address it came from, and a cover chosen from a file has none, so the album's cover from the sources "
-     L"under Online stands in for it. To show those too, set DiscordCoverUpload in the Scrobbling section of "
-     L"settings.ini to a command that uploads the image you hand it and prints its https address.",
+     L"shares your activity. Discord can only show a cover that is on the web: a cover chosen from the online "
+     L"results keeps the address it came from, Upload covers for Discord sends the others, and otherwise the "
+     L"album's cover from the sources under Online stands in.",
      TweakType::Choice, 0, discord::kShowChoices - 1, 0, [] { return (double)discord::Mode(); },
      [](double v) { discord::SetMode((discord::Show)v); }, 0,
      [] {
@@ -464,6 +464,16 @@ const Tweak kTweaks[] = {
          ShowMessage(said[(int)discord::Mode()]);
      },
      kDiscordNames},
+    {"scrobbling.discord_upload", L"Scrobbling", L"DiscordCoverHost", L"Upload covers for Discord",
+     L"Sends the cover cordinal shows for the playing track to litterbox.catbox.moe, so your Discord status shows "
+     L"it: embedded covers, cover files, and covers chosen or made in cordinal. Anyone with the address can see the "
+     L"image, and the host deletes it after three days. Each cover is sent once and reused while it lasts.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)coverupload::HostEnabled(); },
+     [](double v) { coverupload::SetHostEnabled(v != 0); }, 0,
+     [] {
+         ShowMessage(coverupload::HostEnabled() ? L"Covers will be uploaded for your Discord status."
+                                                : L"Covers won't be uploaded for your Discord status.");
+     }},
     {"library.new_music", L"Library", L"Inbox", L"New music from library folders",
      L"Add music automatically or send it to the Inbox; existing Inbox tracks stay.",
      TweakType::Choice, 0, 1, 0, [] { return (double)g.inboxEnabled; }, [](double v) { g.inboxEnabled = v != 0; },
@@ -528,6 +538,10 @@ const Tweak kTweaks[] = {
      L"Sends the album's title and artist to musicbrainz.org when you choose Tag album from MusicBrainz, then the ids of the few releases that match, to read their tracks.",
      TweakType::Bool, 0, 1, 0, [] { return (double)online::Config().albumTags; },
      [](double v) { online::Config().albumTags = v != 0; }, 0, OnlineSettingsChanged},
+    {"online.accurate_rip", L"Online", L"AccurateRip", L"Verify CD rips with AccurateRip",
+     L"Sends a disc's AccurateRip ids and track count to accuraterip.com during CD ripping and offset calibration to verify ripped tracks against other pressings.",
+     TweakType::Bool, 0, 1, 0, [] { return (double)online::Config().accurateRip; },
+     [](double v) { online::Config().accurateRip = v != 0; }, 0, OnlineSettingsChanged},
     {"online.save_music", L"Online", L"SaveMusic", L"Save music from the web",
      L"Downloads a link you paste from soundcloud.com, youtube.com or open.spotify.com: the audio, its cover and its details, saved as your own file in the library. A Spotify link's audio is the same recording matched on YouTube.",
      TweakType::Bool, 0, 1, 0, [] { return (double)online::Config().saveMusic; },
@@ -823,7 +837,8 @@ const Page kPages[] = {
      {{IDM_THEME_RESET_LIGHT, L"Reset &Light colours"}, {IDM_THEME_RESET_DARK, L"Reset &Dark colours"},
       {IDM_LAYOUT_BAR, L"&Customize layout bar"}}},
     {"library.", L"Library", L"New music, sizes in the library views, and Explorer and the web server.", L"Collection",
-     {{IDM_LIBRARY_FOLDERS, L"Library &folders..."}, {IDM_WEB_SERVER, L"&Web server..."}}},
+     {{IDM_LIBRARY_FOLDERS, L"Library &folders..."}, {IDM_SYNC, L"Sync wit&h other PCs..."},
+      {IDM_WEB_SERVER, L"&Web server..."}}},
     {"convert.", L"Conversion", L"Converting between formats, putting the originals back, and ripping CDs.", nullptr, {}},
     {"online.", L"Online", L"Covers, lyrics and artist info from the web. Each says what it sends, and all start off.",
      nullptr, {{IDM_FETCH_COVERS, L"&Fetch missing covers..."}}},
@@ -1795,7 +1810,8 @@ LRESULT CALLBACK PreferencesProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 std::span<const Tweak> Tweaks() { return kTweaks; }
 
 bool TweakShown(const Tweak& t) {
-    if (!discord::Available() && !strcmp(t.key, "scrobbling.discord")) return false;  // no application id yet
+    if (!discord::Available() && (!strcmp(t.key, "scrobbling.discord") || !strcmp(t.key, "scrobbling.discord_upload")))
+        return false;  // no application id yet
     // The Reverb amount slider already covers the menu's presets; a second row for them only repeats it.
     if (!strcmp(t.key, "effects.reverb_mix_choice")) return false;
     if (!kExtraThemes && (!strcmp(t.key, "view.live_fountain") || !strcmp(t.key, "view.robotic_sounds"))) return false;

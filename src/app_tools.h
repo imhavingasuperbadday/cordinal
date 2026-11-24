@@ -10,10 +10,12 @@
 #include <functional>
 
 namespace online { struct Reply; }
+namespace migration { struct ImportBundle; }
 
 namespace app {
 
 void ShowAutoPlaylistEditor(int playlist);
+void SaveSearchAsAutoPlaylist();
 bool AutoEditorDialogMessage(MSG* msg);
 void AddDefaultAutoPlaylists();
 // Playlist > Mixes: the ready-made local mixes (autoplaylist.h MixPreset). An existing auto-playlist
@@ -126,6 +128,10 @@ void ShowDuplicates();
 bool DuplicatesDialogMessage(MSG* msg);
 void DuplicatesMeasured();
 void StopDuplicates();
+// Library > Lint library... (app_lint.cpp): split albums, near-duplicate artists, mojibake, cover audit.
+void ShowLint();
+bool LintDialogMessage(MSG* msg);
+void StopLint();
 void WriteTagsInBackground(const std::vector<TrackId>& ids, const TagEdit& edit, bool announce = true);
 bool CanUndoTagEdit(std::wstring& description);
 void UndoLastTagEdit();
@@ -152,6 +158,10 @@ void BackUpProfile();
 void RestoreProfile();
 void ReviewBackupFolder(const std::wstring& folder);
 void ImportPlaybackStatistics();
+void PreviewImportedStatistics(const std::wstring& sourceLabel, migration::ImportBundle bundle);
+bool CanUndoMigration(std::wstring& description);
+uint64_t NewestMigrationTime();
+void UndoLastMigration();
 bool BackupDialogMessage(MSG* msg);
 void ShowRecentAdditions();
 bool RecentAdditionsDialogMessage(MSG* msg);

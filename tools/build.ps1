@@ -3,6 +3,8 @@
 #   build.bat                 local experimental packed build (with the address filter)
 #   build.bat stock-nrv       stock UPX packed build
 #   build.bat unpacked        development build: plain executables, no UPX download
+#   build.bat fast            fast dev build: separate build\obj-fast\ & build\fast\, skips /GL & /LTCG
+#   build.bat test-only       link only cordinal-test.exe (skips cordinal.exe; combines with fast/unpacked)
 #   build.bat full            ignore the incremental record and rebuild everything
 #   build.bat experimental  use the sibling UPX research decoder for a local development build
 #   build.bat experimental-addresses  also use its smaller x64 address-filter format
@@ -12,13 +14,13 @@
 # What it produces:
 #   build\unpacked\cordinal.exe        the player (src\*.cpp + src\chiptune\*.cpp, no tests)
 #   build\unpacked\cordinal-test.exe   console diagnostics with src\tests\*.cpp (no player window)
+#   build\fast\cordinal-test.exe       fast non-LTCG dev pair (when built with `fast`)
 #   build\cordinal.exe                 the published pair: packed, or copied for "unpacked"
 #
-# Incremental model: build\obj\build.json records the SHA-256 of every source, this script and the
-# MSVC toolset, and the repository headers each .cpp included last time (cl /sourceDependencies). A
-# .cpp recompiles when its hash or the hash of one of those headers changes; a new build script
-# version, toolset or theme set rebuilds everything. There is no timestamp or shadow-directory state to
-# go stale. The record is written only after a successful build, so a failed build repeats its work.
+# Incremental model: build\obj\build.json (or build\obj-fast\build.json for -Fast) records per-file
+# SHA-256, compile-flags hash, and included-header hashes (cl /sourceDependencies). Each .cpp
+# recompiles only when its source, flags, or an included header changes, and each compiled group is
+# checkpointed so a mid-build error never discards earlier compiled objects.
 #
 # To add a source file: drop a .cpp in src\ (or src\chiptune, src\tests). It is picked up by the globs
 # below and compiled with the default app flags. Only the codecs in $SlowCodecs / $HotCodecs and the
@@ -27,18 +29,32 @@
 [CmdletBinding()]
 param(
     [switch]$Unpacked,
+    [switch]$Fast,
+    [switch]$TestOnly,
     [switch]$Full,
     [switch]$Experimental,
     [switch]$ExperimentalAddresses,
     [switch]$Cdpack,
     [switch]$StockNrv,
-    [switch]$Themes
+    [switch]$Themes,
+    [switch]$VerboseBuild
 )
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'packing-mode.ps1')
-$mode = Resolve-PackingMode -Unpacked:$Unpacked -Experimental:$Experimental `
-    -ExperimentalAddresses:$ExperimentalAddresses -Cdpack:$Cdpack -StockNrv:$StockNrv
+if ($Fast) {
+    if ($Experimental -or $ExperimentalAddresses -or $Cdpack -or $StockNrv) {
+        throw 'Choose one build mode (-Fast cannot combine with packed modes).'
+    }
+    $mode = 'fast'
+    $Unpacked = $true
+} else {
+    $mode = Resolve-PackingMode -Unpacked:$Unpacked -Experimental:$Experimental `
+        -ExperimentalAddresses:$ExperimentalAddresses -Cdpack:$Cdpack -StockNrv:$StockNrv
+}
+if ($TestOnly -and !$Unpacked) {
+    throw '-TestOnly is only for development builds (-Fast or -Unpacked).'
+}
 $Experimental = $mode -eq 'experimental'
 $ExperimentalAddresses = $mode -eq 'experimental-addresses'
 $StockNrv = $mode -eq 'pack'
@@ -47,7 +63,9 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $root
 $timer = [Diagnostics.Stopwatch]::StartNew()
 
-$objDir = 'build\obj'
+$objDir = if ($Fast) { 'build\obj-fast' } else { 'build\obj' }
+$outDir = if ($Fast) { 'build\fast' } else { 'build\unpacked' }
+New-Item -ItemType Directory -Force -Path $objDir, $outDir | Out-Null
 $manifestPath = Join-Path $objDir 'build.json'
 # The packed player's size budget in decimal bytes (PRINCIPLES.md: fast and small are features). A
 # release build over it fails: a change that needs more raises this number and says why in docs\size.md.
@@ -119,9 +137,26 @@ function Initialize-Msvc {
     $script:msvcReady = $true
 }
 
-function Invoke-Tool([string]$Exe, [string[]]$Arguments) {
-    & $Exe @Arguments
-    if ($LASTEXITCODE -ne 0) { Fail "$Exe failed with exit code $LASTEXITCODE." }
+$script:quietBuild = !$VerboseBuild -and !$env:CORDINAL_VERBOSE_BUILD
+function Invoke-Tool([string]$Exe, [string[]]$Arguments, [switch]$AllowFailure) {
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $Exe @Arguments 2>&1
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+    foreach ($item in $output) {
+        $line = if ($item -is [Management.Automation.ErrorRecord]) { $item.ToString() } else { [string]$item }
+        if ($script:quietBuild) {
+            if ($Exe -eq 'cl.exe' -and $line -match '^\s*[^\s:\\/]+\.(cpp|c|cc|cxx)\s*$') { continue }
+            if ($Exe -eq 'link.exe' -and $line -match '^\s*(Generating code|Finished generating code)\s*$') { continue }
+        }
+        Write-Host $line
+    }
+    if ($code -ne 0 -and !$AllowFailure) { Fail "$Exe failed with exit code $code." }
+    return $code
 }
 
 # Stock UPX has one filter for win64, 0x49 (upx src/filter/ctok.h and getcto.h). It rewrites every
@@ -190,6 +225,7 @@ New-Item -ItemType Directory -Force -Path $objDir, 'build\unpacked' | Out-Null
 $scriptHash = Get-ContentHash (Join-Path $PSScriptRoot 'build.ps1')
 # Which files build without unwinding is not in the incremental record, so the switch rebuilds all.
 if ($env:CORDINAL_UNWIND_ALL) { $scriptHash += ':unwind-all' }
+if ($env:CORDINAL_NO_ICF) { $scriptHash += ':no-icf' }
 # Repack when either the packing policy or the research executable changes, even with no relink.
 $packingHash = Get-ContentHash (Join-Path $PSScriptRoot 'pack-release.ps1')
 $packingHash += ':' + (Get-ContentHash (Join-Path $PSScriptRoot 'packing-mode.ps1'))
@@ -220,24 +256,20 @@ $resourceHash = Get-SetHash @($hashes.Keys |
     ForEach-Object { "$_=$($hashes[$_])" })
 
 $old = $null
-$oldFiles = @{}
-$oldDeps = @{}
+$oldCompiled = @{}
 if (Test-Path -LiteralPath $manifestPath) {
     $old = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-    if ($old.files) {
-        foreach ($property in $old.files.PSObject.Properties) { $oldFiles[$property.Name] = $property.Value }
-    }
-    if ($old.deps) {
-        foreach ($property in $old.deps.PSObject.Properties) { $oldDeps[$property.Name] = @($property.Value | Where-Object { $_ }) }
+    if ($old.compiled) {
+        foreach ($property in $old.compiled.PSObject.Properties) { $oldCompiled[$property.Name] = $property.Value }
     }
 }
 
 $rebuildAll = [bool]$Full
 $reason = 'requested on the command line'
 if (!$rebuildAll -and !$old) { $rebuildAll = $true; $reason = 'no record of a previous build' }
-if (!$rebuildAll -and $old.script -ne $scriptHash) { $rebuildAll = $true; $reason = 'build.ps1 changed' }
+if (!$rebuildAll -and $old.version -ne 4) { $rebuildAll = $true; $reason = 'incremental manifest upgraded' }
 if (!$rebuildAll -and $old.toolset -ne $toolset) { $rebuildAll = $true; $reason = 'MSVC toolset changed' }
-if (!$rebuildAll -and !$old.deps) { $rebuildAll = $true; $reason = 'no record of header dependencies' }
+if (!$rebuildAll -and !$old.compiled) { $rebuildAll = $true; $reason = 'no per-file compile record' }
 if (!$rebuildAll -and [bool]$old.themes -ne [bool]$Themes) { $rebuildAll = $true; $reason = 'the theme set changed' }
 if ($rebuildAll) { Write-Step "Rebuilding everything: $reason." }
 
@@ -257,13 +289,14 @@ $size = @('/O1', '/Oi', '/Gy', '/Gw', '/D_USE_STD_VECTOR_ALGORITHMS=0')
 $hot = @('/O2', '/Ob3', '/Oi', '/Gy', '/Gw', '/D_USE_STD_VECTOR_ALGORITHMS=0')
 $unicode = @('/DUNICODE', '/D_UNICODE')
 $slowCodecs = @('audio_pcm', 'cord_encode')
-$hotCodecs = @('audio_flac', 'audio_mpeg', 'audio_alac', 'audio_aac', 'audio_resample', 'engine', 'audio_cord',
+$hotCodecs = @('audio_flac', 'audio_mpeg', 'audio_alac', 'audio_aac', 'audio_sbr', 'audio_resample', 'engine', 'audio_cord',
     'audio_vorbis', 'audio_wavpack', 'audio_opus_celt', 'audio_tta', 'audio_opus_silk', 'audio_ape',
     'audio_ac3', 'audio_wma')
 
 $groups = [ordered]@{}
 function Add-Group([string]$Name, [string]$ObjSubdir, [string[]]$Flags, $Sources) {
     $out = if ($ObjSubdir) { Join-Path $objDir $ObjSubdir } else { $objDir }
+    if ($Fast) { $Flags = @($Flags | Where-Object { $_ -ne '/GL' }) }
     $groups[$Name] = @{ ObjDir = $out; Flags = $Flags; Sources = @($Sources) }
 }
 
@@ -287,18 +320,18 @@ $noUnwindNames = @(
     'app_badges', 'app_big', 'app_browser', 'app_columns', 'app_commands', 'app_controls',
     'app_convert', 'app_copy', 'app_coverfetch', 'app_custom', 'app_deltarune', 'app_dialogs', 'app_discover',
     'app_duplicates', 'app_editions', 'app_eq', 'app_foobar', 'app_format', 'app_fountain', 'app_groups', 'app_headphones', 'app_helpers', 'app_import', 'app_ini', 'app_layout', 'app_library',
-    'app_lifecycle', 'app_lightweight', 'app_lyrics', 'app_memory', 'app_menus', 'app_mini', 'app_organize',
+    'app_lifecycle', 'app_lightweight', 'app_lint', 'app_lyrics', 'app_memory', 'app_menus', 'app_mini', 'app_organize',
     'app_packfiles', 'app_packs', 'app_palette', 'app_panels', 'app_playback', 'app_points',
     'app_preferences', 'app_radio', 'app_recent', 'app_region', 'app_releaseradar', 'app_review', 'app_rip',
-    'app_search_online', 'app_settings', 'app_sizes', 'app_spots', 'app_tabs', 'app_tabstrip', 'app_tageditor',
+    'app_search_online', 'app_settings', 'app_sizes', 'app_spots', 'app_sync', 'app_tabs', 'app_tabstrip', 'app_tageditor',
     'app_taskbar', 'app_toast', 'app_tray', 'app_tweaks', 'app_ui', 'app_ui_controls', 'app_ui_menu',
     'app_ui_trackbar', 'app_waveform', 'app_web', 'app_webfetch', 'app_window', 'app_workers', 'art',
     'asio_output', 'audio_kernels', 'cdrip', 'column_layout', 'convert', 'cord_export', 'cover_fade',
     'coverupload', 'crashdump', 'delayload', 'devicecopy', 'discart',
-    'discord', 'duplicates', 'eq_profile', 'headsets', 'inflate', 'keymap', 'libview', 'libview_draw', 'libview_input', 'md5',
+    'discord', 'duplicates', 'eq_profile', 'headsets', 'inflate', 'keymap', 'library_lint', 'libview', 'libview_draw', 'libview_input', 'md5',
     'memory_report', 'mp4_remux', 'musicbrainz', 'online_search', 'packed_image', 'playlist_files', 'playlist_import', 'qr',
     'recycle', 'rediscover', 'release_radar', 'replaygain', 'sfx', 'sfx_output', 'smtc',
-    'soft_canvas', 'soundcloud', 'speakers', 'spotifylink', 'streamfile', 'tag_suggest', 'tagundo', 'tagwriter', 'tagwriter_cord',
+    'soft_canvas', 'soundcloud', 'speakers', 'spotifylink', 'streamfile', 'syncfolder', 'tag_suggest', 'tagundo', 'tagwriter', 'tagwriter_cord',
     'tagwriter_flacogg', 'tagwriter_mp3mp4', 'tempo', 'theme_palette', 'theme_win', 'thumbs',
     'upmix', 'web_library', 'web_remote', 'webfetch', 'ytaudio')
 $noUnwind = @(if (!$env:CORDINAL_UNWIND_ALL) {
@@ -353,16 +386,32 @@ $sourceSetHash = Get-SetHash @($groups.Keys | ForEach-Object {
 })
 $sourceSetChanged = $sourceSetHash -ne $(if ($old) { $old.sources } else { '' })
 
+# Per-source flags hash so editing one group or $noUnwindNames only recompiles the affected files.
+$fileFlags = @{}
+foreach ($name in $groups.Keys) {
+    $gFlags = Get-SetHash (@($groups[$name].Flags) + @("objDir=$($groups[$name].ObjDir)"))
+    foreach ($source in $groups[$name].Sources) {
+        $fileFlags[(Get-Relative $source.FullName)] = $gFlags
+    }
+}
+
+function Get-DepsHash([string[]]$DepList) {
+    $lines = foreach ($header in $DepList) {
+        if (!$hashes.ContainsKey($header)) { return '' }
+        "$header=$($hashes[$header])"
+    }
+    return Get-SetHash @($lines)
+}
+
 function Test-Stale([string]$SourceRel, [string]$Object) {
     if ($rebuildAll) { return $true }
     if (!(Test-Path -LiteralPath $Object)) { return $true }
-    if (!$oldFiles.ContainsKey($SourceRel) -or !$oldDeps.ContainsKey($SourceRel)) { return $true }
-    if ($oldFiles[$SourceRel] -ne $hashes[$SourceRel]) { return $true }
-    # A header that changed or disappeared since the last compile; a newly included header arrives
-    # through an edit to a file already listed here, so it is caught by that edit.
-    foreach ($header in $oldDeps[$SourceRel]) {
-        if (!$hashes.ContainsKey($header) -or $oldFiles[$header] -ne $hashes[$header]) { return $true }
-    }
+    if (!$oldCompiled.ContainsKey($SourceRel)) { return $true }
+    $rec = $oldCompiled[$SourceRel]
+    if ($rec.hash -ne $hashes[$SourceRel]) { return $true }
+    if ($rec.flags -ne $fileFlags[$SourceRel]) { return $true }
+    $depList = @($rec.deps | Where-Object { $_ })
+    if ((Get-DepsHash $depList) -ne $rec.depsHash) { return $true }
     return $false
 }
 
@@ -372,7 +421,12 @@ function Test-Stale([string]$SourceRel, [string]$Object) {
 $srcPrefix = (Join-Path $root 'src').ToLowerInvariant() + '\'
 $relativeByLower = @{}
 foreach ($key in $hashes.Keys) { $relativeByLower[$key.ToLowerInvariant()] = $key }
-$deps = @{}
+$compiled = @{}
+if (!$rebuildAll) {
+    foreach ($key in $oldCompiled.Keys) {
+        if ($hashes.ContainsKey($key)) { $compiled[$key] = $oldCompiled[$key] }
+    }
+}
 function Read-Dependencies([string]$DepDir, $Source) {
     $json = Join-Path $DepDir ($Source.Name + '.json')
     if (!(Test-Path -LiteralPath $json)) { Fail "cl.exe wrote no dependency record for $($Source.Name)." }
@@ -381,6 +435,19 @@ function Read-Dependencies([string]$DepDir, $Source) {
         $relativeByLower[('src/' + $_.Substring($srcPrefix.Length)).Replace('\', '/')]
     } | Where-Object { $_ } | Sort-Object -Unique)
 }
+function Save-Manifest([bool]$Complete) {
+    [ordered]@{
+        version = 4
+        script = $scriptHash
+        toolset = $toolset
+        mode = if ($Complete) { $mode } else { $oldMode }
+        themes = [bool]$Themes
+        packing = if ($Complete) { $packingHash } else { $(if ($old) { $old.packing } else { '' }) }
+        resources = if ($Complete -or !$resourceStale) { $resourceHash } else { $(if ($old) { $old.resources } else { '' }) }
+        sources = if ($Complete -or $TestOnly) { $sourceSetHash } else { $(if ($old) { $old.sources } else { '' }) }
+        compiled = $compiled
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+}
 function Get-Objects([string]$ObjDir, $Sources) {
     return @($Sources | ForEach-Object { Join-Path $ObjDir ($_.BaseName + '.obj') })
 }
@@ -388,31 +455,51 @@ function Get-Objects([string]$ObjDir, $Sources) {
 $appLinked = $false
 $testLinked = $false
 foreach ($name in $groups.Keys) {
+    if ($TestOnly -and $name -eq 'stub') { continue }
     $group = $groups[$name]
     New-Item -ItemType Directory -Force -Path $group.ObjDir | Out-Null
     $stale = @($group.Sources | Where-Object {
         Test-Stale (Get-Relative $_.FullName) (Join-Path $group.ObjDir ($_.BaseName + '.obj'))
     })
-    foreach ($source in $group.Sources) {
-        $rel = Get-Relative $source.FullName
-        if ($oldDeps.ContainsKey($rel)) { $deps[$rel] = $oldDeps[$rel] }
-    }
     if (!$stale) { continue }
 
     Initialize-Msvc
     Write-Host ("Compiling {0} file(s) [{1}]" -f $stale.Count, $name)
     $depDir = Join-Path $group.ObjDir 'deps'
     New-Item -ItemType Directory -Force -Path $depDir | Out-Null
-    Invoke-Tool 'cl.exe' (@($group.Flags) + @('/c', "/Fo$($group.ObjDir)\", '/sourceDependencies', $depDir) +
-        @($stale | ForEach-Object { Get-NativeRelative $_.FullName }))
-    foreach ($source in $stale) { $deps[(Get-Relative $source.FullName)] = @(Read-Dependencies $depDir $source) }
+    $batchStart = [DateTime]::UtcNow.AddSeconds(-1)
+    $clCode = Invoke-Tool 'cl.exe' (@($group.Flags) + @('/c', "/Fo$($group.ObjDir)\", '/sourceDependencies', $depDir) +
+        @($stale | ForEach-Object { Get-NativeRelative $_.FullName })) -AllowFailure
+    $recordedAny = $false
+    foreach ($source in $stale) {
+        $obj = Join-Path $group.ObjDir ($source.BaseName + '.obj')
+        $depJson = Join-Path $depDir ($source.Name + '.json')
+        if (!(Test-Path -LiteralPath $obj) -or !(Test-Path -LiteralPath $depJson)) { continue }
+        if ($clCode -ne 0) {
+            if ((Get-Item -LiteralPath $obj).LastWriteTimeUtc -lt $batchStart -or
+                (Get-Item -LiteralPath $depJson).LastWriteTimeUtc -lt $batchStart) { continue }
+        }
+        $rel = Get-Relative $source.FullName
+        $depList = @(Read-Dependencies $depDir $source)
+        $compiled[$rel] = [ordered]@{
+            hash = $hashes[$rel]
+            flags = $fileFlags[$rel]
+            deps = $depList
+            depsHash = Get-DepsHash $depList
+        }
+        $recordedAny = $true
+    }
+    if ($recordedAny) { Save-Manifest $false }
+    if ($clCode -ne 0) { Fail "cl.exe failed with exit code $clCode." }
     if ($name -eq 'tests') { $testLinked = $true } else { $appLinked = $true }
 }
 
 if ($resourceStale) {
     Initialize-Msvc
     Write-Host 'Compiling resources [cordinal.rc]'
-    Invoke-Tool 'rc.exe' (@('/nologo', "/fo$resPath") + $themeDefine + @('src\cordinal.rc'))
+    Invoke-Tool 'rc.exe' (@('/nologo', "/fo$resPath") + $themeDefine + @('src\cordinal.rc')) | Out-Null
+    $resourceStale = $false
+    Save-Manifest $false
     $appLinked = $true
 }
 
@@ -437,8 +524,8 @@ $libraries = @('ucrt.lib', 'user32.lib', 'gdi32.lib', 'comctl32.lib', 'comdlg32.
 # System32 only.
 $libraries += @('winhttp.dll', 'crypt32.dll', 'hid.dll', 'setupapi.dll', 'ws2_32.dll', 'bcrypt.dll',
     'iphlpapi.dll', 'xmllite.dll') | ForEach-Object { "/DELAYLOAD:$_" }
-$appExe = 'build\unpacked\cordinal.exe'
-$testExe = 'build\unpacked\cordinal-test.exe'
+$appExe = Join-Path $outDir 'cordinal.exe'
+$testExe = Join-Path $outDir 'cordinal-test.exe'
 
 # The two links run one after the other: side by side, their whole-program code generation competes
 # and both take longer (measured November 3, 2026: 28 s together against 16 s in turn).
@@ -452,19 +539,26 @@ $codeOrder = Join-Path $objDir 'code-order.txt'
 $codeOrderLinked = Join-Path $objDir 'code-order-linked.txt'
 $codeProfile = Join-Path $PSScriptRoot 'code-profile.txt'
 $orderCode = $Cdpack -and (Test-Path -LiteralPath $codeProfile)
+$linkOptFlags = if ($Fast) { @('/OPT:REF', '/OPT:NOICF', '/INCREMENTAL:NO') }
+                else { @('/LTCG', '/OPT:REF', $(if ($env:CORDINAL_NO_ICF) { '/OPT:NOICF' } else { '/OPT:ICF' })) }
 function Invoke-PlayerLink([string[]]$Extra = @()) {
     $ordered = $orderCode -and (Test-Path -LiteralPath $codeOrder)
-    $order = if ($ordered) { @("/ORDER:@$codeOrder", '/IGNORE:4037') } else { @() }
-    Invoke-Tool 'link.exe' (@('/nologo', '/LTCG', '/SUBSYSTEM:WINDOWS', '/MANIFEST:NO', '/OPT:REF',
-            '/OPT:ICF', '/DEBUG:NONE', '/NODEFAULTLIB:libucrt.lib', '/MAP:build\cordinal.map',
-            "/OUT:$appExe") + $order + $Extra + $appObjects + @($resPath) + $stubObjects + $chipObjects + $libraries)
-    $linkedWith = if ($ordered) { Get-Content -Raw -LiteralPath $codeOrder } else { '' }
-    Set-Content -LiteralPath $codeOrderLinked -Value $linkedWith -NoNewline -Encoding ascii
+    $order = if ($ordered) { @("/ORDER:@$codeOrder", '/IGNORE:4037', '/IGNORE:4065') } else { @() }
+    $mapFlag = if ($Fast) { @() } else { @('/MAP:build\cordinal.map') }
+    Invoke-Tool 'link.exe' (@('/nologo', '/SUBSYSTEM:WINDOWS', '/MANIFEST:NO', '/DEBUG:NONE',
+            '/NODEFAULTLIB:libucrt.lib', "/OUT:$appExe") + $linkOptFlags + $mapFlag + $order + $Extra +
+            $appObjects + @($resPath) + $stubObjects + $chipObjects + $libraries) | Out-Null
+    if (!$Fast) {
+        $linkedWith = if ($ordered) { Get-Content -Raw -LiteralPath $codeOrder } else { '' }
+        Set-Content -LiteralPath $codeOrderLinked -Value $linkedWith -NoNewline -Encoding ascii
+    }
 }
-if ($appLinked -or !(Test-Path -LiteralPath $appExe)) {
+if (!$TestOnly -and ($appLinked -or !(Test-Path -LiteralPath $appExe))) {
     Initialize-Msvc
-    Write-Host 'Linking cordinal.exe'
+    Write-Host "Linking $appExe"
     Invoke-PlayerLink
+    $testLinked = $true
+} elseif ($TestOnly -and $appLinked) {
     $testLinked = $true
 }
 if ($orderCode) {
@@ -500,10 +594,10 @@ if ($StockNrv -and !(Test-CallFilter $appExe)) {
 }
 if ($testLinked -or !(Test-Path -LiteralPath $testExe)) {
     Initialize-Msvc
-    Write-Host 'Linking cordinal-test.exe'
-    Invoke-Tool 'link.exe' (@('/nologo', '/LTCG', '/SUBSYSTEM:CONSOLE', '/MANIFEST:NO', '/OPT:REF',
-            '/OPT:ICF', '/DEBUG:NONE', '/NODEFAULTLIB:libucrt.lib', "/OUT:$testExe") +
-        $appObjects + @($resPath) + $testObjects + $chipObjects + $libraries)
+    Write-Host "Linking $testExe"
+    Invoke-Tool 'link.exe' (@('/nologo', '/SUBSYSTEM:CONSOLE', '/MANIFEST:NO', '/DEBUG:NONE',
+            '/NODEFAULTLIB:libucrt.lib', "/OUT:$testExe") + $linkOptFlags +
+        $appObjects + @($resPath) + $testObjects + $chipObjects + $libraries) | Out-Null
     $testLinked = $true
 }
 
@@ -511,8 +605,10 @@ if ($testLinked -or !(Test-Path -LiteralPath $testExe)) {
 
 $modeChanged = $oldMode -ne $mode
 $packingChanged = !$old -or $old.packing -ne $packingHash
-if ($Unpacked) {
-    if ($appLinked -or $modeChanged -or !(Test-Path -LiteralPath 'build\cordinal.exe')) {
+if ($Fast) {
+    # Fast dev builds live in build\fast\ so they never overwrite a packed or unpacked build\cordinal.exe.
+} elseif ($Unpacked) {
+    if (!$TestOnly -and ($appLinked -or $modeChanged -or !(Test-Path -LiteralPath 'build\cordinal.exe'))) {
         Copy-Item -LiteralPath $appExe -Destination 'build\cordinal.exe' -Force
     }
     if ($testLinked -or $modeChanged -or !(Test-Path -LiteralPath 'build\cordinal-test.exe')) {
@@ -528,41 +624,36 @@ if ($Unpacked) {
 
 # Sandbox workspaces can label new files Low integrity. Windows then launches even a double-clicked
 # player at Low integrity, which cannot save its normal AppData profile. Publish at Medium instead.
-foreach ($exe in @('build\cordinal.exe', 'build\cordinal-test.exe', 'build\unpacked\cordinal.exe',
-        'build\unpacked\cordinal-test.exe')) {
+$integrityTargets = if ($Fast) { @($appExe, $testExe) }
+                    elseif ($TestOnly) { @($testExe, 'build\cordinal-test.exe') }
+                    else { @('build\cordinal.exe', 'build\cordinal-test.exe', $appExe, $testExe) }
+foreach ($exe in $integrityTargets) {
     if (!(Test-Path -LiteralPath $exe)) { continue }
     & icacls.exe $exe /setintegritylevel M | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail "icacls failed for $exe." }
 }
 
-# Record only what a complete build produced. A failure above leaves the previous record in place.
-[ordered]@{
-    version = 3
-    script = $scriptHash
-    toolset = $toolset
-    mode = $mode
-    themes = [bool]$Themes
-    packing = $packingHash
-    resources = $resourceHash
-    sources = $sourceSetHash
-    files = $hashes
-    deps = $deps
-} | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+Save-Manifest (!$TestOnly)
 
-if (Test-Path -LiteralPath 'build\cordinal.exe') {
-    $size = (Get-Item -LiteralPath 'build\cordinal.exe').Length
-    # The change since the last build of the same mode, so size work and code additions see their cost
-    # on every build instead of only through a separate report.
-    $sizeRecord = "build\obj\last-size-$mode$(if ($Themes) { '-themes' }).txt"
-    $delta = ''
-    if (Test-Path -LiteralPath $sizeRecord) {
-        $previous = 0L
-        if ([long]::TryParse((Get-Content -Raw -LiteralPath $sizeRecord).Trim(), [ref]$previous) -and $previous -ne $size) {
-            $delta = ' ({0:+#,0;-#,0} since the last {1} build)' -f ($size - $previous), $mode
+$sizeTarget = if ($Fast) { $(if ($TestOnly) { $testExe } else { $appExe }) }
+              elseif ($TestOnly) { 'build\cordinal-test.exe' }
+              else { 'build\cordinal.exe' }
+if (Test-Path -LiteralPath $sizeTarget) {
+    $size = (Get-Item -LiteralPath $sizeTarget).Length
+    if (!$TestOnly) {
+        $sizeRecord = "$objDir\last-size-$mode$(if ($Themes) { '-themes' }).txt"
+        $delta = ''
+        if (Test-Path -LiteralPath $sizeRecord) {
+            $previous = 0L
+            if ([long]::TryParse((Get-Content -Raw -LiteralPath $sizeRecord).Trim(), [ref]$previous) -and $previous -ne $size) {
+                $delta = ' ({0:+#,0;-#,0} since the last {1} build)' -f ($size - $previous), $mode
+            }
         }
+        Set-Content -LiteralPath $sizeRecord -Value $size -Encoding ASCII
+        Write-Host ("Built executable ({0}): {1:N0} bytes{2}" -f $mode, $size, $delta)
+    } else {
+        Write-Host ("Built test companion ({0}): {1:N0} bytes" -f $mode, $size)
     }
-    Set-Content -LiteralPath $sizeRecord -Value $size -Encoding ASCII
-    Write-Host ("Built executable ({0}): {1:N0} bytes{2}" -f $mode, $size, $delta)
     # Checked on every build, rebuilt or not, so an over-budget player keeps failing until it shrinks
     # or the budget is raised. A development build is not packed, so it has no budget.
     if (!$Unpacked -and $size -gt $SizeBudget) {

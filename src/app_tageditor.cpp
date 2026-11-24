@@ -793,8 +793,14 @@ uint64_t NewestTagEditTime() {
 
 void UndoLatest() {
     uint64_t tagTime = NewestTagEditTime();
-    if (CanStepPlaylistEdit(false) && (!tagTime || Active().history.undo.back().when >= tagTime)) StepPlaylistEdit(false);
-    else UndoLastTagEdit();
+    uint64_t migTime = NewestMigrationTime();
+    uint64_t plTime = CanStepPlaylistEdit(false) ? Active().history.undo.back().when : 0;
+    if (migTime && migTime >= plTime && migTime >= tagTime)
+        UndoLastMigration();
+    else if (plTime && plTime >= tagTime)
+        StepPlaylistEdit(false);
+    else
+        UndoLastTagEdit();
 }
 
 void UndoLastTagEdit() {

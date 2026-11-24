@@ -88,4 +88,7 @@ void TtaFilterBlockAvx2(int32_t* qm, int32_t* dx, int32_t* dl, int32_t& error, i
 // One step of True Audio's eight-tap filter: weights += sign(error)*dx, then round plus the
 // wrapping dot product of history and the new weights.
 uint32_t TtaFilterAvx2(int32_t* weights,const int32_t* dx,const int32_t* history,int32_t error,uint32_t round);
+// SBR QMF windowing/folding: 320 analysis taps into 64 polyphase inputs, and 640 synthesis taps from the 1280-sample ring.
+void AudioSbrQmfWindowAnaAvx2(const float* x,const float* cAna,float* u);
+void AudioSbrQmfWindowSynAvx2(const float* v,const float* cSyn,float* out);
 }

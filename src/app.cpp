@@ -134,6 +134,7 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int showCmd) {
         if (AlbumMakerDialogMessage(&msg)) continue;
         if (AlbumTaggerDialogMessage(&msg)) continue;
         if (DuplicatesDialogMessage(&msg)) continue;
+        if (LintDialogMessage(&msg)) continue;
         if (AutoEditorDialogMessage(&msg)) continue;
         if (FormatDialogMessage(&msg)) continue;
         if (StartupDefaultsDialogMessage(&msg)) continue;

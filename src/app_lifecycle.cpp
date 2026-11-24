@@ -104,6 +104,7 @@ void StopAppWorkers(HWND hwnd) {
     StopConverter();
     StopRipper();
     StopDuplicates();  // files it already moved take their history with them before the save
+    StopLint();
     StopCopier();
     StopCollection();
     StopIpod();
@@ -182,6 +183,7 @@ void MainTick() {
     if (g.dirty && (g.ticksSinceSave += LightweightHidesWindow() ? 4 : 1) >= 80) {
         SaveLibraryNow();
     }
+    SyncTick();  // a pass about once a minute while a sync folder is chosen
     FlushPendingPreferences();
     MaybeOfferPreferenceSuggestions();
     MemoryTick();

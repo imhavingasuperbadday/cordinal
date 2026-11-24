@@ -9,9 +9,13 @@ struct Header {
     uint32_t version, metadata_bytes, metadata_adler;
     uint32_t memory_rva, memory_bytes, compressed_offset, compressed_bytes, memory_adler;
     uint32_t file_bytes, native_header_bytes, gap_count, copy_count, tls_index_rva, chunk_count;
-    uint32_t extent_count;
+    uint32_t extent_count, flags, hook_rva, cold_cap, reserved;
     uint8_t file_sha256[32];
 };
+// `flags & detached`: the native image is restored into private memory of its own instead of the
+// packed image's CDP0, so cold chunks can be decommitted and decoded again (spec.md, "Detached
+// images"). Cold chunks require it.
+constexpr uint32_t detached = 1;
 struct ResourceCopy {
     uint32_t source, destination, bytes;
 };
@@ -30,15 +34,43 @@ constexpr uint32_t lazy = 1;
 struct Extent {
     uint32_t offset, bytes, chunk;
 };
-constexpr uint32_t version = 3, max_chunks = 64, max_extents = 4096;
+constexpr uint32_t version = 4, max_chunks = 64, max_extents = 4096;
 // Per decoding thread: one model set in its own slot after the 4096-byte state page.
 constexpr uint32_t workspace_slot = 32768;
 struct Anchor {
     uint8_t magic[16];
     uint32_t self, metadata, metadata_bytes, workspace;
 };
-static_assert(sizeof(Header) == 100 && sizeof(Anchor) == 32 && sizeof(ResourceCopy) == 12 &&
-              sizeof(Chunk) == 24 && sizeof(Extent) == 12);
+// What the loader tells the program about its cold code (Hook::status).
+struct ColdStatus {
+    uint32_t flags;           // Header::flags of this image
+    uint32_t cold_chunks;     // chunks decoded on demand
+    uint32_t resident;        // of those, committed now
+    uint32_t cap;             // most resident at once; 0 for no limit
+    uint32_t decodes, evictions;
+    uint32_t suspended;       // threads the last decode or eviction suspended
+    uint32_t pad;
+    uint64_t resident_bytes;
+    void *stub, *native;      // the packed image and the restored one (the same unless detached)
+};
+// A native image may hold one Hook in writable data; the packer finds it by its magic
+// (`hook_rva`) and the loader fills in the entry points. All take the cold-code lock.
+//   evict(address, flags): decommits the cold chunk holding `address`, or every one for null, and
+//     returns how many it decommitted. A chunk a thread is executing, or the caller returns into,
+//     is kept, and with `evict_idle` so is one with any page in the working set: after the process
+//     trims its working set, that is a chunk touched since.
+//   decodes(address): times the chunk holding `address` has been decoded, UINT32_MAX if not cold.
+struct Hook {
+    uint8_t magic[16];
+    uint32_t version, bytes;
+    uint32_t (*evict)(const void *, uint32_t);
+    uint32_t (*decodes)(const void *);
+    void (*status)(ColdStatus *);
+};
+constexpr uint8_t hook_magic[16] = {'C', 'D', 'P', 'H', 'O', 'O', 'K', '1', 0x5a, 0xc3, 0x17, 0x9e, 0x42, 0x08, 0xd1, 0x6b};
+constexpr uint32_t hook_version = 1, evict_idle = 1;
+static_assert(sizeof(Header) == 116 && sizeof(Anchor) == 32 && sizeof(ResourceCopy) == 12 &&
+              sizeof(Chunk) == 24 && sizeof(Extent) == 12 && sizeof(Hook) == 48 && sizeof(ColdStatus) == 56);
 
 inline uint16_t read16(const uint8_t *p) { return uint16_t(p[0] | unsigned(p[1]) << 8); }
 inline uint32_t read32(const uint8_t *p) {

@@ -3,6 +3,7 @@
 // the total; the walk explains it, so a regression names what grew instead of only how much.
 #define WIN32_LEAN_AND_MEAN
 #include "memory_report.h"
+#include "packed_image.h"
 
 #include <windows.h>
 #include <psapi.h>
@@ -128,6 +129,11 @@ MemoryReport TakeMemoryReport() {
               [](const auto& a, const auto& b) { return a.first * a.second > b.first * b.second; });
     if (r.topBlocks.size() > 10) r.topBlocks.resize(10);
     r.threads = ThreadBases(threadBases);
+    ColdCode cold;
+    if (ColdCodeNow(cold)) {
+        r.coldChunks = cold.chunks, r.coldResident = cold.resident, r.coldDecodes = cold.decodes;
+        r.coldEvictions = cold.evictions, r.coldBytes = cold.residentBytes;
+    }
     std::sort(heapBases.begin(), heapBases.end());
     std::sort(threadBases.begin(), threadBases.end());
 
@@ -148,15 +154,20 @@ MemoryReport TakeMemoryReport() {
     const size_t bytes = sizeof(ULONG_PTR) + entries * sizeof(PSAPI_WORKING_SET_BLOCK);
     auto* list = static_cast<PSAPI_WORKING_SET_INFORMATION*>(VirtualAlloc(nullptr, bytes, MEM_COMMIT, PAGE_READWRITE));
     if (!list) return r;
+    // A detached cdpack build runs from private memory of its own, and its loader keeps the packed
+    // image it came from: both are the program.
     const uintptr_t program = (uintptr_t)GetModuleHandleW(nullptr);
     const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(program);
     const size_t programSize = reinterpret_cast<const IMAGE_NT_HEADERS*>(program + dos->e_lfanew)->OptionalHeader.SizeOfImage;
+    uintptr_t loader = 0;
+    size_t loaderSize = 0;
+    PackedLoaderImage(loader, loaderSize);
     std::map<uintptr_t, size_t> libraries;
     if (QueryWorkingSet(GetCurrentProcess(), list, (DWORD)bytes)) {
         for (ULONG_PTR i = 0; i < list->NumberOfEntries; ++i) {
             const PSAPI_WORKING_SET_BLOCK& page = list->WorkingSetInfo[i];
             const uintptr_t address = (uintptr_t)page.VirtualPage * kPage;
-            if (address - program < programSize) r.programResident += kPage;
+            if (address - program < programSize || address - loader < loaderSize) r.programResident += kPage;
             if (page.Shared) continue;
             auto region = std::upper_bound(regions.begin(), regions.end(), address,
                                            [](uintptr_t a, const Region& x) { return a < x.begin; });
@@ -165,9 +176,10 @@ MemoryReport TakeMemoryReport() {
                 continue;
             }
             const uintptr_t base = region->allocation;
-            if (region->type == MEM_IMAGE) {
-                if (base == program) r.program += kPage;
-                else r.libraries += kPage, libraries[base] += kPage;
+            if (base == program || (loader && base == loader)) {
+                r.program += kPage;
+            } else if (region->type == MEM_IMAGE) {
+                r.libraries += kPage, libraries[base] += kPage;
             } else if (region->type == MEM_MAPPED) {
                 r.mapped += kPage;
             } else if (std::binary_search(heapBases.begin(), heapBases.end(), base)) {
@@ -209,10 +221,14 @@ MemoryFigures TakeMemoryFigures() {
     const uintptr_t program = (uintptr_t)GetModuleHandleW(nullptr);
     const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(program);
     const size_t programSize = reinterpret_cast<const IMAGE_NT_HEADERS*>(program + dos->e_lfanew)->OptionalHeader.SizeOfImage;
+    uintptr_t loader = 0;
+    size_t loaderSize = 0;
+    PackedLoaderImage(loader, loaderSize);
     if (QueryWorkingSet(GetCurrentProcess(), list, (DWORD)bytes))
         for (ULONG_PTR i = 0; i < list->NumberOfEntries; ++i) {
             const PSAPI_WORKING_SET_BLOCK& page = list->WorkingSetInfo[i];
-            if (!page.Shared && (uintptr_t)page.VirtualPage * kPage - program < programSize) f.program += kPage;
+            const uintptr_t address = (uintptr_t)page.VirtualPage * kPage;
+            if (!page.Shared && (address - program < programSize || address - loader < loaderSize)) f.program += kPage;
         }
     VirtualFree(list, 0, MEM_RELEASE);
     if (!f.privateWorkingSet) f.privateWorkingSet = PrivateWorkingSetNow();
@@ -229,6 +245,9 @@ std::wstring FormatMemoryReport(const MemoryReport& r) {
     add(L"memory %.2f MB (private working set, the figure Task Manager shows)\n", Mb(r.privateWorkingSet));
     add(L"  program     %6.2f MB  cordinal.exe's own pages (%.2f MB resident in all)\n", Mb(r.program),
         Mb(r.programResident));
+    if (r.coldChunks)
+        add(L"    cold code %6.2f MB  %u of %u chunks committed; %u decodes, %u decommits\n", Mb(r.coldBytes),
+            r.coldResident, r.coldChunks, r.coldDecodes, r.coldEvictions);
     add(L"  heaps       %6.2f MB  %.2f MB allocated\n", Mb(r.heaps), Mb(r.heapInUse));
     add(L"  buffers     %6.2f MB  graphics, audio and other direct allocations\n", Mb(r.buffers));
     add(L"  stacks      %6.2f MB  %u threads\n", Mb(r.stacks), r.threads);

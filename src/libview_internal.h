@@ -45,6 +45,8 @@ struct Artist {
     StringPool::Handle name = 0;
     std::vector<int> albums;
     uint32_t tracks = 0;
+    int coverAlbum = 0;
+    uint32_t appearances = 0;
 };
 
 enum class ItemKind { Section, Tile, Panel, AlbumGroup, ArtistTile };

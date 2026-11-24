@@ -4,7 +4,10 @@
 // (src/discord.cpp) is fed from here too.
 #include "app.h"
 #include "album_editions.h"
+#include "coverupload.h"
 #include "discord.h"
+#include "metadata_fetch.h"
+#include "ui.h"
 #include "listenbrainz.h"
 #include "radio_ui.h"
 
@@ -25,6 +28,20 @@ listenbrainz::Listen MakeListen(TrackId id) {
     l.durationMs = t.durationMs;
     l.trackNumber = t.trackNo;
     return l;
+}
+
+// At most what may be uploaded; a bigger cover stays home and Discord shows the album's online one or the icon.
+std::string ReadCoverFile(const std::string& path) {
+    std::string bytes;
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return bytes;
+    char buffer[65536];
+    size_t got;
+    while ((got = fread(buffer, 1, sizeof(buffer), f)) > 0 && bytes.size() <= online::kMaxHostedBytes)
+        bytes.append(buffer, got);
+    fclose(f);
+    if (bytes.size() > online::kMaxHostedBytes) bytes.clear();
+    return bytes;
 }
 
 }  // namespace
@@ -62,6 +79,15 @@ void DiscordTick() {
         now.albumArtist = std::string(g_lib.View(t.albumArtist));
         if (const AlbumEdition* edition = AlbumEditionForTrack(g.playing)) now.release = edition->musicBrainzRelease;
         now.path = g_lib.Path(g.playing);  // the track's custom cover, when it has one
+        // The cover the pane shows, read from the copy saved for MPRIS once per cover, and only when uploads are on.
+        if (coverupload::HostEnabled()) {
+            static std::string file, bytes;
+            if (std::string shown = CoverFileFor(g.playing); shown != file) {
+                file = std::move(shown);
+                bytes = file.empty() ? std::string() : ReadCoverFile(file);
+            }
+            now.cover = bytes;
+        }
         now.position = g.engine.Position();
         now.duration = g.engine.Duration() > 0 ? g.engine.Duration() : t.Duration();
         now.rate = g.settings.speed * g.settings.tempo;

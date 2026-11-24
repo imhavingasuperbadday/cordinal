@@ -64,8 +64,10 @@ constexpr uint8_t bookIndex[] = {0,0,1,2,0,3,4,5,6,7,8,9,10,11,0,12,13,13,13,13,
 // first-lookup tables are cheap to derive and need not be carried read-only in the file.
 FastBooksTable fastBooks;
 // 12-bit first-lookup tables that resolve a codeword straight to a signed (x,y)
-// pair, including the sign bits after the code and the linear escape values.
-std::array<std::array<uint16_t,4096>,15> signedBooks;
+// pair, including the sign bits after the code and the linear escape values. Built on the heap at
+// first open: 120 KB that would otherwise sit in the image's .bss for players who never open MP3.
+using SignedBooks = std::array<std::array<uint16_t,4096>,15>;
+const SignedBooks* signedBooks;  // kept for the life of the process once built
 // 10-bit first-lookup tables for the two count1 books: a quadruple's code and sign bits never
 // exceed ten bits. An entry holds the bits consumed (low four) and four 2-bit signed values.
 std::array<std::array<uint16_t,1024>,2> countBooks;
@@ -75,6 +77,7 @@ constexpr size_t reservoirPad = 2048;
 void InitFastBooks() {
     static const bool ready=[] {
         for (unsigned i = 0; i < 17; ++i) fastBooks[i] = FastBook(huffman[bookNumbers[i]]);
+        auto* books = new SignedBooks{};
         for (unsigned book=0;book<15;++book) for (unsigned prefix=0;prefix<4096;++prefix) {
             int node=0; unsigned bits=0;
             while (node>=0 && bits<12) node=huffman[bookNumbers[book]][node].child[(prefix>>(11-bits++))&1];
@@ -83,8 +86,9 @@ void InitFastBooks() {
             if (book>=13 && (x==15 || y==15)) continue; // Escape bits precede signs.
             if (x) { if (bits==12) continue; if ((prefix>>(11-bits++))&1) x=-x; }
             if (y) { if (bits==12) continue; if ((prefix>>(11-bits++))&1) y=-y; }
-            signedBooks[book][prefix]=(uint16_t)(0x8000|(bits<<10)|((x&31)<<5)|(y&31));
+            (*books)[book][prefix]=(uint16_t)(0x8000|(bits<<10)|((x&31)<<5)|(y&31));
         }
+        signedBooks = books;
         for (unsigned book=0;book<2;++book) for (unsigned prefix=0;prefix<1024;++prefix) {
             int node=0; unsigned bits=0;
             while (node>=0 && bits<10) node=huffman[32+book][node].child[(prefix>>(9-bits++))&1];
@@ -279,7 +283,7 @@ bool Spectral(MpegBits& b, const MpegHeader& h, Granule& gr) {
         if (!huffman[table]) return false;
         // The 12-bit signed book resolves most pairs with their sign bits in one load. Longer
         // codes and escapes walk the tree from its 8-bit first lookup; a pair is at most 47 bits.
-        const uint16_t* book = signedBooks[bookIndex[table]].data();
+        const uint16_t* book = (*signedBooks)[bookIndex[table]].data();
         const uint16_t* first = fastBooks[bookIndex[table]].data();
         const HuffNode* tree = huffman[table];
         const unsigned escape = linbits[table];
@@ -332,13 +336,13 @@ struct RequantTables {
 };
 // Both tables are always used together; one initialization guard is sufficient.
 const RequantTables& Quantization() {
-    static const auto values=[] {
-        RequantTables v;
-        for (unsigned i=0;i<v.powers.size();++i) v.powers[i]=(float)std::pow(i,4.0/3);
-        for (int n=-512;n<64;++n) v.gains[n+512]=std::exp2(n*0.25f);
-        return v;
+    static const auto* const values=[] {
+        auto v=std::make_unique<RequantTables>();
+        for (unsigned i=0;i<v->powers.size();++i) v->powers[i]=(float)std::pow(i,4.0/3);
+        for (int n=-512;n<64;++n) v->gains[n+512]=std::exp2(n*0.25f);
+        return v.release();
     }();
-    return values;
+    return *values;
 }
 // Requantize quantized lines to spectrum: |x|^(4/3) scaled by 2^(gain/4). The
 // exponent is assembled from the global gain, scalefactors and pre-emphasis.

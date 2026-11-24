@@ -41,6 +41,8 @@ std::vector<Suite> Suites(const std::wstring& root) {
             [](const auto& s) { TestAlbumEditions(s + L"\\albums"); }},
         {L"album-maker", L"making an album from tracks: starting values, order and tag edits", L"src/tests/selftest_albums.cpp", 0, 0,
             [](const auto& s) { TestAlbumMaker(s + L"\\albums"); }},
+        {L"library-lint", L"library linter: split albums, near-duplicate artists, mojibake and cover audit", L"src/tests/selftest_lint.cpp", Media, 0,
+            [root](const auto& s) { TestLibraryLint(root + L"\\media", s + L"\\lint"); }},
         {L"play-log", L"play log and listening statistics", L"src/tests/selftest_library.cpp", 0, 0,
             [](const auto& s) { TestPlayLog(s + L"\\plays"); }},
         {L"migration", L"backups, path remapping and playback statistics import", L"src/tests/selftest_migration.cpp", 0, 0,
@@ -174,7 +176,9 @@ std::vector<Suite> Suites(const std::wstring& root) {
         {L"ui", L"native UI, commands, preferences, themes and workers", L"src/tests/selftest_ui.cpp", 0, Window,
             [](const auto& s) { TestUiControls(s); }},
         {L"scan-merge", L"scan merging and offline roots", L"src/tests/selftest_library_files.cpp", 0, 0,
-            [](const auto&) { TestScanMerge(); }}
+            [](const auto&) { TestScanMerge(); }},
+        {L"sync", L"library sync between PCs through a shared folder", L"src/tests/selftest_sync.cpp", 0, 0,
+            [](const auto& s) { TestSync(s + L"\\sync"); }}
     };
 }
 

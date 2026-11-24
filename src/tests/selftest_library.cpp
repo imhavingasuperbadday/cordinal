@@ -2,10 +2,12 @@
 // file, the play log, cordinal points and auto-playlist rules. RunSelfTest calls each one inside
 // its own testlog group, in the order the groups appear in the log.
 #include "rediscover.h"
+#include "search_query.h"
 #include "selftest_common.h"
 
 #include "sections.h"
 #include "taste.h"
+#include "textcase.h"
 
 #include <ctime>
 
@@ -23,12 +25,11 @@ bool ReferenceSearch(const Library& library, TrackId id, const std::vector<std::
         for (size_t i = 0; i < std::size(fields); ++i) {
             if (i < std::size(handles) && !handles[i]) continue;
             if (!loaded[i]) {
-                fields[i] = i < std::size(handles) ? library.Str(handles[i]) : CodecName(t.codec);
+                fields[i] = textcase::SearchFold(i < std::size(handles) ? library.Str(handles[i]) : CodecName(t.codec));
                 loaded[i] = true;
             }
             const auto& field = fields[i];
-            if (!field.empty() && FindNLSStringEx(LOCALE_NAME_USER_DEFAULT, FIND_FROMSTART | LINGUISTIC_IGNORECASE,
-                field.data(), (int)field.size(), word.data(), (int)word.size(), nullptr,nullptr,nullptr,0) >= 0) {
+            if (!field.empty() && field.find(textcase::SearchFold(word)) != std::wstring::npos) {
                 found = true; break;
             }
         }
@@ -131,6 +132,104 @@ void TestSearch() {
         for (const MissingField& field : kMissingFields)
             cases.Add(MissingTagTerm(gaps, ids[0], field.term) >= 0, field.term);
         Check(cases.Passed(), L"SEARCH missing:<field> finds tracks with that tag empty%ls", cases.failed.c_str());
+    }
+    batch.Next(L"SEARCH folds diacritics, evaluates inline filters, indexes lyrics, suggests completions, and converts to auto-playlist");
+    {
+        Library lib;
+        const uint32_t now = UnixNow(), day = 86400;
+        TrackId bjork = lib.Add(L"C:\\Music\\bjork.flac");
+        {
+            TagData t;
+            t.title = "Jóga"; t.artist = "Björk"; t.album = "Homogenic"; t.genre = "Electronic";
+            t.date = "1997"; t.codec = Codec::FLAC; t.bpm = 120; t.duration = 305.0;
+            lib.ApplyTags(bjork, t);
+            lib[bjork].flags |= Track::kInLibrary;
+            lib[bjork].rating = 90;  // 4.5 stars
+            lib[bjork].added = now - 10 * day;
+            lib[bjork].lastPlayed = 0;
+            lib[bjork].rgHigh = 21;  // (21 - 1) / 4.0 = 5.0 LU (< 7)
+            lib.SetFavorite(bjork, true);
+            lib.SetLyrics(bjork, CleanSearchableLyrics("[00:12.34]All these streetlights glow\n[ar:Björk]\n"));
+        }
+        TrackId sigur = lib.Add(L"C:\\Music\\sigur.mp3");
+        {
+            TagData t;
+            t.title = "Café Lights"; t.artist = "Sigur Rós"; t.album = "Ágætis byrjun"; t.genre = "Post-Rock";
+            t.date = "2002"; t.codec = Codec::MP3; t.bpm = 90; t.duration = 140.0;
+            lib.ApplyTags(sigur, t);
+            lib[sigur].flags |= Track::kInLibrary;
+            lib[sigur].rating = 60;  // 3.0 stars
+            lib[sigur].added = now - 60 * day;
+            lib[sigur].lastPlayed = now - 5 * day;
+            lib[sigur].playCount = 12;
+            lib[sigur].rgHigh = 45;  // 11.0 LU
+        }
+        testlog::Cases cases;
+        auto expect = [&](const wchar_t* query, std::vector<TrackId> want) {
+            const auto words = FilterWords(query);
+            TrackMatcher matcher(lib, words);
+            std::vector<TrackId> got;
+            for (TrackId id = 0; id < lib.Count(); ++id) if (matcher.Matches(id)) got.push_back(id);
+            cases.Add(got == want, query);
+        };
+        expect(L"bjork joga", {bjork});
+        expect(L"sigur ros cafe", {sigur});
+        expect(L"year:1990..1999", {bjork});
+        expect(L"format:flac", {bjork});
+        expect(L"format:lossless", {bjork});
+        expect(L"rating:>=4", {bjork});
+        expect(L"played:never", {bjork});
+        expect(L"added:30d", {bjork});
+        expect(L"bpm:115..125", {bjork});
+        expect(L"dr:<7", {bjork});
+        expect(L"plays:>=10", {sigur});
+        expect(L"length:>4:00", {bjork});
+        expect(L"favorite:yes", {bjork});
+        expect(L"streetlights", {bjork});
+        expect(L"lyrics:streetlights", {bjork});
+        expect(L"year:1990..1999 format:flac rating:>=4 played:never added:30d bpm:115..125 dr:<7", {bjork});
+
+        // Sidecar .lrc extraction
+        wchar_t tmp[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tmp);
+        const std::wstring dir = std::wstring(tmp) + L"cordinal-lyrics-search";
+        CreateDirectoryW(dir.c_str(), nullptr);
+        const std::wstring audio = dir + L"\\song.flac";
+        const std::wstring lrc = dir + L"\\song.lrc";
+        WriteTestBytes(audio, "not-audio");
+        WriteTestBytes(lrc, "\xEF\xBB\xBF[ti:Test]\n[01:02.30]Walking past the streetlights\n");
+        std::string extracted;
+        cases.Add(ReadSearchableLyrics(audio, extracted) && extracted == "Walking past the streetlights", L"sidecar .lrc");
+        DeleteFileW(lrc.c_str());
+        DeleteFileW(audio.c_str());
+        RemoveDirectoryW(dir.c_str());
+
+        // Autocomplete suggestions + application
+        auto sugKey = SearchSuggestions(lib, L"rat", 8);
+        cases.Add(!sugKey.empty() && sugKey[0].insert == L"rating:", L"suggest rating:");
+        cases.Add(ApplySearchSuggestion(L"bjork rat", L"rating:") == L"bjork rating:", L"apply key suggestion");
+        auto sugFormat = SearchSuggestions(lib, L"format:fl", 8);
+        cases.Add(!sugFormat.empty() && sugFormat[0].insert == L"format:FLAC", L"suggest format:FLAC");
+        cases.Add(ApplySearchSuggestion(L"format:fl", L"format:FLAC") == L"format:FLAC ", L"apply value suggestion");
+
+        // Search -> AutoPlaylist conversion & evaluation
+        AutoPlaylist converted;
+        cases.Add(SearchToAutoPlaylist(L"year:1990..1999 format:flac rating:>=4 played:never added:30d bpm:115..125 dr:<7 lyrics:streetlights", converted),
+                  L"SearchToAutoPlaylist parses");
+        std::vector<TrackId> autoOut;
+        EvaluateAutoPlaylist(converted, lib, {}, autoOut);
+        if (autoOut != std::vector<TrackId>{bjork}) {
+            for (const Rule& r : converted.root.rules) {
+                AutoPlaylist single;
+                single.root.rules.push_back(r);
+                std::vector<TrackId> sub;
+                EvaluateAutoPlaylist(single, lib, {}, sub);
+                cases.Add(sub == std::vector<TrackId>{bjork}, L"rule field=" + std::to_wstring((int)r.field) + L" op=" + std::to_wstring((int)r.op));
+            }
+        }
+        cases.Add(autoOut == std::vector<TrackId>{bjork}, L"SearchToAutoPlaylist matches bjork");
+        Check(cases.Passed(), L"SEARCH diacritics, inline filters, lyrics, autocomplete and auto-playlist%ls",
+              cases.failed.c_str());
     }
     batch.Next(L"REDISCOVER offers well-played songs and albums once their own gap has passed");
     {

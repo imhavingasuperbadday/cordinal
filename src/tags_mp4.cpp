@@ -120,57 +120,69 @@ struct Mp4Reader {
     void Item(sv type, sv c) {
         // An ilst item holds one or more "data" atoms (and "mean"/"name" for freeform).
         std::string name;
-        sv data;
-        uint32_t dataType = 0;
+        struct DataAtom { uint32_t dataType = 0; sv data; };
+        std::vector<DataAtom> atoms;
         size_t p = 0;
         while (p + 8 <= c.size()) {
             uint32_t len = BE32(c, p);
             if (len < 8 || p + len > c.size()) break;
             sv atom = c.substr(p + 4, 4);
             if (atom == "name" && len > 12) name.assign(c.substr(p + 12, len - 12));
-            else if (atom == "data" && len >= 16 && data.empty()) {
-                dataType = BE32(c, p + 8) & 0xFFFFFF;
-                data = c.substr(p + 16, len - 16);
+            else if (atom == "data" && len >= 16) {
+                atoms.push_back({BE32(c, p + 8) & 0xFFFFFF, c.substr(p + 16, len - 16)});
             }
             p += len;
         }
-        if (data.empty() && type != "----") return;
-        // A data atom declares its text encoding: 2 is UTF-16BE (common in iPhone/QuickTime
-        // files), 1 is UTF-8, and 0 leaves it to the atom. Reading UTF-16 as raw bytes made every
-        // letter a separate NUL-separated byte, which the library showed as a spaced-out name.
-        std::string text = dataType == 2 ? Utf16ToUtf8(data, true) : std::string(data);
-        if (text.starts_with("\xEF\xBB\xBF")) text.erase(0, 3);
-        text = Trim(text);
+        if (atoms.empty()) return;
         std::string field(type);
         if (type.size() == 4 && type[0] == 0 && type[1] == 0 && type[2] == 0) {
             uint32_t index = ((uint32_t)U8(type, 0) << 24) | ((uint32_t)U8(type, 1) << 16) |
                              ((uint32_t)U8(type, 2) << 8) | U8(type, 3);
             if (index >= 1 && index <= keys.size()) field = keys[index - 1];
         }
-        if (field == "\xA9nam" || field == "com.apple.quicktime.title") t.title = text;
-        else if (field == "\xA9" "ART" || field == "com.apple.quicktime.artist") t.artist = text;
-        else if (field == "\xA9" "alb" || field == "com.apple.quicktime.album") t.album = text;
-        else if (field == "aART" || field == "com.apple.quicktime.albumartist") t.albumArtist = text;
-        else if (field == "\xA9" "day" || field == "com.apple.quicktime.creationdate") t.date = text.substr(0, 10);
-        else if (field == "\xA9gen" || field == "com.apple.quicktime.genre") t.genre = text;
-        else if (field == "\xA9" "wrt" || field == "com.apple.quicktime.composer") t.composer = text;
-        else if (field == "\xA9" "cmt" || field == "com.apple.quicktime.comment" ||
-                 field == "com.apple.quicktime.description") t.comment = text;
-        else if (field == "\xA9" "grp") t.grouping = text;
-        else if (field == "\xA9" "lyr") { if (art.lyrics) *art.lyrics = text; }
-        else if (field == "gnre" && data.size() >= 2) t.genre = GenreFromId((int)BE16(data, 0) - 1);
-        else if (field == "trkn" && data.size() >= 4) {
-            t.track = BE16(data, 2);
-            if (data.size() >= 6) t.trackTotal = BE16(data, 4);
+        for (const auto& da : atoms) {
+            uint32_t dataType = da.dataType;
+            sv data = da.data;
+            if (data.empty() && type != "----") continue;
+            // A data atom declares its text encoding: 2 is UTF-16BE (common in iPhone/QuickTime
+            // files), 1 is UTF-8, and 0 leaves it to the atom. Reading UTF-16 as raw bytes made every
+            // letter a separate NUL-separated byte, which the library showed as a spaced-out name.
+            std::string text = dataType == 2 ? Utf16ToUtf8(data, true) : std::string(data);
+            if (text.starts_with("\xEF\xBB\xBF")) text.erase(0, 3);
+            text = Trim(text);
+            if (field == "\xA9nam" || field == "com.apple.quicktime.title") t.title = text;
+            else if (field == "\xA9" "ART" || field == "com.apple.quicktime.artist") AppendValue(t.artist, text);
+            else if (field == "\xA9" "alb" || field == "com.apple.quicktime.album") t.album = text;
+            else if (field == "aART" || field == "com.apple.quicktime.albumartist") AppendValue(t.albumArtist, text);
+            else if (field == "\xA9" "day" || field == "com.apple.quicktime.creationdate") t.date = text.substr(0, 10);
+            else if (field == "\xA9gen" || field == "com.apple.quicktime.genre") AppendValue(t.genre, text);
+            else if (field == "\xA9" "wrt" || field == "com.apple.quicktime.composer") AppendValue(t.composer, text);
+            else if (field == "\xA9" "cmt" || field == "com.apple.quicktime.comment" ||
+                     field == "com.apple.quicktime.description") t.comment = text;
+            else if (field == "\xA9" "grp") t.grouping = text;
+            else if (field == "\xA9" "wrk") t.work = text;
+            else if (field == "\xA9" "mvn") t.movement = text;
+            else if (field == "\xA9" "mvi") {
+                t.movementNo = (dataType == 21 || dataType == 0) && data.size() >= 2 ? BE16(data, 0) : (uint32_t)atoi(text.c_str());
+            }
+            else if (field == "\xA9" "mvc") {
+                t.movementTotal = (dataType == 21 || dataType == 0) && data.size() >= 2 ? BE16(data, 0) : (uint32_t)atoi(text.c_str());
+            }
+            else if (field == "\xA9" "lyr") { if (art.lyrics) *art.lyrics = text; }
+            else if (field == "gnre" && data.size() >= 2) AppendValue(t.genre, GenreFromId((int)BE16(data, 0) - 1));
+            else if (field == "trkn" && data.size() >= 4) {
+                t.track = BE16(data, 2);
+                if (data.size() >= 6) t.trackTotal = BE16(data, 4);
+            }
+            else if (field == "disk" && data.size() >= 6) {
+                t.disc = BE16(data, 2);
+                t.discTotal = BE16(data, 4);
+            }
+            else if (field == "tmpo" && data.size() >= 2) t.bpm = BE16(data, 0);
+            else if (field == "cpil" && data.size() >= 1) t.compilation = (U8(data, 0) != 0);
+            else if (field == "covr") art.Offer(3, data);
+            else if (field == "----" && !name.empty()) ApplyField(t, name, text, true, art.lyrics);
         }
-        else if (field == "disk" && data.size() >= 6) {
-            t.disc = BE16(data, 2);
-            t.discTotal = BE16(data, 4);
-        }
-        else if (field == "tmpo" && data.size() >= 2) t.bpm = BE16(data, 0);
-        else if (field == "cpil" && data.size() >= 1) t.compilation = (U8(data, 0) != 0);
-        else if (field == "covr") art.Offer(3, data);
-        else if (field == "----" && !name.empty()) ApplyField(t, name, text, false, art.lyrics);
     }
 };
 

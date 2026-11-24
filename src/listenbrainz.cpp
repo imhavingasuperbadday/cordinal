@@ -82,8 +82,8 @@ namespace {
 // Monotonic clock for retry scheduling, immune to wall-clock changes.
 using Clock = std::chrono::steady_clock;
 
-const wchar_t kUserAgent[] = L"cordinal/0.1.18";
-const char kClientVersion[] = "0.1.18";
+const wchar_t kUserAgent[] = L"cordinal/0.1.19";
+const char kClientVersion[] = "0.1.19";
 
 #ifdef _WIN32
 const wchar_t kSep[] = L"\\";
@@ -729,5 +729,268 @@ bool SendNowPlaying() { return g_sendNow; }
 void SetSendNowPlaying(bool on) {
     g_sendNow = on;
     if (!on) for (auto& c : clients) { std::lock_guard lock(c.g_mu); c.g_nowPlayingPending = false; }
+}
+
+namespace {
+uint32_t ParseU32(std::string_view s) {
+    if (s.empty()) return 0;
+    uint64_t v = 0;
+    for (char c : s) {
+        if (c < '0' || c > '9') return 0;
+        v = v * 10 + (unsigned)(c - '0');
+        if (v > UINT32_MAX) return UINT32_MAX;
+    }
+    return (uint32_t)v;
+}
+
+std::string NormListenKey(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    bool space = true;
+    for (unsigned char c : s) {
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+            space = true;
+            continue;
+        }
+        if (space && !out.empty()) out += ' ';
+        space = false;
+        out += (char)(c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c);
+    }
+    return out;
+}
+}  // namespace
+
+bool ParseListenBrainzListens(std::string_view json, std::vector<Listen>& out, uint32_t& oldestTs,
+                              bool& hasMore) {
+    out.clear();
+    oldestTs = 0;
+    hasMore = false;
+    web::JsonValue root;
+    if (!web::ParseJson(json, root)) return false;
+    const web::JsonValue& payload = root["payload"];
+    if (payload.kind != web::JsonValue::Kind::Object) return false;
+    const web::JsonValue& listens = payload["listens"];
+    if (listens.kind != web::JsonValue::Kind::Array) return false;
+    for (const auto& item : listens.items) {
+        const web::JsonValue& meta = item["track_metadata"];
+        Listen l;
+        l.artist = meta.String("artist_name");
+        l.title = meta.String("track_name");
+        l.release = meta.String("release_name");
+        l.listenedAt = ParseU32(item["listened_at"].text);
+        const web::JsonValue& info = meta["additional_info"];
+        if (info.kind == web::JsonValue::Kind::Object) {
+            l.releaseArtist = info.String("release_artist_name");
+            l.durationMs = ParseU32(info["duration_ms"].text);
+        }
+        if (l.listenedAt && (!oldestTs || l.listenedAt < oldestTs)) oldestTs = l.listenedAt;
+        if (!l.artist.empty() && !l.title.empty()) out.push_back(std::move(l));
+    }
+    hasMore = !listens.items.empty() && listens.items.size() >= 100 && oldestTs > 1;
+    return true;
+}
+
+bool ParseLastFmRecentTracks(std::string_view json, std::vector<Listen>& out, uint32_t& page,
+                             uint32_t& totalPages) {
+    out.clear();
+    page = 0;
+    totalPages = 0;
+    web::JsonValue root;
+    if (!web::ParseJson(json, root)) return false;
+    const web::JsonValue& rt = root["recenttracks"];
+    if (rt.kind != web::JsonValue::Kind::Object) return false;
+    const web::JsonValue& attr = rt["@attr"];
+    if (attr.kind == web::JsonValue::Kind::Object) {
+        page = ParseU32(attr["page"].text);
+        totalPages = ParseU32(attr["totalPages"].text);
+    }
+    const web::JsonValue& tracks = rt["track"];
+    auto parseOne = [&](const web::JsonValue& t) {
+        if (t.kind != web::JsonValue::Kind::Object) return;
+        const web::JsonValue& tAttr = t["@attr"];
+        if (tAttr.kind == web::JsonValue::Kind::Object && tAttr.String("nowplaying") == "true") return;
+        Listen l;
+        const web::JsonValue& artist = t["artist"];
+        l.artist = artist.kind == web::JsonValue::Kind::Object ? artist.String("#text") : artist.text;
+        l.title = t.String("name");
+        const web::JsonValue& album = t["album"];
+        l.release = album.kind == web::JsonValue::Kind::Object ? album.String("#text") : album.text;
+        const web::JsonValue& date = t["date"];
+        if (date.kind == web::JsonValue::Kind::Object) l.listenedAt = ParseU32(date["uts"].text);
+        if (!l.artist.empty() && !l.title.empty()) out.push_back(std::move(l));
+    };
+    if (tracks.kind == web::JsonValue::Kind::Array) {
+        for (const auto& t : tracks.items) parseOne(t);
+    } else if (tracks.kind == web::JsonValue::Kind::Object) {
+        parseOne(tracks);
+    }
+    return true;
+}
+
+std::vector<migration::Statistics> AggregateListens(const std::vector<Listen>& listens) {
+    std::vector<migration::Statistics> out;
+    std::map<std::pair<std::string, std::string>, size_t> index;
+    for (const auto& l : listens) {
+        std::string a = NormListenKey(l.artist), t = NormListenKey(l.title);
+        if (a.empty() || t.empty()) continue;
+        auto [it, inserted] = index.emplace(std::make_pair(std::move(a), std::move(t)), out.size());
+        if (inserted) {
+            migration::Statistics st;
+            st.artist = l.artist;
+            st.title = l.title;
+            st.album = l.release;
+            st.durationMs = l.durationMs;
+            st.hasCount = true;
+            out.push_back(std::move(st));
+        }
+        migration::Statistics& st = out[it->second];
+        ++st.count;
+        if (st.album.empty() && !l.release.empty()) st.album = l.release;
+        if (!st.durationMs && l.durationMs) st.durationMs = l.durationMs;
+        if (l.listenedAt) {
+            if (!st.first || l.listenedAt < st.first) st.first = l.listenedAt;
+            if (l.listenedAt > st.last) st.last = l.listenedAt;
+        }
+    }
+    return out;
+}
+
+std::wstring StoredApiKey(Service service) {
+    if (service == Service::ListenBrainz) return {};
+    auto& c = For(service);
+    std::wstring token;
+    {
+        std::lock_guard lock(c.g_mu);
+        token = c.g_token;
+    }
+    web::JsonValue cred;
+    if (!web::ParseJson(ToUtf8(token), cred)) return {};
+    return FromUtf8(cred.String("key"));
+}
+
+bool FetchHistory(Service service, const std::wstring& userIn, const std::wstring& apiKeyIn,
+                  const std::atomic<bool>& cancel, std::vector<migration::Statistics>& out,
+                  std::wstring& error,
+                  const std::function<void(size_t pages, size_t listens)>& onProgress) {
+    out.clear();
+    error.clear();
+    std::wstring user = Trim(userIn);
+    if (user.empty()) user = Trim(GetStatus(service).user);
+    std::wstring apiKey = Trim(apiKeyIn);
+    if (apiKey.empty() && service != Service::ListenBrainz) apiKey = Trim(StoredApiKey(service));
+    if (user.empty()) {
+        error = L"Enter a username or connect the service first.";
+        return false;
+    }
+    if (service != Service::ListenBrainz && apiKey.empty()) {
+        error = L"Enter an API key or connect the service first.";
+        return false;
+    }
+
+    std::string host = service == Service::ListenBrainz ? "api.listenbrainz.org" :
+                       service == Service::LastFm       ? "ws.audioscrobbler.com" :
+                                                          "libre.fm";
+    std::vector<Listen> all;
+    constexpr size_t kMaxPages = 500;
+
+#ifdef _WIN32
+    HINTERNET session = nullptr;
+    if (!g_httpForTest) {
+        session = WinHttpOpen(kUserAgent, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
+                              WINHTTP_NO_PROXY_BYPASS, 0);
+        if (!session) {
+            error = L"Couldn't open an HTTPS connection.";
+            return false;
+        }
+    }
+    auto closeSession = [&] {
+        if (session) WinHttpCloseHandle(session);
+    };
+#else
+    auto closeSession = [] {};
+#endif
+
+    auto fetch = [&](const std::string& path) -> web::HttpReply {
+        std::string url = "https://" + host + path;
+        if (g_httpForTest) return g_httpForTest(service, url, "GET", "", "");
+#ifdef _WIN32
+        return web::HttpFetch(session, url, "GET", "", "", 15000);
+#else
+        return web::HttpFetch(const_cast<std::atomic<bool>*>(&cancel), url, "GET", "", "", 15000);
+#endif
+    };
+
+    if (service == Service::ListenBrainz) {
+        uint32_t maxTs = 0, prevMaxTs = UINT32_MAX;
+        for (size_t page = 1; page <= kMaxPages && !cancel; ++page) {
+            std::string path = "/1/user/" + FormEscape(ToUtf8(user)) + "/listens?count=100";
+            if (maxTs) path += "&max_ts=" + std::to_string(maxTs);
+            web::HttpReply r = fetch(path);
+            if (r.status == 429 && !cancel) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                if (!cancel) r = fetch(path);
+            }
+            if (cancel) break;
+            if (r.status != 200) {
+                closeSession();
+                error = r.status == 404 ? L"ListenBrainz user not found." :
+                                          L"Couldn't fetch ListenBrainz history (HTTP " + std::to_wstring(r.status) + L").";
+                return false;
+            }
+            std::vector<Listen> chunk;
+            uint32_t oldestTs = 0;
+            bool hasMore = false;
+            if (!ParseListenBrainzListens(r.body, chunk, oldestTs, hasMore)) {
+                closeSession();
+                error = L"Couldn't read ListenBrainz response.";
+                return false;
+            }
+            all.insert(all.end(), std::make_move_iterator(chunk.begin()), std::make_move_iterator(chunk.end()));
+            if (onProgress) onProgress(page, all.size());
+            if (!hasMore || oldestTs <= 1 || oldestTs >= prevMaxTs) break;
+            prevMaxTs = oldestTs;
+            maxTs = oldestTs - 1;
+        }
+    } else {
+        uint32_t totalPages = 1;
+        for (uint32_t page = 1; page <= totalPages && page <= kMaxPages && !cancel; ++page) {
+            std::string path = "/2.0/?method=user.getrecenttracks&user=" + FormEscape(ToUtf8(user)) +
+                               "&api_key=" + FormEscape(ToUtf8(apiKey)) + "&limit=200&page=" +
+                               std::to_string(page) + "&format=json";
+            web::HttpReply r = fetch(path);
+            if (r.status == 429 && !cancel) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                if (!cancel) r = fetch(path);
+            }
+            if (cancel) break;
+            if (r.status != 200) {
+                closeSession();
+                web::JsonValue err;
+                std::wstring detail;
+                if (web::ParseJson(r.body, err) && !err.String("message").empty())
+                    detail = L": " + FromUtf8(err.String("message"));
+                error = L"Couldn't fetch listening history (HTTP " + std::to_wstring(r.status) + L")" + detail;
+                return false;
+            }
+            std::vector<Listen> chunk;
+            uint32_t curPage = 0, reportedTotal = 0;
+            if (!ParseLastFmRecentTracks(r.body, chunk, curPage, reportedTotal)) {
+                closeSession();
+                error = L"Couldn't read listening history response.";
+                return false;
+            }
+            if (reportedTotal > 0) totalPages = reportedTotal;
+            all.insert(all.end(), std::make_move_iterator(chunk.begin()), std::make_move_iterator(chunk.end()));
+            if (onProgress) onProgress(page, all.size());
+            if (chunk.empty()) break;
+        }
+    }
+    closeSession();
+    if (cancel) {
+        error = L"History import cancelled.";
+        return false;
+    }
+    out = AggregateListens(all);
+    return true;
 }
 }  // namespace listenbrainz

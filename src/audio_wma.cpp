@@ -42,9 +42,11 @@ struct Codebook {
     }
 };
 const std::array<Codebook,6>& Codebooks() {
-    static const std::array<Codebook,6> books={Codebook(w::coefficients0,w::levels0),Codebook(w::coefficients1,w::levels1),
-        Codebook(w::coefficients2,w::levels2),Codebook(w::coefficients3,w::levels3),Codebook(w::coefficients4,w::levels4),Codebook(w::coefficients5,w::levels5)};
-    return books;
+    static const auto* const books = std::make_unique<std::array<Codebook,6>>(std::array<Codebook,6>{
+        Codebook(w::coefficients0,w::levels0),Codebook(w::coefficients1,w::levels1),
+        Codebook(w::coefficients2,w::levels2),Codebook(w::coefficients3,w::levels3),
+        Codebook(w::coefficients4,w::levels4),Codebook(w::coefficients5,w::levels5)}).release();
+    return *books;
 }
 const PrefixBook& ExponentBook() { static const PrefixBook b(aacdata::codes0); return b; }
 const PrefixBook& GainBook() { static const PrefixBook b(w::highGain); return b; }

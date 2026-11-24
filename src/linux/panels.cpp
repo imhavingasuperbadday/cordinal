@@ -257,7 +257,7 @@ const Ops kWebFetchOps{
 const Ops* const kOps[] = {
     nullptr, &kEqOps, &kHeadphonesOps, &kTagsOps, &kPrefsOps, &kRulesOps, &kOrganizeOps, &kCopyOps, &kListenBrainzOps,
     &kFormatOps, &kDeviceOps, &kPointsOps, &kReviewOps, &kPaletteOps, &kLayoutOps, &kPacksOps, &kHelpersOps, &kGamesOps,
-    &kEditionsOps, &kCoversOps, &kArtistOps, &kExportOps, &kAlbumOps, &kKeysOps, &kComebackOps, &kAlbumTagOps, &kDuplicatesOps, &kConvertOps, &kRipOps, &kWebFetchOps,
+    &kEditionsOps, &kCoversOps, &kArtistOps, &kExportOps, &kAlbumOps, &kKeysOps, &kComebackOps, &kAlbumTagOps, &kDuplicatesOps, &kLintOps, &kConvertOps, &kRipOps, &kWebFetchOps,
     &kRadarOps,
 };
 static_assert(std::size(kOps) == (size_t)Kind::Count);
@@ -468,6 +468,7 @@ void PanelText(const char* text) {
 
 void PanelFileChosen(int purpose, const std::wstring& path) {
     if (purpose == kFileCoverDirect) CoverFileChosen(path);  // the track menu's, with no panel open
+    else if (purpose == kFileSyncFolder) SyncFolderChosen(path);
     else if (const Ops* ops = OpenOps(); ops && ops->file) ops->file(purpose, path);
     g.redraw = true;
 }

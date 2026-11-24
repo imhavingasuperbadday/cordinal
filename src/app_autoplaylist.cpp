@@ -1,6 +1,7 @@
 // The auto-playlist editor: name, rules (ALL/ANY, one level of nested groups), limit and pick
 // order, with a live count of matching tracks.
 #include "app.h"
+#include "search_query.h"
 
 namespace app {
 
@@ -434,6 +435,35 @@ void OpenMix(MixPreset mix) {
     PlaySfx(Sfx::Sparkle);
     RefreshTabs();
     ActivatePlaylist((int)g.playlists.size() - 1);
+}
+
+void SaveSearchAsAutoPlaylist() {
+    if (g.filter.empty() || RadioActive()) return;
+    AutoPlaylist a;
+    if (!SearchToAutoPlaylist(g.filter, a)) return;
+    const std::string rules = SerializeAutoPlaylist(a);
+    std::wstring name = CleanPlaylistName(g.filter);
+    if (name.empty()) name = L"Search";
+    if (name.size() > 60) name.resize(60);
+    g.filter.clear();
+    g.searchPending = false;
+    KillTimer(g.hwnd, kSearchTimer);
+    g.restoringView = true;
+    SetWindowTextW(g.search, L"");
+    g.restoringView = false;
+    HideSearchSuggest();
+    for (int i = 0; i < (int)g.playlists.size(); ++i) {
+        if (g.playlists[i].kind != PlaylistKind::Auto || g.playlists[i].rules != rules) continue;
+        ActivatePlaylist(i);
+        Layout();
+        return;
+    }
+    g.playlists.push_back(Playlist{UniquePlaylistName(g.playlists, name), {}, PlaylistKind::Auto, rules});
+    g.dirty = true;
+    PlaySfx(Sfx::Sparkle);
+    RefreshTabs();
+    ActivatePlaylist((int)g.playlists.size() - 1);
+    Layout();
 }
 
 }  // namespace app

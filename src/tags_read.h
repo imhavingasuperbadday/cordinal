@@ -114,6 +114,7 @@ std::string CleanGenre(std::string g);
 void SetIfEmpty(std::string& field, const std::string& value);
 void AppendValue(std::string& field, const std::string& value);
 void ReadNumberPair(const std::string& value, uint32_t& number, uint32_t& total);
+void AddCredit(TagData& t, std::string role, sv rawName);
 // A generic KEY=value (Vorbis comment / APE / MP4 freeform / ASF / TXXX), any case.
 void ApplyField(TagData& t, sv key, const std::string& value, bool append, std::string* lyrics = nullptr);
 int ParseFlacPicture(sv b, sv& image);

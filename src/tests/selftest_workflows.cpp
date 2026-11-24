@@ -144,6 +144,55 @@ void TestSortingProperties() {
     albumShuffle.Add(varied && empty.empty(), L"varied album orders and empty playlist");
     Check(albumShuffle.Passed(), L"album shuffle keeps compilations, dates, artists, discs, folders and duplicate slots intact%ls",
           albumShuffle.failed.c_str());
+
+    // Track shuffle keeps classical WORK movements together in movement order.
+    g_lib = Library{};
+    std::vector<TrackId> workItems;
+    for (int i = 0; i < 6; ++i) {
+        TrackId id = g_lib.Add(L"C:\\Classical\\track" + std::to_wstring(i) + L".flac");
+        TagData td;
+        td.codec = Codec::FLAC;
+        td.album = "Beethoven Symphonies";
+        td.albumArtist = "Berliner Philharmoniker";
+        if (i < 3) {
+            td.work = "Symphony No. 5";
+            td.movement = "Mvt " + std::to_string(3 - i);
+            td.movementNo = (uint32_t)(3 - i);  // intentionally reverse order in playlist
+            td.movementTotal = 3;
+            td.track = (uint32_t)(3 - i);
+        } else {
+            td.title = "Standalone " + std::to_string(i);
+            td.artist = "Daft Punk feat. Pharrell Williams";
+            td.credits.push_back({"Producer", "Pharrell Williams"});
+        }
+        g_lib.ApplyTags(id, td);
+        workItems.push_back(id);
+    }
+    bool workKeptTogether = true;
+    for (int trial = 0; trial < 20; ++trial) {
+        std::vector<uint32_t> order;
+        ShuffleTracks(order, workItems, rng, -1);
+        if (order.size() != workItems.size()) { workKeptTogether = false; break; }
+        auto pos2 = std::find(order.begin(), order.end(), 2u);  // Mvt 1
+        auto pos1 = std::find(order.begin(), order.end(), 1u);  // Mvt 2
+        auto pos0 = std::find(order.begin(), order.end(), 0u);  // Mvt 3
+        if (pos2 == order.end() || pos1 != pos2 + 1 || pos0 != pos1 + 1) {
+            workKeptTogether = false;
+            break;
+        }
+    }
+    // Starting mid-work (at Mvt 1 = index 2) puts Mvt 2 (1) and Mvt 3 (0) immediately next.
+    std::vector<uint32_t> midOrder;
+    ShuffleTracks(midOrder, workItems, rng, 2);
+    workKeptTogether &= midOrder.size() == 5 && midOrder[0] == 1 && midOrder[1] == 0;
+    Check(workKeptTogether, L"track shuffle keeps classical work movements together in movement order");
+
+    // person: query matches album artist, featured artist, and producer credits without altering AlbumArtist.
+    Check(MatchesTrack(g_lib, workItems[3], FilterWords(L"person:\"Pharrell Williams\"")) &&
+              MatchesTrack(g_lib, workItems[3], FilterWords(L"person:\"Daft Punk\"")) &&
+              !MatchesTrack(g_lib, workItems[0], FilterWords(L"person:\"Pharrell Williams\"")) &&
+              g_lib.View(g_lib[workItems[3]].albumArtist) == "Berliner Philharmoniker",
+          L"person: search matches featured artists and producer credits without altering AlbumArtist");
 }
 
 void TestSearchProperties() {

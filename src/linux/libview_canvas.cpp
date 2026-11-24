@@ -35,6 +35,8 @@ struct Album {
 struct Artist {
     StringPool::Handle name = 0;
     std::vector<int> albums;
+    int coverAlbum = 0;
+    uint32_t appearances = 0;
 };
 enum class ItemKind { Section, Tile, Panel, AlbumGroup, ArtistTile };
 struct Item {
@@ -245,14 +247,41 @@ void BuildGroups() {
     for (auto it = drop.rbegin(); it != drop.rend(); ++it) v.albums.erase(v.albums.begin() + (ptrdiff_t)*it);
     if (g.settings.libraryMode == LibraryMode::Artists) {
         // "Toby Fox; Geoffrey Day" is two artists: the album shows under each of them.
+        // Track artists, composers, and credits also appear so clicking an artist finds both
+        // albums they made and tracks they appeared on or produced.
         std::unordered_map<StringPool::Handle, uint32_t> byArtist;
         std::vector<StringPool::Handle> names;
         for (int i = 0; i < (int)v.albums.size(); ++i) {
             BrowserValues(v.albums[i].tracks[0], BrowseField::AlbumArtist, names);
             for (StringPool::Handle name : names) {
                 auto [it, added] = byArtist.try_emplace(name, (uint32_t)v.artists.size());
-                if (added) v.artists.push_back(Artist{name, {}});
+                if (added) v.artists.push_back(Artist{name, {}, i, 0});
                 v.artists[it->second].albums.push_back(i);
+            }
+        }
+        std::vector<StringPool::Handle> trackPeople;
+        for (int i = 0; i < (int)v.albums.size(); ++i) {
+            for (TrackId id : v.albums[i].tracks) {
+                trackPeople.clear();
+                auto addPerson = [&](StringPool::Handle h) {
+                    if (!h) return;
+                    if (std::find(trackPeople.begin(), trackPeople.end(), h) == trackPeople.end())
+                        trackPeople.push_back(h);
+                };
+                BrowserValues(id, BrowseField::Artist, names);
+                for (StringPool::Handle h : names) addPerson(h);
+                BrowserValues(id, BrowseField::Composer, names);
+                for (StringPool::Handle h : names) addPerson(h);
+                if (size_t cn = g_lib.CreditsCount(id)) {
+                    const CreditHandle* cs = g_lib.CreditsBegin(id);
+                    for (size_t c = 0; c < cn; ++c) addPerson(cs[c].name);
+                }
+                for (StringPool::Handle h : trackPeople) {
+                    auto [it, added] = byArtist.try_emplace(h, (uint32_t)v.artists.size());
+                    if (added) v.artists.push_back(Artist{h, {}, i, 0});
+                    Artist& ar = v.artists[it->second];
+                    if (ar.albums.empty() || ar.albums.back() != i) ar.appearances += 1;
+                }
             }
         }
         // Split names join the list where they belong alphabetically ("Unknown artist" last).
@@ -429,12 +458,18 @@ void ActivateRow(int album, int track) {
     }
 }
 
-// Double-click an artist: point the browser's album-artist pane at them (the second pane if none
-// lists album artists), show it, and switch to Albums.
+// Double-click an artist: filter to albums they made and tracks they appeared on or produced,
+// without altering Album Artist, and switch to Albums & Tracks.
 void ShowArtist(int artist) {
     if (artist < 0 || artist >= (int)v.artists.size()) return;
-    BrowserShowValue(BrowseField::AlbumArtist, v.artists[artist].name);
-    SetLibraryMode(LibraryMode::Albums);
+    StringPool::Handle name = v.artists[artist].name;
+    if (!name) {
+        BrowserShowValue(BrowseField::AlbumArtist, 0);
+        SetLibraryMode(LibraryMode::Albums);
+        return;
+    }
+    g.search = L"person:\"" + g_lib.Str(name) + L"\"";
+    SetLibraryMode(LibraryMode::AlbumTracks);
 }
 
 struct Hit {
@@ -703,12 +738,20 @@ void DrawItem(const Item& item, int index, float ox, float oy, const Palette& p)
             bool sel = v.selArtist[it.index];
             if (sel || hover) Fill({rc.x - F(6), rc.y - F(6), rc.w + F(12), rc.h + F(6)}, sel ? p.select : p.hover);
             Rect art{rc.x, rc.y, rc.w, rc.w};
-            const Album& first = v.albums[ar.albums[0]];
+            const Album& first = v.albums[ar.albums.empty() ? ar.coverAlbum : ar.albums[0]];
             DrawAlbumCover(ArtTrackOf(first), first.album, ArtistName(ar.name), art, p);
             uint32_t tc = sel ? p.selectText : p.text, sc = sel ? p.selectText : p.sub;
             DrawText(Font::Bold, Utf8(ArtistName(ar.name)), rc.x, art.B() + F(9), tc, rc.w);
-            DrawText(Font::Small, std::to_string(ar.albums.size()) + (ar.albums.size() == 1 ? " album" : " albums"), rc.x,
-                     art.B() + F(27), sc, rc.w);
+            std::string sub;
+            if (!ar.albums.empty()) {
+                sub = std::to_string(ar.albums.size()) + (ar.albums.size() == 1 ? " album" : " albums");
+                if (ar.appearances > 0)
+                    sub += " \xC2\xB7 " + std::to_string(ar.appearances) +
+                           (ar.appearances == 1 ? " track" : " tracks");
+            } else {
+                sub = std::to_string(ar.appearances) + (ar.appearances == 1 ? " appearance" : " appearances");
+            }
+            DrawText(Font::Small, sub, rc.x, art.B() + F(27), sc, rc.w);
             break;
         }
     }

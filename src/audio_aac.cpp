@@ -1,6 +1,6 @@
-// Cordinal AAC-LC decoder, from ISO/IEC 14496-3 syntax: ADTS/MP4 input, Huffman spectrum,
-// scalefactor/PNS quantization, M/S and intensity stereo, TNS and the long/short filterbank.
-// Only the LC object type is supported.
+// Cordinal AAC-LC and HE-AAC v1/v2 (SBR + PS) decoder, from ISO/IEC 14496-3 syntax:
+// ADTS/MP4 input, Huffman spectrum, scalefactor/PNS quantization, M/S and intensity
+// stereo, TNS, IMDCT filterbank, Spectral Band Replication, and Parametric Stereo.
 #include "native_audio.h"
 #include "audio_live.h"
 #include "audio_bits.h"
@@ -8,6 +8,7 @@
 #include "audio_packets.h"
 #include "audio_mdct.h"
 #include "audio_aac_tables.h"
+#include "audio_sbr.h"
 #include <array>
 #include <span>
 
@@ -53,9 +54,10 @@ constexpr double pi=3.14159265358979323846;
 
 // The 12 spectral Huffman codebooks, built once as prefix trees at first use.
 const std::array<PrefixBook,12>& Books() {
-    static const std::array<PrefixBook,12> books={PrefixBook(codes0),PrefixBook(codes1),PrefixBook(codes2),PrefixBook(codes3),PrefixBook(codes4),PrefixBook(codes5),
-        PrefixBook(codes6),PrefixBook(codes7),PrefixBook(codes8),PrefixBook(codes9),PrefixBook(codes10),PrefixBook(codes11)};
-    return books;
+    static const auto* const books = std::make_unique<std::array<PrefixBook,12>>(std::array<PrefixBook,12>{
+        PrefixBook(codes0),PrefixBook(codes1),PrefixBook(codes2),PrefixBook(codes3),PrefixBook(codes4),PrefixBook(codes5),
+        PrefixBook(codes6),PrefixBook(codes7),PrefixBook(codes8),PrefixBook(codes9),PrefixBook(codes10),PrefixBook(codes11)}).release();
+    return *books;
 }
 // Scalefactor-band edges depend on the sampling-rate index and on short vs long windows.
 std::span<const uint16_t> Bands(unsigned index,bool shortBlock) {
@@ -102,12 +104,12 @@ struct Channel {
 };
 float Scale(int n) {
     // Every syntax scale is an integral quarter-power of two.
-    static const auto table=[] {
-        std::array<float,2049> v{};
-        for (int i=-1024;i<=1024;++i) v[i+1024]=(float)std::exp2(i*0.25);
-        return v;
+    static const auto* const table=[] {
+        auto v=std::make_unique<std::array<float,2049>>();
+        for (int i=-1024;i<=1024;++i) (*v)[i+1024]=(float)std::exp2(i*0.25);
+        return v.release();
     }();
-    return table[n+1024];
+    return (*table)[n+1024];
 }
 // Expand each codebook symbol into base-5/base-33 digits, offset per book so the digits
 // become signed quantized values. Built once on first use.
@@ -134,26 +136,26 @@ struct SignedPowerTables {
 };
 // Pre-multiplied |value|^(4/3) pairs and quads for the signed codebooks' fast path.
 const SignedPowerTables& SignedPowers() {
-    static const auto tables=[] {
-        SignedPowerTables v{};const auto& powers=Powers();
-        for (unsigned i=0;i<v.quads.size();++i) {
+    static const auto* const tables=[] {
+        auto v=std::make_unique<SignedPowerTables>();const auto& powers=Powers();
+        for (unsigned i=0;i<v->quads.size();++i) {
             unsigned code=i;
-            for (unsigned j=4;j--;) { int q=int(code%5)-2;code/=5;v.quads[i][j]=(q<0?-1:1)*powers[std::abs(q)]; }
+            for (unsigned j=4;j--;) { int q=int(code%5)-2;code/=5;v->quads[i][j]=(q<0?-1:1)*powers[std::abs(q)]; }
         }
-        for (unsigned i=0;i<v.pairs.size();++i) {
+        for (unsigned i=0;i<v->pairs.size();++i) {
             int a=int(i/33)-16,b=int(i%33)-16;
-            v.pairs[i]={(a<0?-1:1)*powers[std::abs(a)],(b<0?-1:1)*powers[std::abs(b)]};
+            v->pairs[i]={(a<0?-1:1)*powers[std::abs(a)],(b<0?-1:1)*powers[std::abs(b)]};
         }
-        return v;
+        return v.release();
     }();
-    return tables;
+    return *tables;
 }
 // 12-bit prefix lookup per spectral codebook: an entry packs the consumed bit count (low four
 // bits) and the index of the signed tuple in SignedPowers, for every codeword whose code and
 // sign bits fit the prefix. Zero marks the rest: longer codes, and book 11's escape values.
 const auto& SignedSpectralLookup() {
-    static const auto tables=[] {
-        std::array<std::array<uint16_t,4096>,12> v{};
+    static const auto* const tables=[] {
+        auto v=std::make_unique<std::array<std::array<uint16_t,4096>,12>>();
         const auto& books=Books(); const auto& tuples=SpectralTuples();
         for (unsigned book=1;book<12;++book) for (unsigned prefix=0;prefix<4096;++prefix) {
             int node=0; unsigned bits=0;
@@ -168,11 +170,11 @@ const auto& SignedSpectralLookup() {
             }
             unsigned tuple=0;
             for (unsigned j=0;j<dim;++j) tuple=tuple*(dim==4?5:33)+values[j]+(dim==4?2:16);
-            if (bits<=12) v[book][prefix]=(uint16_t)((tuple<<4)|bits);
+            if (bits<=12) (*v)[book][prefix]=(uint16_t)((tuple<<4)|bits);
         }
-        return v;
+        return v.release();
     }();
-    return tables;
+    return *tables;
 }
 // One codeword through the register window: tree symbol, then its sign bits, then book 11's
 // escape sequences, in bitstream order. False on a codeword the book does not contain or an
@@ -226,8 +228,8 @@ template<unsigned Dim,bool Signs,bool Escape> __forceinline bool WindowBand(Fast
 }
 // x^(4/3), the AAC inverse-quantization nonlinearity, evaluated once for 0..8191.
 const std::array<float,8192>& Powers() {
-    static const auto table=[] { std::array<float,8192> v{}; for (unsigned i=0;i<v.size();++i) v[i]=(float)std::pow((double)i,4.0/3); return v; }();
-    return table;
+    static const auto* const table=[] { auto v=std::make_unique<std::array<float,8192>>(); for (unsigned i=0;i<v->size();++i) (*v)[i]=(float)std::pow((double)i,4.0/3); return v.release(); }();
+    return *table;
 }
 // Filterbank window: sine for the low-overlap mode, else a Kaiser-Bessel-derived window
 // (alpha 6 for 128 points, 4 for 1024) accumulated to full double precision.
@@ -319,32 +321,104 @@ private:
     }
     bool Configure(bool live) {
         // config is an AudioSpecificConfig: object type, sampling index and channel layout.
-        Bits b(media_.config.data(),media_.config.size());
-        unsigned object=(unsigned)b.Get(5); if (object==31) object=32+(unsigned)b.Get(6);
-        index_=(unsigned)b.Get(4); unsigned rate=index_==15?(unsigned)b.Get(24):index_<13?rates[index_]:0;
-        unsigned layout=(unsigned)b.Get(4);
-        // LC only: other AAC tools require additional reconstruction stages.
-        if (object!=2 || !rate || b.Get(1)) return false;
+        Bits b(media_.config.data(), media_.config.size());
+        unsigned object = (unsigned)b.Get(5);
+        if (object == 31) object = 32 + (unsigned)b.Get(6);
+        index_ = (unsigned)b.Get(4);
+        unsigned rate = index_ == 15 ? (unsigned)b.Get(24) : index_ < 13 ? rates[index_] : 0;
+        unsigned layout = (unsigned)b.Get(4);
+        bool explicitSbr = object == 5 || object == 29;
+        bool explicitPs = object == 29;
+        unsigned extRate = 0;
+        if (explicitSbr) {
+            unsigned extIdx = (unsigned)b.Get(4);
+            extRate = extIdx == 15 ? (unsigned)b.Get(24) : extIdx < 13 ? rates[extIdx] : 0;
+            unsigned coreObj = (unsigned)b.Get(5);
+            if (coreObj == 31) coreObj = 32 + (unsigned)b.Get(6);
+            if (coreObj != 2 || !extRate) return false;
+        } else if (object != 2) {
+            return false;
+        }
+        if (!rate || b.Get(1)) return false;
         if (b.Get(1)) b.Skip(14);
         if (b.Get(1) || !b.Good()) return false;
+        if (!explicitSbr && b.Left() >= 16 && b.Get(11) == 0x2b7) {
+            unsigned extObj = (unsigned)b.Get(5);
+            if (extObj == 31) extObj = 32 + (unsigned)b.Get(6);
+            if (extObj == 5 || extObj == 29) {
+                explicitSbr = b.Get(1) != 0;
+                if (explicitSbr) {
+                    unsigned extIdx = (unsigned)b.Get(4);
+                    extRate = extIdx == 15 ? (unsigned)b.Get(24) : extIdx < 13 ? rates[extIdx] : 0;
+                    if (!extRate) return false;
+                    if (extObj == 29) explicitPs = true;
+                    else if (b.Left() >= 12 && b.Get(11) == 0x548) explicitPs = b.Get(1) != 0;
+                }
+                if (!b.Good()) return false;
+            }
+        }
         // MPEG-4 channel configurations 1..7, 11, 12 and 14 map to 1..8 channels; 13 is 22.2
         // (24 channels), beyond this decoder's eight channel slots.
         static constexpr uint8_t kLayoutChannels[16] = {0, 1, 2, 3, 4, 5, 6, 8, 0, 0, 0, 7, 8, 0, 8, 0};
         unsigned mapped = layout ? (layout < std::size(kLayoutChannels) ? kLayoutChannels[layout] : 0)
                                  : media_.channels;
         if (!mapped || mapped > 8) return false;
-        channels_=mapped;
-        if (index_==15) { index_=0; while (index_<13 && rates[index_]!=rate) ++index_; if (index_==13) return false; }
-        if (!media_.mp4TimeScale && rate!=media_.rate) return false;
+        channels_ = mapped;
+        if (index_ == 15) {
+            index_ = 0;
+            while (index_ < 13 && rates[index_] != rate) ++index_;
+            if (index_ == 13) return false;
+        }
         transform_[0].Init(2048); transform_[1].Init(256);
-        for (int shortBlock=0;shortBlock<2;++shortBlock) for (int k=0;k<2;++k) window_[shortBlock][k]=Window(shortBlock?128:1024,k!=0);
-        simd_=FastAudioKernels();
+        for (int shortBlock = 0; shortBlock < 2; ++shortBlock)
+            for (int k = 0; k < 2; ++k) window_[shortBlock][k] = Window(shortBlock ? 128 : 1024, k != 0);
+        simd_ = FastAudioKernels();
         (void)Books(); (void)Powers(); (void)SpectralTuples(); (void)SignedPowers(); (void)SignedSpectralLookup(); (void)Scale(0);
-        if (live) { rate_=rate; return true; }
-        return Ready(rate,true);
+
+        bool useSbr = explicitSbr;
+        if (useSbr && extRate && extRate != rate * 2) return false;
+        if (!useSbr && rate <= 24000) {
+            sbrProbe_ = true;
+            sbrProbeFound_ = false;
+            std::vector<float> scratch;
+            if (live) {
+                (void)Decode(liveFrame_.data() + liveHeader_, liveFrame_.size() - liveHeader_, scratch);
+            } else {
+                const size_t probeCount = std::min<size_t>(4, media_.Count());
+                for (size_t i = 0; i < probeCount && !sbrProbeFound_; ++i) {
+                    const uint8_t* pkt = media_.Data(i);
+                    if (pkt) (void)Decode(pkt, media_.At(i).bytes, scratch);
+                }
+            }
+            useSbr = sbrProbeFound_;
+            sbrProbe_ = false;
+            Reset();
+        }
+        if (useSbr) {
+            sbr_ = std::make_unique<SbrDecoder>();
+            sbr_->Init(rate, channels_, explicitPs);
+        } else {
+            sbr_.reset();
+        }
+        const unsigned outRate = useSbr ? (extRate ? extRate : rate * 2) : rate;
+        if (!media_.mp4TimeScale) {
+            if (media_.rate != rate && !(useSbr && media_.rate == outRate)) return false;
+            if (useSbr && !live && !media_.packets.empty() && media_.packets[0].frames == 1024) {
+                for (auto& pkt : media_.packets) { pkt.start *= 2; pkt.frames *= 2; }
+                media_.frames *= 2;
+                media_.skip *= 2;
+                media_.valid *= 2;
+            }
+            if (useSbr) media_.rate = outRate;
+        }
+        if (live) { rate_ = outRate; return true; }
+        return Ready(outRate, true);
     }
-    void Reset() override { for (auto& c:channel_) { c.overlap.fill(0); c.previousShape=0; } }
-    size_t Preroll() const override { return 2; }
+    void Reset() override {
+        for (auto& c : channel_) { c.overlap.fill(0); c.previousShape = 0; }
+        if (sbr_) sbr_->Reset();
+    }
+    size_t Preroll() const override { return sbr_ ? 6 : 2; }
     // Scalefactor-band sections: each run assigns one codebook to a span of bands.
     bool Sections(Bits& b,Ics& info) {
         unsigned bits=info.sequence==2?3:5, escape=(1u<<bits)-1;
@@ -647,17 +721,36 @@ private:
         // A raw_data_block is a 3-bit-tagged sequence of elements that fill channels in order.
         Bits b(p,bytes); unsigned channels=0;
         seed_=p; seedBytes_=bytes; seeded_=false;
+        struct ElemSlot {
+            unsigned ch0 = 0, count = 0, sbrIndex = 0;
+            bool isLfe = false;
+        };
+        ElemSlot elems[8]{};
+        unsigned numElems = 0, numSbrElems = 0;
+        int lastSbrElem = -1;
+        unsigned lastSbrCh = 0;
         while (b.Good() && b.Left()>=3) {
             unsigned tag=(unsigned)b.Get(3); if (tag==7) break;
             if (tag==6) {
                 size_t n=(size_t)b.Get(4); if (n==15) n+=b.Get(8)-1;
-                if (n && b.Left()>=4 && (b.Peek(4)==13 || b.Peek(4)==14)) return false; // SBR requires its own synthesis stage.
+                if (n && b.Left()>=4 && (b.Peek(4)==13 || b.Peek(4)==14)) {
+                    if (sbrProbe_) {
+                        sbrProbeFound_ = true;
+                    } else if (sbr_ && lastSbrElem >= 0 && lastSbrElem < 4) {
+                        const size_t startPos = b.Position();
+                        const size_t endPos = std::min(bytes * 8, startPos + n * 8);
+                        Bits sub(p, bytes, endPos);
+                        sub.Skip(startPos);
+                        const unsigned ext = (unsigned)sub.Get(4);
+                        if (!sbr_->Parse(sub, (unsigned)lastSbrElem, lastSbrCh, ext == 14)) return false;
+                    }
+                }
                 b.Skip(n*8); continue;
             }
             if (tag==4) { b.Skip(4); bool align=b.Get(1)!=0; size_t n=(size_t)b.Get(8); if (n==255) n+=b.Get(8); if (align) b.Align(); b.Skip(n*8); continue; }
             if (tag==5) { if (!Pce(b)) return false; continue; }
             if (tag!=0 && tag!=1 && tag!=3) return false;
-            b.Skip(4); unsigned n=tag==1?2:1; if (channels+n>channels_) return false;
+            b.Skip(4); unsigned n=tag==1?2:1; if (channels+n>channels_ || numElems>=8) return false;
             bool common=n==2 && b.Get(1); unsigned mask=0; bool used[8][64]{};
             if (common) {
                 if (!channel_[channels].info.Info(b,index_)) return false;
@@ -668,14 +761,56 @@ private:
             }
             for (unsigned j=0;j<n;++j) if (!Stream(b,channel_[channels+j],common)) return false;
             if (common) Stereo(channel_[channels],channel_[channels+1],mask,used);
+            const bool isLfe = tag == 3;
+            elems[numElems++] = {channels, n, isLfe ? 0u : numSbrElems, isLfe};
+            if (!isLfe) {
+                lastSbrElem = (int)numSbrElems;
+                lastSbrCh = n;
+                ++numSbrElems;
+            }
             channels+=n;
         }
         if (!b.Good() || channels!=channels_) return false;
+        if (sbrProbe_) return true;
         std::array<std::array<float,1024>,8> pcm;
         for (unsigned c=0;c<channels_;++c) { ApplyTns(channel_[c]); Synthesize(channel_[c],pcm[c].data()); }
         // Map each channel layout from AAC order to Cordinal's downmix order.
         static constexpr uint8_t order[9][8]={{},{0},{0,1},{1,2,0},{1,2,0,3},{1,2,0,3,4},
             {1,2,0,5,3,4},{1,2,0,6,3,4,5},{1,2,0,7,5,6,3,4}};
+        if (sbr_) {
+            std::array<std::array<float,2048>,8> sbrPcm{};
+            unsigned outChannels = channels_;
+            for (unsigned ei = 0; ei < numElems; ++ei) {
+                const auto& e = elems[ei];
+                if (e.isLfe) {
+                    for (unsigned i = 0; i < 1024; ++i) {
+                        const float s0 = pcm[e.ch0][i];
+                        const float s1 = (i + 1 < 1024) ? 0.5f * (s0 + pcm[e.ch0][i + 1]) : s0;
+                        sbrPcm[e.ch0][i * 2] = s0;
+                        sbrPcm[e.ch0][i * 2 + 1] = s1;
+                    }
+                    continue;
+                }
+                if (e.sbrIndex >= 4) continue;
+                const float* corePtr[2] = {pcm[e.ch0].data(), e.count == 2 ? pcm[e.ch0 + 1].data() : nullptr};
+                unsigned elemOut = e.count;
+                float* dst0 = sbrPcm[e.ch0].data();
+                float* dst1 = (channels_ == 1) ? sbrPcm[1].data() : (e.count == 2 ? sbrPcm[e.ch0 + 1].data() : nullptr);
+                sbr_->ApplyElement(e.sbrIndex, e.count, corePtr, dst0, dst1, elemOut);
+                if (channels_ == 1 && elemOut == 2) outChannels = 2;
+            }
+            out.resize(4096);
+            if (outChannels <= 2) return InterleaveStereo(sbrPcm[0].data(), sbrPcm[outChannels - 1].data(), out.data(), 2048);
+            for (unsigned i = 0; i < 2048; ++i) {
+                float v[8]{};
+                for (unsigned c = 0; c < channels_; ++c) {
+                    v[c] = sbrPcm[order[channels_][c]][i];
+                    if (!std::isfinite(v[c])) return false;
+                }
+                Mix(v, channels_, out.data() + i * 2);
+            }
+            return true;
+        }
         out.resize(2048);
         if (channels_<=2) return InterleaveStereo(pcm[0].data(),pcm[channels_-1].data(),out.data(),1024);
         for (unsigned i=0;i<1024;++i) {
@@ -697,6 +832,8 @@ private:
     const uint8_t* seed_=nullptr;
     size_t seedBytes_=0;
     bool seeded_=false;
+    std::unique_ptr<SbrDecoder> sbr_;
+    bool sbrProbe_=false, sbrProbeFound_=false;
     Channel channel_[8];
     Mdct transform_[2];
     std::vector<float> window_[2][2];

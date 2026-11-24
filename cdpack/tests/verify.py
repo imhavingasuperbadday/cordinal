@@ -1,6 +1,7 @@
 """Independent format, corruption, exact-buffer, TLS and forced-ASLR regression checks."""
 import argparse
 import importlib.util
+import os
 import lzma
 from pathlib import Path
 import random
@@ -50,6 +51,30 @@ for index, data in enumerate(cases):
     result = subprocess.run([str(out / "decode.exe"), "--decode", str(source), str(scratch / "unexpected.bin"), str(len(data))])
     assert result.returncode != 0, "trailing byte was accepted"
 
+
+
+def exported(pe):
+    """The fixture's exports by name, as RVAs."""
+    at, size = pe.directory(0)
+    table = pe.at(at, size)
+    names, ordinals, functions = (pack.u32(table, offset) for offset in (32, 36, 28))
+    result = {}
+    for i in range(pack.u32(table, 24)):
+        name = pe.data[pe.offset(pack.u32(pe.at(names + i * 4, 4), 0)):]
+        ordinal = pack.u16(pe.at(ordinals + i * 2, 2), 0)
+        result[name[:name.index(0)].decode()] = pack.u32(pe.at(functions + ordinal * 4, 4), 0)
+    return result
+
+
+def run(path, mode=None):
+    environment = dict(os.environ)
+    environment.pop("CDP_FIXTURE", None)
+    if mode:
+        environment["CDP_FIXTURE"] = mode
+    result = subprocess.run([str(path)], timeout=20, env=environment)
+    assert result.returncode == 0, (path.name, mode, result.returncode)
+
+
 for name in ("fixture.exe", "fixture.dll"):
     native_path = out / name
     native = native_path.read_bytes()
@@ -75,12 +100,14 @@ for name in ("fixture.exe", "fixture.dll"):
         subprocess.run([str(out / "dll-host.exe"), str(native_path), hex(pe.base), str(pe.size)], check=True)
         subprocess.run([str(out / "dll-host.exe"), str(candidate), hex(pe.base), str(pe.size)], check=True)
     else:
-        subprocess.run([str(native_path)], check=True, timeout=10)
-        subprocess.run([str(candidate)], check=True, timeout=10)
+        run(native_path)
+        run(candidate)
     # Code the profile marks cold stays compressed until first touched. The fixture's whole .text
-    # page is cold, so its entry point and the DIR64 fixup inside it are decoded by the fault
-    # handler; fixture_probe checks that the fixup was applied. A DLL stays eager: its handler
-    # would point at code the unload takes away.
+    # is cold, so its entry point and the DIR64 fixup inside it are decoded by the fault handler;
+    # fixture_probe checks that the fixup was applied. Cold code makes the image detached: restored
+    # into private memory of its own that Windows is told is the program (fixture_probe checks its
+    # module identity). A DLL stays eager and attached: its handler would point at code the unload
+    # takes away.
     pe = pack.Pe(native)
     text = next(s for s in pe.sections if s["name"] == b".text")
     cold = set(range(text["rva"] // 4096, (text["rva"] + text["raw_bytes"] + 4095) // 4096))
@@ -90,12 +117,37 @@ for name in ("fixture.exe", "fixture.dll"):
             raise AssertionError("a DLL accepted cold code")
         except ValueError:
             pass
+        try:
+            pack.pack_image(native, out / "loader.exe", detach=True)
+            raise AssertionError("a DLL was detached")
+        except ValueError:
+            pass
     else:
         lazy, _, report = pack.pack_image(native, out / "loader.exe", cold=cold)
-        assert report["LazyChunks"] == 1 and report["LazyBytes"] == 4096, report
+        assert report["LazyChunks"] == 1 and report["LazyBytes"] == len(cold) * 4096 >= 8192, report
+        assert report["Detached"] and report["HookRva"], report
         assert pack.unpack_image(lazy, out / "decode.exe", scratch) == native
+        assert not any(s["name"] == b"CDP0" for s in pack.Pe(lazy).sections), "a detached image kept CDP0"
         candidate.write_bytes(lazy)
-        subprocess.run([str(candidate)], check=True, timeout=10)
+        run(candidate)
+        # Detached without cold code: the same module identity, every chunk decoded at start-up.
+        detached, _, report = pack.pack_image(native, out / "loader.exe", detach=True)
+        assert report["Detached"] and not report["LazyChunks"], report
+        assert pack.unpack_image(detached, out / "decode.exe", scratch) == native
+        candidate.write_bytes(detached)
+        run(candidate)
+        # fixture_far, fixture_blocker and fixture_fence each start a page; one cold chunk per page.
+        # "evict": decommit, decode again, a thread blocked inside an evicted page, suspension.
+        # "cap": two resident cold chunks at most, the one decoded longest ago decommitted first.
+        symbols = exported(pe)
+        own = {symbols[s] // 4096 for s in ("fixture_far", "fixture_blocker", "fixture_fence")}
+        assert len(own) == 3 and symbols["fixture_probe"] // 4096 not in own, symbols
+        for mode, cap in (("evict", 0), ("cap", 2)):
+            paged, _, report = pack.pack_image(native, out / "loader.exe", cold=own, lazy_block=4096, cold_cap=cap)
+            assert report["LazyChunks"] == 3 and report["ColdCap"] == cap, report
+            assert pack.unpack_image(paged, out / "decode.exe", scratch) == native
+            candidate.write_bytes(paged)
+            run(candidate, mode)
         # Damage in a cold stream stops the process at start-up, by the up-front input checksum,
         # rather than only when the chunk is first decoded.
         section = next(s for s in pack.Pe(lazy).sections if s["name"] == b"CDP1")["raw"]
@@ -116,7 +168,7 @@ for name in ("fixture.exe", "fixture.dll"):
         if name.endswith(".dll"):
             subprocess.run([str(out / "dll-host.exe"), str(candidate), hex(pe.base), str(pe.size)], check=True)
         else:
-            subprocess.run([str(candidate)], check=True, timeout=10)
+            run(candidate)
     fields = pack.HEADER.unpack_from(chunked, next(s for s in pack.Pe(chunked).sections if s["name"] == b"CDP1")["raw"])
     meta = next(s for s in pack.Pe(chunked).sections if s["name"] == b"CDP1")["raw"]
     damaged = bytearray(chunked)
@@ -176,4 +228,4 @@ for name in ("fixture.exe", "fixture.dll"):
         raise AssertionError("unsupported CFG accepted")
     except ValueError:
         pass
-print(f"PASS {checksum_checks} checksum oracles, {len(cases)} decoder corpora, mutations, exact guards, determinism, overlay, EXE/TLS/DLL/ASLR, chunked threads and corruption")
+print(f"PASS {checksum_checks} checksum oracles, {len(cases)} decoder corpora, mutations, exact guards, determinism, overlay, EXE/TLS/DLL/ASLR, detached images, cold code decommitted and decoded again, the cold cap, chunked threads and corruption")

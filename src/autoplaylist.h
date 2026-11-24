@@ -18,6 +18,9 @@ enum class RuleField : uint8_t {
     SampleRate, Channels, FileSize, TrackGain,                                                      // numbers
     FirstPlayed,                                                                                    // date
     Favorite,                                                                                       // 0 or 1
+    Dr,                                                                                             // dynamic range (LU)
+    Edition,                                                                                        // album edition label
+    Lyrics,                                                                                         // indexed lyrics text
     Count
 };
 

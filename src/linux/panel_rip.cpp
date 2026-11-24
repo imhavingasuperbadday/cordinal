@@ -19,10 +19,19 @@ struct DiscRead {
     std::wstring drive, error;
     cdrip::Toc toc;
     std::vector<cdrip::Disc> names;  // CD-Text or an untitled disc first, then MusicBrainz's releases
-    bool lookedUp = false, offline = false;
+    std::vector<cdrip::AccurateRipPressing> arPressings;
+    bool lookedUp = false, offline = false, arChecked = false;
 };
 
-std::thread reader, ripper;
+struct OffsetRead {
+    uint64_t generation = 0;
+    cdrip::OffsetDetection det;
+    std::vector<cdrip::AccurateRipPressing> pressings;
+    bool fetched = false;
+    std::wstring error;
+};
+
+std::thread reader, offsetWorker, ripper;
 std::shared_ptr<online::Cancel> lookup;
 std::atomic<bool> cancel{false};
 bool ripping = false, stopping = false;
@@ -57,10 +66,12 @@ struct RipPanel {
     int track = 0, first = 0;
     bool flac = true;
     Rect list;
+    bool detectingOffset = false;
+    std::wstring offsetNote;
 } g_rip;
 
 struct RipGeometry {
-    Rect panel, drive, names, fields[kFields], list, format, browse, status, lookUp, go, cancel;
+    Rect panel, drive, names, fields[kFields], list, format, detectOffset, browse, status, lookUp, go, cancel;
 };
 
 RipGeometry Geom() {
@@ -86,6 +97,7 @@ RipGeometry Geom() {
     G.fields[kTitle] = {x, y, W, rh - S(4)};
     y += rh;
     G.format = {x, y, S(280), rh - S(6)};
+    G.detectOffset = {G.format.R() + S(12), y - S(1), S(124), rh - S(4)};
     y += rh;
     G.fields[kFolder] = {x, y, W - S(104), rh - S(4)};
     G.browse = {p.R() - pad - S(96), y, S(96), rh - S(4)};
@@ -104,7 +116,7 @@ std::wstring Folder() {
     return d;
 }
 
-bool Ready() { return Tracks() && !ripping && !Folder().empty(); }
+bool Ready() { return Tracks() && !ripping && !g_rip.detectingOffset && !Folder().empty(); }
 
 std::wstring TrackTitle(size_t k) {
     return k < g_rip.chosen.titles.size() && !g_rip.chosen.titles[k].empty() ? FromUtf8(g_rip.chosen.titles[k])
@@ -141,8 +153,11 @@ void ShowNames() {
 void ReadDisc(bool lookUp) {
     g_rip.disc.reset();
     g_rip.chosen = {};
+    g_rip.detectingOffset = false;
+    g_rip.offsetNote.clear();
     ShowNames();
     if (lookup) lookup->Stop();
+    if (offsetWorker.joinable()) offsetWorker.join();
     if (reader.joinable()) reader.join();
     if (g_rip.drive < 0 || g_rip.drive >= (int)g_rip.drives.size()) return;
     lookup = std::make_shared<online::Cancel>();
@@ -161,6 +176,10 @@ void ReadDisc(bool lookUp) {
                 for (auto& r : cdrip::LookUp(d->toc, *stop, d->offline)) d->names.push_back(std::move(r));
                 d->lookedUp = !stop->Stopped();
             }
+            if (d->error.empty() && online::Config().accurateRip && !stop->Stopped()) {
+                d->arPressings = cdrip::FetchAccurateRip(d->toc, *stop);
+                d->arChecked = !stop->Stopped();
+            }
         }
         PostMessageW(nullptr, WM_APP_RIP, 2, (LPARAM)d.release());
     });
@@ -172,6 +191,8 @@ std::string NamesLabel(const cdrip::Disc& n) { return n.source.empty() ? "Untitl
 std::wstring Status() {
     if (g_rip.drives.empty()) return L"No CD drive found.";
     if (!g_rip.disc) return L"Reading the disc...";
+    if (g_rip.detectingOffset) return L"Detecting drive read offset with AccurateRip...";
+    if (!g_rip.offsetNote.empty()) return g_rip.offsetNote;
     const DiscRead& d = *g_rip.disc;
     if (!d.error.empty()) return d.error;
     const auto audio = d.toc.Audio();
@@ -182,6 +203,12 @@ std::wstring Status() {
     else if (d.offline) s += L"MusicBrainz couldn't be reached.";
     else if (d.lookedUp) s += L"MusicBrainz doesn't know this disc.";
     else s += L"Look up finds its names on MusicBrainz.";
+    if (d.arChecked) {
+        if (!d.arPressings.empty())
+            s += L" AccurateRip: " + std::to_wstring(d.arPressings.size()) +
+                 (d.arPressings.size() == 1 ? L" pressing." : L" pressings.");
+        else s += L" Not in AccurateRip.";
+    }
     return s;
 }
 
@@ -198,6 +225,45 @@ void LookUp() {
     ReadDisc(true);
 }
 
+void DetectOffsetNow() {
+    if (!Tracks() || g_rip.detectingOffset) return;
+    if (!online::Config().accurateRip) {
+        if (!Confirm("Verify CD rips with AccurateRip is off, so cordinal hasn't contacted anyone.\n\n"
+                     "Detecting your drive's read offset sends this disc's ids to accuraterip.com.\n\n"
+                     "Turn it on? It can be changed in Preferences > Online.",
+                     "Rip CD"))
+            return;
+        online::Config().accurateRip = true;
+        SaveSettings();
+    }
+    if (lookup) lookup->Stop();
+    if (offsetWorker.joinable()) offsetWorker.join();
+    lookup = std::make_shared<online::Cancel>();
+    g_rip.detectingOffset = true;
+    g_rip.offsetNote.clear();
+    g.redraw = true;
+    const uint64_t gen = generation;
+    const std::wstring drive = g_rip.disc->drive;
+    const cdrip::Toc toc = g_rip.disc->toc;
+    const auto existing = g_rip.disc->arPressings;
+    const bool hadAr = g_rip.disc->arChecked;
+    offsetWorker = std::thread([gen, drive, toc, existing, hadAr, stop = lookup]() mutable {
+        auto res = std::make_unique<OffsetRead>();
+        res->generation = gen;
+        if (!hadAr) {
+            res->pressings = cdrip::FetchAccurateRip(toc, *stop);
+            res->fetched = !stop->Stopped();
+        } else {
+            res->pressings = std::move(existing);
+        }
+        if (!stop->Stopped() && !res->pressings.empty()) {
+            if (auto dev = cdrip::OpenDrive(drive, res->error))
+                res->det = cdrip::DetectOffset(*dev, toc, res->pressings, stop->Flag());
+        }
+        PostMessageW(nullptr, WM_APP_RIP, 3, (LPARAM)res.release());
+    });
+}
+
 // Saves the choices and hands the disc to the rip worker; the panel closes once it starts.
 void Start() {
     if (!Ready()) return;
@@ -212,6 +278,10 @@ void Start() {
     job.flac = g_rip.flac;
     job.offset = g.settings.ripOffset;
     job.threads = std::max(1u, std::thread::hardware_concurrency() / 2);
+    job.arPressings = g_rip.disc->arPressings;
+    job.arChecked = g_rip.disc->arChecked;
+    job.writeLog = true;
+    job.driveName = g_rip.disc->drive;
     g.settings.ripFlac = job.flac;
     g.settings.ripFolder = job.folder;
     SaveSettings();
@@ -226,11 +296,17 @@ void Start() {
     // The cover comes from the Cover Art Archive only when MusicBrainz covers are turned on.
     const bool cover = !job.disc.release.empty() && online::Config().covers[(int)online::CoverSource::MusicBrainz];
     if (lookup) lookup->Stop();
+    if (offsetWorker.joinable()) offsetWorker.join();
     if (reader.joinable()) reader.join();
     ripping = true;
     cancel = false;
     if (ripper.joinable()) ripper.join();
     ripper = std::thread([drive = g_rip.disc->drive, job = std::move(job), cover]() mutable {
+        if (!job.arChecked && online::Config().accurateRip && !cancel) {
+            online::Cancel arStop;
+            job.arPressings = cdrip::FetchAccurateRip(job.toc, arStop);
+            job.arChecked = !cancel;
+        }
         std::wstring error;
         auto r = std::make_unique<cdrip::Result>();
         if (cover) {
@@ -257,6 +333,7 @@ void MouseDown(float x, float y) {
     const RipGeometry G = Geom();
     if (G.go.In(x, y)) return Start();
     if (G.cancel.In(x, y)) return ClosePanel();
+    if (G.detectOffset.In(x, y)) return DetectOffsetNow();
     if (G.lookUp.In(x, y)) {
         if (Tracks() && !g_rip.disc->lookedUp) LookUp();
         return;
@@ -362,9 +439,10 @@ void Draw(const Palette& p) {
     SDL_SetRenderClipRect(g.renderer, nullptr);
     DrawText(Font::Normal, "Format", lx, TextY(G.format), p.sub);
     DrawButton(G.format, kFormats[g_rip.flac ? 0 : 1], p);
+    DrawButton(G.detectOffset, "Detect offset", p, false, Tracks() && !g_rip.detectingOffset);
     DrawButton(G.browse, "Browse...", p);
     DrawText(Font::Normal, ToUtf8(Status()), G.status.x, TextY(G.status), p.sub, G.status.w);
-    DrawButton(G.lookUp, "Look up", p, false, Tracks() && !g_rip.disc->lookedUp);
+    DrawButton(G.lookUp, "Look up", p, false, Tracks() && !g_rip.disc->lookedUp && !g_rip.detectingOffset);
     DrawButton(G.go, "Rip", p, true, Ready());
     DrawButton(G.cancel, "Cancel", p);
 }
@@ -393,6 +471,7 @@ const Ops kRipOps{
     .close = [] {
         if (lookup) lookup->Stop();
         ++generation;  // a disc still being read finds no panel to show in
+        if (offsetWorker.joinable()) offsetWorker.join();
         g_rip = RipPanel{};
     },
     .typing = true,
@@ -436,12 +515,46 @@ void CancelRip() {
     ShowMessage(L"Cancelling the rip...");
 }
 
-// On the UI thread, from WM_APP_RIP: a disc read (wParam 2), progress (0: track << 8 | percent), or the
-// finished rip (1), whose tracks join the library.
+// The offset calibration worker's result.
+void RipOffsetDone(std::unique_ptr<OffsetRead> res) {
+    if (offsetWorker.joinable()) offsetWorker.join();
+    if (g_kind != Kind::Rip || res->generation != generation) return;
+    g_rip.detectingOffset = false;
+    if (g_rip.disc && res->fetched) {
+        g_rip.disc->arPressings = std::move(res->pressings);
+        g_rip.disc->arChecked = true;
+    }
+    if (!res->error.empty()) {
+        g_rip.offsetNote = res->error;
+    } else if (!res->det.found) {
+        g_rip.offsetNote = L"Couldn't detect the drive's read offset from AccurateRip.";
+    } else {
+        const std::string signedOff = (res->det.offset > 0 ? "+" : "") + std::to_string(res->det.offset);
+        if (res->det.offset == g.settings.ripOffset) {
+            g_rip.offsetNote = L"Drive read offset (" + FromUtf8(signedOff) + L" samples) verified across " +
+                               std::to_wstring(res->det.matchedTracks) +
+                               (res->det.matchedTracks == 1 ? L" track." : L" tracks.");
+        } else if (Confirm("AccurateRip matched this drive at read offset " + signedOff + " samples (across " +
+                           std::to_string(res->det.matchedTracks) +
+                           (res->det.matchedTracks == 1 ? " track" : " tracks") +
+                           ").\n\nSave this as your CD drive read offset?",
+                           "Rip CD")) {
+            g.settings.ripOffset = res->det.offset;
+            SaveSettings();
+            g_rip.offsetNote = L"Saved drive read offset: " + FromUtf8(signedOff) + L" samples.";
+        }
+    }
+    g.redraw = true;
+}
+
+// On the UI thread, from WM_APP_RIP: a disc read (wParam 2), offset check (3), progress (0), or finish (1).
 void OnRipMessage(WPARAM wp, LPARAM lp) {
     if (wp == 2) {
         if (reader.joinable()) reader.join();
         return RipDiscRead(std::unique_ptr<DiscRead>((DiscRead*)lp));
+    }
+    if (wp == 3) {
+        return RipOffsetDone(std::unique_ptr<OffsetRead>((OffsetRead*)lp));
     }
     if (!wp) {
         const size_t i = (size_t)lp >> 8;
@@ -489,6 +602,7 @@ void OnRipMessage(WPARAM wp, LPARAM lp) {
 void StopRipper() {
     stopping = true;
     if (lookup) lookup->Stop();
+    if (offsetWorker.joinable()) offsetWorker.join();
     if (reader.joinable()) reader.join();
     cancel = true;
     if (ripper.joinable()) ripper.join();

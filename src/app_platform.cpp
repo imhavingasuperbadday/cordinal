@@ -8,6 +8,7 @@
 #include "backup.h"
 #include "crashdump.h"
 #include "customcover.h"
+#include "coverupload.h"
 #include "discord.h"
 #include "listenbrainz.h"
 #include "peaks.h"
@@ -158,14 +159,99 @@ listenbrainz::Listen MakeListen(TrackId id) {
 // ListenBrainz window
 
 // One setup window serves every service; credentials are committed after server validation.
+struct BackfillResult {
+    bool ok = false;
+    std::vector<migration::Statistics> stats;
+    std::wstring error;
+};
+constexpr UINT kBackfillProgressMsg = WM_APP + 21;
+constexpr UINT kBackfillDoneMsg = WM_APP + 22;
+
+bool PromptUsername(HWND owner, const wchar_t* title, const wchar_t* label, std::wstring& out) {
+    struct State {
+        HWND edit = nullptr;
+        std::wstring* out = nullptr;
+        bool ok = false;
+    } st{nullptr, &out, false};
+    auto proc = [](HWND h, UINT msg, WPARAM wp, LPARAM lp) -> LRESULT {
+        auto* s = (State*)GetWindowLongPtrW(h, GWLP_USERDATA);
+        switch (msg) {
+            case WM_CREATE: {
+                auto* cs = (CREATESTRUCTW*)lp;
+                s = (State*)cs->lpCreateParams;
+                SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)s);
+                auto make = [&](const wchar_t* cls, const wchar_t* text, DWORD style, int id, int x, int y, int w, int ht) {
+                    HWND c = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style,
+                        S(x), S(y), S(w), S(ht), h, (HMENU)(INT_PTR)id, g.inst, nullptr);
+                    SendMessageW(c, WM_SETFONT, (WPARAM)g.font, TRUE);
+                    ApplyControlTheme(c, g.dark);
+                    return c;
+                };
+                make(WC_STATICW, (const wchar_t*)GetPropW(h, L"PromptLabel"), SS_LEFT, 0, 12, 12, 296, 20);
+                s->edit = make(WC_EDITW, L"", ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 100, 12, 36, 296, 26);
+                make(WC_BUTTONW, L"OK", BS_DEFPUSHBUTTON | WS_TABSTOP, IDOK, 134, 74, 84, 28);
+                make(WC_BUTTONW, L"Cancel", BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL, 224, 74, 84, 28);
+                ApplyWindowTheme(h, P());
+                return 0;
+            }
+            case WM_ERASEBKGND: {
+                RECT rc; GetClientRect(h, &rc); FillRect((HDC)wp, &rc, g.surfaceBrush); return 1;
+            }
+            case WM_CTLCOLORSTATIC: return SurfaceControlColor((HDC)wp, TextColor());
+            case WM_CTLCOLOREDIT: return FieldControlColor((HDC)wp);
+            case WM_COMMAND:
+                if (LOWORD(wp) == IDOK && s) {
+                    wchar_t buf[256]{};
+                    GetWindowTextW(s->edit, buf, (int)std::size(buf));
+                    *s->out = buf;
+                    s->ok = true;
+                    DestroyWindow(h);
+                } else if (LOWORD(wp) == IDCANCEL) {
+                    DestroyWindow(h);
+                }
+                return 0;
+            case WM_CLOSE: DestroyWindow(h); return 0;
+        }
+        return DefWindowProcW(h, msg, wp, lp);
+    };
+    RegisterAppClass(L"CordinalPromptUser", proc);
+    RECT r{0, 0, S(320), S(114)};
+    AdjustWindowRectExForDpi(&r, WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME, g.dpi);
+    RECT own{};
+    GetWindowRect(owner, &own);
+    int w = r.right - r.left, hgt = r.bottom - r.top;
+    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT, L"CordinalPromptUser", title,
+                               WS_CAPTION | WS_SYSMENU, own.left + (own.right - own.left - w) / 2,
+                               own.top + (own.bottom - own.top - hgt) / 2, w, hgt, owner, nullptr, g.inst, &st);
+    SetPropW(dlg, L"PromptLabel", (HANDLE)label);
+    SendMessageW(dlg, WM_NULL, 0, 0);
+    // Set the label text before showing (WM_CREATE already ran; update static child if needed).
+    if (HWND lbl = GetWindow(dlg, GW_CHILD)) SetWindowTextW(lbl, label);
+    EnableWindow(owner, FALSE);
+    ShowWindow(dlg, SW_SHOW);
+    SetFocus(st.edit);
+    MSG msg;
+    while (IsWindow(dlg) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dlg, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    EnableWindow(owner, TRUE);
+    SetForegroundWindow(owner);
+    return st.ok && !out.empty();
+}
+
 struct LbWindow {
     HWND hwnd = nullptr, service = nullptr, intro = nullptr, token = nullptr, key = nullptr, secret = nullptr,
          keyLabel = nullptr, secretLabel = nullptr, status = nullptr, connect = nullptr, disconnect = nullptr,
-         account = nullptr, close = nullptr;
+         account = nullptr, importBtn = nullptr, close = nullptr;
     listenbrainz::Service selected = listenbrainz::Service::ListenBrainz;
     std::wstring pendingToken, authKey, authSecret, authToken, message;
-    bool checking = false;
+    bool checking = false, backfilling = false;
 } lb;
+std::thread g_backfillWorker;
+std::atomic<bool> g_backfillCancel{false};
 
 void LbStatus() {
     if (!lb.hwnd) return;
@@ -180,8 +266,10 @@ void LbStatus() {
     }
     SetWindowTextW(lb.status, text.c_str());
     SetWindowTextW(lb.connect, lb.authToken.empty() ? L"&Connect" : L"&Finish sign-in");
-    for (HWND c : {lb.connect, lb.token, lb.key, lb.secret}) EnableWindow(c, !lb.checking);
-    EnableWindow(lb.disconnect, listenbrainz::Enabled(lb.selected) || lb.checking || !lb.authToken.empty());
+    SetWindowTextW(lb.importBtn, lb.backfilling ? L"Cancel &import" : L"Import &history...");
+    for (HWND c : {lb.connect, lb.token, lb.key, lb.secret, lb.service}) EnableWindow(c, !lb.checking && !lb.backfilling);
+    EnableWindow(lb.disconnect, !lb.backfilling && (listenbrainz::Enabled(lb.selected) || lb.checking || !lb.authToken.empty()));
+    EnableWindow(lb.importBtn, !lb.checking);
 }
 void LbService() {
     bool brainz = lb.selected == listenbrainz::Service::ListenBrainz;
@@ -221,6 +309,7 @@ LRESULT CALLBACK LbProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             lb.secretLabel = make(WC_STATICW, L"API &secret", SS_LEFT, 0, 14, 160, 86, 22);
             lb.secret = make(WC_EDITW, L"", ES_AUTOHSCROLL | ES_PASSWORD | WS_BORDER | WS_TABSTOP, 104, 104, 156, 362, 26);
             lb.account = make(WC_BUTTONW, L"", BS_PUSHBUTTON | WS_TABSTOP, 105, 14, 194, 132, 26);
+            lb.importBtn = make(WC_BUTTONW, L"Import &history...", BS_PUSHBUTTON | WS_TABSTOP, 106, 154, 194, 142, 26);
             lb.status = make(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX, 0, 14, 234, 452, 64);
             lb.connect = make(WC_BUTTONW, L"&Connect", BS_DEFPUSHBUTTON | WS_TABSTOP, IDOK, 14, 310, 124, 28);
             lb.disconnect = make(WC_BUTTONW, L"&Disconnect", BS_PUSHBUTTON | WS_TABSTOP, 101, 146, 310, 116, 28);
@@ -266,10 +355,73 @@ LRESULT CALLBACK LbProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 const wchar_t* url = lb.selected == listenbrainz::Service::ListenBrainz ? L"https://listenbrainz.org/settings/" :
                     lb.selected == listenbrainz::Service::LastFm ? L"https://www.last.fm/api/account/create" : L"https://libre.fm/api-keys.php";
                 ShellExecuteW(h, L"open", url, nullptr, nullptr, SW_SHOWNORMAL);
+            } else if (LOWORD(wp) == 106) {
+                if (lb.backfilling) {
+                    g_backfillCancel = true;
+                    lb.message = L"Cancelling history import...";
+                    LbStatus();
+                    return 0;
+                }
+                auto st = listenbrainz::GetStatus(lb.selected);
+                std::wstring user = st.user;
+                std::wstring apiKey = lb.selected == listenbrainz::Service::ListenBrainz ? L"" : listenbrainz::StoredApiKey(lb.selected);
+                if (apiKey.empty() && lb.selected != listenbrainz::Service::ListenBrainz) apiKey = LbText(lb.key);
+                if (lb.selected != listenbrainz::Service::ListenBrainz && apiKey.empty()) {
+                    lb.message = L"Connect this service or enter its API key first.";
+                    LbStatus();
+                    return 0;
+                }
+                if (user.empty() && !PromptUsername(h, L"Import listening history", L"Username to import from:", user))
+                    return 0;
+                if (g_backfillWorker.joinable()) g_backfillWorker.join();
+                g_backfillCancel = false;
+                lb.backfilling = true;
+                lb.message = L"Fetching listening history...";
+                LbStatus();
+                listenbrainz::Service svc = lb.selected;
+                HWND dlg = h;
+                g_backfillWorker = std::thread([dlg, svc, user, apiKey] {
+                    auto* res = new BackfillResult{};
+                    res->ok = listenbrainz::FetchHistory(
+                        svc, user, apiKey, g_backfillCancel, res->stats, res->error,
+                        [dlg](size_t pages, size_t listens) {
+                            PostMessageW(dlg, kBackfillProgressMsg, (WPARAM)pages, (LPARAM)listens);
+                        });
+                    if (!PostMessageW(dlg, kBackfillDoneMsg, 0, (LPARAM)res)) delete res;
+                });
             } else if (LOWORD(wp) == IDCANCEL) DestroyWindow(h);
             return 0;
+        case kBackfillProgressMsg:
+            if (lb.backfilling) {
+                lb.message = L"Fetched " + std::to_wstring((size_t)lp) + L" listens (page " +
+                             std::to_wstring((size_t)wp) + L")...";
+                LbStatus();
+            }
+            return 0;
+        case kBackfillDoneMsg: {
+            std::unique_ptr<BackfillResult> res((BackfillResult*)lp);
+            if (g_backfillWorker.joinable()) g_backfillWorker.join();
+            lb.backfilling = false;
+            if (!res->ok) {
+                lb.message = res->error;
+                LbStatus();
+                return 0;
+            }
+            if (res->stats.empty()) {
+                lb.message = L"No listening history found for that account.";
+                LbStatus();
+                return 0;
+            }
+            migration::ImportBundle bundle;
+            bundle.statistics = std::move(res->stats);
+            DestroyWindow(h);
+            PreviewImportedStatistics(L"Listening history", std::move(bundle));
+            return 0;
+        }
         case WM_CLOSE: DestroyWindow(h); return 0;
         case WM_NCDESTROY:
+            g_backfillCancel = true;
+            if (g_backfillWorker.joinable()) g_backfillWorker.join();
             listenbrainz::CancelAuthorization(lb.selected); lb = LbWindow{}; return 0;
     }
     return DefWindowProcW(h, msg, wp, lp);
@@ -613,6 +765,8 @@ void DiscordTick() {
         now.albumArtist = Utf8(t.albumArtist);
         if (const AlbumEdition* edition = AlbumEditionForTrack(g.playing)) now.release = edition->musicBrainzRelease;
         now.path = g_lib.Path(g.playing);  // the track's custom cover, when it has one
+        // The cover the pane shows, re-encoded small by the art worker: only copied when it may be uploaded.
+        if (coverupload::HostEnabled() && g.artFor == g.playing) now.cover = g.artJpeg;
         now.position = g.engine.Position();
         now.duration = CurrentDuration();
         now.rate = g.speed * g.tempo;

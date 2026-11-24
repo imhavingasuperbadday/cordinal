@@ -487,6 +487,18 @@ TrackId Library::ImportTrack(const Library& source, TrackId id) {
                         &Track::date, &Track::composer, &Track::comment, &Track::grouping, &Track::label})
         copy.*member = Intern(source.View(copy.*member));
     tracks_[dest] = copy;
+    if (const WorkInfo* w = source.Work(id)) {
+        SetWork(dest, {Intern(source.View(w->work)), Intern(source.View(w->movement)), w->movementNo, w->movementTotal});
+    }
+    if (size_t n = source.CreditsCount(id)) {
+        const CreditHandle* cs = source.CreditsBegin(id);
+        std::vector<TagCredit> list;
+        list.reserve(n);
+        for (size_t i = 0; i < n; ++i)
+            list.push_back({std::string(source.View(cs[i].role)), std::string(source.View(cs[i].name))});
+        SetCredits(dest, list);
+    }
+    if (StringPool::Handle h = source.Lyrics(id)) SetLyrics(dest, source.View(h));
     return dest;
 }
 
@@ -611,6 +623,10 @@ void Library::ApplyTags(TrackId id, const TagData& d) {
     // MusicBrainz album ids live beside the library rather than in the compact Track record. They
     // are read from tags, never fetched, so offline browsing and playback never depend on a network.
     if (this == &g_lib) SetTrackMusicBrainz(id, d.musicBrainzReleaseGroup, d.musicBrainzRelease);
+    SetWork(id, {tag(d.work), tag(d.movement),
+                 (uint16_t)std::min<uint32_t>(d.movementNo, 65535),
+                 (uint16_t)std::min<uint32_t>(d.movementTotal, 65535)});
+    SetCredits(id, d.credits);
     ++revision_;
 }
 
@@ -653,9 +669,63 @@ std::vector<TrackId> Library::Compact(const std::vector<TrackId>& live) {
     return mapping;
 }
 
+void Library::SetWork(TrackId id, const WorkInfo& info) {
+    if (!Contains(id)) return;
+    if (!info.work && !info.movement && !info.movementNo && !info.movementTotal) {
+        works_.erase(id);
+        return;
+    }
+    works_[id] = info;
+}
+
+const CreditHandle* Library::CreditsBegin(TrackId id) const {
+    const auto* span = creditSpans_.find(id);
+    if (!span || span->second == 0 || span->first + span->second > creditEntries_.size()) return nullptr;
+    return creditEntries_.data() + span->first;
+}
+
+size_t Library::CreditsCount(TrackId id) const {
+    const auto* span = creditSpans_.find(id);
+    if (!span || span->first + span->second > creditEntries_.size()) return 0;
+    return span->second;
+}
+
+void Library::SetCredits(TrackId id, const std::vector<TagCredit>& credits) {
+    if (!Contains(id)) return;
+    if (credits.empty()) {
+        creditSpans_.erase(id);
+        return;
+    }
+    uint32_t start = (uint32_t)creditEntries_.size();
+    uint32_t count = 0;
+    for (const auto& c : credits) {
+        if (c.name.empty()) continue;
+        creditEntries_.push_back({Intern(c.role), Intern(c.name)});
+        ++count;
+    }
+    if (count == 0) {
+        creditSpans_.erase(id);
+        return;
+    }
+    creditSpans_[id] = {start, count};
+}
+
+void Library::SetLyrics(TrackId id, std::string_view text) {
+    if (!Contains(id)) return;
+    if (text.empty()) {
+        lyrics_.erase(id);
+        return;
+    }
+    lyrics_[id] = Intern(text);
+}
+
 size_t Library::MemoryBytes() const {
     return tracks_.Bytes() + byPath_.capacity() * sizeof(TrackId) + strings_.Bytes() +
-           favorites_.capacity() * sizeof(uint64_t);
+           favorites_.capacity() * sizeof(uint64_t) +
+           works_.size() * sizeof(TrackIdMap<WorkInfo>::Entry) +
+           creditSpans_.size() * sizeof(TrackIdMap<std::pair<uint32_t, uint32_t>>::Entry) +
+           creditEntries_.capacity() * sizeof(CreditHandle) +
+           lyrics_.size() * sizeof(TrackIdMap<StringPool::Handle>::Entry);
 }
 
 size_t Library::FavoriteCount() const {
@@ -838,6 +908,57 @@ bool LookupField(TrackId id, const std::wstring& name, std::wstring& out) {
     if (name == L"totaldiscs") return num(t.discTotal);
     if (name == L"totaltracks") return num(t.trackTotal);
     if (name == L"bpm") return num(t.bpm);
+    if (name == L"work") {
+        const WorkInfo* w = g_lib.Work(id);
+        return w && w->work && set(g_lib.Str(w->work));
+    }
+    if (name == L"movement") {
+        const WorkInfo* w = g_lib.Work(id);
+        return w && w->movement && set(g_lib.Str(w->movement));
+    }
+    if (name == L"movementnumber") {
+        const WorkInfo* w = g_lib.Work(id);
+        return w && num(w->movementNo);
+    }
+    if (name == L"movementtotal") {
+        const WorkInfo* w = g_lib.Work(id);
+        return w && num(w->movementTotal);
+    }
+    if (name == L"credits") {
+        size_t n = g_lib.CreditsCount(id);
+        if (!n) return false;
+        const CreditHandle* cs = g_lib.CreditsBegin(id);
+        std::wstring s;
+        for (size_t i = 0; i < n; ++i) {
+            if (i) s += L"; ";
+            if (cs[i].role) {
+                s += g_lib.Str(cs[i].role);
+                s += L": ";
+            }
+            s += g_lib.Str(cs[i].name);
+        }
+        return set(std::move(s));
+    }
+    static const struct { const wchar_t* field; const char* role; } creditRoles[] = {
+        {L"producer", "Producer"}, {L"conductor", "Conductor"}, {L"performer", "Performer"},
+        {L"remixer", "Remixer"}, {L"engineer", "Engineer"}, {L"lyricist", "Lyricist"}, {L"arranger", "Arranger"},
+    };
+    for (const auto& cr : creditRoles) {
+        if (name == cr.field) {
+            size_t n = g_lib.CreditsCount(id);
+            if (!n) return false;
+            const CreditHandle* cs = g_lib.CreditsBegin(id);
+            std::wstring s;
+            for (size_t i = 0; i < n; ++i) {
+                std::string_view r = g_lib.View(cs[i].role);
+                if (r == cr.role || r.starts_with(cr.role)) {
+                    if (!s.empty()) s += L"; ";
+                    s += g_lib.Str(cs[i].name);
+                }
+            }
+            return !s.empty() && set(std::move(s));
+        }
+    }
     if (name == L"play_count") return num(t.playCount);
     if (name == L"skip_count") return num(t.skipCount);
     if (name == L"rating") {

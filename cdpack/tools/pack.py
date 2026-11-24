@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent CDP1 PE64 packer/verifier (format version 3). No UPX invocation or UPX-format support."""
+"""Independent CDP1 PE64 packer/verifier (format version 4). No UPX invocation or UPX-format support."""
 import argparse
 import hashlib
 import json
@@ -14,15 +14,19 @@ import time
 import zlib
 
 
-HEADER = struct.Struct("<8s15I32s")
+HEADER = struct.Struct("<8s19I32s")
 # format.h Chunk: output bytes, input offset/bytes, output and input Adler-32, flags.
 CHUNK = struct.Struct("<6I")
 # format.h Extent: offset from memory_rva, bytes, chunk. Sorted by offset; each chunk's output is
 # the bytes of its extents in that order.
 EXTENT = struct.Struct("<3I")
 LAZY = 1  # Chunk flags: decoded when its code first runs instead of at start-up
+DETACHED = 1  # Header flags: the native image lives in private memory of its own (spec.md, "Detached images")
+# format.h hook_magic: a native image may hold one Hook, which the loader fills in.
+HOOK_MAGIC = b"CDPHOOK1\x5a\xc3\x17\x9e\x42\x08\xd1\x6b"
+HOOK_BYTES = 48
 MAGIC = b"CDPACK1\0"
-VERSION = 3
+VERSION = 4
 MAX_CHUNKS = 64
 MAX_EAGER = 8  # chunks decoded at start-up, each on its own thread
 MAX_EXTENTS = 4096
@@ -468,7 +472,7 @@ def runs(pe, pages):
     return [tuple(extent) for extent in extents]
 
 
-def layout(pe, memory, copies, count, cold, relocations):
+def layout(pe, memory, copies, count, cold, relocations, lazy_block=LAZY_BLOCK):
     """Chunks as (flags, extents): `count` eager ones over every page that is neither zero (see
     zero_pages) nor cold, then ~LAZY_BLOCK-byte blocks of cold code. Eager chunks come first, so a
     chunk index below the eager count decodes at start-up."""
@@ -480,7 +484,7 @@ def layout(pe, memory, copies, count, cold, relocations):
     block = []
     for page in sorted(cold):
         block.append(page)
-        if len(block) * 4096 >= LAZY_BLOCK:
+        if len(block) * 4096 >= lazy_block:
             pieces.append((LAZY, runs(pe, block)))
             block = []
     if block:
@@ -552,7 +556,22 @@ def profile_code(pe, map_text, profile_text):
     return ranges, len(found), len(listed)
 
 
-def pack_image(native, loader, chunks=None, cold=None, profile=None):
+def find_hook(pe, memory):
+    """RVA of the native image's Hook, or 0. It must be unique and in writable, non-code data."""
+    at = memory.find(HOOK_MAGIC)
+    if at < 0:
+        return 0
+    require(memory.find(HOOK_MAGIC, at + 1) < 0, "more than one cdpack hook")
+    section = section_of(pe, at)
+    require(section and section["flags"] & 0x80000000 and not section["flags"] & 0x20000000 and
+            at % 8 == 0 and at + HOOK_BYTES <= section["rva"] + section["raw_bytes"], "cdpack hook placement")
+    return at
+
+
+def pack_image(native, loader, chunks=None, cold=None, profile=None, detach=False, lazy_block=LAZY_BLOCK,
+               cold_cap=0):
+    """`detach` restores the native image into private memory even without cold code, which cold
+    code always implies. `cold_cap` limits how many cold chunks stay committed at once (0: no limit)."""
     pe = Pe(native)
     validate_native(pe)
     native_targets = native_relocations(pe)
@@ -569,7 +588,12 @@ def pack_image(native, loader, chunks=None, cold=None, profile=None):
     if chunks is None:
         chunks = DEFAULT_CHUNKS if pe.size - first >= CHUNKED_FROM else 1
     require(1 <= chunks <= MAX_EAGER, "chunk count")
-    pieces, zero = layout(pe, memory, copies, chunks, cold or set(), native_targets)
+    pieces, zero = layout(pe, memory, copies, chunks, cold or set(), native_targets, lazy_block)
+    lazy_count = sum(1 for flags, _ in pieces if flags & LAZY)
+    detached = bool(detach or lazy_count)
+    require(not (detached and is_dll(pe)), "a detached image needs an EXE")
+    require(0 <= cold_cap <= MAX_CHUNKS, "cold chunk cap")
+    hook_rva = find_hook(pe, memory)
     # Extents in image order. Each chunk's input is its extents' filtered bytes in that order.
     extents = []
     for index, (_, spans) in enumerate(pieces):
@@ -614,7 +638,9 @@ def pack_image(native, loader, chunks=None, cold=None, profile=None):
     metadata_bytes = (HEADER.size + len(extra) + len(copies) * 12 + len(table) * CHUNK.size +
                       len(extents) * EXTENT.size)
     stub, symbols, anchor = loader_image(loader)
-    stub_rva = pe.size
+    # A detached image keeps none of the native RVAs: the loader restores the native image into
+    # memory of its own, so the packed sections start right after the headers.
+    stub_rva = 4096 if detached else pe.size
     data_rva = align(stub_rva + len(stub))
     tls_offset = align(metadata_bytes, 16)
     aux = bytearray(56)
@@ -652,9 +678,12 @@ def pack_image(native, loader, chunks=None, cold=None, profile=None):
     workspace_bytes = 4096 + len(table) * WORKSPACE_SLOT
     reloc_rva = workspace_rva + workspace_bytes
     tls_rva = data_rva + tls_offset
+    # Windows writes the TLS index where AddressOfIndex points. An attached image lets it land in the
+    # native image's own variable; a detached one has no native RVAs, so it lands in the state page
+    # (State::tls_slot, offset 12) and the loader copies it across.
+    index_rva = workspace_rva + 12 if detached else tls_index or workspace_rva + 4
     struct.pack_into("<QQQQII", aux, 0, pe.base + tls_rva + 56, pe.base + tls_rva + 56 + len(template),
-                     pe.base + (tls_index or workspace_rva + 4), pe.base + tls_rva + 40,
-                     zero_fill, characteristics)
+                     pe.base + index_rva, pe.base + tls_rva + 40, zero_fill, characteristics)
     w64(aux, 40, pe.base + stub_rva + symbols["cdp_tls"])
     tls_fixups = [tls_rva + 56 + target - template_rva for target in native_targets
                   if template_rva <= target and target + 8 <= template_rva + len(template)]
@@ -668,36 +697,52 @@ def pack_image(native, loader, chunks=None, cold=None, profile=None):
         extra += EXTENT.pack(*extent)
     fields = [MAGIC, VERSION, metadata_bytes, 0, first, pe.size - first, compressed_offset, len(compressed),
               zlib.adler32(filtered), len(native), pe.headers, len(gaps), len(copies), tls_index, len(table),
-              len(extents), hashlib.sha256(native).digest()]
+              len(extents), DETACHED if detached else 0, hook_rva, cold_cap, 0, hashlib.sha256(native).digest()]
     metadata = bytearray(HEADER.pack(*fields)) + extra
     w32(metadata, 16, zlib.adler32(metadata))
     payload = metadata + b"\0" * (tls_offset - len(metadata)) + aux
     payload += b"\0" * (compressed_offset - len(payload)) + compressed
-    sections = [(b"CDP0", first, pe.size - first, b"", 0xc0000080),
-                (b"CDPX", stub_rva, len(stub), stub, 0x60000020),
-                (b"CDP1", data_rva, len(payload), payload, 0x40000040)]
+    sections = [] if detached else [(b"CDP0", first, pe.size - first, b"", 0xc0000080)]
+    sections += [(b"CDPX", stub_rva, len(stub), stub, 0x60000020),
+                 (b"CDP1", data_rva, len(payload), payload, 0x40000040)]
     if resources:
         sections.append((b".rsrc", resource_rva, len(resources), resources, 0x40000040))
     sections += [(b"CDPW", workspace_rva, workspace_bytes, b"", 0xc0000080),
                  (b".reloc", reloc_rva, len(relocation), relocation, 0x42000040)]
+    image_end = align(reloc_rva + len(relocation))
+    pad = 0
+    if detached and image_end < pe.size:
+        # Read-only zero pages, so the packed image spans at least the native one: Windows' module
+        # entry keeps the packed size, and the loader reserves that much for the native image, so
+        # every native address falls inside the module. Read-only, they cost no commit. RCDATA
+        # payloads, which only the restored image holds, point here and read as zeros from the file,
+        # as they read from CDP0 in an attached image.
+        pad = pe.size - image_end
+        sections.append((b"CDPZ", image_end, pad, b"", 0x40000080))
+        for leaf in leaves:
+            if leaf["path"][0] == "#10" and leaf["bytes"] <= pad:
+                w32(resources, leaf["entry"], image_end)
+        image_end = pe.size
     header_bytes = align(pe.table + len(sections) * 40, 512)
+    require(not detached or header_bytes <= stub_rva, "packed headers overlap CDPX")
     result = bytearray(header_bytes)
     result[:pe.table] = native[:pe.table]
     struct.pack_into("<H", result, pe.pe + 6, len(sections))
     w32(result, pe.pe + 12, 0); w32(result, pe.pe + 16, 0)
     w32(result, pe.opt + 4, align(len(stub), 512))
     w32(result, pe.opt + 8, align(len(payload), 512) + align(len(resources), 512) + align(len(relocation), 512))
-    w32(result, pe.opt + 12, pe.size - first + workspace_bytes)
+    w32(result, pe.opt + 12, (0 if detached else pe.size - first) + workspace_bytes + pad)
     w32(result, pe.opt + 16, stub_rva + symbols["cdp_entry"])
     w32(result, pe.opt + 20, stub_rva)
     w32(result, pe.opt + 36, 512)
-    w32(result, pe.opt + 56, align(reloc_rva + len(relocation)))
+    w32(result, pe.opt + 56, image_end)
     w32(result, pe.opt + 60, header_bytes); w32(result, pe.opt + 64, 0)
     result[pe.opt + 112:pe.opt + 240] = b"\0" * 128
     directories = {0: (data_rva + export_offset, len(export)) if export else (0, 0),
                    1: (data_rva + import_offset, import_bytes) if import_bytes else (0, 0),
                    2: (resource_rva, len(resources)) if resources else (0, 0),
-                   3: pe.directory(3), 5: (reloc_rva, len(relocation)), 9: (tls_rva, 40), 12: iat}
+                   3: (0, 0) if detached else pe.directory(3), 5: (reloc_rva, len(relocation)),
+                   9: (tls_rva, 40), 12: iat}
     for index, pair in directories.items():
         struct.pack_into("<II", result, pe.opt + 112 + index * 8, *pair)
     for i, (name, rva, virtual, data, flags) in enumerate(sections):
@@ -710,7 +755,7 @@ def pack_image(native, loader, chunks=None, cold=None, profile=None):
     return bytes(result), bytes(filtered), dict(DecoderBytes=len(stub), CompressedBytes=len(compressed),
         ExpandedBytes=pe.size - first, MetadataBytes=metadata_bytes, ResourcePayloads=len(leaves),
         DictionaryBytes=dictionary, FilterProfile=1, FormatVersion=VERSION, Chunks=len(table),
-        LazyChunks=sum(1 for flags, _ in pieces if flags & LAZY),
+        LazyChunks=lazy_count, Detached=detached, ColdCap=cold_cap, HookRva=hook_rva,
         LazyBytes=sum(table[i][0] for i in range(len(table)) if table[i][5] & LAZY),
         Extents=len(extents), ZeroPagesSkipped=zero)
 
@@ -725,7 +770,8 @@ def unpack_image(packed, decoder, scratch):
     fields = HEADER.unpack_from(packed, at)
     (magic, version, metadata_bytes, checksum, first, expanded, compressed_offset, compressed_bytes,
      memory_adler, file_bytes, native_header_bytes, gap_count, copy_count, tls_index, chunk_count,
-     extent_count, digest) = fields
+     extent_count, header_flags, hook_rva, cold_cap, _, digest) = fields
+    require(header_flags in (0, DETACHED) and cold_cap <= MAX_CHUNKS, "header flags")
     require(magic == MAGIC and version == VERSION, "CDP1 magic/version")
     require(1 <= chunk_count <= MAX_CHUNKS and 1 <= extent_count <= MAX_EXTENTS, "chunk/extent counts")
     require(HEADER.size <= metadata_bytes <= section["raw_bytes"], "metadata extent")
@@ -758,6 +804,7 @@ def unpack_image(packed, decoder, scratch):
     for index, (output_bytes, input_at, input_bytes, adler, input_adler, flags) in enumerate(chunks):
         require(flags in (0, LAZY) and output_bytes == totals[index] and output_bytes and input_bytes,
                 "chunk fields")
+        require(not flags & LAZY or header_flags & DETACHED, "cold chunks need a detached image")
     decoded = bytearray(expanded)
     with tempfile.TemporaryDirectory(prefix="verify-", dir=scratch) as temp:
         source, destination = Path(temp) / "stream.packed", Path(temp) / "memory.bin"
@@ -851,6 +898,8 @@ def main():
     parser.add_argument("--report", type=Path)
     parser.add_argument("--profile", type=Path, help="hot-function profile from tools/make-code-profile.py")
     parser.add_argument("--map", type=Path, help="linker map of the input image, with --profile")
+    parser.add_argument("--detach", action="store_true", help="restore into private memory without cold code")
+    parser.add_argument("--cold-cap", type=int, default=0, help="most cold chunks committed at once (0: no limit)")
     args = parser.parse_args()
     tools = args.tools.resolve()
     if args.mode == "check-loader":
@@ -865,7 +914,8 @@ def main():
         if args.profile:
             profile = (args.map.read_text(errors="replace"), args.profile.read_text())
         start = time.perf_counter()
-        packed, expanded, report = pack_image(source, tools / "loader.exe", profile=profile)
+        packed, expanded, report = pack_image(source, tools / "loader.exe", profile=profile, detach=args.detach,
+                                              cold_cap=args.cold_cap)
         elapsed = (time.perf_counter() - start) * 1000
         restored = unpack_image(packed, tools / "decode.exe", tools)
         require(restored == source, "independent full-file round trip")

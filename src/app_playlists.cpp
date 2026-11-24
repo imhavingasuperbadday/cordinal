@@ -711,7 +711,8 @@ void ShowListContextMenu(POINT pt) {
 // A row's right-click menu for the selection. Every item has its own access key, so one letter runs
 // it (the self-test checks), and the same command keeps the same name it has in the menu bar.
 HMENU BuildListContextMenu() {
-    UINT en = !SelectedTracks().empty() ? MF_ENABLED : MF_GRAYED;
+    const std::vector<TrackId> selected = SelectedTracks();
+    const UINT en = !selected.empty() ? MF_ENABLED : MF_GRAYED;
     HMENU m = CreatePopupMenu();
     AppendMenuW(m, MF_STRING | en, IDM_PLAY_SEL, L"&Play");
     SetMenuDefaultItem(m, IDM_PLAY_SEL, FALSE);
@@ -719,17 +720,20 @@ HMENU BuildListContextMenu() {
     AppendMenuW(m, MF_STRING | en, IDM_QUEUE_ADD, L"Add to &queue\tCtrl+Q");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     PlaylistKind kind = Active().kind;
+    bool addedListOps = false;
     if (kind == PlaylistKind::Inbox) {
         AppendMenuW(m, MF_STRING | en, IDM_INBOX_ACCEPT, L"Add to &library");
         AppendMenuW(m, MF_STRING | en, IDM_EXCLUDE, L"&Remove from library...");
+        addedListOps = true;
     } else if (kind == PlaylistKind::Library) {
         AppendMenuW(m, MF_STRING | en, IDM_EXCLUDE, L"&Remove from library...\tDel");
+        addedListOps = true;
     } else if (Active().Editable()) {
         AppendMenuW(m, MF_STRING | en, IDM_REMOVE, L"&Remove\tDel");
         AppendMenuW(m, MF_STRING | en, IDM_CROP, L"&Keep only selected tracks");
+        addedListOps = true;
     }
-    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    const std::vector<TrackId> selected = SelectedTracks();
+    if (addedListOps) AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     const bool allFavorites = !selected.empty() &&
         std::all_of(selected.begin(), selected.end(), [](TrackId id) { return g_lib.Favorite(id); });
     AppendMenuW(m, MF_STRING | en | (allFavorites ? MF_CHECKED : 0), IDM_FAVORITE, L"&Favorite\tCtrl+D");
@@ -742,7 +746,7 @@ HMENU BuildListContextMenu() {
     AppendMenuW(gain, MF_STRING | rg, IDM_RG_WRITE_TAGS, L"&Write ReplayGain tags");
     AppendMenuW(m, MF_POPUP | en, (UINT_PTR)gain, L"Replay&Gain");
     AppendMenuW(m, MF_STRING | en, IDM_SHOW_IN_EXPLORER, L"S&how in Explorer");
-    AppendMenuW(m, MF_STRING | en, IDM_ORGANIZE, L"&Organize files...");
+    AppendMenuW(m, MF_STRING | (en == MF_ENABLED && !OrganizeBusy() ? MF_ENABLED : MF_GRAYED), IDM_ORGANIZE, L"&Organize files...");
     AppendMenuW(m, MF_STRING | (en == MF_ENABLED && !ConvertBusy() ? MF_ENABLED : MF_GRAYED), IDM_CONVERT, L"Con&vert...");
     AppendMenuW(m, MF_STRING | (en == MF_ENABLED && !CopyBusy() ? MF_ENABLED : MF_GRAYED), IDM_COPY_TO, L"Cop&y to folder or device...");
     AppendMenuW(m, MF_STRING | en, IDM_PROPERTIES, L"Edit &tags...\tAlt+Enter");
@@ -756,7 +760,7 @@ HMENU BuildListContextMenu() {
     AppendMenuW(cover, MF_STRING | (ClipboardMayHoldCover() ? MF_ENABLED : MF_GRAYED), IDM_COVER_PASTE,
                 L"&Paste image from clipboard");
     AppendMenuW(cover, MF_STRING, IDM_FIND_COVER, L"&Search online...");
-    if (en == MF_ENABLED && HasCustomCover(SelectedTracks())) {
+    if (en == MF_ENABLED && HasCustomCover(selected)) {
         AppendMenuW(cover, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(cover, MF_STRING, IDM_RESTORE_COVER, L"Restore origi&nal cover");
     }
@@ -768,6 +772,7 @@ HMENU BuildListContextMenu() {
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, IDM_ADD_FILES, L"&Add files...");
     AppendMenuW(m, MF_STRING, IDM_ADD_FOLDER, L"Import fol&der once...");
+    ApplyShortcutLabels(m);
     return m;
 }
 
@@ -799,6 +804,7 @@ HMENU BuildTabContextMenu(int index) {
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, IDM_EXPORT_M3U, L"&Save as...");
     AppendMenuW(m, MF_STRING | (index >= 0 && !CopyBusy() ? MF_ENABLED : MF_GRAYED), IDM_COPY_PL, L"Cop&y to folder or device...");
+    ApplyShortcutLabels(m);
     return m;
 }
 

@@ -12,6 +12,8 @@ param(
     [uint32]$Seed = 1,
     [ValidateRange(1, 86400)][int]$TimeoutSeconds = 180,
     [switch]$NoBuild,
+    # Fast non-LTCG dev build (build\fast\cordinal-test.exe): skips /GL, /LTCG, and linking cordinal.exe.
+    [switch]$Fast,
     # Runs the suites that cover the files changed since -Since (default HEAD, so uncommitted and
     # untracked work), chosen by tools\test-map.psd1. With -List it prints the choice and its reasons.
     [switch]$Changed,
@@ -47,10 +49,20 @@ function Show-Path([string]$path) {
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $root
-if (!$NoBuild) { & (Join-Path $PSScriptRoot 'build.ps1') -Unpacked }
-$exe = @('build\unpacked\cordinal-test.exe', 'build\cordinal-test.exe') |
-    Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-if (!$exe) { throw 'cordinal-test.exe is missing. Run build.bat unpacked first.' }
+if (!$NoBuild) {
+    if ($Fast) { & (Join-Path $PSScriptRoot 'build.ps1') -Fast -TestOnly }
+    else { & (Join-Path $PSScriptRoot 'build.ps1') -Unpacked }
+}
+$exe = if ($Fast) {
+    @('build\fast\cordinal-test.exe') | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+} else {
+    @('build\unpacked\cordinal-test.exe', 'build\cordinal-test.exe') |
+        Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+}
+if (!$exe) {
+    $hint = if ($Fast) { 'build.bat fast test-only' } else { 'build.bat unpacked' }
+    throw "cordinal-test.exe is missing. Run $hint first."
+}
 $exe = (Resolve-Path -LiteralPath $exe).Path
 
 # Requirements come from the executable, so there is no second feature list to maintain.

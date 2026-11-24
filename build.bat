@@ -5,19 +5,22 @@ rem
 rem   build.bat              local experimental packed build (with the address filter)
 rem   build.bat stock-nrv    stock UPX packed build
 rem   build.bat unpacked     development build, plain executables, no UPX download
+rem   build.bat fast         fast dev build: separate build\obj-fast\, skips /GL & /LTCG
+rem   build.bat test-only    link only cordinal-test.exe (combines with fast or unpacked)
 rem   build.bat full         ignore the incremental record and rebuild everything
 rem   build.bat experimental  local development build with the sibling UPX research decoder
 rem   build.bat experimental-addresses  also use its smaller x64 address-filter format
 rem   build.bat cdpack       release build: cordinal's own packer (needs LLVM-MinGW clang, Python 3.14)
 rem   build.bat themes       also include the themes beyond Light and Dark
+rem   build.bat verbose      keep full cl.exe filename echo output
 setlocal
 cd /d "%~dp0"
 
 set "ARGS="
 :args
 if "%~1"=="" goto run
-if /i "%~1"=="unpacked" (set "ARGS=%ARGS% -Unpacked") else if /i "%~1"=="full" (set "ARGS=%ARGS% -Full") else if /i "%~1"=="experimental" (set "ARGS=%ARGS% -Experimental") else if /i "%~1"=="experimental-addresses" (set "ARGS=%ARGS% -ExperimentalAddresses") else if /i "%~1"=="cdpack" (set "ARGS=%ARGS% -Cdpack") else if /i "%~1"=="stock-nrv" (set "ARGS=%ARGS% -StockNrv") else if /i "%~1"=="themes" (set "ARGS=%ARGS% -Themes") else (
-    echo Usage: build.bat [unpacked ^| experimental ^| experimental-addresses ^| cdpack ^| stock-nrv] [full] [themes]
+if /i "%~1"=="unpacked" (set "ARGS=%ARGS% -Unpacked") else if /i "%~1"=="fast" (set "ARGS=%ARGS% -Fast") else if /i "%~1"=="test-only" (set "ARGS=%ARGS% -TestOnly") else if /i "%~1"=="verbose" (set "ARGS=%ARGS% -VerboseBuild") else if /i "%~1"=="full" (set "ARGS=%ARGS% -Full") else if /i "%~1"=="experimental" (set "ARGS=%ARGS% -Experimental") else if /i "%~1"=="experimental-addresses" (set "ARGS=%ARGS% -ExperimentalAddresses") else if /i "%~1"=="cdpack" (set "ARGS=%ARGS% -Cdpack") else if /i "%~1"=="stock-nrv" (set "ARGS=%ARGS% -StockNrv") else if /i "%~1"=="themes" (set "ARGS=%ARGS% -Themes") else (
+    echo Usage: build.bat [fast ^| unpacked ^| experimental ^| experimental-addresses ^| cdpack ^| stock-nrv] [test-only] [full] [themes] [verbose]
     exit /b 2
 )
 shift

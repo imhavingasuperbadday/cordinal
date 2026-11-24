@@ -5,13 +5,17 @@
 // an offline spell or a closed app. A worker per service sends them; the UI thread only queues work
 // and reads the status. Nothing here blocks the UI thread on the network.
 #pragma once
+#include "migration.h"
 #include <windows.h>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <map>
+#include <vector>
 namespace web { struct HttpReply; }
 
 namespace listenbrainz {
@@ -72,6 +76,19 @@ Status GetStatus(Service service = Service::ListenBrainz);
 // The JSON object for one listen, or empty when the artist or title is missing. The timestamp
 // is included only when withTimestamp is set.
 std::string ListenJson(const Listen& l, bool withTimestamp);
+
+// History backfill: pure response parsers, aggregation into migration::Statistics, and synchronous
+// paginated fetchers (run on a worker thread; respect SetHttpForTest).
+bool ParseListenBrainzListens(std::string_view json, std::vector<Listen>& out, uint32_t& oldestTs,
+                              bool& hasMore);
+bool ParseLastFmRecentTracks(std::string_view json, std::vector<Listen>& out, uint32_t& page,
+                             uint32_t& totalPages);
+std::vector<migration::Statistics> AggregateListens(const std::vector<Listen>& listens);
+std::wstring StoredApiKey(Service service);
+bool FetchHistory(Service service, const std::wstring& user, const std::wstring& apiKey,
+                  const std::atomic<bool>& cancel, std::vector<migration::Statistics>& out,
+                  std::wstring& error,
+                  const std::function<void(size_t pages, size_t listens)>& onProgress = {});
 
 // Self-test hook: while disabled, the worker never sends, so tests stay off the network.
 void SetSendingDisabledForTest(bool disabled);

@@ -183,22 +183,28 @@ void ActivateRow(int album, int track) {
     }
 }
 
-// Double-click an artist tile: reveal the browser, point its album-artist pane at this artist, and
-// switch to Albums. Falls back to the second pane if no pane currently shows album artist.
+// Double-click an artist tile: filter to albums they made and tracks they appeared on or produced,
+// without altering Album Artist, and switch to Albums & Tracks.
 void ShowArtist(int artist) {
     if (artist < 0 || artist >= (int)v.artists.size()) return;
     StringPool::Handle name = v.artists[artist].name;
-    if (!g.browserVisible) {
-        g.browserVisible = true;
-        Layout();
+    if (!name) {
+        if (!g.browserVisible) {
+            g.browserVisible = true;
+            Layout();
+        }
+        int pane = 1;
+        for (int i = 0; i < 3; ++i)
+            if (g.panes[i].field == BrowseField::AlbumArtist) pane = i;
+        g.panes[pane].field = BrowseField::AlbumArtist;
+        SelectBrowserValue(BrowseField::AlbumArtist, 0);
+        SetLibraryMode(LibraryMode::Albums);
+        return;
     }
-    // Show the artist through the browser pane listing album artists (or the second pane).
-    int pane = 1;
-    for (int i = 0; i < 3; ++i)
-        if (g.panes[i].field == BrowseField::AlbumArtist) pane = i;
-    g.panes[pane].field = BrowseField::AlbumArtist;
-    SelectBrowserValue(BrowseField::AlbumArtist, name ? Split1(name) : 0);
-    SetLibraryMode(LibraryMode::Albums);
+    for (BrowserPane& pane : g.panes) pane.selected.clear();
+    std::wstring query = L"person:\"" + g_lib.Str(name) + L"\"";
+    SetWindowTextW(g.search, query.c_str());
+    SetLibraryMode(LibraryMode::AlbumTracks);
 }
 
 void OnClick(int x, int y, bool dbl, WPARAM keys) {

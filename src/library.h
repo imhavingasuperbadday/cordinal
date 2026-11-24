@@ -6,6 +6,7 @@
 // A path is stored as folder handle + file name handle; playlists hold 32-bit track ids.
 #pragma once
 #include "tags.h"
+#include "track_set.h"
 
 #include <windows.h>
 
@@ -239,6 +240,15 @@ private:
     size_t size_ = 0;
 };
 
+struct WorkInfo {
+    StringPool::Handle work = 0, movement = 0;
+    uint16_t movementNo = 0, movementTotal = 0;
+};
+
+struct CreditHandle {
+    StringPool::Handle role = 0, name = 0;
+};
+
 class Library {
 public:
     // Returns the existing track for a path, or a new unloaded one.
@@ -284,6 +294,17 @@ public:
         favorites_[word] = on ? before | bit : before & ~bit;
     }
     size_t FavoriteCount() const;
+    const WorkInfo* Work(TrackId id) const { return works_.find(id); }
+    void SetWork(TrackId id, const WorkInfo& info);
+    const CreditHandle* CreditsBegin(TrackId id) const;
+    size_t CreditsCount(TrackId id) const;
+    void SetCredits(TrackId id, const std::vector<TagCredit>& credits);
+    const TrackIdMap<WorkInfo>& Works() const { return works_; }
+    const TrackIdMap<std::pair<uint32_t, uint32_t>>& CreditSpans() const { return creditSpans_; }
+    const std::vector<CreditHandle>& CreditEntries() const { return creditEntries_; }
+    StringPool::Handle Lyrics(TrackId id) const { const auto* h = lyrics_.find(id); return h ? *h : 0; }
+    void SetLyrics(TrackId id, std::string_view text);
+    const TrackIdMap<StringPool::Handle>& LyricsMap() const { return lyrics_; }
     std::wstring Str(StringPool::Handle h) const { return FromUtf8(strings_.Get(h)); }
     std::string_view View(StringPool::Handle h) const { return strings_.Get(h); }
     StringPool::Handle Intern(std::string_view s) { return strings_.Intern(s); }
@@ -300,6 +321,10 @@ private:
     TrackStore tracks_;
     StringPool strings_;
     std::vector<uint64_t> favorites_;  // a bit per track id
+    TrackIdMap<WorkInfo> works_;       // sparse: only tracks with work/movement tags
+    TrackIdMap<std::pair<uint32_t, uint32_t>> creditSpans_;  // (offset, count) into creditEntries_
+    std::vector<CreditHandle> creditEntries_;
+    TrackIdMap<StringPool::Handle> lyrics_;  // sparse: only tracks with indexed local/embedded lyrics
     std::vector<TrackId> byPath_;  // open-addressing index on (dir, file); empty = UINT32_MAX
     uint32_t revision_ = 1;
     void Index(TrackId id);
@@ -467,7 +492,7 @@ bool MatchesTrack(const Library& library, TrackId id, const std::vector<std::wst
 // so adjacent tracks with shared tags reuse Unicode conversion and linguistic matches.
 class TrackMatcher {
 public:
-    TrackMatcher(const Library& library, const std::vector<std::wstring>& words) : library_(library), words_(words) {}
+    TrackMatcher(const Library& library, const std::vector<std::wstring>& words);
     bool Matches(TrackId id);
 private:
     struct Field {
@@ -477,12 +502,20 @@ private:
     };
     const Library& library_;
     const std::vector<std::wstring>& words_;
+    std::vector<std::wstring> foldedWords_;
+    uint32_t now_ = 0;
     Field fields_[13];
     // A grouped track also matches its edition label and group title. Kept out of fields_ because
     // most tracks have no edition and pay nothing for the extra searchable text.
     TrackId editionTrack_ = kInvalidTrack;
     std::wstring editionText_;
     Field edition_;
+    TrackId extraTrack_ = kInvalidTrack;
+    std::wstring extraText_;
+    Field extra_;
+    TrackId lyricsTrack_ = kInvalidTrack;
+    std::wstring lyricsText_;
+    Field lyrics_;
 };
 void SanitizePlaylistPosition(Playlist& playlist);
 

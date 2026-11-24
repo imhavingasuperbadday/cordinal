@@ -105,25 +105,17 @@ void Reshuffle(int first) {
         g.shufflePos = first >= 0 ? 0 : -1;
         return;
     }
+    std::vector<double> weights;
+    if (g.settings.taste || g.settings.skipAwareShuffle)
+        weights = OrderWeights(g_lib, Queue(), kInvalidTrack, UnixNow(), g.settings.taste);
     int n = (int)Queue().size();
-    if (g.settings.taste || g.settings.skipAwareShuffle) {
-        g.shuffleOrder.clear();
-        g.shuffleOrder.reserve(n);
-        for (int i = 0; i < n; ++i) if (i != first) g.shuffleOrder.push_back((uint32_t)i);
-        ShuffleByWeights(g.shuffleOrder, OrderWeights(g_lib, Queue(), kInvalidTrack, UnixNow(), g.settings.taste), g.rng);
-        std::reverse(g.shuffleOrder.begin(), g.shuffleOrder.end());
-        if (first >= 0 && first < n) g.shuffleOrder.insert(g.shuffleOrder.begin(), (uint32_t)first);
-        g.shufflePos = first >= 0 && first < n ? 0 : -1;
-        return;
+    ShuffleTracks(g.shuffleOrder, Queue(), g.rng, first, weights.empty() ? nullptr : &weights);
+    if (first >= 0 && first < n) {
+        g.shuffleOrder.insert(g.shuffleOrder.begin(), (uint32_t)first);
+        g.shufflePos = 0;
+    } else {
+        g.shufflePos = -1;
     }
-    g.shuffleOrder.resize(n);
-    for (int i = 0; i < n; ++i) g.shuffleOrder[i] = i;
-    std::shuffle(g.shuffleOrder.begin(), g.shuffleOrder.end(), g.rng);
-    if (first >= 0) {
-        auto it = std::find(g.shuffleOrder.begin(), g.shuffleOrder.end(), first);
-        if (it != g.shuffleOrder.end()) std::iter_swap(g.shuffleOrder.begin(), it);
-    }
-    g.shufflePos = first >= 0 ? 0 : -1;
 }
 
 // The queue index after `index` (or -1 at the end), following shuffle and repeat. `manual` is a

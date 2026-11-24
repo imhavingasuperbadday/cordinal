@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -26,7 +27,7 @@ namespace online {
 
 // The version is kept with the others in tools/check-updates.ps1.
 const char kRequestHeaders[] =
-    "User-Agent: cordinal/0.1.18 (https://github.com/imhavingasuperbadday/cordinal)\r\n"
+    "User-Agent: cordinal/0.1.19 (https://github.com/imhavingasuperbadday/cordinal)\r\n"
     "Accept: application/json\r\n";
 
 namespace {
@@ -59,7 +60,7 @@ int Int(const web::JsonValue& value) { return atoi(value.text.c_str()); }
 
 Cancel::Cancel() {
 #ifdef _WIN32
-    session_ = WinHttpOpen(L"cordinal/0.1.18 (https://github.com/imhavingasuperbadday/cordinal)",
+    session_ = WinHttpOpen(L"cordinal/0.1.19 (https://github.com/imhavingasuperbadday/cordinal)",
                            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
 #endif
 }
@@ -923,6 +924,45 @@ TextImage ImageFromText(std::string_view text, Cancel& cancel, std::string& imag
     if (InspectImage(image, w, h) != ImageType::None) return TextImage::Got;
     image.clear();
     return TextImage::Failed;
+}
+
+std::string HostCover(const std::string& image, Cancel& cancel) {
+    const bool png = image.size() >= 8 && !memcmp(image.data(), "\x89PNG", 4);
+    const bool jpeg = image.size() >= 3 && (unsigned char)image[0] == 0xFF && (unsigned char)image[1] == 0xD8;
+    if ((!png && !jpeg) || image.size() > kMaxHostedBytes || cancel.Stopped()) return {};
+    void* session = cancel.Session();
+#ifdef _WIN32
+    if (!session) return {};  // stopped: never fall back to an uncancellable session
+#endif
+    // Litterbox's documented form: the request type, how long to keep the file, and the file itself.
+    const std::string boundary = "cordinal-cover-7d3f9a21c4e85b60";
+    std::string body;
+    body.reserve(image.size() + 512);
+    auto field = [&](const char* name, const std::string& value) {
+        body += "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + name + "\"\r\n\r\n" + value + "\r\n";
+    };
+    field("reqtype", "fileupload");
+    field("time", std::to_string(kHostedHours) + "h");
+    body += "--" + boundary + "\r\nContent-Disposition: form-data; name=\"fileToUpload\"; filename=\"cover." +
+            (png ? "png" : "jpg") + "\"\r\nContent-Type: image/" + (png ? "png" : "jpeg") + "\r\n\r\n";
+    body += image;
+    body += "\r\n--" + boundary + "--\r\n";
+    const std::string headers =
+        std::string(kRequestHeaders) + "Content-Type: multipart/form-data; boundary=" + boundary + "\r\n";
+    web::HttpReply r = web::HttpFetch(session, "https://litterbox.catbox.moe/resources/internals/api.php", "POST", body,
+                                      headers, 30000, 4096);
+    if (cancel.Stopped() || r.status != 200) return {};
+    return HostedAddress(r.body);
+}
+
+std::string HostedAddress(std::string_view reply) {
+    // The reply is the address alone. Anything else (an error page, a stray character) is not shown.
+    while (!reply.empty() && (unsigned char)reply.back() <= ' ') reply.remove_suffix(1);
+    while (!reply.empty() && (unsigned char)reply.front() <= ' ') reply.remove_prefix(1);
+    if (!reply.starts_with("https://litter.catbox.moe/") || reply.size() <= 26 || reply.size() > 256 ||
+        reply.find_first_of("\"'<>\\ \t\r\n") != std::string_view::npos)
+        return {};
+    return std::string(reply);
 }
 
 bool FolderHasCover(const std::wstring& dir) {

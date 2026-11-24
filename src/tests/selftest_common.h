@@ -105,6 +105,7 @@ void TestFavoritesSection(const std::wstring& scratch);
 void TestLibraryDb(const std::wstring& scratch);
 void TestAlbumEditions(const std::wstring& scratch);
 void TestAlbumMaker(const std::wstring& scratch);
+void TestLibraryLint(const std::wstring& fixturesMedia, const std::wstring& scratch);
 void TestPlayLog(const std::wstring& scratch);
 void TestListeningModel();
 void TestTaste(const std::wstring& scratch);
@@ -122,6 +123,7 @@ void TestLibraryFolders(const std::wstring& scratch);
 void TestTagUndo(const std::wstring& media, const std::wstring& scratch);
 void TestAudioHash(const std::wstring& media, const std::wstring& scratch);
 void TestScanMerge();
+void TestSync(const std::wstring& scratch);
 
 // Audio checks (selftest_audio.cpp, selftest_engine.cpp, selftest_gamemusic.cpp).
 void TestGapless(const std::wstring& dir);

@@ -226,4 +226,88 @@ void TestMigration(const std::wstring& scratch) {
           L"corrupted backup fixture prepared");
     Check(!backup::Read(folder, reopened, readIni, error) && !error.empty(),
           L"backup checksums reject corruption before a profile can be replaced");
+
+    batch.Next(L"iTunes Library.xml, MusicBee CSV/TSV, XSPF playlists and metadata-fallback matching import cleanly");
+    const std::string itunesXml =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<!DOCTYPE plist PUBLIC \"-//Apple Computer//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+        "<plist version=\"1.0\"><dict>\n"
+        "  <key>Tracks</key><dict>\n"
+        "    <key>101</key><dict>\n"
+        "      <key>Track ID</key><integer>101</integer>\n"
+        "      <key>Name</key><string>One &amp; Only</string>\n"
+        "      <key>Artist</key><string>Bj\xC3\xB6rk</string>\n"
+        "      <key>Album</key><string>Debut</string>\n"
+        "      <key>Total Time</key><integer>210000</integer>\n"
+        "      <key>Date Added</key><date>2021-03-04T05:06:07Z</date>\n"
+        "      <key>Play Count</key><integer>19</integer>\n"
+        "      <key>Skip Count</key><integer>2</integer>\n"
+        "      <key>Play Date UTC</key><date>2024-05-06T07:08:09Z</date>\n"
+        "      <key>Rating</key><integer>80</integer>\n"
+        "      <key>Location</key><string>file://localhost/D:/Music/Bj%C3%B6rk/One.flac</string>\n"
+        "    </dict>\n"
+        "    <key>102</key><dict>\n"
+        "      <key>Track ID</key><integer>102</integer>\n"
+        "      <key>Name</key><string>Computed Only</string>\n"
+        "      <key>Artist</key><string>Artist B</string>\n"
+        "      <key>Rating</key><integer>100</integer>\n"
+        "      <key>Rating Computed</key><true/>\n"
+        "      <key>Location</key><string>file://localhost/D:/Music/Two.flac</string>\n"
+        "    </dict>\n"
+        "  </dict>\n"
+        "  <key>Playlists</key><array>\n"
+        "    <dict><key>Name</key><string>Library</string><key>Master</key><true/><key>Playlist Items</key><array><dict><key>Track ID</key><integer>101</integer></dict></array></dict>\n"
+        "    <dict><key>Name</key><string>Music</string><key>Distinguished Kind</key><integer>4</integer><key>Playlist Items</key><array><dict><key>Track ID</key><integer>101</integer></dict></array></dict>\n"
+        "    <dict><key>Name</key><string>Favorites</string><key>Playlist Items</key><array><dict><key>Track ID</key><integer>101</integer></dict></array></dict>\n"
+        "  </array>\n"
+        "</dict></plist>\n";
+    migration::ImportBundle bundle;
+    migration::ImportFormat fmt = migration::ImportFormat::Unknown;
+    const bool itunesOk = migration::ReadImportBytes(itunesXml, "Library", bundle, fmt, error);
+    Check(itunesOk && fmt == migration::ImportFormat::ItunesXml && bundle.statistics.size() == 2 &&
+              bundle.statistics[0].title == "One & Only" && bundle.statistics[0].count == 19 &&
+              bundle.statistics[0].skips == 2 && bundle.statistics[0].rating == 80 &&
+              bundle.statistics[0].hasRating && !bundle.statistics[1].hasRating &&
+              bundle.playlists.size() == 1 && bundle.playlists[0].name == "Favorites" &&
+              bundle.playlists[0].tracks.size() == 1,
+          L"iTunes Library.xml parses tracks, ignores Rating Computed, decodes URIs and skips built-in playlists: %ls",
+          error.c_str());
+
+    const std::string mbTsv =
+        "Path\tTitle\tArtist\tPlay Count\tSkip Count\tRating\tDate Added\tLast Played\tPlaylist\n"
+        "C:\\Old\\Song.mp3\tOne & Only\tBj\xC3\xB6rk\t11\t1\t4.5\t2022-01-02 03:04:05\t2024-01-02T03:04:05Z\tRoadtrip\n";
+    migration::ImportBundle mbBundle;
+    const bool mbOk = migration::ReadImportBytes(mbTsv, "Export", mbBundle, fmt, error);
+    Check(mbOk && fmt == migration::ImportFormat::MusicBeeCsv && mbBundle.statistics.size() == 1 &&
+              mbBundle.statistics[0].count == 11 && mbBundle.statistics[0].skips == 1 &&
+              mbBundle.statistics[0].rating == 90 && mbBundle.playlists.size() == 1 &&
+              mbBundle.playlists[0].name == "Roadtrip",
+          L"MusicBee TSV export parses flexible headers, half-star ratings, dates and playlists: %ls",
+          error.c_str());
+
+    const std::string xspf =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<playlist version=\"1\" xmlns=\"http://xspf.org/ns/0/\"><title>Chill</title><trackList>"
+        "<track><location>file:///D:/Music/Bj%C3%B6rk/One.flac</location><title>One &amp; Only</title><creator>Bj\xC3\xB6rk</creator></track>"
+        "</trackList></playlist>";
+    migration::ImportBundle xspfBundle;
+    const bool xspfOk = migration::ReadImportBytes(xspf, "Fallback", xspfBundle, fmt, error);
+    Check(xspfOk && fmt == migration::ImportFormat::Xspf && xspfBundle.playlists.size() == 1 &&
+              xspfBundle.playlists[0].name == "Chill" && xspfBundle.playlists[0].tracks.size() == 1,
+          L"XSPF playlist parses title and track locations: %ls", error.c_str());
+
+    Library metaLib;
+    TrackId metaId = metaLib.Add(L"X:\\Library\\Bjork - One.flac");
+    metaLib[metaId].title = metaLib.Intern("One & Only");
+    metaLib[metaId].artist = metaLib.Intern("Bj\xC3\xB6rk");
+    migration::Statistics noPathRow;
+    noPathRow.title = "one & only";
+    noPathRow.artist = "bj\xC3\xB6rk";
+    noPathRow.count = 7;
+    noPathRow.hasCount = true;
+    auto metaPlan = migration::PlanStatistics(metaLib, {noPathRow}, {});
+    auto plPlan = migration::PlanPlaylists(metaLib, mbBundle.playlists, {});
+    Check(metaPlan.matched.size() == 1 && metaPlan.matched[0].first == metaId &&
+              plPlan.size() == 1 && plPlan[0].tracks.size() == 1 && plPlan[0].tracks[0] == metaId,
+          L"PlanStatistics and PlanPlaylists fall back to normalized artist+title when paths differ or are absent");
 }

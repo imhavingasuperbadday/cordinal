@@ -22,6 +22,10 @@ struct MemoryReport {
     size_t libraries = 0;          // private pages of Windows DLLs (their data and relocations)
     size_t mapped = 0;             // private pages of mapped files
     unsigned threads = 0;
+    // A cdpack build's cold code: chunks committed of all, their bytes (part of `program`), and how
+    // often chunks were decoded and decommitted. coldChunks is 0 without cold code.
+    unsigned coldChunks = 0, coldResident = 0, coldDecodes = 0, coldEvictions = 0;
+    size_t coldBytes = 0;
     std::vector<std::pair<std::wstring, size_t>> topLibraries;  // largest DLLs, by private bytes
     std::vector<std::pair<size_t, size_t>> topBlocks;  // heap block size and count, largest totals first
 };

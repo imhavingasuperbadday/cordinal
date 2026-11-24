@@ -4,6 +4,7 @@
 // function its menu item uses, and is saved. The command palette lists these settings too.
 #include "panels_internal.h"
 
+#include "coverupload.h"
 #include "discord.h"
 #include "listenbrainz.h"
 #include "metadata_fetch.h"
@@ -297,9 +298,17 @@ const Pref kPrefs[] = {
     {"discord_status", "Scrobbling", "Discord status",
      "While the Discord app runs on this computer, your status shows the song playing or the album, with how far "
      "along it is. Nothing is shown while paused. Discord shows it only while its own Activity Privacy setting "
-     "shares your activity. The album cover comes from the cover sources turned on under Online.",
+     "shares your activity. Discord can only show a cover that is on the web: a cover chosen from the online "
+     "results keeps the address it came from, Upload covers for Discord sends the others, and otherwise the "
+     "album's cover from the sources under Online stands in.",
      PrefType::Choice, 0, discord::kShowChoices - 1, 0, 1, [] { return (double)discord::Mode(); },
      [](double v) { discord::SetMode((discord::Show)v); Saved(); }, kDiscordNames},
+    {"discord_upload", "Scrobbling", "Upload covers for Discord",
+     "Sends the cover cordinal shows for the playing track to litterbox.catbox.moe, so your Discord status shows "
+     "it: embedded covers, cover files, and covers chosen or made in cordinal. Anyone with the address can see the "
+     "image, and the host deletes it after three days. Each cover is sent once and reused while it lasts.",
+     PrefType::Bool, 0, 1, 0, 1, [] { return (double)coverupload::HostEnabled(); },
+     [](double v) { coverupload::SetHostEnabled(v != 0); Saved(); }},
     {"musicbrainz_lookup", "Library", "Look up missing album editions online",
      "Asks MusicBrainz for a release-group id when two local albums share an artist and base title and their tags carry none. "
      "Results are cached; browsing and playback never wait for or require the network.", PrefType::Bool, 0, 1, 0, 1,
@@ -353,6 +362,10 @@ const Pref kPrefs[] = {
      "Sends the album's title and artist to musicbrainz.org when you choose Tag album from MusicBrainz, then the ids of the few releases that match, to read their tracks.",
      PrefType::Bool, 0, 1, 0, 1, [] { return (double)online::Config().albumTags; },
      [](double v) { online::Config().albumTags = v != 0; Saved(); }},
+    {"online_accurate_rip", "Online", "Verify CD rips with AccurateRip",
+     "Sends a disc's AccurateRip ids and track count to accuraterip.com during CD ripping and offset calibration to verify ripped tracks against other pressings.",
+     PrefType::Bool, 0, 1, 0, 1, [] { return (double)online::Config().accurateRip; },
+     [](double v) { online::Config().accurateRip = v != 0; Saved(); }},
     {"online_save_music", "Online", "Save music from the web",
      "Downloads the link you paste from that site: the audio, its cover and its details, saved as your own "
      "file in the library. A Spotify link's audio is the same recording matched on YouTube. A Spotify "
@@ -519,7 +532,8 @@ const PrefPage kPrefPages[] = {
     {"Layout", "Where the player sits and which parts of the normal window show.",
      {{"Customize layout...", OpenLayout}, {"Startup defaults...", OpenStartupDefaults}}},
     {"Library", "New music, sizes in the library views, and the web server.",
-     {{"Library folders...", OpenLibraryFolders}, {"Web server...", OpenWebServer}}, "Collection"},
+     {{"Library folders...", OpenLibraryFolders}, {"Sync with other PCs...", OpenSync}, {"Web server...", OpenWebServer}},
+     "Collection"},
     {"Conversion", "Converting to .cord, and putting the originals back.", {}},
     {"Online", "Covers, lyrics and artist info from the web. Each says what it sends, and all start off.",
      {{"Fetch missing covers...", FetchMissingCovers, [] { return !CoverFetchBusy(); }}}},
@@ -692,7 +706,8 @@ std::string PrefText(const Pref& t, double v) {
 
 // The settings of themes this build leaves out (theme_palette.h) are never shown.
 bool PrefShown(const Pref& t) {
-    if (t.key && !discord::Available() && !strcmp(t.key, "discord_status")) return false;  // no application id yet
+    if (t.key && !discord::Available() && (!strcmp(t.key, "discord_status") || !strcmp(t.key, "discord_upload")))
+        return false;  // no application id yet
     return kExtraThemes || !t.key || (strcmp(t.key, "live_fountain") && strcmp(t.key, "robotic_sounds"));
 }
 

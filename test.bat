@@ -3,6 +3,7 @@ rem Runs the headless self-test. The work is in tools\test.ps1; this launcher ke
 rem consistent with build.bat and avoids remembering the fixtures/log arguments.
 rem
 rem   test.bat                         build unpacked, then run with build\fixtures
+rem   test.bat -Fast -Suite search     fast non-LTCG test-only build + focused suite (fastest dev loop)
 rem   test.bat -Headless              offline suites, no native UI or audio device
 rem   test.bat -List                  list suites, prerequisites and source files
 rem   test.bat -Suite search,sorting  focus a bug investigation

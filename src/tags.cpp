@@ -152,6 +152,75 @@ bool ReadLyrics(const std::wstring& path, std::string& lyrics) {
     return !lyrics.empty();
 }
 
+std::string CleanSearchableLyrics(std::string_view raw) {
+    std::string out;
+    out.reserve(std::min<size_t>(raw.size(), 65536));
+    auto appendSpace = [&] {
+        if (!out.empty() && out.back() != ' ') out += ' ';
+    };
+    size_t start = 0;
+    while (start < raw.size() && out.size() < 65536) {
+        size_t end = raw.find('\n', start);
+        if (end == std::string_view::npos) end = raw.size();
+        std::string_view line = raw.substr(start, end - start);
+        start = end + 1;
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        size_t pos = 0;
+        bool metaOnly = false;
+        while (pos < line.size() && line[pos] == '[') {
+            size_t close = line.find(']', pos);
+            if (close == std::string_view::npos || close - pos > 32) break;
+            std::string_view tag = line.substr(pos + 1, close - pos - 1);
+            // LRC timestamp [mm:ss...] or metadata tag [key:val]
+            bool isTime = !tag.empty() && tag[0] >= '0' && tag[0] <= '9' && tag.find(':') != std::string_view::npos;
+            bool isMeta = !isTime && tag.find(':') != std::string_view::npos && tag.find(' ') == std::string_view::npos;
+            if (!isTime && !isMeta) break;
+            if (isMeta) metaOnly = true;
+            pos = close + 1;
+        }
+        std::string_view rest = line.substr(pos);
+        if (metaOnly && rest.empty()) continue;
+        for (char c : rest) {
+            if (out.size() >= 65536) break;
+            if ((unsigned char)c <= ' ') appendSpace();
+            else out += c;
+        }
+        appendSpace();
+    }
+    if (!out.empty() && out.back() == ' ') out.pop_back();
+    return out;
+}
+
+bool ReadSearchableLyrics(const std::wstring& path, std::string& out) {
+    out.clear();
+    std::wstring audio = AudioFileOf(path);
+    size_t dot = audio.find_last_of(L'.'), slash = audio.find_last_of(L"\\/");
+    std::string raw;
+    if (dot != std::wstring::npos && (slash == std::wstring::npos || dot > slash)) {
+        std::wstring lrc = audio.substr(0, dot) + L".lrc";
+        HANDLE f = CreateFileW(lrc.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (f != INVALID_HANDLE_VALUE) {
+            LARGE_INTEGER size{};
+            if (GetFileSizeEx(f, &size) && size.QuadPart > 0 && size.QuadPart < (1 << 20)) {
+                raw.resize((size_t)size.QuadPart);
+                DWORD got = 0;
+                if (!ReadFile(f, raw.data(), (DWORD)raw.size(), &got, nullptr)) got = 0;
+                raw.resize(got);
+            }
+            CloseHandle(f);
+            if (raw.size() >= 2 && (uint8_t)raw[0] == 0xFF && (uint8_t)raw[1] == 0xFE) {
+                std::wstring w((const wchar_t*)(raw.data() + 2), (raw.size() - 2) / 2);
+                raw = ToUtf8(w);
+            } else if (raw.size() >= 3 && raw.compare(0, 3, "\xEF\xBB\xBF") == 0) {
+                raw.erase(0, 3);
+            }
+        }
+    }
+    if (raw.empty()) ReadLyrics(path, raw);
+    if (!raw.empty()) out = CleanSearchableLyrics(raw);
+    return !out.empty();
+}
+
 bool ReadChapters(const std::wstring& path, std::vector<Chapter>& chapters) {
     chapters.clear();
     TagData t;

@@ -249,6 +249,7 @@ void SaveLibraryNow() {
     else {
         DeleteFileW(UnsavedLibraryPath().c_str());  // library.cdb now holds everything it held
         KeepLibrarySnapshot(g.libraryPath);          // once a day; a failed copy only skips that day
+        SyncLibrarySaved();                          // the sync bookkeeping that matches this save
     }
     g.dirty = !saved;  // keep retrying after a temporary lock or unavailable profile folder
     g.ticksSinceSave = 0;
@@ -266,6 +267,7 @@ bool KeepUnsavedLibrary() {
     const std::wstring unsaved = UnsavedLibraryPath();
     if (!SaveLibrary(unsaved, g.playlists)) return false;
     DeleteFileW((unsaved + L".bak").c_str());  // the previous copy, now superseded
+    SyncLibrarySaved();  // the next start restores this copy, so its bookkeeping goes with it
     return true;
 }
 

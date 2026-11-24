@@ -240,10 +240,10 @@ void ReorderPlaylist(int direction) {
 }
 
 void ToggleMute() {
-    if (g_muteVolume > 0) {
-        SetVolume(g_muteVolume);
+    if (g.settings.volume <= 0) {
+        SetVolume(g_muteVolume > 0 ? g_muteVolume : 1.0f);
         g_muteVolume = 0;
-    } else if (g.settings.volume > 0) {
+    } else {
         g_muteVolume = g.settings.volume;
         SetVolume(0);
     }

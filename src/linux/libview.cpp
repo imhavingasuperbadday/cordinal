@@ -6,6 +6,7 @@
 #include "libview.h"
 
 #include "album_editions.h"
+#include "tag_values.h"
 #include "text.h"
 
 #include <bitset>
@@ -38,28 +39,22 @@ float g_paneRowsH = 0;  // the panes' visible height, for paging and keeping the
 std::string g_typed;    // type to jump: what has been typed lately
 Uint64 g_typedTick = 0;
 
-// Per-tag splits ("A; B" -> A, B) and years, worked out once per library revision.
-std::unordered_map<StringPool::Handle, std::vector<StringPool::Handle>> g_splitCache;
+// Per-tag splits and years, worked out once per library revision.
+std::unordered_map<uint64_t, std::vector<StringPool::Handle>> g_splitCache;
 std::unordered_map<StringPool::Handle, StringPool::Handle> g_yearCache;
 uint32_t g_cacheRevision = 0;
 
-void SplitTo(StringPool::Handle h, std::vector<StringPool::Handle>& out) {
-    std::string_view s = g_lib.View(h);
-    if (!h || s.find(';') == std::string_view::npos) {
+void SplitTo(StringPool::Handle h, TagFieldKind kind, std::vector<StringPool::Handle>& out) {
+    if (!h) {
         out.push_back(h);
         return;
     }
-    auto [it, added] = g_splitCache.emplace(h, std::vector<StringPool::Handle>());
+    const uint64_t key = (uint64_t)h << 4 | (uint64_t)kind;
+    auto [it, added] = g_splitCache.emplace(key, std::vector<StringPool::Handle>());
     if (added) {
-        for (size_t start = 0; start <= s.size();) {
-            size_t sep = s.find(';', start);
-            if (sep == std::string_view::npos) sep = s.size();
-            std::string_view part = s.substr(start, sep - start);
-            while (!part.empty() && part.front() == ' ') part.remove_prefix(1);
-            while (!part.empty() && part.back() == ' ') part.remove_suffix(1);
-            if (!part.empty() || it->second.empty()) it->second.push_back(g_lib.Intern(part));
-            start = sep + 1;
-        }
+        for (const std::string& part : SplitTagValues(g_lib.View(h), kind))
+            it->second.push_back(g_lib.Intern(part));
+        if (it->second.empty()) it->second.push_back(0);
     }
     out.insert(out.end(), it->second.begin(), it->second.end());
 }
@@ -79,11 +74,11 @@ void BrowserValues(TrackId id, BrowseField field, std::vector<StringPool::Handle
     const Track& t = g_lib[id];
     out.clear();
     switch (field) {
-        case BrowseField::Genre: SplitTo(t.genre, out); break;
-        case BrowseField::AlbumArtist: SplitTo(t.albumArtist ? t.albumArtist : t.artist, out); break;
-        case BrowseField::Artist: SplitTo(t.artist, out); break;
+        case BrowseField::Genre: SplitTo(t.genre, TagFieldKind::Genre, out); break;
+        case BrowseField::AlbumArtist: SplitTo(t.albumArtist ? t.albumArtist : t.artist, TagFieldKind::Artist, out); break;
+        case BrowseField::Artist: SplitTo(t.artist, TagFieldKind::Artist, out); break;
         case BrowseField::Album: out.push_back(t.album); break;
-        case BrowseField::Composer: SplitTo(t.composer, out); break;
+        case BrowseField::Composer: SplitTo(t.composer, TagFieldKind::Composer, out); break;
         case BrowseField::Year: out.push_back(YearOf(t.date)); break;
         case BrowseField::Label: out.push_back(t.label); break;
         case BrowseField::Grouping: out.push_back(t.grouping); break;

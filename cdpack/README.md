@@ -24,7 +24,9 @@ None of these build tools is a player runtime dependency. Standalone output defa
 encodes and verifies the container. Every player pack requires exact native-file and resource
 equality. Tests include guards, corrupted/truncated streams, checksums, deterministic output,
 overlays, EXE/DLL and TLS loading, forced ASLR, zero pages left demand-zero, code decoded on first
-fault (including a fixup inside a cold page), the IAT directory and unsupported CFG rejection.
+fault (including a fixup inside a cold page), detached images restored into private memory
+(module identity, static TLS, decommit and decode again, a thread blocked in an evicted page, the
+cold cap), the IAT directory and unsupported CFG rejection.
 
 `build.bat cdpack` gives the player cold code from `tools/code-profile.txt`: the functions the
 memory-budget scenarios run, which `tools/make-code-profile.py` regenerates from a native build,

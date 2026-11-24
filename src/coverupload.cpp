@@ -25,7 +25,8 @@ namespace {
 
 std::mutex g_mx;
 std::wstring g_command;
-std::atomic<uint32_t> g_generation{0};  // CancelAll bumps it; a run from an older one stops at once
+std::atomic<uint32_t> g_generation{0};
+std::atomic<bool> g_host{false};  // CancelAll bumps it; a run from an older one stops at once
 
 // Long enough for a slow upload, short enough that a stuck tool never pins a worker for good.
 constexpr int kTimeoutMs = 10000;
@@ -49,6 +50,9 @@ std::string FirstAddress(const std::string& output) {
 }
 
 }  // namespace
+
+bool HostEnabled() { return g_host.load(); }
+void SetHostEnabled(bool on) { g_host = on; }
 
 bool Configured() {
     std::lock_guard lock(g_mx);

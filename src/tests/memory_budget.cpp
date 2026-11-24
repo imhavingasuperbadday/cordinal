@@ -56,8 +56,11 @@ constexpr Budget kBudgets[] = {
 // stereo phase vocoder (cb092d4, that morning) grew the image from 6.02 to 6.05 MB, past the
 // budget the day before had set. The same day's unwind re-proof restored tables eight files
 // needed again, offset by seven new no-unwind files, so the rest of that pass nets zero here
-// (docs/memory.md, "Idle work taken out of scans, startup and the caches").
-constexpr double kProgramBudget = 6.10;
+// (docs/memory.md, "Idle work taken out of scans, startup and the caches"). Lowered to 5.95 on
+// November 23, 2026: library sync added 62 KB of code, and the Opus and MP3 decoders' 246 KB of
+// lookup tables moved from .bss to the heap at first use, leaving the image at 5.90 MB
+// (docs/memory.md, "Sync between PCs, and decoder tables off the image").
+constexpr double kProgramBudget = 5.95;
 
 // Where the budgets are heading: what the packed release player should show in Task Manager while
 // playing. docs/memory.md has the plan; the log reports the distance on every run.

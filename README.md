@@ -9,7 +9,7 @@ No installer, no runtime, no codec packs, no telemetry. Just drop it anywhere an
 
 <div align="center">
 
-Current release: **0.1.18** · `cordinal.exe`, 2,119,168 bytes<br>
+Current release: **0.1.19** · `cordinal.exe`, 2,119,168 bytes<br>
 **[Download](https://github.com/imhavingasuperbadday/cordinal/releases/latest)** ·
 [Quick start](#quick-start) · [Guide](#guide) · [Linux](#linux-preview) · [Building](#building) ·
 [Issues](https://github.com/imhavingasuperbadday/cordinal/issues)
@@ -43,15 +43,17 @@ leaves your music right where you keep it.
   built-in loudness scanner. 10-band EQ with headphone (AutoEq) profiles, crossfeed, reverb, night mode,
   bitcrusher, and 5.1/7.1 stereo upmixing. Internet radio, a browser player for your phone, and
   UPnP/DLNA network speakers.
-- **30+ built-in formats:** FLAC (including Ogg FLAC), WAV, AIFF, MP3, MP4/M4A, Ogg Vorbis, Opus, AAC,
-  ALAC, WMA, APE, WavPack, Musepack, AC-3/E-AC-3, TTA, Matroska audio, DSD, Apple CAF, Sun AU, Creative
+- **30+ built-in formats:** FLAC (including Ogg FLAC), WAV, AIFF, MP3, MP4/M4A, Ogg Vorbis, Opus, AAC
+  (including HE-AAC v1/v2), ALAC, WMA, APE, WavPack, Musepack, AC-3/E-AC-3, TTA, Matroska audio, DSD, Apple CAF, Sun AU, Creative
   VOC, Amiga 8SVX, CRI ADX, GSM 06.10, G.722, G.726, ComputerCraft DFPWM, CUE sheets, tracker modules,
   MIDI, retro game music (NES, SNES, Game Boy, Genesis, C64), and cordinal's own lossless `.cord`
   format.
 - **Library & playlists:** Watched folders that track new and moved files without losing history. Track
   list, cover grid, albums, artists, and column browser. Album editions (remasters, deluxe releases, etc.)
   grouped under one cover. Playlists, rule-based auto-playlists, drag-to-reorder queue, M3U/M3U8/PLS,
-  Steam soundtrack import, device copying, and classic iPod sync.
+  Steam soundtrack import, device copying, and classic iPod sync. Search ignores accents and takes
+  inline filters with autocomplete (`year:1990..1999 format:flac rating:>=4 played:never lyrics:...`),
+  and **Playlist ▸ Save search as auto-playlist** keeps one.
 - **Tags, ripping & conversion:** Edit tags, covers, and lyrics for one song or hundreds with undo.
   Rename and organize files from tags. Convert to FLAC, WAV, MP3, AAC, or `.cord` (as copies or undoable
   replacements). Rip audio CDs to FLAC or `.cord` with two-pass sector verification. Find exact-audio or
@@ -59,7 +61,8 @@ leaves your music right where you keep it.
   Release Radar.
 - **History & taste:** Half-star ratings, favorites (hearts), play/skip counts, play log, and a year in
   review. Ready-made local Mixes and a shuffle mode that learns your taste. Last.fm, ListenBrainz, and
-  Libre.fm scrobbling, plus Discord status.
+  Libre.fm scrobbling, plus Discord status. Sync all of it between your PCs through any folder you
+  already sync, with no server or account.
 - **Make it yours:** Light and Dark themes with optional album-cover colour tinting. Layouts from Big
   mode down to a mini player or tray-only Lightweight mode. Waveform and moodbar seek bars. Shareable
   `.cordpack` customization packs, external visualizer helpers, and a command palette (`Ctrl+Shift+P`)
@@ -245,6 +248,9 @@ Playlists always point at exact files, and `%edition%` works in title formats.
   files** (rename/move from tags with preview &amp; undo), **Make album...**, **Tag album from
   MusicBrainz...** (preview before applying), and **Library ▸ Find missing information** (or search
   `missing:year`, `missing:genre`, `missing:any`).
+- **Lint (`Library ▸ Lint my library...`):** One review screen for albums split in two, near-duplicate
+  artist names, garbled or legacy-encoded tags, and cover-art problems. Every fix is previewed, only
+  checked ones apply, and **Edit ▸ Undo last tag edit** takes back the whole run.
 - **Duplicates (`Library ▸ Find duplicates...`):** Finds both **Identical audio** (same sound regardless
   of tags/filenames) and **Same song** (same artist/title/length across formats like FLAC + MP3). Moving
   checked copies to the Recycle Bin migrates their ratings, plays, and playlist spots to the kept copy,
@@ -257,7 +263,9 @@ Playlists always point at exact files, and `%edition%` works in title formats.
 - **CD ripping (`Library ▸ Rip CD...`):** Reads CD-Text offline or looks up discs on MusicBrainz (with
   optional Cover Art Archive front covers), rips to `<folder>\<artist>\<album>\` in FLAC or `.cord`,
   and adds tracks to your library. Every sector is read twice and re-read on mismatch; drive read-offset
-  correction lives in **Preferences ▸ Conversion**. Existing files are never overwritten. On Linux, your
+  correction lives in **Preferences ▸ Conversion**. With **Preferences ▸ Online ▸ AccurateRip** on, each
+  track is checked against other people's rips of the same disc, **Detect offset** finds your drive's read
+  offset, and every rip writes an `<Album>.log`. Existing files are never overwritten. On Linux, your
   user needs read access to the drive (typically the `cdrom` or `optical` group).
 
 </details>
@@ -287,10 +295,18 @@ Playlists always point at exact files, and `%edition%` works in title formats.
 - **Scrobbling (`File ▸ Scrobbling...`):** Connect Last.fm, ListenBrainz, and/or Libre.fm in any
   combination. Credentials are encrypted with your Windows account (or stored in a private file on
   Linux). Offline plays queue up and submit later. Tracks count after half their length or 4 minutes
-  (plus >30s for Last.fm/Libre.fm).
+  (plus >30s for Last.fm/Libre.fm). **Import history...** pulls your past ListenBrainz or Last.fm
+  listens into play counts and last-played dates.
+- **Bringing your stats along (`File ▸ Import playback statistics...`):** Reads an iTunes/Apple Music
+  `Library.xml`, MusicBee CSV/TSV exports and XSPF playlists, shows what matched before anything
+  changes, and **Edit ▸ Undo** takes the import back.
 - **Discord status (`Preferences ▸ Scrobbling`, off by default):** Shows the playing song or album via
-  the local Discord client (hidden when paused). Online covers work automatically; for local covers,
-  cordinal matches via your enabled online sources or runs a custom uploader from `settings.ini`:
+  the local Discord client (hidden when paused). Discord only shows covers that live on the web, so
+  covers picked from online results work automatically. For embedded covers, cover files, and albums
+  you made in cordinal, turn on **Upload covers for Discord**: it sends the cover the player shows to
+  litterbox.catbox.moe, which deletes it after three days, and reuses that address for two. Otherwise
+  cordinal looks the album up in your enabled online sources, or runs your own uploader from
+  `settings.ini`:
   ```ini
   [Scrobbling]
   DiscordCoverUpload=C:\Tools\upload.exe --json
@@ -374,6 +390,16 @@ Playlists always point at exact files, and `%edition%` works in title formats.
   even on a machine with different music paths. **File ▸ Export collection...** bundles chosen artists,
   albums, or playlists (with covers and lyrics) into one `.zip`; **Import collection...** unpacks it
   without overwriting existing files.
+- **Sync between PCs:** **Library ▸ Sync with other PCs...** keeps plays, skips, ratings, hearts,
+  playlists, and places left partway through songs the same on every PC, through a folder Syncthing,
+  Nextcloud, Dropbox, or a USB stick already keeps in step. Pick the same folder on each PC. Each one
+  appends to a small log of its own there and only reads the others', so the sync tool never sees two
+  versions of one file, and `library.cdb` never goes near the folder. Tracks match by their path under
+  your library folders, then audio hash, then artist, album, title, and length, so a Windows desktop and
+  a Linux laptop with music in different places line up. Plays made after joining add up (with each
+  listen, so the year in review counts both PCs); counts from before join by the highest, so a copied
+  library isn't counted twice. For everything else the newest change wins, and a playlist closed on one
+  PC can be reopened on the others with `Ctrl+Shift+T`.
 - **No lock-in:** Tags live in standard fields inside your audio files. Ratings and play counts can be
   written to files (`FMPS_RATING`, `FMPS_PLAYCOUNT`, MP3 `POPM`) from the right-click **Rating** menu.
   Playlists export to `.m3u8` (`Ctrl+S`), and backups include plain `statistics.csv` and `history.csv`.

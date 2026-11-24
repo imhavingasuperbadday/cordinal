@@ -26,7 +26,10 @@ foreach ($name in @('cordinal.exe', 'cordinal-test.exe')) {
     $native = Join-Path $BuildDir ('unpacked\' + $name)
     $packed = Join-Path $stage $name
     $report = Join-Path $stage ($name + '.json')
-    $extra = if ($name -eq 'cordinal.exe') { $hot } else { @() }
+    # The companion has no map, so no cold code; it is still restored into private memory as the
+    # player is, so its whole self-test runs against the detached layout (cdpack/spec.md).
+    # @() outside the if: PowerShell unrolls a one-element array an if returns (tools/build.ps1).
+    $extra = @(if ($name -eq 'cordinal.exe') { $hot } else { '--detach' })
     & $python[0] @($python | Select-Object -Skip 1) (Join-Path $source 'tools\pack.py') pack $native $packed `
         --tools $tools --report $report @extra
     if ($LASTEXITCODE) { throw "Independent packing/verification failed: $name" }

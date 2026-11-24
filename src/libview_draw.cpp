@@ -456,12 +456,20 @@ void DrawItem(const Item& it, int index) {
             if (sel || hover)
                 Fill({it.rc.left - F(6), it.rc.top - F(6), it.rc.right + F(6), it.rc.bottom}, Col(sel ? P().select : P().hover));
             D2D1_RECT_F art{it.rc.left, it.rc.top, it.rc.right, it.rc.top + side};
-            DrawCover(v.albums[ar.albums[0]], art, ArtistName(ar.name));
+            const int coverIdx = ar.albums.empty() ? ar.coverAlbum : ar.albums[0];
+            DrawCover(v.albums[coverIdx], art, ArtistName(ar.name));
             Rgb tc = sel ? P().selectText : P().text, sc = sel ? P().selectText : P().sub;
             Text(ArtistName(ar.name), v.fTitle.Get(), {it.rc.left, art.bottom + F(8), it.rc.right, art.bottom + F(26)}, Col(tc));
             static std::wstring info;
-            info = std::to_wstring(ar.albums.size());
-            info += ar.albums.size() == 1 ? L" album" : L" albums";
+            info.clear();
+            if (!ar.albums.empty()) {
+                info = std::to_wstring(ar.albums.size()) + (ar.albums.size() == 1 ? L" album" : L" albums");
+                if (ar.appearances > 0)
+                    info += L" \x00B7 " + std::to_wstring(ar.appearances) +
+                            (ar.appearances == 1 ? L" track" : L" tracks");
+            } else {
+                info = std::to_wstring(ar.appearances) + (ar.appearances == 1 ? L" appearance" : L" appearances");
+            }
             Text(info, v.fSmall.Get(), {it.rc.left, art.bottom + F(26), it.rc.right, art.bottom + F(44)}, Col(sc));
             break;
         }

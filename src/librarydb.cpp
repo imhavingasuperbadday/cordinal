@@ -42,13 +42,13 @@ constexpr uint64_t kMaxSectionBytes = 1ull << 30;
 // The payloads of the sections a file carries, copied out of the file.
 struct Sections {
     std::string playLog, points, audioHash, views, loudness, albums, firstPlayed, albumEditions, albumArt, taste, tasteParts,
-        favorites;
+        favorites, work, credits, lyrics;
     bool hasChecksum = false;
     uint32_t checksum = 0;
     uint64_t checkedBytes = 0;  // the bytes the checksum covers: everything before its tag
     bool hasPlayLog = false, hasPoints = false, hasAudioHash = false, hasViews = false, hasLoudness = false,
          hasAlbums = false, hasFirstPlayed = false, hasAlbumEditions = false, hasAlbumArt = false, hasTaste = false,
-         hasTasteParts = false, hasFavorites = false;
+         hasTasteParts = false, hasFavorites = false, hasWork = false, hasCredits = false, hasLyrics = false;
 };
 
 // Optional version-2 section: old readers skip it, so the database format stays compatible.
@@ -171,6 +171,137 @@ bool DecodeFavorites(std::string_view data, uint64_t trackCount, const std::vect
         index += (uint32_t)r.U(trackCount);
         if (!r.ok || index >= trackCount) return false;
         if (library) library->SetFavorite(savedToId ? (*savedToId)[index] : (TrackId)index, true);
+    }
+    return r.ok && r.Done();
+}
+
+std::string EncodeLyrics(const Library& library, const std::vector<uint32_t>& newId) {
+    std::string out;
+    ByteWriter w(out);
+    std::vector<std::pair<uint32_t, StringPool::Handle>> items;
+    for (const auto& entry : library.LyricsMap()) {
+        if (entry.id < newId.size() && newId[entry.id] != UINT32_MAX && entry.value)
+            items.push_back({newId[entry.id], entry.value});
+    }
+    SortObjects(items.begin(), items.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    w.U(items.size());
+    uint32_t previous = 0;
+    for (const auto& [index, h] : items) {
+        w.U(index - previous);
+        w.Bytes(library.View(h));
+        previous = index;
+    }
+    return out;
+}
+
+bool DecodeLyrics(std::string_view data, uint64_t trackCount, const std::vector<TrackId>* savedToId, Library* library) {
+    ByteReader r(data);
+    uint64_t count = r.U(trackCount);
+    uint32_t index = 0;
+    for (uint64_t i = 0; i < count && r.ok; ++i) {
+        index += (uint32_t)r.U(trackCount);
+        auto text = r.Bytes(131072);
+        if (!r.ok || index >= trackCount) return false;
+        if (!text.empty() && !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(), (int)text.size(), nullptr, 0))
+            return false;
+        if (library) {
+            TrackId id = savedToId ? (*savedToId)[index] : (TrackId)index;
+            library->SetLyrics(id, text);
+        }
+    }
+    return r.ok && r.Done();
+}
+
+std::string EncodeWork(const Library& library, const std::vector<uint32_t>& newId) {
+    std::string out;
+    ByteWriter w(out);
+    std::vector<std::pair<uint32_t, WorkInfo>> items;
+    for (const auto& entry : library.Works()) {
+        if (entry.id < newId.size() && newId[entry.id] != UINT32_MAX) items.push_back({newId[entry.id], entry.value});
+    }
+    SortObjects(items.begin(), items.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    w.U(items.size());
+    uint32_t previous = 0;
+    for (const auto& [index, info] : items) {
+        w.U(index - previous);
+        w.Bytes(library.View(info.work));
+        w.Bytes(library.View(info.movement));
+        w.U(info.movementNo);
+        w.U(info.movementTotal);
+        previous = index;
+    }
+    return out;
+}
+
+bool DecodeWork(std::string_view data, uint64_t trackCount, const std::vector<TrackId>* savedToId, Library* library) {
+    ByteReader r(data);
+    uint64_t count = r.U(trackCount);
+    uint32_t index = 0;
+    for (uint64_t i = 0; i < count && r.ok; ++i) {
+        index += (uint32_t)r.U(trackCount);
+        auto work = r.Bytes(65536);
+        auto movement = r.Bytes(65536);
+        uint16_t no = (uint16_t)r.U(65535);
+        uint16_t total = (uint16_t)r.U(65535);
+        if (!r.ok || index >= trackCount) return false;
+        if (!work.empty() && !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, work.data(), (int)work.size(), nullptr, 0))
+            return false;
+        if (!movement.empty() && !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, movement.data(), (int)movement.size(), nullptr, 0))
+            return false;
+        if (library) {
+            TrackId id = savedToId ? (*savedToId)[index] : (TrackId)index;
+            library->SetWork(id, {library->Intern(work), library->Intern(movement), no, total});
+        }
+    }
+    return r.ok && r.Done();
+}
+
+std::string EncodeCredits(const Library& library, const std::vector<uint32_t>& newId) {
+    std::string out;
+    ByteWriter w(out);
+    std::vector<std::pair<uint32_t, TrackId>> items;
+    for (const auto& entry : library.CreditSpans()) {
+        if (entry.id < newId.size() && newId[entry.id] != UINT32_MAX && entry.value.second > 0)
+            items.push_back({newId[entry.id], entry.id});
+    }
+    SortObjects(items.begin(), items.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    w.U(items.size());
+    uint32_t previous = 0;
+    for (const auto& [index, oldId] : items) {
+        w.U(index - previous);
+        size_t n = library.CreditsCount(oldId);
+        const CreditHandle* cs = library.CreditsBegin(oldId);
+        w.U(n);
+        for (size_t j = 0; j < n; ++j) {
+            w.Bytes(library.View(cs[j].role));
+            w.Bytes(library.View(cs[j].name));
+        }
+        previous = index;
+    }
+    return out;
+}
+
+bool DecodeCredits(std::string_view data, uint64_t trackCount, const std::vector<TrackId>* savedToId, Library* library) {
+    ByteReader r(data);
+    uint64_t count = r.U(trackCount);
+    uint32_t index = 0;
+    for (uint64_t i = 0; i < count && r.ok; ++i) {
+        index += (uint32_t)r.U(trackCount);
+        uint64_t n = r.U(4096);
+        if (!r.ok || index >= trackCount) return false;
+        std::vector<TagCredit> list;
+        if (library) list.reserve((size_t)n);
+        for (uint64_t j = 0; j < n && r.ok; ++j) {
+            auto role = r.Bytes(4096);
+            auto name = r.Bytes(65536);
+            if (!r.ok) return false;
+            if (!role.empty() && !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, role.data(), (int)role.size(), nullptr, 0))
+                return false;
+            if (!name.empty() && !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name.data(), (int)name.size(), nullptr, 0))
+                return false;
+            if (library) list.push_back({std::string(role), std::string(name)});
+        }
+        if (library) library->SetCredits(savedToId ? (*savedToId)[index] : (TrackId)index, list);
     }
     return r.ok && r.Done();
 }
@@ -518,7 +649,9 @@ bool ReadSections(Reader& r, Sections& out) {
             (tag == kSectionFirstPlayed && out.hasFirstPlayed) ||
             (tag == kSectionAlbumEditions && out.hasAlbumEditions) ||
             (tag == kSectionAlbumArt && out.hasAlbumArt) || (tag == kSectionTaste && out.hasTaste) ||
-            (tag == kSectionTasteParts && out.hasTasteParts) || (tag == kSectionFavorites && out.hasFavorites)) return false;
+            (tag == kSectionTasteParts && out.hasTasteParts) || (tag == kSectionFavorites && out.hasFavorites) ||
+            (tag == kSectionWork && out.hasWork) || (tag == kSectionCredits && out.hasCredits) ||
+            (tag == kSectionLyrics && out.hasLyrics)) return false;
         if (tag == kSectionPlaylistViews) {
             out.views.assign(body);
             out.hasViews = true;
@@ -555,6 +688,15 @@ bool ReadSections(Reader& r, Sections& out) {
         } else if (tag == kSectionFavorites) {
             out.favorites.assign(body);
             out.hasFavorites = true;
+        } else if (tag == kSectionWork) {
+            out.work.assign(body);
+            out.hasWork = true;
+        } else if (tag == kSectionCredits) {
+            out.credits.assign(body);
+            out.hasCredits = true;
+        } else if (tag == kSectionLyrics) {
+            out.lyrics.assign(body);
+            out.hasLyrics = true;
         }
     }
 }
@@ -636,6 +778,9 @@ bool ValidateLibrary(FileSource& input, uint64_t& stringCount, uint64_t& trackCo
         if (sections.hasTaste && !DecodeTaste(sections.taste, trackCount, nullptr, nullptr)) return false;
         if (sections.hasTasteParts && !DecodeTasteParts(sections.tasteParts, trackCount, nullptr, nullptr)) return false;
         if (sections.hasFavorites && !DecodeFavorites(sections.favorites, trackCount, nullptr, nullptr)) return false;
+        if (sections.hasWork && !DecodeWork(sections.work, trackCount, nullptr, nullptr)) return false;
+        if (sections.hasCredits && !DecodeCredits(sections.credits, trackCount, nullptr, nullptr)) return false;
+        if (sections.hasLyrics && !DecodeLyrics(sections.lyrics, trackCount, nullptr, nullptr)) return false;
         if (sections.hasViews && !DecodeViews(sections.views, playlistCount, trackCount, nullptr, nullptr)) return false;
     }
     return r.ok && r.Remaining() == 0;
@@ -769,6 +914,14 @@ static bool WriteDatabase(const std::wstring& file, const Library& library,
     w.Bytes(EncodeTasteParts(taste, newId));
     w.U(kSectionFavorites);
     w.Bytes(EncodeFavorites(library, newId));
+    w.U(kSectionWork);
+    w.Bytes(EncodeWork(library, newId));
+    w.U(kSectionCredits);
+    w.Bytes(EncodeCredits(library, newId));
+    if (!library.LyricsMap().empty()) {
+        w.U(kSectionLyrics);
+        w.Bytes(EncodeLyrics(library, newId));
+    }
     w.Seal();
     std::vector<uint32_t>().swap(newId);
     return w.Commit();
@@ -888,6 +1041,12 @@ bool ReadLibraryArchive(const std::wstring& file, LibraryArchive& out) {
     if (sections.hasTasteParts && !DecodeTasteParts(sections.tasteParts, trackCount, savedToId, &data.taste.parts))
         return reject();
     if (sections.hasFavorites && !DecodeFavorites(sections.favorites, trackCount, savedToId, &data.library))
+        return reject();
+    if (sections.hasWork && !DecodeWork(sections.work, trackCount, savedToId, &data.library))
+        return reject();
+    if (sections.hasCredits && !DecodeCredits(sections.credits, trackCount, savedToId, &data.library))
+        return reject();
+    if (sections.hasLyrics && !DecodeLyrics(sections.lyrics, trackCount, savedToId, &data.library))
         return reject();
     for (const auto& e : data.log) if (e.flags & PlayEvent::kCounted) {
         auto& first = data.library[e.id].firstPlayed;
